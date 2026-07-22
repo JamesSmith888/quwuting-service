@@ -1,0 +1,53 @@
+src/main/java/org/quwuting/quwutingservice/venue/controller/VenueController.java
+  s_8519bd2764f221::t_49e34758826dd9 1-30,32-52,56-68,79-81,83-85,107-108
+src/main/java/org/quwuting/quwutingservice/venue/dto/response/VenueResponse.java
+  s_8519bd2764f221::t_02e4d8dc13e4e6 1-28,33-36,40
+.gitignore
+  s_8519bd2764f221::t_8d03526a0a0b15 34-37
+src/main/java/org/quwuting/quwutingservice/venue/repository/VenueRepository.java
+  s_8519bd2764f221::t_074d7335164b83 1-104
+src/main/java/org/quwuting/quwutingservice/exception/GlobalExceptionHandler.java
+  s_8519bd2764f221::t_a8cf21d21bb339 1-43
+src/main/java/org/quwuting/quwutingservice/venue/enums/VenueStatus.java
+  s_8519bd2764f221::t_814387b78cc8f7 1-19
+src/main/java/org/quwuting/quwutingservice/common/ApiResponse.java
+  s_8519bd2764f221::t_16d50e9ebc1987 1-12
+src/main/java/org/quwuting/quwutingservice/venue/entity/Venue.java
+  s_8519bd2764f221::t_14b3d6c8a38e0f 1-13,20-67,69,76,80-104
+pom.xml
+  s_8519bd2764f221::t_34e1b97bfc39a4 48-52
+  s_8519bd2764f221::t_740339e02f56bc 56-57,60-61
+src/main/java/org/quwuting/quwutingservice/venue/service/VenueService.java
+  s_8519bd2764f221::t_02076671d19fd3 1-51,55-61,64-65,67,123-131,133-134,139-155,176-179,186,188-189,203-204,207-208,229,231,233-236,240,242,245-247
+src/main/java/org/quwuting/quwutingservice/venue/dto/request/CreateVenueRequest.java
+  s_8519bd2764f221::t_aa11bb8bffc64d 1-51,55-65
+src/main/resources/application.yaml
+  s_8519bd2764f221::t_11b619bbdea753 4-16
+src/main/java/org/quwuting/quwutingservice/base/BaseEntity.java
+  s_8519bd2764f221::t_e48f9385a23440 1-29,31-32
+AGENTS.md
+  s_8519bd2764f221::t_2b1a82e5e3fd7c 1-32,35,99-100,104-410,412-560,564-671,674-733
+src/main/java/org/quwuting/quwutingservice/exception/BusinessException.java
+  s_8519bd2764f221::t_6792609ccca85f 1-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.35-trip",
+  "base_commit_sha": "13ac45e5bffe27342d7d4077b63a370bd9987c0f",
+  "prompts": {},
+  "humans": {
+    "h_fbb9b8e239a0dd": {
+      "author": "James Smith(杨鑫) <xin.y@trip.com>"
+    }
+  },
+  "sessions": {
+    "s_8519bd2764f221": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "89d99ad7-0d5e-4605-911d-1aa64aaab0c5",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "James Smith(杨鑫) <xin.y@trip.com>"
+    }
+  }
+}
