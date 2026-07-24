@@ -17,7 +17,8 @@ import org.quwuting.quwutingservice.venuepost.enums.PostPublisherType;
 @Entity
 @Table(name = "qwt_venue_posts", indexes = {
         @Index(name = "qwt_idx_posts_venue_id", columnList = "venueId"),
-        @Index(name = "qwt_idx_posts_created_at", columnList = "createdAt")
+        @Index(name = "qwt_idx_posts_created_at", columnList = "createdAt"),
+        @Index(name = "qwt_idx_posts_venue_deleted", columnList = "venueId, deleted")
 })
 public class VenuePost extends BaseEntity {
 

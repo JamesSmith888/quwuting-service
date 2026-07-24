@@ -58,4 +58,46 @@ public interface TagInteractionRepository extends JpaRepository<TagInteraction, 
     @Query("SELECT COUNT(DISTINCT ti.userId) FROM TagInteraction ti " +
            "WHERE ti.venueId = :venueId AND ti.score IS NOT NULL AND ti.deleted = false")
     long countDistinctRatersByVenueId(@Param("venueId") Long venueId);
+
+    // ─── 合并查询（减少远程 DB 往返，性能优化） ─────────────────────────────
+
+    /**
+     * 单次往返同时获取：近30天评价数、近30天点赞数、总评价人数（去重）。
+     * 返回 Object[]{ratingCount30d, likeCount30d, distinctRaters}。
+     * 使用原生 SQL：JPQL 不支持 COUNT(DISTINCT CASE WHEN ...) 语法。
+     */
+    @Query(value = "SELECT " +
+                   "COUNT(CASE WHEN ti.score IS NOT NULL AND ti.updated_at >= :since THEN 1 END), " +
+                   "COUNT(CASE WHEN ti.liked = true AND ti.updated_at >= :since THEN 1 END), " +
+                   "COUNT(DISTINCT CASE WHEN ti.score IS NOT NULL THEN ti.user_id END) " +
+                   "FROM qwt_tag_interactions ti WHERE ti.venue_id = :venueId AND ti.deleted = false",
+           nativeQuery = true)
+    Object[] countInteractionsForHeat(@Param("venueId") Long venueId, @Param("since") LocalDateTime since);
+
+    /**
+     * 单次往返同时获取各维度的全量/30天/7天评分聚合。
+     * 返回 Object[]{tag, avgAll, countAll, avg30d, count30d, avg7d, count7d}。
+     * AVG(CASE WHEN ... THEN score END) 中不满足条件的行返回 NULL，AVG 自动忽略 NULL。
+     */
+    @Query("SELECT ti.tag, " +
+           "AVG(ti.score), COUNT(ti), " +
+           "AVG(CASE WHEN ti.updatedAt >= :since30d THEN ti.score END), " +
+           "SUM(CASE WHEN ti.updatedAt >= :since30d THEN 1 ELSE 0 END), " +
+           "AVG(CASE WHEN ti.updatedAt >= :since7d THEN ti.score END), " +
+           "SUM(CASE WHEN ti.updatedAt >= :since7d THEN 1 ELSE 0 END) " +
+           "FROM TagInteraction ti " +
+           "WHERE ti.venueId = :venueId AND ti.score IS NOT NULL AND ti.deleted = false " +
+           "GROUP BY ti.tag")
+    List<Object[]> aggregateScoresMultiWindow(@Param("venueId") Long venueId,
+                                              @Param("since30d") LocalDateTime since30d,
+                                              @Param("since7d") LocalDateTime since7d);
+
+    /**
+     * 单次往返获取用户对指定场所的全部交互状态（点赞 + 评分）。
+     * 返回 Object[]{tag, liked, score}。
+     */
+    @Query("SELECT ti.tag, ti.liked, ti.score FROM TagInteraction ti " +
+           "WHERE ti.userId = :userId AND ti.venueId = :venueId AND ti.deleted = false " +
+           "AND (ti.liked = true OR ti.score IS NOT NULL)")
+    List<Object[]> findUserInteractionsByVenue(@Param("userId") Long userId, @Param("venueId") Long venueId);
 }

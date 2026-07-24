@@ -22,6 +22,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class VenuePostService {
 
     private static final String PLATFORM_PUBLISHER_NAME = "去舞厅平台";
+    private static final int MAX_PAGE_SIZE = 50;
 
     private final VenuePostRepository venuePostRepository;
     private final VenueRepository venueRepository;
@@ -32,6 +33,8 @@ public class VenuePostService {
     @Transactional(readOnly = true)
     public Page<VenuePostResponse> listPosts(Long venueId, int page, int size) {
         assertVenueExists(venueId);
+        page = Math.max(0, page);
+        size = Math.min(Math.max(1, size), MAX_PAGE_SIZE);
         PageRequest pageable = PageRequest.of(page, size,
                 Sort.by(Sort.Direction.DESC, "createdAt"));
         return venuePostRepository.findByVenueIdAndDeletedFalse(venueId, pageable)

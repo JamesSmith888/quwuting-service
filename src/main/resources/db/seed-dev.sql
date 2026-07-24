@@ -39,7 +39,7 @@ INSERT INTO qwt_venues (id, name, status, image_url, photos, description, city, 
  '[{"label":"晚场","type":"FIXED","price":20}]',
  '[{"unit":"MINUTE","minutes":3,"price":20},{"unit":"MINUTE","minutes":4,"price":25},{"unit":"MINUTE","minutes":60,"price":200}]',
  '13800001111', NULL,
- '["莎莎舞","驻场舞伴","可包时","招聘中"]', 100, 2,
+ '["驻场舞伴","可包时","招聘中"]', 100, 2,
  '2026-05-10 15:00:00', '2026-07-01 10:00:00', false);
 
 -- 场所 2：正常营业，下午场 + 晚场，有动态

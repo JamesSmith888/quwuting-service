@@ -21,4 +21,9 @@ public interface VenueViewRepository extends JpaRepository<VenueView, Long> {
     @Query("SELECT COUNT(DISTINCT v.userId) FROM VenueView v " +
            "WHERE v.venueId = :venueId AND v.viewDate >= :since AND v.userId IS NOT NULL")
     long countDistinctUsersByVenueIdSince(@Param("venueId") Long venueId, @Param("since") LocalDate since);
+
+    /** 单次往返同时获取 PV 和 UV（热度聚合优化），返回 Object[]{pv, uv} */
+    @Query("SELECT COUNT(v), COUNT(DISTINCT v.userId) FROM VenueView v " +
+           "WHERE v.venueId = :venueId AND v.viewDate >= :since")
+    Object[] countPvAndUvByVenueIdSince(@Param("venueId") Long venueId, @Param("since") LocalDate since);
 }

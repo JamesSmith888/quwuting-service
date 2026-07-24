@@ -27,6 +27,10 @@ public class JwtUtil {
             @Value("${jwt.secret}") String secret,
             @Value("${jwt.expiry-days:7}") int expiryDays
     ) {
+        if (secret == null || secret.isBlank() || secret.length() < 32) {
+            throw new IllegalStateException(
+                    "jwt.secret 未配置或长度不足32字符，拒绝启动。请设置环境变量 JWT_SECRET");
+        }
         this.secretBytes = secret.getBytes(StandardCharsets.UTF_8);
         this.expiryMs = expiryDays * 24L * 3600 * 1000;
     }
@@ -49,7 +53,9 @@ public class JwtUtil {
         }
 
         String expectedSig = sign(parts[0] + "." + parts[1]);
-        if (!expectedSig.equals(parts[2])) {
+        if (!java.security.MessageDigest.isEqual(
+                expectedSig.getBytes(StandardCharsets.UTF_8),
+                parts[2].getBytes(StandardCharsets.UTF_8))) {
             throw new BusinessException(1002, "token签名无效");
         }
 

@@ -10,7 +10,8 @@ import org.quwuting.quwutingservice.base.BaseEntity;
 @Entity
 @Table(name = "qwt_favorites", indexes = {
         @Index(name = "qwt_idx_fav_user_id", columnList = "userId"),
-        @Index(name = "qwt_idx_fav_venue_id", columnList = "venueId")
+        @Index(name = "qwt_idx_fav_venue_id", columnList = "venueId"),
+        @Index(name = "qwt_idx_fav_venue_deleted", columnList = "venueId, deleted")
 }, uniqueConstraints = {
         @UniqueConstraint(name = "qwt_uk_fav_user_venue", columnNames = {"userId", "venueId"})
 })

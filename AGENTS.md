@@ -21,7 +21,7 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务。
 ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
 ```
 
-> 禁止直接运行 `java -jar` 发布到生产，部署流程另行约定。
+> 生产部署流程见「配置管理 → 生产部署」章节。
 
 ---
 
@@ -33,7 +33,7 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务。
 base/           ← 抽象基类（BaseEntity：id / createdAt / updatedAt / deleted）
 common/         ← 通用响应体（ApiResponse<T>）
 exception/      ← 自定义异常类 + @RestControllerAdvice 全局处理
-config/         ← Spring @Configuration 类（WebMvc、CORS、拦截器注册）
+config/         ← Spring @Configuration 类（WebMvc、拦截器注册）
 security/       ← JWT 工具、AuthInterceptor、UserContext（ThreadLocal 用户上下文）
 
 venue/          ← 场所模块（按功能分包）
@@ -134,12 +134,14 @@ storage/        ← 文件存储模块（前端直传 Supabase Storage，后端�
 ```yaml
 wechat:
   appid: wx054a26bf9b1424dc   # 公开信息
-  secret: ${WECHAT_SECRET:}   # 环境变量注入，禁止硬编码
+  secret: ${WECHAT_SECRET}    # 环境变量注入，无默认值（未设置则启动失败）
 
 jwt:
-  secret: ${JWT_SECRET:}      # 环境变量注入，禁止硬编码
+  secret: ${JWT_SECRET}       # 环境变量注入，无默认值（未设置则启动失败）
   expiry-days: 7
 ```
+
+`JwtUtil` 构造函数强制校验 secret 非空且长度 ≥ 32 字符，不满足则抛 `IllegalStateException` 拒绝启动——防止遗漏环境变量时以空密钥签发 token。
 
 ### 角色
 
@@ -264,6 +266,19 @@ heatScore = viewCount30d × 1
 - "当前状态持续天数" = 最近一条状态日志的 `createdAt` 距今天数
 - `SUSPENDED`（暂停营业）语义为被迫关门（警察检查等），与 `CLOSED`（休息中，正常未到营业时间）不同
 
+### 查询性能优化（条件聚合 + 本地缓存）
+
+热度接口和标签统计接口的 DB 往返次数已通过**条件聚合**大幅压缩：
+
+- `GET /venues/{id}/heat`：原 14 次串行 DB 往返 → 7 次（浏览 PV+UV 合并、收藏 total+30d 合并、动态 total+30d 合并、评价 rating+like+raters 合并、状态暂停+最新时间合并）
+- `GET /venues/{venueId}/tags/stats`：原 7 次 → 4 次（评分全量+30d+7d 三窗口合并为一条 `AVG(CASE WHEN...)` 查询、用户点赞+评分合并为一条）
+
+根因：服务器在阿里云 ECS，数据库在 Supabase（AWS ap-south-1），单次 DB 往返约 100-200ms，查询次数 × 延迟 = 接口总延迟。压缩查询次数是最直接有效的优化手段。
+
+**本地缓存（Caffeine，60s TTL）**：`VenueHeatService.getHeat` 和 `TagInteractionService.getTagStats` 加了 `@Cacheable`。热度/标签统计是聚合数据，60 秒内的精度偏差对用户无感知，但可避免同一场所短时间内的重复计算（多用户同时浏览、同一用户切换 Tab 等场景）。缓存配置在 `config/CacheConfig`，maxSize=500，TTL=60s。
+
+**新增查询时的约定**：当一个 Service 方法需要同一张表的多个 COUNT/aggregation 时，优先用 `SUM(CASE WHEN condition THEN 1 ELSE 0 END)` 合并为单条 SQL，不拆多次往返。JPQL 不支持 `COUNT(DISTINCT CASE WHEN...)` 时，使用 `@Query(nativeQuery = true)` 并注明原因。
+
 ---
 
 ## 标签交互（taginteraction 模块）
@@ -283,7 +298,18 @@ heatScore = viewCount30d × 1
 
 ### 评分维度（RatingDimensions）
 
-系统统一定义的标准维度列表（当前：服务、环境、音响效果、性价比），所有舞厅共享，不依赖管理员是否添加了对应标签。新增维度只需修改 `RatingDimensions.ALL` 常量，前端通过 `tag-stats` 接口的 `dimensions` 字段自动同步。
+系统统一定义的标准维度列表，所有舞厅共享，不依赖管理员是否添加了对应标签。新增维度只需修改 `RatingDimensions.ALL` 常量，前端通过 `tag-stats` 接口的 `dimensions` 字段自动同步。
+
+维度分两类：
+
+| 类别 | 维度 | 锚定文案 | 说明 |
+|------|------|----------|------|
+| 体验评估 | 服务、环境、音响效果、性价比 | 1 最差 / 10 最好 | 主观质量打分，全量均分有参考价值 |
+| 现场状况 | 舞伴氛围、客流热度、舞伴年龄层 | 各异（很少/很多、冷清/爆满、偏成熟/偏年轻） | 众包实时体感上报，时效性强，近 7d/30d 窗口均分更有参考价值 |
+
+"现场状况"维度的设计动机：舞伴和客流是舞厅决策的核心变量（舞伴找客人多的店，客人找舞伴多的店），但无法由管理员维护（实时变化），只能众包。复用评分基础设施（1-10 量表 + 时间窗口 + 防刷冷却）是最低成本方案。
+
+审核安全：维度命名使用角色术语（"舞伴""客流"）和主观体感词（"氛围""热度""年龄层"），不出现"男/女""人数"等字样，避免被解读为按性别统计的社交/陪侍类应用。
 
 ### 接口
 
@@ -531,6 +557,20 @@ public interface VenueRepository extends JpaRepository<Venue, Long> {
 - 禁止 `@Query(nativeQuery = true)`，除非 JPQL 无法实现且已注释原因
 - 分页统一使用 `Pageable` 参数，返回 `Page<T>`
 
+### 分页参数安全（强制）
+
+Controller 接收的 `page` / `size` 参数必须在 **Service 层**钳制后再构造 `PageRequest`，防止客户端传入极端值导致 OOM 或异常：
+
+```java
+private static final int MAX_PAGE_SIZE = 50;
+
+page = Math.max(0, page);
+size = Math.min(Math.max(1, size), MAX_PAGE_SIZE);
+PageRequest pageable = PageRequest.of(page, size);
+```
+
+新增任何分页接口时必须遵循此模式。
+
 ---
 
 ## DTO 规范
@@ -595,6 +635,23 @@ public class GlobalExceptionHandler {
 - Controller 层禁止 try-catch，统一由 `GlobalExceptionHandler` 处理
 - 日志用 `@Slf4j`，错误级别：业务异常用 `warn`，系统异常用 `error`
 
+### 并发写入竞态处理（唯一约束 + catch 模式）
+
+对有唯一约束的 INSERT 操作（收藏、标签交互、浏览记录等），check-then-act 存在并发窗口：两个请求同时通过"不存在"检查后都尝试 INSERT，第二个触发唯一约束异常。标准处理模式：
+
+```java
+try {
+    repository.save(entity);
+} catch (DataIntegrityViolationException e) {
+    // 并发竞态：另一请求已插入，幂等忽略
+    log.debug("并发冲突，幂等忽略: ...");
+}
+```
+
+适用条件：INSERT 是幂等的（重复插入不影响业务语义）。若 INSERT 后还需后续操作（如 toggle），冲突时应重新查询已有记录再执行后续逻辑。
+
+已有实例：`VenueViewService.recordView`、`FavoriteService.addFavorite`、`TagInteractionService.toggleLike/score`。
+
 ---
 
 ## JSON 序列化（Jackson 3.x）
@@ -623,27 +680,51 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 ```
 src/main/resources/
-  application.yaml          ← 公共配置（不含敏感信息）
+  application.yaml          ← 公共配置（不含敏感信息，所有 profile 共享）
   application-dev.yaml      ← 本地开发（不提交 git，已加入 .gitignore）
-  application-prod.yaml     ← 生产（敏感值通过环境变量注入）
+  application-prod.yaml     ← 生产（已提交，敏感值全部通过环境变量注入）
 ```
 
-```yaml
-# application-prod.yaml 示例：通过环境变量注入数据库密码
-spring:
-  datasource:
-    url: ${DB_URL}
-    username: ${DB_USERNAME}
-    password: ${DB_PASSWORD}
-  jpa:
-    hibernate:
-      ddl-auto: validate        # 生产禁止 create / create-drop / update
-    show-sql: false
-```
-
+- 基础 `application.yaml` 的 `ddl-auto` 为 `validate`（安全默认），仅 `application-dev.yaml` 覆盖为 `update`
 - 禁止在任何 yaml 文件中硬编码数据库密码、密钥等敏感信息
 - 本地开发使用 `application-dev.yaml`，该文件已列入 `.gitignore`
-- `ddl-auto` 生产环境必须为 `validate` 或 `none`
+- 环境变量占位符禁止带空默认值（`${SECRET}` 而非 `${SECRET:}`），确保遗漏配置时启动即失败
+
+### 生产部署
+
+基础设施：阿里云 ECS（内嵌 Tomcat，`java -jar` 方式运行）+ Cloudflare Tunnel（HTTPS 终止，转发至 `localhost:8080`）。
+
+**必需环境变量**（任一缺失则启动即失败，fail-fast）：
+
+| 变量 | 说明 | 示例 |
+|------|------|------|
+| `DB_URL` | JDBC 连接串（6543 端口必须含 `prepareThreshold=0`） | `jdbc:postgresql://aws-1-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=require&prepareThreshold=0` |
+| `DB_USERNAME` | 数据库用户名 | `postgres.<project-ref>` |
+| `DB_PASSWORD` | 数据库密码 | — |
+| `WECHAT_SECRET` | 微信小程序 AppSecret | — |
+| `JWT_SECRET` | JWT HS256 签名密钥（≥ 32 字符） | — |
+| `SUPABASE_PROJECT_URL` | Supabase Storage 项目 URL | `https://<ref>.supabase.co` |
+| `SUPABASE_ANON_KEY` | Supabase Storage 公开密钥 | — |
+
+可选：`SUPABASE_STORAGE_BUCKET`（默认 `qwt-public`）。
+
+**部署步骤**：
+
+```bash
+# 1. 本地打包
+./mvnw clean package -DskipTests
+
+# 2. 上传至服务器
+scp target/quwuting-service-0.0.1-SNAPSHOT.jar user@server:/opt/quwuting/
+
+# 3. 服务器端启动（环境变量由 systemd EnvironmentFile 或 export 提供）
+java -jar /opt/quwuting/quwuting-service-0.0.1-SNAPSHOT.jar --spring.profiles.active=prod
+
+# 4. 验证
+curl http://localhost:8080/venues?page=0&size=1
+```
+
+生产环境变量推荐通过 systemd unit + `EnvironmentFile=/etc/quwuting/env` 管理，避免 shell 会话丢失。Cloudflare Tunnel 的 `config.yml` 中 ingress 指向 `http://localhost:8080`。
 
 ### Supabase 连接池兼容性（强制）
 
@@ -692,6 +773,7 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 - 禁止在 `@Column` 中写 MySQL 特有 `columnDefinition`（如 `tinyint`），应省略让 Hibernate 按方言映射
 - 禁止在用户 API 响应中引入头像等社交属性字段（产品为黄页工具，UserInfoResponse 仅含 id/openId/nickname/role）
 - 禁止在 Venue 模型中使用"人均消费"（price）/"最低消费"（minConsumption）字段——舞厅领域无此概念，消费模型为 tickets（门票规则）+ partnerFees（舞伴费用多模式列表，unit 区分 MINUTE/SONG）
+- 禁止添加 CORS 配置（`addCorsMappings`）——唯一客户端为微信小程序（`wx.request` 不受同源策略约束），CORS 仅降低防御深度
 
 ---
 

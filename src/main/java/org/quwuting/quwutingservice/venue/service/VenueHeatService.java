@@ -1,17 +1,18 @@
 package org.quwuting.quwutingservice.venue.service;
 
 import lombok.RequiredArgsConstructor;
+import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.favorite.repository.FavoriteRepository;
+import org.quwuting.quwutingservice.taginteraction.RatingDimensions;
 import org.quwuting.quwutingservice.taginteraction.repository.TagInteractionRepository;
 import org.quwuting.quwutingservice.venue.dto.response.VenueHeatResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
-import org.quwuting.quwutingservice.venue.entity.VenueStatusLog;
-import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
 import org.quwuting.quwutingservice.venuepost.repository.VenuePostRepository;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,6 +29,9 @@ import java.util.List;
  *           + 满意度 × W_SATISFACTION（无评分时为 0）。
  * <p>
  * 权重常量收敛在本类内部，后续基于真实数据分布调优，接口契约不变。
+ * <p>
+ * 性能优化：通过条件聚合将原 14 次串行 DB 往返合并为 6 次，
+ * 并加 60s TTL 本地缓存（聚合数据无需实时精度）。
  */
 @Service
 @RequiredArgsConstructor
@@ -55,6 +59,7 @@ public class VenueHeatService {
     private final VenueStatusLogRepository venueStatusLogRepository;
     private final TagInteractionRepository tagInteractionRepository;
 
+    @Cacheable(value = CacheConfig.CACHE_VENUE_HEAT, key = "#venueId")
     @Transactional(readOnly = true)
     public VenueHeatResponse getHeat(Long venueId) {
         Venue venue = venueRepository.findByIdAndDeletedFalse(venueId)
@@ -63,30 +68,34 @@ public class VenueHeatService {
         LocalDateTime since30d = LocalDateTime.now().minusDays(WINDOW_DAYS);
         LocalDate sinceDate30d = LocalDate.now().minusDays(WINDOW_DAYS);
 
-        // ── 浏览 ──
-        long viewCount30d = venueViewRepository.countByVenueIdSince(venueId, sinceDate30d);
-        long viewUv30d = venueViewRepository.countDistinctUsersByVenueIdSince(venueId, sinceDate30d);
+        // ── 浏览（PV + UV 合并为 1 次往返） ──
+        Object[] viewRow = venueViewRepository.countPvAndUvByVenueIdSince(venueId, sinceDate30d);
+        long viewCount30d = ((Number) viewRow[0]).longValue();
+        long viewUv30d = ((Number) viewRow[1]).longValue();
 
-        // ── 收藏 ──
-        long favoriteCount = favoriteRepository.countByVenueIdAndDeletedFalse(venueId);
-        long newFavoriteCount30d = favoriteRepository.countByVenueIdAndDeletedFalseAndCreatedAtAfter(venueId, since30d);
+        // ── 收藏（总数 + 30天新增 合并为 1 次往返） ──
+        Object[] favRow = favoriteRepository.countTotalAndRecentByVenueId(venueId, since30d);
+        long favoriteCount = ((Number) favRow[0]).longValue();
+        long newFavoriteCount30d = favRow[1] != null ? ((Number) favRow[1]).longValue() : 0;
 
-        // ── 动态 ──
-        long postCount = venuePostRepository.countByVenueIdAndDeletedFalse(venueId);
-        long newPostCount30d = venuePostRepository.countByVenueIdAndDeletedFalseAndCreatedAtAfter(venueId, since30d);
+        // ── 动态（总数 + 30天新增 合并为 1 次往返） ──
+        Object[] postRow = venuePostRepository.countTotalAndRecentByVenueId(venueId, since30d);
+        long postCount = ((Number) postRow[0]).longValue();
+        long newPostCount30d = postRow[1] != null ? ((Number) postRow[1]).longValue() : 0;
 
-        // ── 评价互动 ──
-        long ratingCount30d = tagInteractionRepository.countRatingsSince(venueId, since30d);
-        long likeCount30d = tagInteractionRepository.countLikesSince(venueId, since30d);
+        // ── 评价互动（ratingCount30d + likeCount30d + distinctRaters 合并为 1 次往返） ──
+        Object[] tiRow = tagInteractionRepository.countInteractionsForHeat(venueId, since30d);
+        long ratingCount30d = ((Number) tiRow[0]).longValue();
+        long likeCount30d = ((Number) tiRow[1]).longValue();
+        long ratingTotalCount = ((Number) tiRow[2]).longValue();
 
         // ── 满意度（各维度等权均分，近30天窗口） ──
-        long ratingTotalCount = tagInteractionRepository.countDistinctRatersByVenueId(venueId);
         Double satisfactionScore = computeSatisfaction(venueId, since30d, ratingTotalCount);
 
-        // ── 营业稳定性 ──
-        long suspensionCount30d = venueStatusLogRepository.countByVenueIdAndToStatusInSince(
-                venueId, List.of(VenueStatus.SUSPENDED), since30d);
-        long currentStatusDays = computeCurrentStatusDays(venueId);
+        // ── 营业稳定性（暂停次数 + 最近状态时间 合并为 1 次往返） ──
+        Object[] statusRow = venueStatusLogRepository.countSuspensionsAndLatestTime(venueId, since30d);
+        long suspensionCount30d = ((Number) statusRow[0]).longValue();
+        long currentStatusDays = computeCurrentStatusDays(statusRow[1]);
 
         // ── 综合热度指数 ──
         long satisfactionComponent = satisfactionScore != null
@@ -131,6 +140,11 @@ public class VenueHeatService {
         double sum = 0;
         int count = 0;
         for (Object[] row : scores) {
+            String tag = (String) row[0];
+            // 仅体验评估维度参与满意度（排除"现场状况"类：舞伴氛围/客流热度/舞伴年龄层）
+            if (!RatingDimensions.isQualityDimension(tag)) {
+                continue;
+            }
             Object avg = row[1];
             if (avg != null) {
                 sum += ((Number) avg).doubleValue();
@@ -144,10 +158,12 @@ public class VenueHeatService {
         return Math.round(sum / count * 10.0) / 10.0;
     }
 
-    /** 计算当前状态持续天数：最近一条状态日志的 createdAt 距今天数 */
-    private long computeCurrentStatusDays(Long venueId) {
-        return venueStatusLogRepository.findTopByVenueIdOrderByCreatedAtDesc(venueId)
-                .map(log -> ChronoUnit.DAYS.between(log.getCreatedAt().toLocalDate(), LocalDate.now()))
-                .orElse(0L);
+    /** 从合并查询结果中提取当前状态持续天数 */
+    private long computeCurrentStatusDays(Object latestCreatedAt) {
+        if (latestCreatedAt == null) {
+            return 0L;
+        }
+        LocalDateTime latest = ((java.sql.Timestamp) latestCreatedAt).toLocalDateTime();
+        return ChronoUnit.DAYS.between(latest.toLocalDate(), LocalDate.now());
     }
 }

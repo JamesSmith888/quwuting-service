@@ -21,4 +21,15 @@ public interface VenueStatusLogRepository extends JpaRepository<VenueStatusLog, 
     long countByVenueIdAndToStatusInSince(@Param("venueId") Long venueId,
                                           @Param("statuses") List<VenueStatus> statuses,
                                           @Param("since") LocalDateTime since);
+
+    /**
+     * 单次往返同时获取暂停次数和最近状态变迁时间（热度聚合优化）。
+     * 返回 Object[]{suspensionCount, latestCreatedAt}。
+     * 使用原生 SQL：JPQL 无法在单条投影中同时表达条件 COUNT + MAX。
+     */
+    @Query(value = "SELECT COUNT(CASE WHEN l.to_status = 'SUSPENDED' AND l.created_at >= :since THEN 1 END), " +
+                   "MAX(l.created_at) " +
+                   "FROM qwt_venue_status_logs l WHERE l.venue_id = :venueId",
+           nativeQuery = true)
+    Object[] countSuspensionsAndLatestTime(@Param("venueId") Long venueId, @Param("since") LocalDateTime since);
 }

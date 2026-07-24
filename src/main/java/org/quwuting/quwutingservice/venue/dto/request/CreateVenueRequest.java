@@ -59,7 +59,8 @@ public record CreateVenueRequest(
         @Size(max = 500)
         String wechatQr,
 
-        List<String> tags,
+        @Size(max = 10)
+        List<@Size(max = 20) String> tags,
 
         Integer sortWeight
 ) {}

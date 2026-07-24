@@ -57,7 +57,7 @@ BEGIN
     '[{"label":"下午场","type":"FIXED","price":15},{"label":"晚场","type":"FIXED","price":20}]',
     '[{"unit":"MINUTE","minutes":4,"price":20},{"unit":"MINUTE","minutes":10,"price":45},{"unit":"MINUTE","minutes":60,"price":200}]',
     '13800005555', NULL,
-    '["交谊舞","莎莎舞","场地宽敞","空调开放"]',
+    '["交谊舞","场地宽敞","空调开放"]',
     85, v_owner_id,
     '2026-06-15 10:00:00', '2026-07-20 12:00:00', false
   )

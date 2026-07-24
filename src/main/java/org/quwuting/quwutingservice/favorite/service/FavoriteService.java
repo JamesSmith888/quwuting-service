@@ -8,6 +8,7 @@ import org.quwuting.quwutingservice.favorite.repository.FavoriteRepository;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -53,7 +54,12 @@ public class FavoriteService {
         Favorite fav = new Favorite();
         fav.setUserId(userId);
         fav.setVenueId(venueId);
-        favoriteRepository.save(fav);
+        try {
+            favoriteRepository.save(fav);
+        } catch (DataIntegrityViolationException e) {
+            // 并发竞态：另一请求已插入，幂等忽略
+            log.debug("addFavorite 并发冲突，幂等忽略: userId={}, venueId={}", userId, venueId);
+        }
     }
 
     /** 取消收藏（幂等：未收藏则忽略） */

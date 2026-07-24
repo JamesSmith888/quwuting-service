@@ -2,6 +2,7 @@ package org.quwuting.quwutingservice.taginteraction.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.taginteraction.RatingDimensions;
 import org.quwuting.quwutingservice.taginteraction.dto.response.DimensionScoreStats;
@@ -12,6 +13,8 @@ import org.quwuting.quwutingservice.taginteraction.entity.TagInteraction;
 import org.quwuting.quwutingservice.taginteraction.repository.TagInteractionRepository;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -21,7 +24,6 @@ import tools.jackson.databind.ObjectMapper;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -80,7 +82,12 @@ public class TagInteractionService {
         ti.setVenueId(venueId);
         ti.setTag(tag);
         ti.setLiked(true);
-        tagInteractionRepository.save(ti);
+        try {
+            tagInteractionRepository.save(ti);
+        } catch (DataIntegrityViolationException e) {
+            // 并发竞态：另一请求已创建（liked=true），幂等返回已赞
+            log.debug("toggleLike 并发冲突，幂等返回: userId={}, venueId={}, tag={}", userId, venueId, tag);
+        }
         return true;
     }
 
@@ -125,7 +132,12 @@ public class TagInteractionService {
         ti.setTag(tag);
         ti.setLiked(false);
         ti.setScore(score);
-        tagInteractionRepository.save(ti);
+        try {
+            tagInteractionRepository.save(ti);
+        } catch (DataIntegrityViolationException e) {
+            // 并发竞态：另一请求已创建，幂等忽略
+            log.debug("score 并发冲突，幂等忽略: userId={}, venueId={}, tag={}", userId, venueId, tag);
+        }
     }
 
     // ─── 聚合统计 ───────────────────────────────────────────────────────
@@ -133,24 +145,65 @@ public class TagInteractionService {
     /**
      * 获取场所的标签交互统计（点赞 + 维度评分 + 时间窗口）。
      * 软鉴权：未登录时 likedByMe=false、myScore=null，聚合数据正常返回。
+     * <p>
+     * 性能优化：通过合并查询将原 7 次串行 DB 往返合并为 4 次
+     * （venue + likes + multiWindowScores + userState），并加 60s TTL 缓存。
      */
+    @Cacheable(value = CacheConfig.CACHE_TAG_STATS, key = "{#venueId, #currentUserId}")
     @Transactional(readOnly = true)
     public TagStatsResponse getTagStats(Long venueId, Long currentUserId) {
         Venue venue = assertVenueExists(venueId);
         List<String> venueTags = deserializeStringList(venue.getTags());
 
-        // ── 标签点赞统计 ──
+        // ── 标签点赞统计（1 次往返） ──
         List<Object[]> likeRows = tagInteractionRepository.countLikesByVenueGroupByTag(venueId);
         Map<String, Long> likeCountMap = new HashMap<>();
         for (Object[] row : likeRows) {
             likeCountMap.put((String) row[0], (Long) row[1]);
         }
 
-        final Set<String> userLikedTags = currentUserId != null
-                ? new HashSet<>(tagInteractionRepository.findLikedTagsByUserAndVenue(currentUserId, venueId))
-                : Collections.emptySet();
+        // ── 维度评分统计：全量 + 30天 + 7天 合并为 1 次往返 ──
+        LocalDateTime now = LocalDateTime.now();
+        List<Object[]> multiWindowRows = tagInteractionRepository.aggregateScoresMultiWindow(
+                venueId, now.minusDays(30), now.minusDays(7));
 
-        // 只返回当前存在于场所 tags 中的标签（管理员删除标签后历史交互不展示）
+        // tag → [avgAll, countAll, avg30d, count30d, avg7d, count7d]
+        Map<String, double[]> multiWindowMap = new HashMap<>();
+        for (Object[] row : multiWindowRows) {
+            String dimTag = (String) row[0];
+            if (RatingDimensions.isValid(dimTag)) {
+                double avgAll = row[1] != null ? ((Number) row[1]).doubleValue() : 0;
+                long countAll = ((Number) row[2]).longValue();
+                double avg30d = row[3] != null ? ((Number) row[3]).doubleValue() : 0;
+                long count30d = row[4] != null ? ((Number) row[4]).longValue() : 0;
+                double avg7d = row[5] != null ? ((Number) row[5]).doubleValue() : 0;
+                long count7d = row[6] != null ? ((Number) row[6]).longValue() : 0;
+                multiWindowMap.put(dimTag, new double[]{avgAll, countAll, avg30d, count30d, avg7d, count7d});
+            }
+        }
+
+        // ── 用户交互状态：点赞 + 评分 合并为 1 次往返 ──
+        Set<String> likedTagsBuilder = new HashSet<>();
+        Map<String, Integer> scoresBuilder = new HashMap<>();
+        if (currentUserId != null) {
+            List<Object[]> userRows = tagInteractionRepository
+                    .findUserInteractionsByVenue(currentUserId, venueId);
+            for (Object[] row : userRows) {
+                String tag = (String) row[0];
+                Boolean liked = (Boolean) row[1];
+                Integer score = (Integer) row[2];
+                if (Boolean.TRUE.equals(liked)) {
+                    likedTagsBuilder.add(tag);
+                }
+                if (score != null) {
+                    scoresBuilder.put(tag, score);
+                }
+            }
+        }
+        final Set<String> userLikedTags = Collections.unmodifiableSet(likedTagsBuilder);
+        final Map<String, Integer> userScores = Collections.unmodifiableMap(scoresBuilder);
+
+        // ── 组装标签点赞（只返回当前存在于场所 tags 中的标签） ──
         List<TagLikeStats> tagLikes = venueTags.stream()
                 .map(tag -> new TagLikeStats(
                         tag,
@@ -158,47 +211,21 @@ public class TagInteractionService {
                         userLikedTags.contains(tag)))
                 .toList();
 
-        // ── 维度评分统计 ──
-        List<Object[]> scoreRows = tagInteractionRepository.aggregateScoresByVenueGroupByTag(venueId);
-        Map<String, double[]> scoreMap = new HashMap<>(); // tag → [avg, count]
-        for (Object[] row : scoreRows) {
-            String dimTag = (String) row[0];
-            if (RatingDimensions.isValid(dimTag)) {
-                scoreMap.put(dimTag, new double[]{(Double) row[1], (Long) row[2]});
-            }
-        }
-
-        // 时间窗口聚合
-        LocalDateTime now = LocalDateTime.now();
-        Map<String, double[]> score30d = aggregateSince(venueId, now.minusDays(30));
-        Map<String, double[]> score7d = aggregateSince(venueId, now.minusDays(7));
-
-        // 当前用户评分
-        Map<String, Integer> userScores = Collections.emptyMap();
-        if (currentUserId != null) {
-            userScores = tagInteractionRepository
-                    .findScoredInteractionsByUserAndVenue(currentUserId, venueId)
-                    .stream()
-                    .collect(Collectors.toMap(TagInteraction::getTag, TagInteraction::getScore,
-                            (a, b) -> b));
-        }
-
-        // 组装所有维度（无数据时 count=0, avgScore=null）
+        // ── 组装维度评分（无数据时 count=0, avgScore=null） ──
         List<DimensionScoreStats> dimensionScores = new ArrayList<>();
         for (String dim : RatingDimensions.ALL) {
-            double[] allTime = scoreMap.get(dim);
-            Double avg = allTime != null ? roundToOneDecimal(allTime[0]) : null;
-            long count = allTime != null ? (long) allTime[1] : 0L;
+            double[] mw = multiWindowMap.get(dim);
 
-            double[] r30 = score30d.get(dim);
+            Double avg = mw != null && mw[1] > 0 ? roundToOneDecimal(mw[0]) : null;
+            long count = mw != null ? (long) mw[1] : 0L;
+
             WindowScore w30 = new WindowScore(
-                    r30 != null ? roundToOneDecimal(r30[0]) : null,
-                    r30 != null ? (long) r30[1] : 0L);
+                    mw != null && mw[3] > 0 ? roundToOneDecimal(mw[2]) : null,
+                    mw != null ? (long) mw[3] : 0L);
 
-            double[] r7 = score7d.get(dim);
             WindowScore w7 = new WindowScore(
-                    r7 != null ? roundToOneDecimal(r7[0]) : null,
-                    r7 != null ? (long) r7[1] : 0L);
+                    mw != null && mw[5] > 0 ? roundToOneDecimal(mw[4]) : null,
+                    mw != null ? (long) mw[5] : 0L);
 
             dimensionScores.add(new DimensionScoreStats(
                     dim, avg, count, userScores.get(dim), w30, w7));
@@ -208,19 +235,6 @@ public class TagInteractionService {
     }
 
     // ─── 内部工具 ───────────────────────────────────────────────────────
-
-    private Map<String, double[]> aggregateSince(Long venueId, LocalDateTime since) {
-        List<Object[]> rows = tagInteractionRepository
-                .aggregateScoresByVenueSinceGroupByTag(venueId, since);
-        Map<String, double[]> map = new HashMap<>();
-        for (Object[] row : rows) {
-            String dimTag = (String) row[0];
-            if (RatingDimensions.isValid(dimTag)) {
-                map.put(dimTag, new double[]{(Double) row[1], (Long) row[2]});
-            }
-        }
-        return map;
-    }
 
     private Venue assertVenueExists(Long venueId) {
         return venueRepository.findByIdAndDeletedFalse(venueId)

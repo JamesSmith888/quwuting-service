@@ -34,6 +34,8 @@ import java.util.List;
 @RequiredArgsConstructor
 public class VenueService {
 
+    private static final int MAX_PAGE_SIZE = 50;
+
     private final VenueRepository venueRepository;
     private final VenuePostRepository venuePostRepository;
     private final VenueStatusLogRepository venueStatusLogRepository;
@@ -154,6 +156,8 @@ public class VenueService {
                                           Double latitude, Double longitude,
                                           int page, int size) {
         String keywordPattern = StringUtils.hasText(keyword) ? "%" + keyword.trim() + "%" : null;
+        page = Math.max(0, page);
+        size = Math.min(Math.max(1, size), MAX_PAGE_SIZE);
         PageRequest pageable = PageRequest.of(page, size);
         Page<Venue> result;
         if (latitude != null && longitude != null) {
