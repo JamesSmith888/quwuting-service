@@ -9,6 +9,14 @@ spring:
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      # 低流量小程序 + 高延迟 DB（~150ms/往返），5 连接足够且节省内存
+      maximum-pool-size: 5
+      minimum-idle: 2
+      idle-timeout: 300000        # 空闲连接 5min 回收（默认 10min）
+      max-lifetime: 900000        # 连接最长存活 15min（默认 30min，缩短减少泄漏窗口）
+      connection-timeout: 10000   # 获取连接超时 10s（默认 30s，快速失败）
+      leak-detection-threshold: 30000  # 连接持有超 30s 告警（排查未关闭连接）
   jpa:
     hibernate:
       ddl-auto: validate

@@ -694,7 +694,13 @@ src/main/resources/
 
 基础设施：阿里云 ECS（内嵌 Tomcat，`java -jar` 方式运行）+ Cloudflare Tunnel（HTTPS 终止，转发至 `localhost:8080`）。
 
-**必需环境变量**（任一缺失则启动即失败，fail-fast）：
+**强制约束（2026-07-25 OOM 事故后确立）**：
+
+- **禁止在生产环境使用 `mvn spring-boot:run`**。该命令会同时运行 Maven JVM + fork 应用 JVM，双倍内存开销且无进程守护。生产唯一启动方式为 systemd 管理的 `java -jar`。
+- **JVM 必须配置内存上限**。使用 `-XX:MaxRAMPercentage=75.0` 让 JVM 感知系统可用内存并限制堆大小，禁止使用无约束的默认值（默认取物理内存 1/4，不感知其他进程占用）。
+- **必须通过 systemd 管理进程**（自动重启、资源硬限制、日志归集）。systemd unit 文件版本化于 `deploy/quwuting.service`。
+
+**必需环境变量**（任一缺失则启动即失败，fail-fast），存放于 `/etc/quwuting/env`：
 
 | 变量 | 说明 | 示例 |
 |------|------|------|
@@ -717,14 +723,34 @@ src/main/resources/
 # 2. 上传至服务器
 scp target/quwuting-service-0.0.1-SNAPSHOT.jar user@server:/opt/quwuting/
 
-# 3. 服务器端启动（环境变量由 systemd EnvironmentFile 或 export 提供）
-java -jar /opt/quwuting/quwuting-service-0.0.1-SNAPSHOT.jar --spring.profiles.active=prod
+# 3. 首次安装 systemd unit（后续更新只需 restart）
+scp deploy/quwuting.service user@server:/etc/systemd/system/
+ssh user@server "systemctl daemon-reload && systemctl enable quwuting && systemctl start quwuting"
 
-# 4. 验证
+# 4. 日常更新后重启
+ssh user@server "systemctl restart quwuting"
+
+# 5. 验证
 curl http://localhost:8080/venues?page=0&size=1
+
+# 6. 查看日志
+ssh user@server "journalctl -u quwuting -f --no-pager"
 ```
 
-生产环境变量推荐通过 systemd unit + `EnvironmentFile=/etc/quwuting/env` 管理，避免 shell 会话丢失。Cloudflare Tunnel 的 `config.yml` 中 ingress 指向 `http://localhost:8080`。
+**systemd unit 关键配置说明**（`deploy/quwuting.service`）：
+
+| 配置项 | 值 | 作用 |
+|--------|------|------|
+| `Restart=always` + `RestartSec=10` | 异常退出 10s 后自动拉起 | OOM Kill / 未捕获异常后自愈 |
+| `StartLimitBurst=5` / `StartLimitIntervalSec=300` | 5 分钟内最多重启 5 次 | 防止配置错误导致无限重启循环 |
+| `MemoryMax=1536M` | cgroup 硬限制 | JVM 逃逸时兜底，保护 OS 不被拖死 |
+| `MemoryHigh=1280M` | 软限制（触发 GC 压力） | 在硬限制前给 JVM 施压促其自收敛 |
+| `-XX:MaxRAMPercentage=75.0` | JVM 堆上限 = 可用内存 × 75% | 留余量给 Metaspace/线程栈/DirectBuffer |
+| `-XX:+UseG1GC` | G1 垃圾收集器 | 低延迟，适合 1-2GB 堆 |
+
+**HikariCP 连接池**（`application-prod.yaml`）：maximumPoolSize=5, minimumIdle=2。低流量小程序 + 高延迟 DB（~150ms/往返）场景下 5 连接足够，减少内存占用。leak-detection-threshold=30s 用于排查连接泄漏。
+
+Cloudflare Tunnel 的 `config.yml` 中 ingress 指向 `http://localhost:8080`。
 
 ### Supabase 连接池兼容性（强制）
 
@@ -774,6 +800,8 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 - 禁止在用户 API 响应中引入头像等社交属性字段（产品为黄页工具，UserInfoResponse 仅含 id/openId/nickname/role）
 - 禁止在 Venue 模型中使用"人均消费"（price）/"最低消费"（minConsumption）字段——舞厅领域无此概念，消费模型为 tickets（门票规则）+ partnerFees（舞伴费用多模式列表，unit 区分 MINUTE/SONG）
 - 禁止添加 CORS 配置（`addCorsMappings`）——唯一客户端为微信小程序（`wx.request` 不受同源策略约束），CORS 仅降低防御深度
+- 禁止在生产环境使用 `mvn spring-boot:run`（双 JVM 内存翻倍 + 无进程守护，2026-07-25 OOM 事故根因）
+- 禁止生产 `java -jar` 启动时省略 JVM 内存参数（必须至少含 `-XX:MaxRAMPercentage`，由 systemd unit 统一管理）
 
 ---
 

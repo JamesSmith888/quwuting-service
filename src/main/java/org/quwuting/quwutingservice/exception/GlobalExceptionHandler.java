@@ -4,9 +4,12 @@ import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 @Slf4j
 @RestControllerAdvice
@@ -33,6 +36,14 @@ public class GlobalExceptionHandler {
                 .findFirst()
                 .orElse("参数校验失败");
         return ApiResponse.fail(1001, message);
+    }
+
+    /** 路由不存在（扫描器/爬虫探测）→ HTTP 404，仅 DEBUG 日志，不打堆栈 */
+    @ExceptionHandler(NoResourceFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public ApiResponse<Void> handleNoResource(NoResourceFoundException ex) {
+        log.debug("Resource not found: {}", ex.getResourcePath());
+        return ApiResponse.fail(1001, "资源不存在");
     }
 
     @ExceptionHandler(Exception.class)

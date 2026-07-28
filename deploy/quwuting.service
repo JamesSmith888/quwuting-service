@@ -1,0 +1,38 @@
+[Unit]
+Description=Quwuting Service (Spring Boot)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/quwuting
+EnvironmentFile=/etc/quwuting/env
+
+# JVM 内存限制（适配 1-2GB ECS，禁止使用无限制的默认值）
+# MaxRAMPercentage=75 让 JVM 感知 cgroup/系统可用内存，取 75% 作为最大堆
+# 剩余 25% 留给 Metaspace、线程栈、NIO DirectBuffer、OS 自身
+ExecStart=/usr/bin/java \
+    -XX:MaxRAMPercentage=75.0 \
+    -XX:InitialRAMPercentage=50.0 \
+    -XX:+UseG1GC \
+    -XX:MaxGCPauseMillis=200 \
+    -jar /opt/quwuting/quwuting-service-0.0.1-SNAPSHOT.jar \
+    --spring.profiles.active=prod
+
+# 进程守护：异常退出自动重启（OOM Kill / 未捕获异常等）
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# 资源硬限制（兜底，防止 JVM 逃逸吃光系统内存导致整机不可用）
+MemoryMax=1536M
+MemoryHigh=1280M
+
+# 日志输出到 journald（journalctl -u quwuting -f 查看）
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=quwuting
+
+[Install]
+WantedBy=multi-user.target
