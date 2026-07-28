@@ -3,14 +3,15 @@
 # quwuting-service 一键部署脚本（Alibaba Cloud Linux 3 / RHEL 系兼容）
 #
 # 适用场景：阿里云 ECS + Cloudflare Tunnel（HTTPS 终止，转发至 localhost:8080）。
-# 满足 AGENTS.md 核心约束：java -jar + JAVA_TOOL_OPTIONS + systemd
+# 满足 AGENTS.md 核心约束：java -jar + JVM 内存限制 + systemd
 # Restart=always + cgroup MemoryMax 三件套。
+#
+# 配置策略：所有业务配置（DB/JWT/Supabase）直接写在 application-dev.yaml 中，
+# 不依赖外部环境变量文件。JVM 参数硬编码在 ExecStart 中。
 #
 # 用法（首次部署，root 直接执行）：
 #   1. 把仓库 clone 到 /root/quwuting-service（或通过环境变量覆盖 APP_DIR）
-#   2. cp /root/quwuting-service/deploy/quwuting-service.env.example \
-#         /etc/quwuting-service.env
-#      并填入真实 DB / JWT / Supabase 凭据（chmod 600 自动设置）
+#   2. 确保 src/main/resources/application-dev.yaml 中有真实的业务配置
 #   3. sudo bash deploy/deploy.sh
 #
 # 后续升级：
@@ -26,14 +27,18 @@ APP_NAME="quwuting-service"
 APP_DIR="${APP_DIR:-/root/quwuting-service}"
 APP_USER="${APP_USER:-appuser}"
 LOG_DIR="${LOG_DIR:-/var/log/${APP_NAME}}"
-ENV_FILE="${ENV_FILE:-/etc/${APP_NAME}.env}"
 UNIT_FILE="/etc/systemd/system/${APP_NAME}.service"
 JAR_GLOB="${APP_DIR}/target/${APP_NAME}-*.jar"
+SPRING_PROFILE="${SPRING_PROFILE:-dev}"
 
-# 容量上限（阿里云 ECS 2C/2G 实测合理值）
-JVM_XMX="512m"
-JVM_XMS="256m"
-JVM_METASPACE_MAX="192m"
+# JVM 参数（阿里云 ECS 2C/2G 实测合理值）
+# Xmx512m: 堆上限，RSS 实际 ≈ Xmx + 250MB ≈ 762MB
+# MaxMetaspaceSize=192m: 防止 Spring/Hibernate 类元数据膨胀
+# ExitOnOutOfMemoryError: JVM 内 OOM 立刻退出，让 systemd 10s 内拉起
+# HeapDumpOnOutOfMemoryError: 留 hprof，事后用 Eclipse MAT 分析
+JVM_FLAGS="-Xmx512m -Xms256m -XX:MaxMetaspaceSize=192m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=${LOG_DIR}/ -Djava.security.egd=file:/dev/./urandom"
+
+# cgroup 内存限制
 CGROUP_MEMORY_HIGH="800M"      # 软告警，到达后内核优先回收本进程
 CGROUP_MEMORY_MAX="950M"        # 硬上限；仍 < 物理 2GB 一半，OS 不会被拖死
 
@@ -63,6 +68,11 @@ die() { echo -e "\033[1;31m[deploy]\033[0m $*" >&2; exit 1; }
 [[ -x "$APP_DIR/mvnw" ]] || die "$APP_DIR/mvnw 不可执行"
 command -v java >/dev/null 2>&1 || die "未安装 java；请先 'dnf install -y java-latest-openjdk-headless'"
 command -v systemctl >/dev/null 2>&1 || die "无 systemd；本脚本依赖 systemd"
+
+# 检查 application-dev.yaml 存在
+DEV_CONFIG="$APP_DIR/src/main/resources/application-${SPRING_PROFILE}.yaml"
+[[ -f "$DEV_CONFIG" ]] || die "缺少配置文件 $DEV_CONFIG（业务配置直接写在 yaml 中，不依赖环境变量）"
+log "配置文件: $DEV_CONFIG"
 
 # ── 1. 创建系统用户（无登录 shell，无 home，专跑应用） ─────────────────────
 if ! $SKIP_USER && ! id -u "$APP_USER" >/dev/null 2>&1; then
@@ -99,19 +109,7 @@ fi
 log "调整 $APP_DIR 属主为 $APP_USER（递归）"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
-# ── 3. 环境变量文件（包含敏感凭据，强制 640） ──────────────────────────────
-if [[ ! -f "$ENV_FILE" ]]; then
-  die "缺少 $ENV_FILE
-        请先复制范本并填入真实凭据：
-          sudo cp $APP_DIR/deploy/quwuting-service.env.example $ENV_FILE
-          sudo chmod 600 $ENV_FILE
-          sudo \${EDITOR:-vi} $ENV_FILE"
-fi
-chown root:"$APP_USER" "$ENV_FILE"
-chmod 640 "$ENV_FILE"
-log "环境变量文件权限已固化为 root:$APP_USER 640"
-
-# ── 3.5 探测 JAVA_HOME（打包阶段需透传给 sudo；systemd unit ExecStart 也要用） ─
+# ── 3. 探测 JAVA_HOME（打包阶段需透传给 sudo；systemd unit ExecStart 也要用） ─
 if [[ -z "${JAVA_HOME:-}" ]]; then
   JAVA_BIN=$(command -v java || true)
   if [[ -z "$JAVA_BIN" ]]; then
@@ -166,10 +164,9 @@ Type=simple
 User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${APP_DIR}
-EnvironmentFile=${ENV_FILE}
 
-# JAVA_TOOL_OPTIONS 在 ENV_FILE 中提供完整 JVM flag；这里仅锁定 jar 路径
-ExecStart=${JAVA_HOME}/bin/java -jar ${JAR_PATH}
+# JVM 参数 + jar 路径 + Spring profile（业务配置在 application-${SPRING_PROFILE}.yaml）
+ExecStart=${JAVA_HOME}/bin/java ${JVM_FLAGS} -jar ${JAR_PATH} --spring.profiles.active=${SPRING_PROFILE}
 
 # 守护：被杀立即拉起
 Restart=always

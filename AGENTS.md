@@ -697,8 +697,9 @@ src/main/resources/
 **强制约束（2026-07-25 OOM 事故后确立）**：
 
 - **禁止在生产环境使用 `mvn spring-boot:run`**。该命令会同时运行 Maven JVM + fork 应用 JVM，双倍内存开销且无进程守护。生产唯一启动方式为 systemd 管理的 `java -jar`。
-- **JVM 必须配置内存上限**。通过 `JAVA_TOOL_OPTIONS`（环境变量文件）传入 `-Xmx` / `-XX:MaxMetaspaceSize` / `-XX:+ExitOnOutOfMemoryError`，禁止使用无约束的默认值。
+- **JVM 必须配置内存上限**。由 `deploy/deploy.sh` 在 ExecStart 中硬编码 `-Xmx` / `-XX:MaxMetaspaceSize` / `-XX:+ExitOnOutOfMemoryError`，禁止使用无约束的默认值。
 - **必须通过 systemd 管理进程**（自动重启、资源硬限制、日志归集）。systemd unit 由 `deploy/deploy.sh` 自动探测 JAVA_HOME 后内联生成（避免硬编码 `/usr/bin/java` 导致 status=203/EXEC）。
+- **业务配置直接写在服务器上的 `application-dev.yaml`**，不依赖外部环境变量文件（简化部署流程，该文件不进 git）。
 
 **部署流程（一键脚本）**：
 
@@ -707,10 +708,8 @@ src/main/resources/
 # 1. 确保仓库已 clone 到 /root/quwuting-service
 git clone https://github.com/JamesSmith888/quwuting-service.git /root/quwuting-service
 
-# 2. 复制环境变量范本并填入真实凭据
-sudo cp deploy/quwuting-service.env.example /etc/quwuting-service.env
-sudo chmod 600 /etc/quwuting-service.env
-sudo vi /etc/quwuting-service.env   # 填入 DB/JWT/Supabase 真实值
+# 2. 确保 src/main/resources/application-dev.yaml 中有真实的业务配置（DB/JWT/Supabase）
+#    该文件已在服务器上，不进 git
 
 # 3. 一键部署（打包 + 创建用户 + 写 systemd unit + 启动）
 sudo bash deploy/deploy.sh
@@ -720,22 +719,7 @@ git pull
 sudo bash deploy/deploy.sh --no-user --no-unit   # 仅重新打包+重启
 ```
 
-脚本支持 `--no-user`（跳过用户创建）、`--no-unit`（跳过 unit 重写）、`--no-package`（跳过 Maven 打包）。
-
-**必需环境变量**（存放于 `/etc/quwuting-service.env`，任一缺失则启动即失败）：
-
-| 变量 | 说明 |
-|------|------|
-| `JAVA_TOOL_OPTIONS` | JVM 参数（env.example 已预设合理值：`-Xmx512m -Xms256m -XX:MaxMetaspaceSize=192m -XX:+ExitOnOutOfMemoryError`） |
-| `DB_URL` | JDBC 连接串（6543 端口必须含 `prepareThreshold=0`） |
-| `DB_USERNAME` | 数据库用户名 |
-| `DB_PASSWORD` | 数据库密码 |
-| `WECHAT_SECRET` | 微信小程序 AppSecret |
-| `JWT_SECRET` | JWT HS256 签名密钥（≥ 32 字符） |
-| `SUPABASE_PROJECT_URL` | Supabase Storage 项目 URL |
-| `SUPABASE_ANON_KEY` | Supabase Storage 公开密钥 |
-
-可选：`SUPABASE_STORAGE_BUCKET`（默认 `qwt-public`）。
+脚本支持 `--no-user`（跳过用户创建）、`--no-unit`（跳过 unit 重写）、`--no-package`（跳过 Maven 打包）。默认使用 `dev` profile（可通过 `SPRING_PROFILE` 环境变量覆盖）。
 
 **deploy.sh 关键机制说明**：
 
@@ -743,13 +727,14 @@ sudo bash deploy/deploy.sh --no-user --no-unit   # 仅重新打包+重启
 |------|------|------|
 | JAVA_HOME 自动探测 | `readlink -f $(which java)` | 避免硬编码 `/usr/bin/java`（tarball JDK 无此路径，导致 status=203/EXEC） |
 | 专用系统用户 | `appuser`（nologin shell） | 进程隔离，最小权限运行 |
-| `Restart=always` + `RestartSec=10s` | systemd 守护 | OOM Kill / 未捕获异常后 10s 自愈 |
+| JVM 参数硬编码 | ExecStart 中 `-Xmx512m -Xms256m -XX:MaxMetaspaceSize=192m` | 限制堆大小，防止 OOM Kill |
+| `-XX:+ExitOnOutOfMemoryError` | JVM flag | JVM 内 OOM 立刻退出，让 systemd 拉起而非僵死 |
+| `-XX:+HeapDumpOnOutOfMemoryError` | JVM flag | 留 hprof 到 `/var/log/quwuting-service/`，事后分析 |
+| `Restart=always` + `RestartSec=10s` | systemd 守护 | 异常退出后 10s 自愈 |
 | `StartLimitBurst=5` / `StartLimitIntervalSec=120` | 2 分钟内最多重启 5 次 | 防止配置错误导致无限重启循环 |
 | `MemoryMax=950M` / `MemoryHigh=800M` | cgroup 硬/软限制 | JVM 逃逸时兜底（仍 < 物理 2GB 一半），OS 不被拖死 |
-| `-XX:+ExitOnOutOfMemoryError` | JAVA_TOOL_OPTIONS | JVM 内 OOM 立刻退出，让 systemd 拉起而非僵死 |
-| `-XX:+HeapDumpOnOutOfMemoryError` | JAVA_TOOL_OPTIONS | 留 hprof 到 `/var/log/quwuting-service/`，事后分析 |
 
-**HikariCP 连接池**（`application-prod.yaml`）：maximumPoolSize=5, minimumIdle=2。低流量小程序 + 高延迟 DB（~150ms/往返）场景下 5 连接足够，减少内存占用。leak-detection-threshold=30s 用于排查连接泄漏。
+**HikariCP 连接池**（`application-dev.yaml`）：maximumPoolSize=5, minimumIdle=2。低流量小程序 + 高延迟 DB（~150ms/往返）场景下 5 连接足够，减少内存占用。leak-detection-threshold=30s 用于排查连接泄漏。
 
 Cloudflare Tunnel 的 `config.yml` 中 ingress 指向 `http://localhost:8080`。
 
@@ -802,7 +787,7 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 - 禁止在 Venue 模型中使用"人均消费"（price）/"最低消费"（minConsumption）字段——舞厅领域无此概念，消费模型为 tickets（门票规则）+ partnerFees（舞伴费用多模式列表，unit 区分 MINUTE/SONG）
 - 禁止添加 CORS 配置（`addCorsMappings`）——唯一客户端为微信小程序（`wx.request` 不受同源策略约束），CORS 仅降低防御深度
 - 禁止在生产环境使用 `mvn spring-boot:run`（双 JVM 内存翻倍 + 无进程守护，2026-07-25 OOM 事故根因）
-- 禁止生产 `java -jar` 启动时省略 JVM 内存参数（必须通过 env 文件的 `JAVA_TOOL_OPTIONS` 至少含 `-Xmx`，由 `deploy/deploy.sh` 统一管理）
+- 禁止生产 `java -jar` 启动时省略 JVM 内存参数（JVM flags 由 `deploy/deploy.sh` 硬编码在 ExecStart 中统一管理，至少含 `-Xmx`）
 
 ---
 
