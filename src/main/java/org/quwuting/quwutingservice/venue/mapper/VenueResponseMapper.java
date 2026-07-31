@@ -34,7 +34,7 @@ public class VenueResponseMapper {
     private final ObjectMapper objectMapper;
 
     public VenueResponse toResponse(Venue v) {
-        return toResponse(v, Collections.emptyMap());
+        return toResponse(v, Collections.emptyMap(), false);
     }
 
     /**
@@ -42,6 +42,14 @@ public class VenueResponseMapper {
      *                      无需展示标签热度的场景（新建/编辑表单回显）传空 Map
      */
     public VenueResponse toResponse(Venue v, Map<String, Long> tagLikeCounts) {
+        return toResponse(v, tagLikeCounts, false);
+    }
+
+    /**
+     * @param tagLikeCounts 各标签的点赞数
+     * @param isHot         是否为城市内热门场所（列表页视觉高亮）
+     */
+    public VenueResponse toResponse(Venue v, Map<String, Long> tagLikeCounts, boolean isHot) {
         return new VenueResponse(
                 v.getId(),
                 v.getName(),
@@ -64,6 +72,7 @@ public class VenueResponseMapper {
                 deserializeStringList(v.getTags(), "tags"),
                 tagLikeCounts != null ? tagLikeCounts : Collections.emptyMap(),
                 v.getSortWeight(),
+                isHot,
                 v.getCreatedAt(),
                 v.getUpdatedAt()
         );

@@ -29,8 +29,10 @@ import org.springframework.util.StringUtils;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Slf4j
 @Service
@@ -177,8 +179,11 @@ public class VenueService {
         // 批量查询整页场所的标签点赞数，避免逐条查询造成的 N+1（见 TagInteractionService#batchGetTagLikeCounts）
         List<Long> venueIds = result.getContent().stream().map(Venue::getId).toList();
         Map<Long, Map<String, Long>> tagLikeCountsByVenue = tagInteractionService.batchGetTagLikeCounts(venueIds);
+        // 查询城市内热门场所 ID 集合（单次全表查询，数据规模小）
+        Set<Long> hotVenueIds = new HashSet<>(venueRepository.findHotVenueIds());
         return result.map(v -> venueResponseMapper.toResponse(
-                v, tagLikeCountsByVenue.getOrDefault(v.getId(), Collections.emptyMap())));
+                v, tagLikeCountsByVenue.getOrDefault(v.getId(), Collections.emptyMap()),
+                hotVenueIds.contains(v.getId())));
     }
 
     /** 有场所的城市列表（按场所数倒序），供前端热门城市选择 */

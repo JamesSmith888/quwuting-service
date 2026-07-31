@@ -9,10 +9,13 @@ import org.quwuting.quwutingservice.taginteraction.repository.TagInteractionRepo
 import org.quwuting.quwutingservice.venue.dto.response.FavoriteTrendPoint;
 import org.quwuting.quwutingservice.venue.dto.response.VenueHeatResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
+import org.quwuting.quwutingservice.venue.enums.StatusConfidence;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
 import org.quwuting.quwutingservice.venuepost.repository.VenuePostRepository;
+import org.quwuting.quwutingservice.venuestatusreport.dto.response.ActiveReportSummary;
+import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportService;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -59,12 +62,16 @@ public class VenueHeatService {
     /** 收藏趋势图窗口：14 天——比 30 天更适合小程序小屏图表的柱状数量，且足以看出升降走势 */
     private static final int TREND_WINDOW_DAYS = 14;
 
+    /** 状态可信度矩阵阈值：不稳定门店状态持续天数 ≤ 此值视为"近期确认过"（MEDIUM），> 此值为 LOW */
+    private static final long CONFIDENCE_RECENT_DAYS = 7;
+
     private final VenueRepository venueRepository;
     private final FavoriteRepository favoriteRepository;
     private final VenuePostRepository venuePostRepository;
     private final VenueViewRepository venueViewRepository;
     private final VenueStatusLogRepository venueStatusLogRepository;
     private final TagInteractionRepository tagInteractionRepository;
+    private final StatusReportService statusReportService;
 
     @Cacheable(value = CacheConfig.CACHE_VENUE_HEAT, key = "#venueId")
     @Transactional(readOnly = true)
@@ -121,6 +128,9 @@ public class VenueHeatService {
         long suspensionCount30d = statusStats.getSuspensioncount();
         long currentStatusDays = computeCurrentStatusDays(statusStats.getLatestcreatedat());
 
+        // ── 用户实时状态报告（独立信号层，TTL 窗口，实时事实不受"截至昨日"约束） ──
+        ActiveReportSummary reportSummary = statusReportService.getActiveReportSummary(venueId);
+
         // ── 综合热度指数 ──
         long satisfactionComponent = satisfactionScore != null
                 ? Math.round(satisfactionScore * WEIGHT_SATISFACTION)
@@ -133,6 +143,10 @@ public class VenueHeatService {
                 + likeCount30d * WEIGHT_LIKE
                 + satisfactionComponent;
 
+        // ── 状态可信度（二维矩阵 + 活跃报告 override） ──
+        StatusConfidence confidence = computeStatusConfidence(
+                suspensionCount30d, currentStatusDays, reportSummary.activeCount() > 0);
+
         return new VenueHeatResponse(
                 heatScore,
                 viewCount30d, viewUv30d,
@@ -142,6 +156,9 @@ public class VenueHeatService {
                 satisfactionScore, ratingTotalCount,
                 suspensionCount30d, currentStatusDays,
                 venue.getStatus().name(), venue.getStatus().getDisplayName(),
+                confidence.name(),
+                reportSummary.activeCount(),
+                reportSummary.latestReportTime(),
                 statsAsOfDate.toString()
         );
     }
@@ -210,5 +227,30 @@ public class VenueHeatService {
             return 0L;
         }
         return ChronoUnit.DAYS.between(latestCreatedAt.toLocalDate(), LocalDate.now());
+    }
+
+    /**
+     * 状态可信度：活跃报告 override + 二维矩阵。
+     * <p>
+     * 第一优先级：有活跃用户报告（TTL 内）→ 恒为 LOW。众包实时信号的说明力高于历史统计——
+     * 有用户在现场报告"关了"，这比"30天内管理员改过N次状态"更能说明当前问题。
+     * <p>
+     * 二维矩阵（无活跃报告时）：
+     * <pre>
+     *                    稳定（30d 内 0 次暂停）    不稳定（30d 内 ≥1 次暂停）
+     * 状态持续 ≤ 7天      HIGH（近期确认）          MEDIUM（状态多变）
+     * 状态持续 > 7天      HIGH（稳定营业）          LOW（需确认 / 数据可能过时）
+     * </pre>
+     * 核心洞察：稳定门店无论多久没改状态，"营业中"就是可信的——不更新≠不准确。
+     */
+    private StatusConfidence computeStatusConfidence(long suspensionCount30d, long currentStatusDays,
+                                                       boolean hasActiveReports) {
+        if (hasActiveReports) {
+            return StatusConfidence.LOW;
+        }
+        if (suspensionCount30d == 0) {
+            return StatusConfidence.HIGH;
+        }
+        return currentStatusDays <= CONFIDENCE_RECENT_DAYS ? StatusConfidence.MEDIUM : StatusConfidence.LOW;
     }
 }

@@ -80,6 +80,26 @@ venuepost/      ← 场所动态模块（公告 / 通知）
     response/   ← VenuePostResponse
   enums/        ← PostPublisherType（OWNER 商家 / ADMIN 平台）
 
+venuefeedback/  ← 场所信息纠错反馈模块
+  controller/   ← VenueFeedbackController（POST /venues/{venueId}/feedbacks）
+  service/      ← VenueFeedbackService
+  entity/       ← VenueFeedback 实体（qwt_venue_feedbacks）
+  repository/   ← VenueFeedbackRepository
+  dto/
+    request/    ← CreateFeedbackRequest（type + note）
+    response/   ← VenueFeedbackResponse
+  enums/        ← FeedbackType（CLOSED_DOWN / SUSPENDED / INACCURATE / OTHER）
+
+venuestatusreport/  ← 场所状态众包上报模块（实时暂停信号，4h TTL）
+  controller/   ← StatusReportController（POST /venues/{venueId}/status-reports, POST .../cancel）
+  service/      ← StatusReportService（upsert 上报、撤销、活跃统计、频率限制、@CacheEvict 热度缓存）
+  entity/       ← VenueStatusReport 实体（qwt_venue_status_reports）
+  repository/   ← StatusReportRepository（含活跃计数+最新时间合并投影查询）
+  dto/
+    request/    ← SubmitReportRequest（reason + occurredAt + note，全可选）
+    response/   ← ActiveReportSummary（公开）/ StatusReportResponse（管理端，含 note）
+  enums/        ← ReportReason（CHECK 门店检查 / UNKNOWN 情况不明 / CLEARED 清场）
+
 taginteraction/ ← 标签交互模块（点赞 + 维度评分）
   controller/   ← TagInteractionController（GET /venues/{id}/tags/stats, POST .../like, POST .../score）
   service/      ← TagInteractionService（toggle 点赞、upsert 评分、个人交互状态实时查询、批量点赞数）
@@ -296,6 +316,22 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 - "当前状态持续天数" = 最近一条状态日志的 `createdAt` 距今天数——这是实时事实，不受"截至昨日"窗口约束（见上节）
 - `SUSPENDED`（暂停营业）语义为被迫关门（警察检查等），与 `CLOSED`（休息中，正常未到营业时间）不同
 
+### 状态可信度（StatusConfidence）
+
+`VenueHeatResponse` 新增 `statusConfidence` 字段，向用户传达"当前状态信息有多可信"。枚举值：`HIGH` / `MEDIUM` / `LOW`。
+
+计算逻辑为二维矩阵——稳定性（suspensionCount30d）× 当前状态持续天数（currentStatusDays）：
+
+| | currentStatusDays 短（≤ 7 天） | currentStatusDays 长（> 7 天） |
+|------|------|------|
+| **稳定**（suspensionCount30d == 0） | HIGH | HIGH |
+| **不稳定**（suspensionCount30d > 0） | MEDIUM | LOW |
+
+- **稳定场所恒为 HIGH**：近 30 天无暂停记录的场所，无论最近一次状态更新距今多久，可信度都是 HIGH——稳定本身就是最强的可信信号，不需要额外要求"近期更新过"
+- 不稳定场所才按 currentStatusDays 细分：状态刚切换不久（≤7 天）→ MEDIUM（近期确认过，虽然不稳定但刚有更新）；状态持续较长时间（>7 天）→ LOW（不稳定且长时间未确认，数据可能过时）
+- `currentStatusDays` 沿用「营业稳定性」中"最近一条状态日志 createdAt 距今天数"的定义，是实时事实，不受"截至昨日"窗口约束
+- **活跃上报覆盖规则**：当 `VenueHeatService` 从 `StatusReportService` 获取到 `activeCount > 0`（近 4 小时有用户报告暂停）时，`computeStatusConfidence` 直接返回 `LOW`，跳过上述矩阵——众包实时信号优先级高于历史稳定性矩阵。根因：矩阵基于历史暂停记录（管理员维护的 `Venue.status` 变迁），无法反映"此刻正在发生"的关门事件；用户现场上报正是为了弥补这一滞后
+
 ### 查询性能优化（条件聚合 + 本地缓存）
 
 热度接口和标签统计接口的 DB 往返次数已通过**条件聚合**大幅压缩：
@@ -314,6 +350,71 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 **Spring `@Cacheable` 自调用陷阱（必须知晓）**：Spring 基于动态代理实现 AOP，方法内部通过 `this.xxx()` 调用同类的另一个 `@Cacheable`/`@CacheEvict` 方法会绕开代理，注解静默失效（不报错，但缓存/失效都不生效）。这是 `TagAggregateStatsService` 被拆成独立 Bean 而非 `TagInteractionService` 内部私有方法的直接原因——被缓存的方法必须从另一个 Bean 上调用。新增任何带缓存注解的方法时，若调用方和被调用方在同一个类里，先检查是否触发此陷阱。
 
 **新增查询时的约定**：当一个 Service 方法需要同一张表的多个 COUNT/aggregation 时，优先用 `SUM(CASE WHEN condition THEN 1 ELSE 0 END)` 合并为单条 SQL，不拆多次往返。JPQL 不支持 `COUNT(DISTINCT CASE WHEN...)` 时，使用 `@Query(nativeQuery = true)` 并注明原因。
+
+---
+
+## 场所状态上报（venuestatusreport 模块）
+
+### 设计定位
+
+舞厅门店状态变更（警察检查、突然关门）发生频率远高于管理员手动更新 `Venue.status` 的能力——极端情况可能 30 分钟内多轮检查导致反复开关门。`venuefeedback` 模块是异步管理员审核流程（有 `handled` 状态），无法满足实时性需求。此模块提供**实时众包信号层**：用户在现场一键报告"现在关门了"，信号对其他用户即时可见。
+
+**与 venuefeedback 的边界**（重要）：
+
+- `venuefeedback.SUSPENDED` = "我不在场但认为状态信息有误"→ 异步管理员审核 → `handled` 布尔流转
+- `venuestatusreport` = "我现在就在现场，刚确认关门"→ 实时 TTL 信号 → 自动过期，无需管理员介入
+
+两者共存，语义边界清晰：一个走异步审核，一个走实时众包。`venuefeedback` 不重复承担实时信号职责。
+
+### 独立信号层（不修改 Venue.status）
+
+用户上报**不改变** `Venue.status` 字段。`Venue.status` 的变更权仍属管理员/认领人（`POST /venues/{id}/update`）。用户上报作为独立信号层，出现在热度接口中为"N人报告暂停"的众包标记。管理员可在管理后台查看活跃报告并决定是否据此手动更新 `Venue.status`（管理端接口后续约定）。
+
+### TTL 语义（4 小时活跃窗口）
+
+```java
+LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);  // 4h
+```
+
+活跃报告 = `createdAt >= now - 4h`。这是**实时窗口**，锚点为请求发生的"此刻"，与「统计口径：截至昨日」的 `windowEnd = today.atStartOfDay()`（排他上界，排除当天不完整数据）是两套不同的时间语义——一个是实时状态信号，一个是历史聚合完整性。两者互不矛盾：
+
+- 活跃报告数（`activeReportCount`）和最新报告时间（`latestReportTime`）是实时事实，不受"截至昨日"窗口约束
+- 与 `currentStatusDays`（当前状态持续天数）同理：都是"当前状态"这一实时事实，而非滚动窗口聚合
+
+### 接口
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| POST | `/venues/{venueId}/status-reports` | 需登录 | 上报暂停（body 可空=快速上报，或含 reason/occurredAt/note） |
+| POST | `/venues/{venueId}/status-reports/cancel` | 需登录 | 撤销我的上报（软删除） |
+
+### 数据模型
+
+`qwt_venue_status_reports` 表：一个用户对一个场所至多一条活跃报告（`UNIQUE(userId, venueId)`），重新上报 = upsert 覆盖（刷新 `createdAt` 续期 TTL）。撤销 = 逻辑删除（`deleted = true`），再次上报 = 恢复（`deleted = false`），复用收藏模块的逻辑删除模式。
+
+索引：`(venueId, createdAt)` 覆盖活跃计数查询，`(userId)` 覆盖用户频率限制查询。
+
+### Upsert 语义
+
+`submitReport` 使用 check-then-act + `DataIntegrityViolationException` catch 模式（与收藏/标签交互一致）：
+
+1. 查 `findByUserIdAndVenueIdAndDeletedFalse` → 存在则更新（`createdAt` 刷新为 now）
+2. 不存在则新建 → save，catch 唯一约束冲突 → 重新查询后更新
+
+### 防刷机制
+
+频率限制（`MAX_REPORTS_PER_HOUR = 5`）：滑动窗口（now - 1h），统计用户上报的不同场所数，超过阈值抛 1006。**仅对新上报生效**——已有活跃报告的续期更新不触发频率检查（否则"续期"会被误判为重复上报而拦截）。
+
+### 审核安全
+
+- `note` 字段存储于 DB 但**不公开返回**（`ActiveReportSummary` 仅含 `activeCount` + `latestReportTime`），仅供管理端查看（`StatusReportResponse` 含 note，后续管理接口使用）
+- `ReportReason` 枚举命名避免敏感词：`CHECK`（门店检查）、`UNKNOWN`（情况不明）、`CLEARED`（清场）——不出现"警察/扫黄"等微信审核敏感词
+
+### 缓存失效（跨 Bean @CacheEvict）
+
+`submitReport` 和 `cancelReport` 标注 `@CacheEvict(value = CACHE_VENUE_HEAT, key = "#venueId")`，写入后立即失效热度缓存。`CACHE_VENUE_HEAT` 的属主是 `VenueHeatService`，跨 Bean 失效是 Spring 缓存的标准能力（缓存名全局唯一），与 `TagInteractionService` 失效 `CACHE_TAG_STATS`（属主 `TagAggregateStatsService`）同模式。
+
+`getActiveReportSummary()` 本身不缓存（无 `@Cacheable`），由 `VenueHeatService.getHeat()` 的 `@Cacheable` 包裹，60s TTL 内的重复请求命中缓存。
 
 ---
 
@@ -465,6 +566,14 @@ Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(
 
 `GET /venues/cities` → `List<CityStatsResponse(city, venueCount)>`，按场所数倒序，供前端"热门城市"数据驱动展示。注意路由：字面量 `/venues/cities` 与路径变量 `/venues/{id}` 共存时 Spring 优先匹配字面量，无需特殊处理。
 
+### 热门场所标记（VenueResponse.isHot）
+
+`VenueResponse` 新增 `isHot` 字段（boolean），标记该场所在同城市中属于热门场所。
+
+- **城市内相对排名**：按复合评分（见「复合评分排序」）在同城市场所中取 top 20%，最少 1 个。即"热门"是相对同城市其他场所而言，不是绝对分数阈值
+- **查询实现**：`VenueRepository.findHotVenueIds()` 使用 PostgreSQL 窗口函数（`ROW_NUMBER() OVER (PARTITION BY city ORDER BY score DESC)`）在库内完成城市内排名，避免在 Java 侧逐城市遍历。排序口径为 `sortWeight + 收藏数×20 + 动态数×10`（与列表查询的无坐标变体一致，不含距离项——距离是用户维度，场所热度排名不应因请求者位置变化）。Service 层在 `listVenues` 中无条件调用此方法，获取热门 ID 集合后转为 `Set<Long>` 供 `result.map()` 内 `contains` 检查
+- **VenueResponseMapper 三参重载**：`toResponse(Venue, Map<String, Long> tagLikeCounts, boolean isHot)` ——在已有双参重载基础上追加 `isHot` 参数。Service 层先调用 `venueRepository.findHotVenueIds()` 获取热门 ID 集合并转为 `Set<Long>`，再在 `result.map()` 中传入 `hotVenueIds.contains(v.getId())`。双参重载默认 `isHot=false`，单参重载亦默认 `isHot=false`（创建/编辑回显场景无需热门标记）
+
 ---
 
 ## 开发测试数据
@@ -485,6 +594,9 @@ Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(
 | 创建资源 | POST | `POST /venues` |
 | 逻辑更新（状态变更） | POST | `POST /venues/{id}/status` |
 | 逻辑删除 | POST | `POST /venues/{id}/disable` |
+| 信息纠错反馈 | POST | `POST /venues/{venueId}/feedbacks`（需登录） |
+| 场所状态上报 | POST | `POST /venues/{venueId}/status-reports`（需登录，body 可空=快速上报） |
+| 撤销状态上报 | POST | `POST /venues/{venueId}/status-reports/cancel`（需登录） |
 
 URL 使用复数名词，全小写，单词间用 `-` 连接：`/job-posts`、`/venue-tags`。
 
@@ -519,7 +631,7 @@ public record ApiResponse<T>(int code, String message, T data) {
 | 1003 | 权限不足（非管理员）/ 微信接口业务错误 |
 | 1004 | 用户不存在 |
 | 1005 | 文件校验失败（类型 / 大小超限） |
-| 1006 | 操作过于频繁（评分防刷冷却期内） |
+| 1006 | 操作过于频繁（评分防刷冷却期内 / 状态上报频率超限） |
 | 1007 | 无效的标签或评分维度 |
 | 5000 | 未知服务器错误（兜底） |
 | 5001 | 微信接口响应异常（无响应 / 解析失败） |
@@ -874,6 +986,8 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 - 禁止列表页关联统计（如标签点赞数）按场所逐条查询——批量查询整页涉及的 ID（`IN (...)`），避免 N+1
 - 禁止原生查询/JPQL 投影接口的 DATE/TIMESTAMP 列 getter 声明为 `java.sql.Date`/`java.sql.Timestamp`——Hibernate 6+ 默认映射为 `java.time.LocalDate`/`LocalDateTime`，类型不符会在运行时抛 `UnsupportedOperationException`（见「投影接口 getter 类型」章节）
 - 禁止「近 N 天」滚动窗口统计只传 `since` 不传 `until` 上界——必须锚定「截至昨日」（`until = 今天 0 点`），不得让当天未走完的部分数据混入窗口聚合（见「统计口径：截至昨日」章节）
+- 禁止用户状态上报修改 `Venue.status` 字段——上报是独立信号层，`Venue.status` 变更权属管理员/认领人（见「场所状态上报」章节）
+- 禁止在 `ActiveReportSummary`（公开响应）中返回 `note` 字段——note 仅管理端可见，审核安全要求（见「场所状态上报 → 审核安全」）
 
 ---
 
@@ -903,6 +1017,8 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 | 把 likedByMe/myScore 等个人状态塞进以 `{venueId, userId}` 为 key 的聚合缓存 | 聚合数据（venueId 为 key）与个人状态（永远实时查询）彻底分离，写操作对聚合缓存做 `@CacheEvict`，不要只依赖 TTL |
 | 在同一 Service 类内 `this.xxx()` 调用本类的 `@Cacheable` 方法 | 绕开 AOP 代理导致缓存静默失效；把被缓存的方法拆到独立 Bean（如 `TagAggregateStatsService`），从外部注入调用 |
 | 列表页展示的关联统计按 venueId 循环单独查询 | 收集整页 venueId 后一次 `IN (...)` 批量查询（如 `TagInteractionService.batchGetTagLikeCounts`） |
+| 用 venuefeedback 做实时状态上报（误用异步审核做实时信号） | venuefeedback = 异步管理员审核流程；venuestatusreport = 实时 4h TTL 众包信号。两者共存，不可混用（见「场所状态上报」章节） |
+| 用户上报后修改 Venue.status | 用户上报是独立信号层，不改 Venue.status；管理员后续可决定是否据此手动更新（见「独立信号层」章节） |
 
 ---
 

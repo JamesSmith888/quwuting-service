@@ -37,6 +37,8 @@ public record VenueResponse(
         /** 各标签的点赞数（tag → count），未出现的标签视为 0 赞；不含"我是否已赞"（列表层无需个人状态） */
         Map<String, Long> tagLikeCounts,
         Integer sortWeight,
+        /** 是否为城市内热门场所（城市内热度排名前 20%，至少 1 家），驱动列表卡片视觉高亮 */
+        boolean isHot,
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime createdAt,
         /** 数据最后更新时间（用户可见的时效性信号，用于判断信息可靠度） */
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime updatedAt

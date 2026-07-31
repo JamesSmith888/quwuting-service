@@ -101,4 +101,29 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
         String getCity();
         Long getVenueCount();
     }
+
+    /**
+     * 查询城市内热门场所 ID 集合（热度排名前 20%，至少 1 家/城市）。
+     * <p>
+     * 排序口径与列表查询一致：sortWeight + 收藏数×20 + 动态数×10（不含距离项，距离是用户维度）。
+     * 使用 PostgreSQL 窗口函数 ROW_NUMBER + COUNT 实现"城市内相对排名"，
+     * 避免跨城市基数差异（上海普通场所的收藏量可能 > 小城市最热门场所）。
+     * <p>
+     * 数据规模小（每城市 5~30 家），单次全表查询无性能压力。
+     */
+    @Query(value = """
+            SELECT id FROM (
+                SELECT v.id,
+                       ROW_NUMBER() OVER (PARTITION BY v.city ORDER BY (
+                           v.sort_weight
+                           + (SELECT COUNT(*) FROM qwt_favorites f WHERE f.venue_id = v.id AND f.deleted = false) * 20
+                           + (SELECT COUNT(*) FROM qwt_venue_posts p WHERE p.venue_id = v.id AND p.deleted = false) * 10
+                       ) DESC, v.id) AS rn,
+                       COUNT(*) OVER (PARTITION BY v.city) AS city_total
+                FROM qwt_venues v
+                WHERE v.deleted = false
+            ) ranked
+            WHERE rn <= GREATEST(1, CEIL(city_total * 0.2))
+            """, nativeQuery = true)
+    List<Long> findHotVenueIds();
 }

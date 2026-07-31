@@ -1,5 +1,8 @@
 package org.quwuting.quwutingservice.venue.dto.response;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -55,9 +58,32 @@ public record VenueHeatResponse(
         String currentStatusDisplay,
 
         /**
+         * 状态可信度等级（HIGH / MEDIUM / LOW），由「当前状态持续天数」与「近30天暂停次数」二维矩阵派生。
+         * 稳定门店（30天内0次暂停）恒为 HIGH；不稳定 + 状态持续 ≤7天为 MEDIUM；不稳定 + >7天为 LOW。
+         * 前端据此渲染颜色分级与行动建议，不持有判定逻辑。
+         */
+        String statusConfidence,
+
+        // ── 用户实时状态报告（独立信号层，不修改 Venue.status） ──
+        /**
+         * 活跃报告数：最近 TTL（当前 4 小时）内用户上报"暂停营业"的数量。
+         * 与 suspensionCount30d（管理通道审计）不同，这是众包实时信号。
+         * 当此值 > 0 时，statusConfidence 被 override 为 LOW（见 VenueHeatService）。
+         */
+        int activeReportCount,
+
+        /**
+         * 最新活跃报告时间（用于"X分钟前"展示）。
+         * null = 无活跃报告。此时间是实时事实，不受 statsAsOfDate 窗口约束。
+         */
+        @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+        LocalDateTime latestReportTime,
+
+        /**
          * 滚动窗口统计口径的截止日期（yyyy-MM-dd，即"昨天"）。
-         * 除 currentStatusDays/currentStatus 外的所有统计字段均只统计到该日期 24 点为止，
-         * 不含当天尚未走完的数据。前端必须在页面醒目展示该字段，避免用户误将"半天数据"当作完整趋势解读。
+         * 除 currentStatusDays/currentStatus/activeReportCount/latestReportTime 外的所有统计字段
+         * 均只统计到该日期 24 点为止，不含当天尚未走完的数据。
+         * 前端必须在页面醒目展示该字段，避免用户误将"半天数据"当作完整趋势解读。
          */
         String statsAsOfDate
 ) {}
