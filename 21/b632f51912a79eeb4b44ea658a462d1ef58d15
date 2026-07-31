@@ -1,0 +1,81 @@
+src/main/java/org/quwuting/quwutingservice/venue/dto/response/FavoriteTrendPoint.java
+  s_b255e28bbc00c8::t_1122b489b9decc 1-12
+src/main/java/org/quwuting/quwutingservice/taginteraction/repository/TagInteractionRepository.java
+  s_7cdfe8f87fe01c::t_bbc2a69936dcef 37-40,43,46-47,77-83,87,90-92,95-97
+  s_b255e28bbc00c8::t_f83ee53a5ddb4d 22-30
+src/main/java/org/quwuting/quwutingservice/favorite/repository/FavoriteRepository.java
+  s_b255e28bbc00c8::t_8a39e252dcfd57 39,46,48-53,55-56,58-59
+  s_7cdfe8f87fe01c::t_2ca4424d0c58af 29-34,36-38,40-45,47,54,57,60-62
+AGENTS.md
+  s_b255e28bbc00c8::t_5aa5d27f57a9fc 283-287,289-292
+  s_7cdfe8f87fe01c::t_bd8187af0ad389 264-282,288,295-296
+  s_b255e28bbc00c8::t_b6280a9aa7a4c2 308-314
+  s_b255e28bbc00c8::t_db5aedabb4222c 872-874,903-905
+  s_b255e28bbc00c8::t_424c8546cd8048 85-86,88
+  s_b255e28bbc00c8::t_e2ba3ebd3e1031 373-381
+  s_7cdfe8f87fe01c::t_914ab214efe119 626-638
+  s_7cdfe8f87fe01c::t_d5ef549eea2a37 875-876,898-899
+src/main/java/org/quwuting/quwutingservice/venue/service/VenueHeatService.java
+  s_7cdfe8f87fe01c::t_12606c6d58be7e 75-84,87-90,93-99,102-105,108-112,115,118-120
+  s_b255e28bbc00c8::t_88d0f431982c5c 9,23-24,26
+  s_b255e28bbc00c8::t_0dd5a2bc8db01a 59-61
+  s_b255e28bbc00c8::t_984f6e01c54da8 139,149,152,157-158,161-167
+  s_7cdfe8f87fe01c::t_f19f007283d5c4 144-145,150-151,153-156,159-160,174,178,207-208,212
+src/main/java/org/quwuting/quwutingservice/taginteraction/service/TagInteractionService.java
+  s_b255e28bbc00c8::t_05426eaca85efb 36
+  s_b255e28bbc00c8::t_23fcd5a744974a 156-159,163,165,187,190,197,217-236
+  s_b255e28bbc00c8::t_87d9552e55fbfa 16
+  s_b255e28bbc00c8::t_d49e60b2854c02 48-50,54
+  s_b255e28bbc00c8::t_3fe824fdb6a328 104,106
+src/main/java/org/quwuting/quwutingservice/venue/dto/response/VenueResponse.java
+  s_b255e28bbc00c8::t_6d1829cb00d1b7 10,37-38
+src/main/java/org/quwuting/quwutingservice/favorite/service/FavoriteService.java
+  s_b255e28bbc00c8::t_55c1b11a0adcb2 8,10,17,19,30,36,39-44
+src/main/java/org/quwuting/quwutingservice/venue/service/VenueService.java
+  s_b255e28bbc00c8::t_74518f41d4942d 177-181
+  s_b255e28bbc00c8::t_8301301410998e 7,31,33,46
+  s_b255e28bbc00c8::t_cf14e66fbed93d 141-143
+src/main/java/org/quwuting/quwutingservice/venue/repository/VenueViewRepository.java
+  s_7cdfe8f87fe01c::t_bbc2a69936dcef 31-37
+src/main/java/org/quwuting/quwutingservice/taginteraction/service/TagAggregateStatsService.java
+  s_b255e28bbc00c8::t_78a9ab9f400f24 1-107
+src/main/java/org/quwuting/quwutingservice/venuepost/repository/VenuePostRepository.java
+  s_7cdfe8f87fe01c::t_bbc2a69936dcef 25-29,31-33
+src/main/java/org/quwuting/quwutingservice/venue/repository/VenueStatusLogRepository.java
+  s_7cdfe8f87fe01c::t_bbc2a69936dcef 25-35,39-40,42-43,46-48
+src/main/java/org/quwuting/quwutingservice/venue/dto/response/VenueHeatResponse.java
+  s_b255e28bbc00c8::t_46f212431be449 3-4,26-27
+  s_7cdfe8f87fe01c::t_0fcb77b6f31823 55-62
+src/main/java/org/quwuting/quwutingservice/venue/mapper/VenueResponseMapper.java
+  s_b255e28bbc00c8::t_9fc7616c12e710 18
+  s_b255e28bbc00c8::t_8e102c7cb6ae16 37-44,65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.39-trip",
+  "base_commit_sha": "21b632f51912a79eeb4b44ea658a462d1ef58d15",
+  "prompts": {},
+  "humans": {
+    "h_fbb9b8e239a0dd": {
+      "author": "James Smith(杨鑫) <xin.y@trip.com>"
+    }
+  },
+  "sessions": {
+    "s_7cdfe8f87fe01c": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "883fc94a-1fee-4a9c-8a55-789d06357883",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "James Smith(杨鑫) <xin.y@trip.com>"
+    },
+    "s_b255e28bbc00c8": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "444e6273-84f0-4d30-9133-b68bffdc6680",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "James Smith(杨鑫) <xin.y@trip.com>"
+    }
+  }
+}
