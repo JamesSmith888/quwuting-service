@@ -13,7 +13,7 @@ import org.quwuting.quwutingservice.taginteraction.entity.TagInteraction;
 import org.quwuting.quwutingservice.taginteraction.repository.TagInteractionRepository;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
-import org.springframework.cache.annotation.Cacheable;
+import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -33,6 +33,7 @@ public class TagInteractionService {
     private final TagInteractionRepository tagInteractionRepository;
     private final VenueRepository venueRepository;
     private final ObjectMapper objectMapper;
+    private final TagAggregateStatsService tagAggregateStatsService;
 
     /** 评分修改冷却时间（秒）：同一用户同一维度在此时间内不可重复改分，防止恶意刷分 */
     private static final long SCORE_COOLDOWN_SECONDS = 60;
@@ -44,9 +45,13 @@ public class TagInteractionService {
     /**
      * 切换标签点赞状态。
      * 首次调用=点赞，再次调用=取消。仅允许对场所当前 tags 中存在的标签操作。
+     * <p>
+     * 写操作即时失效场所级聚合缓存（{@link TagAggregateStatsService}），
+     * 而不是等待 60 秒 TTL 自然过期——保证点赞后所有用户很快都能看到最新点赞数。
      *
      * @return true=当前已赞，false=当前已取消
      */
+    @CacheEvict(value = CacheConfig.CACHE_TAG_STATS, key = "#venueId")
     @Transactional
     public boolean toggleLike(Long userId, Long venueId, String tag) {
         Venue venue = assertVenueExists(venueId);
@@ -96,7 +101,9 @@ public class TagInteractionService {
     /**
      * 对评分维度打分或修改分数（仅保留最新分）。
      * 防刷机制：同一用户同一维度 60 秒内不可重复改分。
+     * 写操作即时失效场所级聚合缓存，理由同 {@link #toggleLike}。
      */
+    @CacheEvict(value = CacheConfig.CACHE_TAG_STATS, key = "#venueId")
     @Transactional
     public void score(Long userId, Long venueId, String tag, int score) {
         assertVenueExists(venueId);
@@ -146,43 +153,16 @@ public class TagInteractionService {
      * 获取场所的标签交互统计（点赞 + 维度评分 + 时间窗口）。
      * 软鉴权：未登录时 likedByMe=false、myScore=null，聚合数据正常返回。
      * <p>
-     * 性能优化：通过合并查询将原 7 次串行 DB 往返合并为 4 次
-     * （venue + likes + multiWindowScores + userState），并加 60s TTL 缓存。
+     * 场所级聚合数据（点赞计数、评分均值）由 {@link TagAggregateStatsService} 缓存 60s；
+     * 当前用户的个人交互状态（我是否已赞/我的评分）<b>不缓存，每次实时查询</b>——
+     * 这是修复"点赞后返回列表再进入又消失"问题的关键：个人状态必须与操作结果强一致，
+     * 缓存的应当只是与用户无关的公共聚合数据。
      */
-    @Cacheable(value = CacheConfig.CACHE_TAG_STATS, key = "{#venueId, #currentUserId}")
     @Transactional(readOnly = true)
     public TagStatsResponse getTagStats(Long venueId, Long currentUserId) {
-        Venue venue = assertVenueExists(venueId);
-        List<String> venueTags = deserializeStringList(venue.getTags());
+        TagAggregateStatsService.TagAggregate aggregate = tagAggregateStatsService.getAggregate(venueId);
 
-        // ── 标签点赞统计（1 次往返） ──
-        List<Object[]> likeRows = tagInteractionRepository.countLikesByVenueGroupByTag(venueId);
-        Map<String, Long> likeCountMap = new HashMap<>();
-        for (Object[] row : likeRows) {
-            likeCountMap.put((String) row[0], (Long) row[1]);
-        }
-
-        // ── 维度评分统计：全量 + 30天 + 7天 合并为 1 次往返 ──
-        LocalDateTime now = LocalDateTime.now();
-        List<Object[]> multiWindowRows = tagInteractionRepository.aggregateScoresMultiWindow(
-                venueId, now.minusDays(30), now.minusDays(7));
-
-        // tag → [avgAll, countAll, avg30d, count30d, avg7d, count7d]
-        Map<String, double[]> multiWindowMap = new HashMap<>();
-        for (Object[] row : multiWindowRows) {
-            String dimTag = (String) row[0];
-            if (RatingDimensions.isValid(dimTag)) {
-                double avgAll = row[1] != null ? ((Number) row[1]).doubleValue() : 0;
-                long countAll = ((Number) row[2]).longValue();
-                double avg30d = row[3] != null ? ((Number) row[3]).doubleValue() : 0;
-                long count30d = row[4] != null ? ((Number) row[4]).longValue() : 0;
-                double avg7d = row[5] != null ? ((Number) row[5]).doubleValue() : 0;
-                long count7d = row[6] != null ? ((Number) row[6]).longValue() : 0;
-                multiWindowMap.put(dimTag, new double[]{avgAll, countAll, avg30d, count30d, avg7d, count7d});
-            }
-        }
-
-        // ── 用户交互状态：点赞 + 评分 合并为 1 次往返 ──
+        // ── 当前用户交互状态：点赞 + 评分 合并为 1 次往返，实时查询不缓存 ──
         Set<String> likedTagsBuilder = new HashSet<>();
         Map<String, Integer> scoresBuilder = new HashMap<>();
         if (currentUserId != null) {
@@ -204,17 +184,17 @@ public class TagInteractionService {
         final Map<String, Integer> userScores = Collections.unmodifiableMap(scoresBuilder);
 
         // ── 组装标签点赞（只返回当前存在于场所 tags 中的标签） ──
-        List<TagLikeStats> tagLikes = venueTags.stream()
+        List<TagLikeStats> tagLikes = aggregate.venueTags().stream()
                 .map(tag -> new TagLikeStats(
                         tag,
-                        likeCountMap.getOrDefault(tag, 0L),
+                        aggregate.likeCounts().getOrDefault(tag, 0L),
                         userLikedTags.contains(tag)))
                 .toList();
 
         // ── 组装维度评分（无数据时 count=0, avgScore=null） ──
         List<DimensionScoreStats> dimensionScores = new ArrayList<>();
         for (String dim : RatingDimensions.ALL) {
-            double[] mw = multiWindowMap.get(dim);
+            double[] mw = aggregate.multiWindow().get(dim);
 
             Double avg = mw != null && mw[1] > 0 ? roundToOneDecimal(mw[0]) : null;
             long count = mw != null ? (long) mw[1] : 0L;
@@ -234,6 +214,28 @@ public class TagInteractionService {
         return new TagStatsResponse(tagLikes, dimensionScores, RatingDimensions.ALL);
     }
 
+    /**
+     * 批量获取多个场所各标签的点赞数（列表页展示标签热度用）。
+     * 不含 likedByMe（列表层不需要个人状态，见项目信息层级原则），直接实时查询、无缓存——
+     * 列表页请求频率低于详情页且每次请求的场所集合不同，缓存收益低。
+     *
+     * @return venueId → (tag → likeCount)，无点赞记录的场所/标签不出现在结果中，调用方按需 getOrDefault
+     */
+    @Transactional(readOnly = true)
+    public Map<Long, Map<String, Long>> batchGetTagLikeCounts(List<Long> venueIds) {
+        if (venueIds == null || venueIds.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<Long, Map<String, Long>> result = new HashMap<>();
+        for (Object[] row : tagInteractionRepository.countLikesByVenueIdsGroupByTag(venueIds)) {
+            Long venueId = (Long) row[0];
+            String tag = (String) row[1];
+            Long count = (Long) row[2];
+            result.computeIfAbsent(venueId, k -> new HashMap<>()).put(tag, count);
+        }
+        return result;
+    }
+
     // ─── 内部工具 ───────────────────────────────────────────────────────
 
     private Venue assertVenueExists(Long venueId) {
@@ -250,6 +252,7 @@ public class TagInteractionService {
             return Collections.emptyList();
         }
     }
+
 
     private static Double roundToOneDecimal(double value) {
         return Math.round(value * 10.0) / 10.0;

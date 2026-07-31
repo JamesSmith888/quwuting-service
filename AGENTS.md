@@ -82,9 +82,10 @@ venuepost/      ← 场所动态模块（公告 / 通知）
 
 taginteraction/ ← 标签交互模块（点赞 + 维度评分）
   controller/   ← TagInteractionController（GET /venues/{id}/tags/stats, POST .../like, POST .../score）
-  service/      ← TagInteractionService（toggle 点赞、upsert 评分、聚合统计、防刷冷却）
+  service/      ← TagInteractionService（toggle 点赞、upsert 评分、个人交互状态实时查询、批量点赞数）
+                  TagAggregateStatsService（场所级聚合数据的 @Cacheable 专属 Bean，见「标签交互」章节）
   entity/       ← TagInteraction 实体（qwt_tag_interactions）
-  repository/   ← TagInteractionRepository（含 GROUP BY 聚合查询）
+  repository/   ← TagInteractionRepository（含 GROUP BY 聚合查询、批量多场所聚合查询）
   dto/
     request/    ← LikeTagRequest / ScoreTagRequest
     response/   ← TagStatsResponse / TagLikeStats / DimensionScoreStats / WindowScore
@@ -260,10 +261,39 @@ heatScore = viewCount30d × 1
 
 综合满意度 = 各维度（`RatingDimensions.ALL`）评分的等权均分，优先取近 30 天窗口数据，无近期数据时回退全量。评价总人数 < 3 时返回 `null`（前端展示"暂无足够评价"）。
 
+### 统计口径：截至昨日（2026-07-31 确立）
+
+`GET /venues/{id}/heat` 的所有滚动窗口指标（近30天浏览/收藏/动态/评价/点赞、近14天收藏趋势）统一以**昨天 24 点**为排他上界，而不是请求发生的"此刻"：
+
+```java
+LocalDate today = LocalDate.now();
+LocalDate statsAsOfDate = today.minusDays(1);      // 展示给前端的"数据截至"日期
+LocalDateTime windowEnd = today.atStartOfDay();    // 排他上界 = 今天 0 点 = 昨天 24 点
+LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
+```
+
+**根因**：当天数据是"过了一半的一天"，若窗口上界取"此刻"，会把这条不完整的当天数据和其余 29 条完整的历史整天数据混在同一个聚合/时间序列里——尤其是收藏趋势图，最新一根柱子必然比实际值偏低（不是因为收藏变少了，只是这天还没过完），用户会误读为"在下滑"。同一个场所在当天不同时刻多次请求也会得到不同的"近30天"统计结果，缺乏可复现性。
+
+**规则**：
+- 涉及"近 N 天"窗口统计的 Repository 查询方法必须同时接收 `since` 和 `until` 两个排他边界参数（`[since, until)`），不能只传 `since` 靠调用方自然到"现在"
+- `until` 统一取 `LocalDate.now().atStartOfDay()`（即今天 0 点），由 `VenueHeatService.getHeat` 一处计算后传给所有子查询，禁止各查询各自计算
+- **例外**：`VenueStatusLogRepository.countSuspensionsAndLatestTime` 的 `latestcreatedat`（当前状态持续天数的依据）代表"当前状态"这一实时事实，不是滚动窗口聚合，不受该上界约束，保持全量 `MAX`
+- `VenueHeatResponse.statsAsOfDate`（`yyyy-MM-dd`，即昨天）随接口返回，**前端必须在热度 Tab 醒目展示**（当前实现：Tab 顶部 accent 底色横幅 + 底部数据说明重复提示），不得让用户在不知情的情况下把"含当天不完整数据"的口径当作完整统计解读
+
+### 收藏趋势（VenueHeatResponse.favoriteTrend）
+
+`GET /venues/{id}/heat` 在收藏总数/新增数之外，附带近 14 天每日新增收藏数的时间序列 `favoriteTrend: List<FavoriteTrendPoint(date, count)>`，供前端渲染收藏趋势图。
+
+- 窗口取 14 天而非与热度其余指标一致的 30 天：趋势图是给人看"升降走势"的可视化，30 根柱子在小程序小屏图表上过密；14 天足够识别趋势且渲染负担更小。窗口常量 `VenueHeatService.TREND_WINDOW_DAYS` 独立于 `WINDOW_DAYS`，互不影响
+- 窗口锚点为 `statsAsOfDate`（昨天），即 14 天窗口是 `[昨天-13, 昨天]`，不含今天——与上述"统计口径：截至昨日"约定一致
+- 数据源：`FavoriteRepository.countDailyFavoritesSince`（原生 SQL `date_trunc('day', created_at)::date` 分组，JPQL 无法表达按天截断分组，原因已在查询注释中说明）
+- **服务端补零**：`VenueHeatService.computeFavoriteTrend` 对没有收藏记录的日期补 `count=0`，保证返回序列总是 14 个连续日期点，前端无需处理"缺失日期"分支，柱状图天然对齐
+- 与 `newFavoriteCount30d`（30 天窗口总数）同源但独立查询，不做互相推导——两者语义不同（一个是求和统计，一个是按天时间序列），保持查询职责单一
+
 ### 营业稳定性
 
-- "暂停营业次数" = 近 30 天内 `toStatus = SUSPENDED` 的状态变迁记录数
-- "当前状态持续天数" = 最近一条状态日志的 `createdAt` 距今天数
+- "暂停营业次数" = 近 30 天内（截至昨日）`toStatus = SUSPENDED` 的状态变迁记录数
+- "当前状态持续天数" = 最近一条状态日志的 `createdAt` 距今天数——这是实时事实，不受"截至昨日"窗口约束（见上节）
 - `SUSPENDED`（暂停营业）语义为被迫关门（警察检查等），与 `CLOSED`（休息中，正常未到营业时间）不同
 
 ### 查询性能优化（条件聚合 + 本地缓存）
@@ -275,7 +305,13 @@ heatScore = viewCount30d × 1
 
 根因：服务器在阿里云 ECS，数据库在 Supabase（AWS ap-south-1），单次 DB 往返约 100-200ms，查询次数 × 延迟 = 接口总延迟。压缩查询次数是最直接有效的优化手段。
 
-**本地缓存（Caffeine，60s TTL）**：`VenueHeatService.getHeat` 和 `TagInteractionService.getTagStats` 加了 `@Cacheable`。热度/标签统计是聚合数据，60 秒内的精度偏差对用户无感知，但可避免同一场所短时间内的重复计算（多用户同时浏览、同一用户切换 Tab 等场景）。缓存配置在 `config/CacheConfig`，maxSize=500，TTL=60s。
+**本地缓存（Caffeine，60s TTL）**：`VenueHeatService.getHeat` 和 `TagAggregateStatsService.getAggregate` 加了 `@Cacheable`。热度/标签统计是聚合数据，60 秒内的精度偏差对用户无感知，但可避免同一场所短时间内的重复计算（多用户同时浏览、同一用户切换 Tab 等场景）。缓存配置在 `config/CacheConfig`，maxSize=500，TTL=60s。
+
+**缓存内容的强制约束（2026-07-31 标签点赞"消失又恢复"事故后确立）**：被缓存的数据必须与请求者身份无关——只允许缓存所有用户共享的聚合结果（点赞总数、评分均值等），禁止把当前用户的个人交互状态（"我是否已赞"、"我的评分"）一并放进缓存值或缓存 key。个人状态必须在每次请求时实时查询（成本是一次简单的按 userId+venueId 查询，远低于聚合计算）。
+
+根因：早期 `TagInteractionService.getTagStats` 以 `{venueId, userId}` 为 key 整体缓存（含 likedByMe/myScore），点赞/评分写操作未失效缓存，用户点赞后 60 秒 TTL 内会出现"返回列表再进入详情页看到操作前的状态"；因用户重新打开小程序的间隔通常 > 60s，缓存已自然过期，问题被掩盖，误判为"完全重启后恢复正常"是预期行为。修复方案：聚合数据（点赞计数、评分均值）拆到独立的 `TagAggregateStatsService`，以 venueId 为 key 缓存；个人交互状态在 `TagInteractionService.getTagStats` 中永远实时查询、不缓存；同时 toggleLike/score 写操作对聚合缓存做 `@CacheEvict`，不必等待 TTL 自然过期，保证点赞后所有用户很快就能看到最新点赞数。
+
+**Spring `@Cacheable` 自调用陷阱（必须知晓）**：Spring 基于动态代理实现 AOP，方法内部通过 `this.xxx()` 调用同类的另一个 `@Cacheable`/`@CacheEvict` 方法会绕开代理，注解静默失效（不报错，但缓存/失效都不生效）。这是 `TagAggregateStatsService` 被拆成独立 Bean 而非 `TagInteractionService` 内部私有方法的直接原因——被缓存的方法必须从另一个 Bean 上调用。新增任何带缓存注解的方法时，若调用方和被调用方在同一个类里，先检查是否触发此陷阱。
 
 **新增查询时的约定**：当一个 Service 方法需要同一张表的多个 COUNT/aggregation 时，优先用 `SUM(CASE WHEN condition THEN 1 ELSE 0 END)` 合并为单条 SQL，不拆多次往返。JPQL 不支持 `COUNT(DISTINCT CASE WHEN...)` 时，使用 `@Query(nativeQuery = true)` 并注明原因。
 
@@ -333,6 +369,15 @@ heatScore = viewCount30d × 1
 - 评分仅允许 `RatingDimensions.ALL` 中的维度
 - 评分只保留最新分（覆盖式），不保留历史版本
 - 热度公式已纳入标签交互数据：`ratingCount30d × 8 + likeCount30d × 3 + satisfactionScore × 20`（见"场所热度"章节）
+
+### 列表页标签热度（VenueResponse.tagLikeCounts）
+
+场所列表（`GET /venues`）与收藏列表（`GET /user/favorites` 等复用 `VenueResponseMapper` 的接口）在 `VenueResponse.tags` 之外新增 `tagLikeCounts: Map<String, Long>`（tag → 点赞数），用于卡片上展示标签的认同热度。
+
+- **不含 `likedByMe`**：列表层是识别信息，不需要"我是否已赞"这一评估层个人状态（详情页 `/tags/stats` 才携带），避免为一整页场所都计算当前用户的个人交互状态
+- **批量查询而非逐条查询**：`TagInteractionService.batchGetTagLikeCounts(List<Long> venueIds)` 用一条 `venueId IN (...)` 分组查询覆盖整页场所，`VenueService.listVenues` / `FavoriteService.getFavoriteVenues` 在拿到 `Page<Venue>`/`List<Venue>` 后统一批量查询一次，禁止在 map 循环里逐个场所查询（N+1）
+- 该批量查询**不缓存**：列表页请求的场所集合每次不同（翻页、筛选变化），复用 `TagAggregateStatsService` 的单场所缓存收益低，直接实时查询
+- `VenueResponseMapper.toResponse(Venue)` 单参重载默认传空 Map（创建/编辑表单回显场景不需要标签热度），`toResponse(Venue, Map<String, Long>)` 重载供需要展示热度的场景显式传入
 
 ---
 
@@ -556,6 +601,41 @@ public interface VenueRepository extends JpaRepository<Venue, Long> {
 - 优先方法命名推导，方法名超过 4 个条件时改用 `@Query`
 - 禁止 `@Query(nativeQuery = true)`，除非 JPQL 无法实现且已注释原因
 - 分页统一使用 `Pageable` 参数，返回 `Page<T>`
+- **单行多列聚合查询禁止以 `Object[]` 为返回类型，必须使用接口投影（Interface-based Closed Projection）**。Spring Data JPA 4.x 将 `Object[]` 解释为"行数组"而非"列值数组"，导致 `ClassCastException`。标准做法：在 Repository 内定义嵌套投影接口（getter 名与 SELECT alias 对应），查询方法返回该接口类型。多行查询仍用 `List<Object[]>`（不受影响）。
+
+```java
+// ✅ 正确：接口投影（类型安全，跨版本稳定）
+public interface VenueViewRepository extends JpaRepository<VenueView, Long> {
+    interface PvUvStats {
+        Long getPv();
+        Long getUv();
+    }
+
+    @Query("SELECT COUNT(v) as pv, COUNT(DISTINCT v.userId) as uv FROM VenueView v " +
+           "WHERE v.venueId = :venueId AND v.viewDate >= :since")
+    PvUvStats countPvAndUvByVenueIdSince(@Param("venueId") Long venueId, @Param("since") LocalDate since);
+}
+
+// ❌ 禁止：Object[] 接收单行多列（Spring Data JPA 4.x 语义变更致 ClassCastException）
+@Query("SELECT COUNT(v), COUNT(DISTINCT v.userId) FROM VenueView v ...")
+Object[] countPvAndUv(...);
+```
+
+投影接口命名约定：嵌套于 Repository 接口内部（co-located，不新增文件）；JPQL 用 `as alias` 与 getter 名对应；native query 的 alias 使用全小写（PostgreSQL 对未加引号标识符做小写折叠），getter 名同步全小写（如 `getRatingcount()`）。
+
+### 投影接口 getter 类型必须匹配 Hibernate 的实际映射类型（2026-07-31 热度接口 500 事故根因）
+
+投影接口的 getter 返回类型必须与 Hibernate 对该 SQL 列类型的**实际映射类型**一致，而非直觉上"看起来对应"的 JDBC 遗留类型。Hibernate 6+（Spring Boot 4.x 默认版本）对原生查询结果的默认类型映射已改为优先 `java.time.*`：
+
+| SQL 类型 | Hibernate 6+ 默认映射 | 禁止使用的历史遗留类型 |
+|----------|----------------------|----------------------|
+| `DATE` | `java.time.LocalDate` | `java.sql.Date` |
+| `TIMESTAMP` | `java.time.LocalDateTime` | `java.sql.Timestamp` |
+
+若投影接口的 getter 声明为遗留类型（如 `java.sql.Date getDay()`），`ProjectingMethodInterceptor` 在把 Hibernate 实际返回的 `LocalDate` 转换为声明类型时找不到匹配的 `Converter`，直接抛 `UnsupportedOperationException: Cannot project java.time.LocalDate to java.sql.Date`——**编译期不报错，只在运行时首次命中该查询才炸**，且异常堆栈指向调用方（`VenueHeatService`）而非真正的根因（Repository 投影接口）。
+
+**规则**：新增/修改任何原生查询（`nativeQuery = true`）的投影接口时，DATE/TIMESTAMP 列一律用 `java.time.LocalDate`/`java.time.LocalDateTime` 声明 getter，禁止使用 `java.sql.*` 包下的类型。JPQL 查询同理（Hibernate 对 JPQL 结果的映射规则一致）。
+
 
 ### 分页参数安全（强制）
 
@@ -788,6 +868,12 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 - 禁止添加 CORS 配置（`addCorsMappings`）——唯一客户端为微信小程序（`wx.request` 不受同源策略约束），CORS 仅降低防御深度
 - 禁止在生产环境使用 `mvn spring-boot:run`（双 JVM 内存翻倍 + 无进程守护，2026-07-25 OOM 事故根因）
 - 禁止生产 `java -jar` 启动时省略 JVM 内存参数（JVM flags 由 `deploy/deploy.sh` 硬编码在 ExecStart 中统一管理，至少含 `-Xmx`）
+- 禁止单行多列聚合查询以 `Object[]` 为返回类型（Spring Data JPA 4.x 语义变更致 ClassCastException），必须使用接口投影
+- 禁止把用户个人交互状态（"我是否已赞"、"我的评分"等）和场所级公共聚合数据放进同一个缓存 key——个人状态必须实时查询，缓存只允许存放与请求者身份无关的聚合结果
+- 禁止在同一个 Service 类内部通过 `this` 调用被 `@Cacheable`/`@CacheEvict` 标注的方法——自调用会绕开 Spring AOP 代理，缓存注解静默失效；被缓存的方法必须拆到另一个 Bean 中
+- 禁止列表页关联统计（如标签点赞数）按场所逐条查询——批量查询整页涉及的 ID（`IN (...)`），避免 N+1
+- 禁止原生查询/JPQL 投影接口的 DATE/TIMESTAMP 列 getter 声明为 `java.sql.Date`/`java.sql.Timestamp`——Hibernate 6+ 默认映射为 `java.time.LocalDate`/`LocalDateTime`，类型不符会在运行时抛 `UnsupportedOperationException`（见「投影接口 getter 类型」章节）
+- 禁止「近 N 天」滚动窗口统计只传 `since` 不传 `until` 上界——必须锚定「截至昨日」（`until = 今天 0 点`），不得让当天未走完的部分数据混入窗口聚合（见「统计口径：截至昨日」章节）
 
 ---
 
@@ -809,8 +895,14 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 | 给用户 API 加头像 / 社交属性字段 | 产品为黄页工具非社交；UserInfoResponse 仅含 id/openId/nickname/role；storage 模块仅服务场所图片，不涉及用户头像 |
 | Venue 消费字段用 `price`（人均）/ `minConsumption`（低消） | 舞厅领域无此概念；用 `tickets`（门票规则 JSON 列表）+ `partnerFees`（舞伴费用多模式 JSON 列表，unit 区分 MINUTE/SONG），共享 DTO record 在 `venue/dto/` |
 | 在登录链路获取 / 要求前端上送昵称 | 微信 jscode2session 不返回资料；昵称经 `POST /user/profile` 由用户主动提交，角色等变更经 `GET /user/me` 静默同步 |
+| 原生查询投影接口 DATE/TIMESTAMP 列声明 `java.sql.Date`/`java.sql.Timestamp` | 改用 `java.time.LocalDate`/`LocalDateTime`——Hibernate 6+ 默认映射为 java.time 类型，声明遗留类型会在首次命中该查询时运行时报错 |
+| 「近 N 天」统计只传 `since` 让窗口自然到"现在" | 同时传 `since` + `until`（`until` 固定为今天 0 点），把当天不完整数据排除在窗口外，统一锚定「截至昨日」 |
 | JPQL 数学函数传可空坐标参数（`radians(:latitude)` + null） | PG 将 null 参数推断为 bytea 直接报错；拆成带坐标 / 无坐标两个查询，Service 分流，坐标形参用原生 `double` |
 | 城市筛选用 LIKE 模糊匹配"兼容"非标准名 | 精确匹配 + 写入端统一 region picker 标准名；脏数据走一次性清洗 SQL，不在查询端容错 |
+| 单行多列聚合查询返回 `Object[]` 再下标强转 | 用 Repository 嵌套接口投影（getter 名 = SELECT alias），编译期类型安全，不受 Spring Data JPA 版本语义变更影响 |
+| 把 likedByMe/myScore 等个人状态塞进以 `{venueId, userId}` 为 key 的聚合缓存 | 聚合数据（venueId 为 key）与个人状态（永远实时查询）彻底分离，写操作对聚合缓存做 `@CacheEvict`，不要只依赖 TTL |
+| 在同一 Service 类内 `this.xxx()` 调用本类的 `@Cacheable` 方法 | 绕开 AOP 代理导致缓存静默失效；把被缓存的方法拆到独立 Bean（如 `TagAggregateStatsService`），从外部注入调用 |
+| 列表页展示的关联统计按 venueId 循环单独查询 | 收集整页 venueId 后一次 `IN (...)` 批量查询（如 `TagInteractionService.batchGetTagLikeCounts`） |
 
 ---
 

@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.taginteraction.service.TagInteractionService;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
@@ -27,7 +28,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import tools.jackson.databind.ObjectMapper;
 
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Service
@@ -40,6 +43,7 @@ public class VenueService {
     private final VenuePostRepository venuePostRepository;
     private final VenueStatusLogRepository venueStatusLogRepository;
     private final VenueResponseMapper venueResponseMapper;
+    private final TagInteractionService tagInteractionService;
     private final ObjectMapper objectMapper;
 
     @Transactional
@@ -134,7 +138,9 @@ public class VenueService {
     public VenueDetailResponse getVenueDetail(Long id) {
         Venue venue = venueRepository.findByIdAndDeletedFalse(id)
                 .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
-        VenueResponse base = venueResponseMapper.toResponse(venue);
+        Map<String, Long> tagLikeCounts = tagInteractionService.batchGetTagLikeCounts(List.of(id))
+                .getOrDefault(id, Collections.emptyMap());
+        VenueResponse base = venueResponseMapper.toResponse(venue, tagLikeCounts);
         long postCount = venuePostRepository.countByVenueIdAndDeletedFalse(id);
         boolean canManage = computeCanManage(venue);
         return new VenueDetailResponse(base, canManage, postCount);
@@ -168,7 +174,11 @@ public class VenueService {
             result = venueRepository.searchRankedNoLocation(
                     blankToNull(city), blankToNull(district), status, keywordPattern, pageable);
         }
-        return result.map(venueResponseMapper::toResponse);
+        // 批量查询整页场所的标签点赞数，避免逐条查询造成的 N+1（见 TagInteractionService#batchGetTagLikeCounts）
+        List<Long> venueIds = result.getContent().stream().map(Venue::getId).toList();
+        Map<Long, Map<String, Long>> tagLikeCountsByVenue = tagInteractionService.batchGetTagLikeCounts(venueIds);
+        return result.map(v -> venueResponseMapper.toResponse(
+                v, tagLikeCountsByVenue.getOrDefault(v.getId(), Collections.emptyMap())));
     }
 
     /** 有场所的城市列表（按场所数倒序），供前端热门城市选择 */

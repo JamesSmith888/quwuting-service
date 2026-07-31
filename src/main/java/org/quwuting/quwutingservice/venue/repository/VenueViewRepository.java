@@ -22,8 +22,17 @@ public interface VenueViewRepository extends JpaRepository<VenueView, Long> {
            "WHERE v.venueId = :venueId AND v.viewDate >= :since AND v.userId IS NOT NULL")
     long countDistinctUsersByVenueIdSince(@Param("venueId") Long venueId, @Param("since") LocalDate since);
 
-    /** 单次往返同时获取 PV 和 UV（热度聚合优化），返回 Object[]{pv, uv} */
-    @Query("SELECT COUNT(v), COUNT(DISTINCT v.userId) FROM VenueView v " +
-           "WHERE v.venueId = :venueId AND v.viewDate >= :since")
-    Object[] countPvAndUvByVenueIdSince(@Param("venueId") Long venueId, @Param("since") LocalDate since);
+    /** 单行多列聚合投影：PV + UV */
+    interface PvUvStats {
+        Long getPv();
+        Long getUv();
+    }
+
+    /**
+     * 单次往返同时获取 PV 和 UV（热度聚合优化）。
+     * until 为排他上界——热度统计口径固定为「截至昨日」，见 VenueHeatService 的 statsAsOfDate 约定。
+     */
+    @Query("SELECT COUNT(v) as pv, COUNT(DISTINCT v.userId) as uv FROM VenueView v " +
+           "WHERE v.venueId = :venueId AND v.viewDate >= :since AND v.viewDate < :until")
+    PvUvStats countPvAndUvByVenueIdSince(@Param("venueId") Long venueId, @Param("since") LocalDate since, @Param("until") LocalDate until);
 }

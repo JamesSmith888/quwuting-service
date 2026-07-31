@@ -97,7 +97,7 @@ public class VenueController {
     }
 
     /**
-     * 记录场所详情页浏览（软鉴权：未登录时 userId 为 null，匿名记录不去重）
+     * 记录场所详情页浏览（软鉴权：未登录时 userId 为 null，匿名���录不去重）
      * POST /venues/{id}/view
      */
     @PostMapping("/{id}/view")

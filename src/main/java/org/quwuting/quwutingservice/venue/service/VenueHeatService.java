@@ -6,6 +6,7 @@ import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.favorite.repository.FavoriteRepository;
 import org.quwuting.quwutingservice.taginteraction.RatingDimensions;
 import org.quwuting.quwutingservice.taginteraction.repository.TagInteractionRepository;
+import org.quwuting.quwutingservice.venue.dto.response.FavoriteTrendPoint;
 import org.quwuting.quwutingservice.venue.dto.response.VenueHeatResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
@@ -19,7 +20,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 场所热度计算服务（多维度聚合）。
@@ -52,6 +56,9 @@ public class VenueHeatService {
     /** 时间窗口：30 天 */
     private static final int WINDOW_DAYS = 30;
 
+    /** 收藏趋势图窗口：14 天——比 30 天更适合小程序小屏图表的柱状数量，且足以看出升降走势 */
+    private static final int TREND_WINDOW_DAYS = 14;
+
     private final VenueRepository venueRepository;
     private final FavoriteRepository favoriteRepository;
     private final VenuePostRepository venuePostRepository;
@@ -65,37 +72,54 @@ public class VenueHeatService {
         Venue venue = venueRepository.findByIdAndDeletedFalse(venueId)
                 .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
 
-        LocalDateTime since30d = LocalDateTime.now().minusDays(WINDOW_DAYS);
-        LocalDate sinceDate30d = LocalDate.now().minusDays(WINDOW_DAYS);
+        // 统计口径统一锚定在「昨天」：所有滚动窗口（近30天/近14天）的排他上界固定为
+        // 今天 0 点（即只统计到昨天 24 点），不掺入当天尚未走完的部分。
+        // 根因：当天数据是"半天"，与其余"整天"数据混在同一窗口聚合/对比（尤其是逐日趋势图）
+        // 会系统性地把最新一天拉低，造成"数据在往下掉"的错觉；改为固定日期边界后，同一天内
+        // 多次请求的统计结果也保持稳定，不再随请求时刻漂移。
+        LocalDate today = LocalDate.now();
+        LocalDate statsAsOfDate = today.minusDays(1);
+        LocalDateTime windowEnd = today.atStartOfDay();
+        LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
+        LocalDate sinceDate30d = today.minusDays(WINDOW_DAYS);
 
         // ── 浏览（PV + UV 合并为 1 次往返） ──
-        Object[] viewRow = venueViewRepository.countPvAndUvByVenueIdSince(venueId, sinceDate30d);
-        long viewCount30d = ((Number) viewRow[0]).longValue();
-        long viewUv30d = ((Number) viewRow[1]).longValue();
+        VenueViewRepository.PvUvStats viewStats =
+                venueViewRepository.countPvAndUvByVenueIdSince(venueId, sinceDate30d, today);
+        long viewCount30d = viewStats.getPv();
+        long viewUv30d = viewStats.getUv();
 
         // ── 收藏（总数 + 30天新增 合并为 1 次往返） ──
-        Object[] favRow = favoriteRepository.countTotalAndRecentByVenueId(venueId, since30d);
-        long favoriteCount = ((Number) favRow[0]).longValue();
-        long newFavoriteCount30d = favRow[1] != null ? ((Number) favRow[1]).longValue() : 0;
+        FavoriteRepository.TotalRecentStats favStats =
+                favoriteRepository.countTotalAndRecentByVenueId(venueId, since30d, windowEnd);
+        long favoriteCount = favStats.getTotal();
+        long newFavoriteCount30d = favStats.getRecent() != null ? favStats.getRecent() : 0;
+
+        // ── 收藏趋势（近14天每日新增，图表用，截至昨天） ──
+        List<FavoriteTrendPoint> favoriteTrend = computeFavoriteTrend(venueId, statsAsOfDate);
 
         // ── 动态（总数 + 30天新增 合并为 1 次往返） ──
-        Object[] postRow = venuePostRepository.countTotalAndRecentByVenueId(venueId, since30d);
-        long postCount = ((Number) postRow[0]).longValue();
-        long newPostCount30d = postRow[1] != null ? ((Number) postRow[1]).longValue() : 0;
+        VenuePostRepository.TotalRecentStats postStats =
+                venuePostRepository.countTotalAndRecentByVenueId(venueId, since30d, windowEnd);
+        long postCount = postStats.getTotal();
+        long newPostCount30d = postStats.getRecent() != null ? postStats.getRecent() : 0;
 
         // ── 评价互动（ratingCount30d + likeCount30d + distinctRaters 合并为 1 次往返） ──
-        Object[] tiRow = tagInteractionRepository.countInteractionsForHeat(venueId, since30d);
-        long ratingCount30d = ((Number) tiRow[0]).longValue();
-        long likeCount30d = ((Number) tiRow[1]).longValue();
-        long ratingTotalCount = ((Number) tiRow[2]).longValue();
+        TagInteractionRepository.HeatInteractionStats tiStats =
+                tagInteractionRepository.countInteractionsForHeat(venueId, since30d, windowEnd);
+        long ratingCount30d = tiStats.getRatingcount();
+        long likeCount30d = tiStats.getLikecount();
+        long ratingTotalCount = tiStats.getRaters();
 
         // ── 满意度（各维度等权均分，近30天窗口） ──
-        Double satisfactionScore = computeSatisfaction(venueId, since30d, ratingTotalCount);
+        Double satisfactionScore = computeSatisfaction(venueId, since30d, windowEnd, ratingTotalCount);
 
         // ── 营业稳定性（暂停次数 + 最近状态时间 合并为 1 次往返） ──
-        Object[] statusRow = venueStatusLogRepository.countSuspensionsAndLatestTime(venueId, since30d);
-        long suspensionCount30d = ((Number) statusRow[0]).longValue();
-        long currentStatusDays = computeCurrentStatusDays(statusRow[1]);
+        // 注意：latestcreatedat 代表当前状态的实时事实，不受「截至昨天」窗口约束（见 Repository 注释）
+        VenueStatusLogRepository.SuspensionStats statusStats =
+                venueStatusLogRepository.countSuspensionsAndLatestTime(venueId, since30d, windowEnd);
+        long suspensionCount30d = statusStats.getSuspensioncount();
+        long currentStatusDays = computeCurrentStatusDays(statusStats.getLatestcreatedat());
 
         // ── 综合热度指数 ──
         long satisfactionComponent = satisfactionScore != null
@@ -112,24 +136,46 @@ public class VenueHeatService {
         return new VenueHeatResponse(
                 heatScore,
                 viewCount30d, viewUv30d,
-                favoriteCount, newFavoriteCount30d,
+                favoriteCount, newFavoriteCount30d, favoriteTrend,
                 postCount, newPostCount30d,
                 ratingCount30d, likeCount30d,
                 satisfactionScore, ratingTotalCount,
                 suspensionCount30d, currentStatusDays,
-                venue.getStatus().name(), venue.getStatus().getDisplayName()
+                venue.getStatus().name(), venue.getStatus().getDisplayName(),
+                statsAsOfDate.toString()
         );
+    }
+
+    /**
+     * 计算近 {@link #TREND_WINDOW_DAYS} 天每日新增收藏数（含 asOfDate 当天，即截至昨天），
+     * 缺失的日期补零，保证图表时间轴连续。
+     */
+    private List<FavoriteTrendPoint> computeFavoriteTrend(Long venueId, LocalDate asOfDate) {
+        LocalDate sinceDate = asOfDate.minusDays(TREND_WINDOW_DAYS - 1);
+        LocalDateTime sinceDateTime = sinceDate.atStartOfDay();
+        LocalDateTime untilDateTime = asOfDate.plusDays(1).atStartOfDay();
+        Map<LocalDate, Long> countByDay = new HashMap<>();
+        for (FavoriteRepository.DailyFavoriteCount row :
+                favoriteRepository.countDailyFavoritesSince(venueId, sinceDateTime, untilDateTime)) {
+            countByDay.put(row.getDay(), row.getCount());
+        }
+        List<FavoriteTrendPoint> points = new ArrayList<>(TREND_WINDOW_DAYS);
+        for (int i = 0; i < TREND_WINDOW_DAYS; i++) {
+            LocalDate day = sinceDate.plusDays(i);
+            points.add(new FavoriteTrendPoint(day.toString(), countByDay.getOrDefault(day, 0L)));
+        }
+        return points;
     }
 
     /**
      * 计算综合满意度：近30天各维度评分的等权均分。
      * 评价人数不足 MIN_RATING_SAMPLE 时返回 null（前端展示"暂无足够评价"）。
      */
-    private Double computeSatisfaction(Long venueId, LocalDateTime since, long totalRaters) {
+    private Double computeSatisfaction(Long venueId, LocalDateTime since, LocalDateTime until, long totalRaters) {
         if (totalRaters < MIN_RATING_SAMPLE) {
             return null;
         }
-        List<Object[]> scores = tagInteractionRepository.aggregateScoresByVenueSinceGroupByTag(venueId, since);
+        List<Object[]> scores = tagInteractionRepository.aggregateScoresByVenueSinceGroupByTag(venueId, since, until);
         if (scores.isEmpty()) {
             // 近30天无评分但历史有足够样本，回退到全量
             scores = tagInteractionRepository.aggregateScoresByVenueGroupByTag(venueId);
@@ -158,12 +204,11 @@ public class VenueHeatService {
         return Math.round(sum / count * 10.0) / 10.0;
     }
 
-    /** 从合并查询结果中提取当前状态持续天数 */
-    private long computeCurrentStatusDays(Object latestCreatedAt) {
+    /** 从合并查询结果中提取当前状态持续天数（实时事实，不受统计窗口约束） */
+    private long computeCurrentStatusDays(LocalDateTime latestCreatedAt) {
         if (latestCreatedAt == null) {
             return 0L;
         }
-        LocalDateTime latest = ((java.sql.Timestamp) latestCreatedAt).toLocalDateTime();
-        return ChronoUnit.DAYS.between(latest.toLocalDate(), LocalDate.now());
+        return ChronoUnit.DAYS.between(latestCreatedAt.toLocalDate(), LocalDate.now());
     }
 }

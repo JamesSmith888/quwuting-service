@@ -5,14 +5,18 @@ import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.favorite.entity.Favorite;
 import org.quwuting.quwutingservice.favorite.repository.FavoriteRepository;
+import org.quwuting.quwutingservice.taginteraction.service.TagInteractionService;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
+import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 @Slf4j
@@ -23,15 +27,21 @@ public class FavoriteService {
     private final FavoriteRepository favoriteRepository;
     private final VenueRepository venueRepository;
     private final VenueResponseMapper venueResponseMapper;
+    private final TagInteractionService tagInteractionService;
 
     /** 获取用户收藏的场所列表（按收藏时间倒序） */
     @Transactional(readOnly = true)
     public List<VenueResponse> getFavoriteVenues(Long userId) {
         List<Favorite> favorites = favoriteRepository.findByUserIdAndDeletedFalseOrderByCreatedAtDesc(userId);
-        return favorites.stream()
+        List<Venue> venues = favorites.stream()
                 .map(fav -> venueRepository.findByIdAndDeletedFalse(fav.getVenueId()).orElse(null))
                 .filter(Objects::nonNull)
-                .map(venueResponseMapper::toResponse)
+                .toList();
+        Map<Long, Map<String, Long>> tagLikeCountsByVenue =
+                tagInteractionService.batchGetTagLikeCounts(venues.stream().map(Venue::getId).toList());
+        return venues.stream()
+                .map(v -> venueResponseMapper.toResponse(
+                        v, tagLikeCountsByVenue.getOrDefault(v.getId(), Collections.emptyMap())))
                 .toList();
     }
 

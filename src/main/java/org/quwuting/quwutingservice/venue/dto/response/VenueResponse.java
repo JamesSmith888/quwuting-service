@@ -7,6 +7,7 @@ import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 public record VenueResponse(
         Long id,
@@ -33,6 +34,8 @@ public record VenueResponse(
         String contactPhone,
         String wechatQr,
         List<String> tags,
+        /** 各标签的点赞数（tag → count），未出现的标签视为 0 赞；不含"我是否已赞"（列表层无需个人状态） */
+        Map<String, Long> tagLikeCounts,
         Integer sortWeight,
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime createdAt,
         /** 数据最后更新时间（用户可见的时效性信号，用于判断信息可靠度） */

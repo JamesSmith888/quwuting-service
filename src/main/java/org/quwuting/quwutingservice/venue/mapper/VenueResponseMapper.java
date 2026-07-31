@@ -15,6 +15,7 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Venue 实体 → VenueResponse DTO 转换器。
@@ -33,6 +34,14 @@ public class VenueResponseMapper {
     private final ObjectMapper objectMapper;
 
     public VenueResponse toResponse(Venue v) {
+        return toResponse(v, Collections.emptyMap());
+    }
+
+    /**
+     * @param tagLikeCounts 各标签的点赞数（tag → count），列表页/详情页批量查询后传入；
+     *                      无需展示标签热度的场景（新建/编辑表单回显）传空 Map
+     */
+    public VenueResponse toResponse(Venue v, Map<String, Long> tagLikeCounts) {
         return new VenueResponse(
                 v.getId(),
                 v.getName(),
@@ -53,6 +62,7 @@ public class VenueResponseMapper {
                 v.getContactPhone(),
                 v.getWechatQr(),
                 deserializeStringList(v.getTags(), "tags"),
+                tagLikeCounts != null ? tagLikeCounts : Collections.emptyMap(),
                 v.getSortWeight(),
                 v.getCreatedAt(),
                 v.getUpdatedAt()

@@ -1,5 +1,7 @@
 package org.quwuting.quwutingservice.venue.dto.response;
 
+import java.util.List;
+
 /**
  * 场所热度响应体（GET /venues/{id}/heat）。
  * <p>
@@ -21,6 +23,8 @@ public record VenueHeatResponse(
         long favoriteCount,
         /** 近30天新增收藏 */
         long newFavoriteCount30d,
+        /** 近14天每日新增收藏趋势（收藏趋势图用），按日期升序，无收藏的日期已补零 */
+        List<FavoriteTrendPoint> favoriteTrend,
 
         // ── 动态 ──
         /** 动态总数 */
@@ -48,5 +52,12 @@ public record VenueHeatResponse(
         /** 当前状态枚举值 */
         String currentStatus,
         /** 当前状态展示名 */
-        String currentStatusDisplay
+        String currentStatusDisplay,
+
+        /**
+         * 滚动窗口统计口径的截止日期（yyyy-MM-dd，即"昨天"）。
+         * 除 currentStatusDays/currentStatus 外的所有统计字段均只统计到该日期 24 点为止，
+         * 不含当天尚未走完的数据。前端必须在页面醒目展示该字段，避免用户误将"半天数据"当作完整趋势解读。
+         */
+        String statsAsOfDate
 ) {}
