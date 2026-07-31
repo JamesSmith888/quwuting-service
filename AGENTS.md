@@ -394,12 +394,19 @@ LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);  
 
 索引：`(venueId, createdAt)` 覆盖活跃计数查询，`(userId)` 覆盖用户频率限制查询。
 
-### Upsert 语义
+### Upsert 语义（软删恢复模式）
 
-`submitReport` 使用 check-then-act + `DataIntegrityViolationException` catch 模式（与收藏/标签交互一致）：
+`submitReport` 使用 `findByUserIdAndVenueId`（**不限 `deleted`**）查找已有记录，与 `FavoriteService.addFavorite` 同模式：
 
-1. 查 `findByUserIdAndVenueIdAndDeletedFalse` → 存在则更新（`createdAt` 刷新为 now）
-2. 不存在则新建 → save，catch 唯一约束冲突 → 重新查询后更新
+1. 找到**活跃记录**（`deleted=false`）→ 更新字段（reason/occurredAt/note）
+2. 找到**软删记录**（`deleted=true`）→ 恢复：设 `deleted=false`、刷新 `createdAt = now` 续期 TTL、更新字段。频率限制检查仅在恢复时触发（恢复 = 新报告行为）
+3. 未找到 → 新建 INSERT，catch `DataIntegrityViolationException` 处理并发竞态
+
+**根因（为什么不查 `findByUserIdAndVenueIdAndDeletedFalse`）**：UNIQUE 约束 `qwt_uk_status_report_user_venue` 在 `(userId, venueId)` 上，不含 `deleted` 列——软删记录仍占用唯一槽位。若仅查活跃记录，撤销后再次上报会走到 INSERT 分支，与软删记录冲突。`FavoriteService` 的 `findByUserIdAndVenueId`（含软删）+ 恢复模式是标准做法，此模块此前遗漏了此模式导致 `AssertionFailure` 崩溃。
+
+**`@CreationTimestamp` 仅 INSERT 时设值**：恢复软删记录时需手动 `setCreatedAt(now)` 刷新 TTL，否则旧 `createdAt` 可能已超过 4h TTL，恢复后立即"过期"。
+
+**`DataIntegrityViolationException` catch 后必须 `entityManager.clear()`**：`save()` 失败后 Hibernate session 拋留 id=null 的脏实体，后续 JPQL 查询触发 auto-flush 时抛 `AssertionFailure: Entry for instance has a null identifier`。`entityManager.clear()` 清除脏实体后，`getActiveReportSummary` 的查询才能正常执行。
 
 ### 防刷机制
 

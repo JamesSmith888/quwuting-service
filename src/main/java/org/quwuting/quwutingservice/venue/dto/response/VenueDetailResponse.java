@@ -9,10 +9,15 @@ package org.quwuting.quwutingservice.venue.dto.response;
  *       由后端基于软鉴权上下文计算，匿名请求恒为 false。前端仅用于控制管理入口展示，
  *       安全边界在后端写操作接口。</li>
  *   <li>postCount — 动态总数，用于前端 Tab 标签计数展示。</li>
+ *   <li>hasMyStatusReport — 当前用户是否已对此场所有活跃的状态上报。
+ *       个人状态字段（与 canManage 同性质），实时查询、不缓存——
+ *       VenueDetailResponse 不经过 @Cacheable，每次请求实时计算。
+ *       驱动详情页"已报告·补充 / 撤销"与"报告暂停营业"的 UI 切换。</li>
  * </ul>
  */
 public record VenueDetailResponse(
         VenueResponse venue,
         boolean canManage,
-        long postCount
+        long postCount,
+        boolean hasMyStatusReport
 ) {}

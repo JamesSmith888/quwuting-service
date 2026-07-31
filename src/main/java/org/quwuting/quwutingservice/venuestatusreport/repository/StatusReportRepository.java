@@ -14,6 +14,17 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
     Optional<VenueStatusReport> findByUserIdAndVenueIdAndDeletedFalse(Long userId, Long venueId);
 
     /**
+     * 查找用户对某场所的报告（含逻辑删除的记录）。
+     * 用于 upsert 恢复逻辑：撤销（soft delete）后再次上报时，
+     * 需找到已软删的记录并恢复，而非 INSERT 新行（UNIQUE 约束会冲突）。
+     * 与 FavoriteService.findByUserIdAndVenueId 同模式。
+     */
+    Optional<VenueStatusReport> findByUserIdAndVenueId(Long userId, Long venueId);
+
+    /** 当前用户是否已对此场所有活跃报告（详情页个人状态，实时查询不缓存） */
+    boolean existsByUserIdAndVenueIdAndDeletedFalse(Long userId, Long venueId);
+
+    /**
      * 活跃报告聚合：合并 COUNT + MAX(createdAt) 为 1 次往返。
      * 活跃 = 未删除且 createdAt >= since（TTL 窗口，由 Service 层计算）。
      */

@@ -20,6 +20,7 @@ import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
+import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportService;
 import org.quwuting.quwutingservice.venuepost.repository.VenuePostRepository;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -46,6 +47,7 @@ public class VenueService {
     private final VenueStatusLogRepository venueStatusLogRepository;
     private final VenueResponseMapper venueResponseMapper;
     private final TagInteractionService tagInteractionService;
+    private final StatusReportService statusReportService;
     private final ObjectMapper objectMapper;
 
     @Transactional
@@ -145,7 +147,8 @@ public class VenueService {
         VenueResponse base = venueResponseMapper.toResponse(venue, tagLikeCounts);
         long postCount = venuePostRepository.countByVenueIdAndDeletedFalse(id);
         boolean canManage = computeCanManage(venue);
-        return new VenueDetailResponse(base, canManage, postCount);
+        boolean hasMyStatusReport = statusReportService.hasMyReport(id);
+        return new VenueDetailResponse(base, canManage, postCount, hasMyStatusReport);
     }
 
     /**
