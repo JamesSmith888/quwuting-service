@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.taginteraction.service.TagAggregateStatsService;
 import org.quwuting.quwutingservice.taginteraction.service.TagInteractionService;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
@@ -20,8 +21,10 @@ import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
-import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportService;
 import org.quwuting.quwutingservice.venuepost.repository.VenuePostRepository;
+import org.quwuting.quwutingservice.config.CacheConfig;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Caching;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
@@ -30,7 +33,6 @@ import org.springframework.util.StringUtils;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -47,10 +49,13 @@ public class VenueService {
     private final VenueStatusLogRepository venueStatusLogRepository;
     private final VenueResponseMapper venueResponseMapper;
     private final TagInteractionService tagInteractionService;
-    private final StatusReportService statusReportService;
+    private final TagAggregateStatsService tagAggregateStatsService;
+    private final VenueHeatService venueHeatService;
     private final ObjectMapper objectMapper;
+    private final VenueLookupService venueLookupService;
 
     @Transactional
+    @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
     public VenueResponse createVenue(CreateVenueRequest req) {
         validateTickets(req.tickets());
         Venue venue = new Venue();
@@ -93,6 +98,10 @@ public class VenueService {
      * 权限校验：{@link UserContext#requireManageOrAdmin(Long)}——ADMIN 或 claimedBy 匹配。
      */
     @Transactional
+    @Caching(evict = {
+            @CacheEvict(value = CacheConfig.CACHE_VENUE, key = "#id"),
+            @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
+    })
     public VenueResponse updateVenue(Long id, CreateVenueRequest req) {
         Venue venue = venueRepository.findByIdAndDeletedFalse(id)
                 .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
@@ -129,7 +138,12 @@ public class VenueService {
         venue.setWechatQr(req.wechatQr());
         venue.setTags(serializeStringList(req.tags()));
         venue.setSortWeight(req.sortWeight() != null ? req.sortWeight() : venue.getSortWeight());
-        return venueResponseMapper.toResponse(venueRepository.save(venue));
+        VenueResponse response = venueResponseMapper.toResponse(venueRepository.save(venue));
+        // 场所编辑影响两个聚合缓存的内容：tags 是标签聚合的组装依据，status/状态日志
+        // 是热度响应的输出（currentStatus / currentStatusDays）——显式逐出，与其余写路径一致
+        tagAggregateStatsService.invalidate(id);
+        venueHeatService.invalidate(id);
+        return response;
     }
 
     /**
@@ -137,17 +151,23 @@ public class VenueService {
      * <p>
      * canManage 基于软鉴权上下文计算：平台管理员或门店认领人为 true，匿名请求恒为 false。
      * 该字段仅驱动前端管理入口的展示，安全边界在后端各写操作接口的角色校验。
+     * <p>
+     * DB 往返压缩：场所实体经 {@link VenueLookupService#findById} 缓存；标签点赞数复用
+     * {@link TagAggregateStatsService#getAggregate} 的聚合缓存（与 /tags/stats 端点共享同一
+     * venueId key，详情页并发请求单飞回源）；动态总数与"我是否已上报"合并为单条标量子查询
+     * （{@link VenuePostRepository#findDetailStats}，个人状态实时计算不缓存）。
+     * 缓存全命中时仅 1 次往返，冷启动最多 3 次。
      */
     @Transactional(readOnly = true)
     public VenueDetailResponse getVenueDetail(Long id) {
-        Venue venue = venueRepository.findByIdAndDeletedFalse(id)
-                .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
-        Map<String, Long> tagLikeCounts = tagInteractionService.batchGetTagLikeCounts(List.of(id))
-                .getOrDefault(id, Collections.emptyMap());
+        Venue venue = venueLookupService.findById(id);
+        Map<String, Long> tagLikeCounts = tagAggregateStatsService.getAggregate(id).likeCounts();
         VenueResponse base = venueResponseMapper.toResponse(venue, tagLikeCounts);
-        long postCount = venuePostRepository.countByVenueIdAndDeletedFalse(id);
+        VenuePostRepository.DetailStats detailStats =
+                venuePostRepository.findDetailStats(id, UserContext.getCurrentUserId());
         boolean canManage = computeCanManage(venue);
-        boolean hasMyStatusReport = statusReportService.hasMyReport(id);
+        long postCount = detailStats.getPostcount() != null ? detailStats.getPostcount() : 0L;
+        boolean hasMyStatusReport = Boolean.TRUE.equals(detailStats.getHasmyreport());
         return new VenueDetailResponse(base, canManage, postCount, hasMyStatusReport);
     }
 
@@ -182,8 +202,8 @@ public class VenueService {
         // 批量查询整页场所的标签点赞数，避免逐条查询造成的 N+1（见 TagInteractionService#batchGetTagLikeCounts）
         List<Long> venueIds = result.getContent().stream().map(Venue::getId).toList();
         Map<Long, Map<String, Long>> tagLikeCountsByVenue = tagInteractionService.batchGetTagLikeCounts(venueIds);
-        // 查询城市内热门场所 ID 集合（单次全表查询，数据规模小）
-        Set<Long> hotVenueIds = new HashSet<>(venueRepository.findHotVenueIds());
+        // 查询城市内热门场所 ID 集合（5min 缓存，窗口函数全表计算结果变化频率极低）
+        Set<Long> hotVenueIds = venueLookupService.getHotVenueIds();
         return result.map(v -> venueResponseMapper.toResponse(
                 v, tagLikeCountsByVenue.getOrDefault(v.getId(), Collections.emptyMap()),
                 hotVenueIds.contains(v.getId())));

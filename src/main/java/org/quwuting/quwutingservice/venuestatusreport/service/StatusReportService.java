@@ -4,16 +4,15 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
+import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venuestatusreport.dto.request.SubmitReportRequest;
 import org.quwuting.quwutingservice.venuestatusreport.dto.response.ActiveReportSummary;
 import org.quwuting.quwutingservice.venuestatusreport.entity.VenueStatusReport;
 import org.quwuting.quwutingservice.venuestatusreport.enums.ReportReason;
 import org.quwuting.quwutingservice.venuestatusreport.repository.StatusReportRepository;
-import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,11 +23,11 @@ import java.time.LocalDateTime;
  * 场所实时状态报告服务。
  * <p>
  * 用户在详情页极速上报"暂停营业"，系统作为独立信号层展示（不修改 Venue.status），
- * 通过 TTL 过期 + {@link org.quwuting.quwutingservice.venue.service.VenueHeatService} 的
- * StatusConfidence override 形成闭环。
+ * 通过 TTL 过期 + {@link VenueHeatService} 的 StatusConfidence override 形成闭环。
  * <p>
- * 写操作即时失效热度缓存（{@link CacheConfig#CACHE_VENUE_HEAT}），
- * 确保其他用户很快看到最新活跃报告数——与 TagInteractionService 的 @CacheEvict 模式一致。
+ * 写操作即时失效热度缓存（{@link VenueHeatService#invalidate}），
+ * 确保其他用户很快看到最新活跃报告数——与 TagInteractionService / FavoriteService 的
+ * 显式失效模式一致（热度缓存为服务内嵌 LoadingCache，不走 Spring @CacheEvict）。
  * <p>
  * Upsert 恢复模式：撤销（soft delete）后再次上报时，恢复已软删的记录（设 deleted=false、
  * 刷新 createdAt 续期 TTL），而非 INSERT 新行。UNIQUE(userId, venueId) 约束使软删记录仍
@@ -47,6 +46,7 @@ public class StatusReportService {
 
     private final StatusReportRepository statusReportRepository;
     private final VenueRepository venueRepository;
+    private final VenueHeatService venueHeatService;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -56,7 +56,6 @@ public class StatusReportService {
      * 同一用户对同一场所只保留一条物理记录，再次报告覆盖更新。
      * 撤销后再次上报 = 恢复软删记录（不 INSERT，避免 UNIQUE 约束冲突）。
      */
-    @CacheEvict(value = CacheConfig.CACHE_VENUE_HEAT, key = "#venueId")
     @Transactional
     public ActiveReportSummary submitReport(Long venueId, SubmitReportRequest req) {
         Long userId = UserContext.requireAuth();
@@ -102,13 +101,14 @@ public class StatusReportService {
             }
         }
 
+        // 活跃报告数是热度接口的输出之一：显式失效热度缓存（写路径逐出，refresh 周期仅兜底）
+        venueHeatService.invalidate(venueId);
         return getActiveReportSummary(venueId);
     }
 
     /**
      * 撤销当前用户对某场所的状态报告（soft delete）。
      */
-    @CacheEvict(value = CacheConfig.CACHE_VENUE_HEAT, key = "#venueId")
     @Transactional
     public ActiveReportSummary cancelReport(Long venueId) {
         Long userId = UserContext.requireAuth();
@@ -119,15 +119,16 @@ public class StatusReportService {
                     statusReportRepository.save(report);
                 });
 
+        venueHeatService.invalidate(venueId);
         return getActiveReportSummary(venueId);
     }
 
     /**
-     * 获取某场所的活跃报告摘要（供 VenueHeatService 调用）。
+     * 获取某场所的活跃报告摘要（状态上报接口的响应数据）。
      * <p>
      * 活跃 = 未删除且 createdAt >= now - TTL。
-     * 此方法无 @Cacheable——它被 {@link org.quwuting.quwutingservice.venue.service.VenueHeatService#getHeat}
-     * 的 @Cacheable 包裹，其结果随 VenueHeatResponse 整体缓存，写操作通过 @CacheEvict 失效。
+     * 热度接口不再经由此方法——{@link org.quwuting.quwutingservice.venue.service.VenueHeatService#getHeat}
+     * 的 mega-query 已内联活跃上报计数；本方法仅供 submitReport / cancelReport 组装响应使用。
      */
     @Transactional(readOnly = true)
     public ActiveReportSummary getActiveReportSummary(Long venueId) {
@@ -136,19 +137,6 @@ public class StatusReportService {
                 statusReportRepository.countActiveAndLatestTime(venueId, since);
         int count = stats.getActiveCount() != null ? stats.getActiveCount().intValue() : 0;
         return new ActiveReportSummary(count, stats.getLatestTime());
-    }
-
-    /**
-     * 当前用户是否已对此场所有活跃报告（详情页个人状态）。
-     * <p>
-     * 个人状态实时查询、不缓存——与 likedByMe/myScore 同原则：
-     * VenueDetailResponse 已是 per-user 响应（canManage 同理），不经过 @Cacheable。
-     */
-    @Transactional(readOnly = true)
-    public boolean hasMyReport(Long venueId) {
-        Long userId = UserContext.getCurrentUserId();
-        if (userId == null) return false;
-        return statusReportRepository.existsByUserIdAndVenueIdAndDeletedFalse(userId, venueId);
     }
 
     /** 全局频率限制：滑动窗口内不同场所数 */

@@ -1,16 +1,19 @@
 package org.quwuting.quwutingservice.venuepost.service;
 
 import lombok.RequiredArgsConstructor;
+import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
+import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venuepost.dto.request.CreatePostRequest;
 import org.quwuting.quwutingservice.venuepost.dto.response.VenuePostResponse;
 import org.quwuting.quwutingservice.venuepost.entity.VenuePost;
 import org.quwuting.quwutingservice.venuepost.enums.PostPublisherType;
 import org.quwuting.quwutingservice.venuepost.repository.VenuePostRepository;
+import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -26,6 +29,7 @@ public class VenuePostService {
 
     private final VenuePostRepository venuePostRepository;
     private final VenueRepository venueRepository;
+    private final VenueHeatService venueHeatService;
 
     /**
      * 分页查询场所动态（公开接口，按发布时间倒序）。
@@ -46,7 +50,13 @@ public class VenuePostService {
      * <p>
      * publisherType 由角色自动判定：ADMIN 角色 → 平台公告（publisherName="去舞厅平台"），
      * 认领人 → 商家动态（publisherName=门店名）。客户端不指定发布方身份。
+     * <p>
+     * 写操作即时逐出两类缓存：动态总数是热度公式输入（postCount × 5）——热度为
+     * VenueHeatService 内嵌 LoadingCache，方法体内显式 invalidate；动态数也参与热门场所
+     * 排序（收藏×20 + 动态×10）——hotVenueIds 仍由 Spring CacheManager 托管，
+     * 用 @CacheEvict(allEntries) 逐出。
      */
+    @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
     @Transactional
     public VenuePostResponse createPost(Long venueId, CreatePostRequest req) {
         Venue venue = venueRepository.findByIdAndDeletedFalse(venueId)
@@ -63,7 +73,9 @@ public class VenuePostService {
         post.setContent(req.content().trim());
         post.setPublisherType(publisherType);
         post.setPublisherName(publisherName);
-        return toResponse(venuePostRepository.save(post));
+        VenuePostResponse response = toResponse(venuePostRepository.save(post));
+        venueHeatService.invalidate(venueId);
+        return response;
     }
 
     private VenuePostResponse toResponse(VenuePost post) {

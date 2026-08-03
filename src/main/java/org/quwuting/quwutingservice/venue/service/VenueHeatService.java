@@ -1,8 +1,7 @@
 package org.quwuting.quwutingservice.venue.service;
 
-import lombok.RequiredArgsConstructor;
-import org.quwuting.quwutingservice.config.CacheConfig;
-import org.quwuting.quwutingservice.exception.BusinessException;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
 import org.quwuting.quwutingservice.favorite.repository.FavoriteRepository;
 import org.quwuting.quwutingservice.taginteraction.RatingDimensions;
 import org.quwuting.quwutingservice.taginteraction.repository.TagInteractionRepository;
@@ -11,14 +10,9 @@ import org.quwuting.quwutingservice.venue.dto.response.VenueHeatResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.enums.StatusConfidence;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
-import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
-import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
-import org.quwuting.quwutingservice.venuepost.repository.VenuePostRepository;
 import org.quwuting.quwutingservice.venuestatusreport.dto.response.ActiveReportSummary;
 import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportService;
-import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -27,6 +21,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 场所热度计算服务（多维度聚合）。
@@ -37,11 +32,31 @@ import java.util.Map;
  * <p>
  * 权重常量收敛在本类内部，后续基于真实数据分布调优，接口契约不变。
  * <p>
- * 性能优化：通过条件聚合将原 14 次串行 DB 往返合并为 6 次，
- * 并加 60s TTL 本地缓存（聚合数据无需实时精度）。
+ * DB 往返压缩（两轮优化的最终形态）：
+ * <ol>
+ *   <li>第一轮（条件聚合）：同表多指标合并，14 次 → 6 次；</li>
+ *   <li>第二轮（跨表 mega-query，{@link VenueRepository#countHeatCounters}）：
+ *       6 张表的全部单值计数器收敛为一条标量子查询 SELECT，回源仅
+ *       mega-query(1) + 收藏趋势(1) + 满意度(0~2，raters 不足时跳过) ≈ 2~4 次往返。</li>
+ * </ol>
+ * <p>
+ * 缓存策略（refresh-ahead，2026-08 确立）：内嵌 Caffeine {@link LoadingCache}，
+ * 不走 Spring CacheManager——refreshAfterWrite 要求 LoadingCache（构建时提供 loader），
+ * Spring 缓存抽象无法为单个缓存注入各自的加载器，故采用与 AuthInterceptor 用户缓存
+ * 相同的"服务内嵌原生 Caffeine"模式：
+ * <ul>
+ *   <li>{@code refreshAfterWrite(60s)}：条目写入 60s 后，下一次访问<b>立即返回旧值</b>并
+ *       在后台异步重载——活跃场所的用户永不周期性吃到同步冷加载（早期
+ *       expireAfterWrite(60s) 硬过期导致每 60 秒出现一个 2s+ 慢请求）；</li>
+ *   <li>{@code expireAfterWrite(30min)}：仅长期无访问的条目被驱逐，下一访问者承担一次冷加载；</li>
+ *   <li>单飞（single-flight）：同 key 并发回源只执行一次加载，详情页并发请求天然去重；</li>
+ *   <li>异步刷新失败保留旧值：瞬态 DB 抖动降级为数据滞后而非请求失败；</li>
+ *   <li>新鲜度主保障是写路径显式 {@link #invalidate}（点赞/评分、收藏、动态、状态上报、
+ *       场所编辑），refresh/expire 仅作兜底。被缓存值与请求者身份无关（热度为公共聚合），
+ *       后台刷新线程无请求上下文是安全的。</li>
+ * </ul>
  */
 @Service
-@RequiredArgsConstructor
 public class VenueHeatService {
 
     // ── 热度权重常量 ──
@@ -53,7 +68,7 @@ public class VenueHeatService {
     private static final long WEIGHT_LIKE = 3;
     private static final long WEIGHT_SATISFACTION = 20;
 
-    /** 满意度最低样本量：评价人数不足此值时不展示具体分数 */
+    /** 满意度最低样本量：评价人数不足此值时不展示具体分数（同时跳过满意度查询） */
     private static final long MIN_RATING_SAMPLE = 3;
 
     /** 时间窗口：30 天 */
@@ -65,19 +80,60 @@ public class VenueHeatService {
     /** 状态可信度矩阵阈值：不稳定门店状态持续天数 ≤ 此值视为"近期确认过"（MEDIUM），> 此值为 LOW */
     private static final long CONFIDENCE_RECENT_DAYS = 7;
 
+    /** 缓存预刷新周期：60s 后访问返回旧值并触发异步重载 */
+    private static final long CACHE_REFRESH_SECONDS = 60;
+
+    /** 缓存硬过期：30 分钟无访问才驱逐 */
+    private static final long CACHE_EXPIRE_MINUTES = 30;
+
+    private final VenueLookupService venueLookupService;
     private final VenueRepository venueRepository;
     private final FavoriteRepository favoriteRepository;
-    private final VenuePostRepository venuePostRepository;
-    private final VenueViewRepository venueViewRepository;
-    private final VenueStatusLogRepository venueStatusLogRepository;
     private final TagInteractionRepository tagInteractionRepository;
-    private final StatusReportService statusReportService;
+    private final LoadingCache<Long, VenueHeatResponse> heatCache;
 
-    @Cacheable(value = CacheConfig.CACHE_VENUE_HEAT, key = "#venueId")
-    @Transactional(readOnly = true)
+    public VenueHeatService(VenueLookupService venueLookupService,
+                            VenueRepository venueRepository,
+                            FavoriteRepository favoriteRepository,
+                            TagInteractionRepository tagInteractionRepository) {
+        this.venueLookupService = venueLookupService;
+        this.venueRepository = venueRepository;
+        this.favoriteRepository = favoriteRepository;
+        this.tagInteractionRepository = tagInteractionRepository;
+        // loader 为 computeHeat（实例方法引用）：字段必须先于缓存构建完成赋值。
+        // 异步刷新默认运行在 ForkJoinPool.commonPool——热度计算不依赖请求上下文，安全。
+        this.heatCache = Caffeine.newBuilder()
+                .maximumSize(500)
+                .refreshAfterWrite(CACHE_REFRESH_SECONDS, TimeUnit.SECONDS)
+                .expireAfterWrite(CACHE_EXPIRE_MINUTES, TimeUnit.MINUTES)
+                .build(this::computeHeat);
+    }
+
+    /**
+     * 获取场所热度（缓存：单飞 + refresh-ahead，见类注释）。
+     */
     public VenueHeatResponse getHeat(Long venueId) {
-        Venue venue = venueRepository.findByIdAndDeletedFalse(venueId)
-                .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
+        return heatCache.get(venueId);
+    }
+
+    /**
+     * 写路径显式失效：任何改变热度输入的写操作（点赞/评分、收藏增删、动态发布、
+     * 状态上报/撤销、场所编辑）完成后必须调用，保证其他用户及时看到最新统计。
+     * 与早期 @CacheEvict(CACHE_VENUE_HEAT) 注解同职责，因缓存载体改为内嵌
+     * LoadingCache 而显式化。
+     */
+    public void invalidate(Long venueId) {
+        heatCache.invalidate(venueId);
+    }
+
+    /**
+     * 热度计算（缓存 loader，勿直接调用——经 {@link #getHeat} 走缓存）。
+     * <p>
+     * 各聚合查询在独立隐式只读事务中执行（统计读无跨语句原子性要求，
+     * Postgres READ COMMITTED 下与原单事务行为等价）。
+     */
+    private VenueHeatResponse computeHeat(Long venueId) {
+        Venue venue = venueLookupService.findById(venueId);
 
         // 统计口径统一锚定在「昨天」：所有滚动窗口（近30天/近14天）的排他上界固定为
         // 今天 0 点（即只统计到昨天 24 点），不掺入当天尚未走完的部分。
@@ -89,47 +145,32 @@ public class VenueHeatService {
         LocalDateTime windowEnd = today.atStartOfDay();
         LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
         LocalDate sinceDate30d = today.minusDays(WINDOW_DAYS);
+        // 活跃上报为实时 TTL 窗口（now - 4h），是实时事实，不受「截至昨日」约束
+        LocalDateTime reportSince = LocalDateTime.now().minusHours(StatusReportService.ACTIVE_REPORT_TTL_HOURS);
 
-        // ── 浏览（PV + UV 合并为 1 次往返） ──
-        VenueViewRepository.PvUvStats viewStats =
-                venueViewRepository.countPvAndUvByVenueIdSince(venueId, sinceDate30d, today);
-        long viewCount30d = viewStats.getPv();
-        long viewUv30d = viewStats.getUv();
+        // ── 全部单值计数器：跨 6 张表合并为 1 次 DB 往返（标量子查询 mega-query） ──
+        VenueRepository.HeatCounters counters = venueRepository.countHeatCounters(
+                venueId, sinceDate30d, today, since30d, windowEnd, reportSince);
+        long viewCount30d = orZero(counters.getPv());
+        long viewUv30d = orZero(counters.getUv());
+        long favoriteCount = orZero(counters.getFavtotal());
+        long newFavoriteCount30d = orZero(counters.getFavrecent());
+        long postCount = orZero(counters.getPosttotal());
+        long newPostCount30d = orZero(counters.getPostrecent());
+        long ratingCount30d = orZero(counters.getRatingcount30d());
+        long likeCount30d = orZero(counters.getLikecount30d());
+        long ratingTotalCount = orZero(counters.getRaters());
+        long suspensionCount30d = orZero(counters.getSuspensioncount());
+        long currentStatusDays = computeCurrentStatusDays(counters.getLateststatuslogtime());
+        ActiveReportSummary reportSummary = new ActiveReportSummary(
+                (int) orZero(counters.getReportcount()),
+                counters.getLatestreporttime());
 
-        // ── 收藏（总数 + 30天新增 合并为 1 次往返） ──
-        FavoriteRepository.TotalRecentStats favStats =
-                favoriteRepository.countTotalAndRecentByVenueId(venueId, since30d, windowEnd);
-        long favoriteCount = favStats.getTotal();
-        long newFavoriteCount30d = favStats.getRecent() != null ? favStats.getRecent() : 0;
-
-        // ── 收藏趋势（近14天每日新增，图表用，截至昨天） ──
+        // ── 收藏趋势（多行时间序列，独立 1 次往返，近14天每日新增，截至昨天） ──
         List<FavoriteTrendPoint> favoriteTrend = computeFavoriteTrend(venueId, statsAsOfDate);
 
-        // ── 动态（总数 + 30天新增 合并为 1 次往返） ──
-        VenuePostRepository.TotalRecentStats postStats =
-                venuePostRepository.countTotalAndRecentByVenueId(venueId, since30d, windowEnd);
-        long postCount = postStats.getTotal();
-        long newPostCount30d = postStats.getRecent() != null ? postStats.getRecent() : 0;
-
-        // ── 评价互动（ratingCount30d + likeCount30d + distinctRaters 合并为 1 次往返） ──
-        TagInteractionRepository.HeatInteractionStats tiStats =
-                tagInteractionRepository.countInteractionsForHeat(venueId, since30d, windowEnd);
-        long ratingCount30d = tiStats.getRatingcount();
-        long likeCount30d = tiStats.getLikecount();
-        long ratingTotalCount = tiStats.getRaters();
-
-        // ── 满意度（各维度等权均分，近30天窗口） ──
+        // ── 满意度（各维度等权均分，近30天窗口；raters 不足样本量时直接跳过查询） ──
         Double satisfactionScore = computeSatisfaction(venueId, since30d, windowEnd, ratingTotalCount);
-
-        // ── 营业稳定性（暂停次数 + 最近状态时间 合并为 1 次往返） ──
-        // 注意：latestcreatedat 代表当前状态的实时事实，不受「截至昨天」窗口约束（见 Repository 注释）
-        VenueStatusLogRepository.SuspensionStats statusStats =
-                venueStatusLogRepository.countSuspensionsAndLatestTime(venueId, since30d, windowEnd);
-        long suspensionCount30d = statusStats.getSuspensioncount();
-        long currentStatusDays = computeCurrentStatusDays(statusStats.getLatestcreatedat());
-
-        // ── 用户实时状态报告（独立信号层，TTL 窗口，实时事实不受"截至昨日"约束） ──
-        ActiveReportSummary reportSummary = statusReportService.getActiveReportSummary(venueId);
 
         // ── 综合热度指数 ──
         long satisfactionComponent = satisfactionScore != null
@@ -163,6 +204,10 @@ public class VenueHeatService {
         );
     }
 
+    private static long orZero(Long value) {
+        return value != null ? value : 0L;
+    }
+
     /**
      * 计算近 {@link #TREND_WINDOW_DAYS} 天每日新增收藏数（含 asOfDate 当天，即截至昨天），
      * 缺失的日期补零，保证图表时间轴连续。
@@ -186,7 +231,8 @@ public class VenueHeatService {
 
     /**
      * 计算综合满意度：近30天各维度评分的等权均分。
-     * 评价人数不足 MIN_RATING_SAMPLE 时返回 null（前端展示"暂无足够评价"）。
+     * 评价人数不足 MIN_RATING_SAMPLE 时返回 null（前端展示"暂无足够评价"），
+     * 且完全不发起满意度查询——冷启动场景下大部分场所样本不足，省掉 1~2 次 DB 往返。
      */
     private Double computeSatisfaction(Long venueId, LocalDateTime since, LocalDateTime until, long totalRaters) {
         if (totalRaters < MIN_RATING_SAMPLE) {

@@ -9,12 +9,16 @@ import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
 public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecificationExecutor<Venue> {
 
     Optional<Venue> findByIdAndDeletedFalse(Long id);
+
+    /** 批量按 ID 查询场所（消除 N+1：收藏列表等场景需一次性加载多个场所） */
+    List<Venue> findByIdInAndDeletedFalse(List<Long> ids);
 
     /**
      * 列表筛选条件（两个排序变体共用）。
@@ -101,6 +105,102 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
         String getCity();
         Long getVenueCount();
     }
+
+    /**
+     * 热度读模型：单场所全部"单值计数器"的跨表合并投影（供 VenueHeatService.getHeat 使用）。
+     * <p>
+     * getter 类型约定：TIMESTAMP 列（lateststatuslogtime / latestreporttime）必须声明为
+     * java.time.LocalDateTime——Hibernate 6+ 对原生查询的默认映射（见 AGENTS.md「投影接口
+     * getter 类型」章节，历史遗留 java.sql.* 类型会运行时抛 UnsupportedOperationException）。
+     */
+    interface HeatCounters {
+        /** 近30天浏览量 PV（含匿名） */
+        Long getPv();
+        /** 近30天独立用户浏览数 UV（仅已登录去重，COUNT DISTINCT 天然忽略 NULL） */
+        Long getUv();
+        /** 收藏总数 */
+        Long getFavtotal();
+        /** 近30天新增收藏 */
+        Long getFavrecent();
+        /** 动态总数 */
+        Long getPosttotal();
+        /** 近30天新增动态 */
+        Long getPostrecent();
+        /** 近30天评价数（score 非空的交互记录数） */
+        Long getRatingcount30d();
+        /** 近30天点赞数 */
+        Long getLikecount30d();
+        /** 评价总人数（去重 userId） */
+        Long getRaters();
+        /** 近30天暂停营业次数（to_status = SUSPENDED 的状态变迁数） */
+        Long getSuspensioncount();
+        /** 最近一条状态变迁时间（当前状态持续天数的依据，实时事实，无窗口上界） */
+        LocalDateTime getLateststatuslogtime();
+        /** TTL 窗口内的活跃状态上报数 */
+        Long getReportcount();
+        /** TTL 窗口内最新上报时间，null = 无活跃上报 */
+        LocalDateTime getLatestreporttime();
+    }
+
+    /**
+     * 热度计数器 mega-query：一次 DB 往返取回热度公式与状态可信度所需的全部单值统计。
+     * <p>
+     * 根因：这些计数器分布在 6 张表上（views / favorites / posts / tag_interactions /
+     * status_logs / status_reports），早期按表各发一条合并查询，仍需 6 次串行跨洲往返
+     * （约 2.1s）。它们都是"以 venueId 为键的单值聚合"，可以收敛为一条 SELECT 内的
+     * 标量子查询——Postgres 一次解析执行，网络开销只剩 1 次往返。各子查询均命中
+     * (venue_id, ...) 复合索引，库内执行时间为毫秒级。
+     * <p>
+     * 窗口语义（与 VenueHeatService 保持一致）：
+     * <ul>
+     *   <li>viewSince/viewUntil：浏览按 view_date 过滤，[30天前的日期, 今天)，即「截至昨日」</li>
+     *   <li>windowSince/windowUntil：其余滚动窗口按时间戳过滤，[30天前0点, 今天0点)，即「截至昨日」</li>
+     *   <li>reportSince：活跃上报为实时 TTL 窗口（now - 4h），不受「截至昨日」约束</li>
+     *   <li>lateststatuslogtime：当前状态的实时事实，全量 MAX，无窗口约束</li>
+     * </ul>
+     * 收藏趋势（多行时间序列）与满意度（分组均值，依赖 raters 条件触发）形态不同，
+     * 不参与本合并，仍为独立查询。
+     */
+    @Query(value = """
+            SELECT
+              (SELECT COUNT(*) FROM qwt_venue_views vv
+                WHERE vv.venue_id = :venueId AND vv.view_date >= :viewSince AND vv.view_date < :viewUntil) AS pv,
+              (SELECT COUNT(DISTINCT vv.user_id) FROM qwt_venue_views vv
+                WHERE vv.venue_id = :venueId AND vv.view_date >= :viewSince AND vv.view_date < :viewUntil) AS uv,
+              (SELECT COUNT(*) FROM qwt_favorites f
+                WHERE f.venue_id = :venueId AND f.deleted = false) AS favtotal,
+              (SELECT COUNT(*) FROM qwt_favorites f
+                WHERE f.venue_id = :venueId AND f.deleted = false
+                  AND f.created_at >= :windowSince AND f.created_at < :windowUntil) AS favrecent,
+              (SELECT COUNT(*) FROM qwt_venue_posts p
+                WHERE p.venue_id = :venueId AND p.deleted = false) AS posttotal,
+              (SELECT COUNT(*) FROM qwt_venue_posts p
+                WHERE p.venue_id = :venueId AND p.deleted = false
+                  AND p.created_at >= :windowSince AND p.created_at < :windowUntil) AS postrecent,
+              (SELECT COUNT(*) FROM qwt_tag_interactions ti
+                WHERE ti.venue_id = :venueId AND ti.deleted = false AND ti.score IS NOT NULL
+                  AND ti.updated_at >= :windowSince AND ti.updated_at < :windowUntil) AS ratingcount30d,
+              (SELECT COUNT(*) FROM qwt_tag_interactions ti
+                WHERE ti.venue_id = :venueId AND ti.deleted = false AND ti.liked = true
+                  AND ti.updated_at >= :windowSince AND ti.updated_at < :windowUntil) AS likecount30d,
+              (SELECT COUNT(DISTINCT ti.user_id) FROM qwt_tag_interactions ti
+                WHERE ti.venue_id = :venueId AND ti.deleted = false AND ti.score IS NOT NULL) AS raters,
+              (SELECT COUNT(*) FROM qwt_venue_status_logs l
+                WHERE l.venue_id = :venueId AND l.to_status = 'SUSPENDED'
+                  AND l.created_at >= :windowSince AND l.created_at < :windowUntil) AS suspensioncount,
+              (SELECT MAX(l.created_at) FROM qwt_venue_status_logs l
+                WHERE l.venue_id = :venueId) AS lateststatuslogtime,
+              (SELECT COUNT(*) FROM qwt_venue_status_reports r
+                WHERE r.venue_id = :venueId AND r.deleted = false AND r.created_at >= :reportSince) AS reportcount,
+              (SELECT MAX(r.created_at) FROM qwt_venue_status_reports r
+                WHERE r.venue_id = :venueId AND r.deleted = false AND r.created_at >= :reportSince) AS latestreporttime
+            """, nativeQuery = true)
+    HeatCounters countHeatCounters(@Param("venueId") Long venueId,
+                                   @Param("viewSince") java.time.LocalDate viewSince,
+                                   @Param("viewUntil") java.time.LocalDate viewUntil,
+                                   @Param("windowSince") LocalDateTime windowSince,
+                                   @Param("windowUntil") LocalDateTime windowUntil,
+                                   @Param("reportSince") LocalDateTime reportSince);
 
     /**
      * 查询城市内热门场所 ID 集合（热度排名前 20%，至少 1 家/城市）。

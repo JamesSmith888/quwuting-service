@@ -2,7 +2,6 @@ package org.quwuting.quwutingservice.taginteraction.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.taginteraction.RatingDimensions;
 import org.quwuting.quwutingservice.taginteraction.dto.response.DimensionScoreStats;
@@ -12,8 +11,8 @@ import org.quwuting.quwutingservice.taginteraction.dto.response.WindowScore;
 import org.quwuting.quwutingservice.taginteraction.entity.TagInteraction;
 import org.quwuting.quwutingservice.taginteraction.repository.TagInteractionRepository;
 import org.quwuting.quwutingservice.venue.entity.Venue;
-import org.quwuting.quwutingservice.venue.repository.VenueRepository;
-import org.springframework.cache.annotation.CacheEvict;
+import org.quwuting.quwutingservice.venue.service.VenueHeatService;
+import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,9 +30,10 @@ import java.util.*;
 public class TagInteractionService {
 
     private final TagInteractionRepository tagInteractionRepository;
-    private final VenueRepository venueRepository;
+    private final VenueLookupService venueLookupService;
     private final ObjectMapper objectMapper;
     private final TagAggregateStatsService tagAggregateStatsService;
+    private final VenueHeatService venueHeatService;
 
     /** 评分修改冷却时间（秒）：同一用户同一维度在此时间内不可重复改分，防止恶意刷分 */
     private static final long SCORE_COOLDOWN_SECONDS = 60;
@@ -46,12 +46,13 @@ public class TagInteractionService {
      * 切换标签点赞状态。
      * 首次调用=点赞，再次调用=取消。仅允许对场所当前 tags 中存在的标签操作。
      * <p>
-     * 写操作即时失效场所级聚合缓存（{@link TagAggregateStatsService}），
-     * 而不是等待 60 秒 TTL 自然过期——保证点赞后所有用户很快都能看到最新点赞数。
+     * 写操作即时失效场所级聚合缓存（{@link TagAggregateStatsService}）与热度缓存
+     * （{@link VenueHeatService}）：点赞数既是标签统计的直接输出，也是热度公式输入
+     * （likeCount30d × 3）——两个内嵌 LoadingCache 都必须显式 invalidate，
+     * 而不是等待刷新周期，保证点赞后所有用户很快看到最新值。
      *
      * @return true=当前已赞，false=当前已取消
      */
-    @CacheEvict(value = CacheConfig.CACHE_TAG_STATS, key = "#venueId")
     @Transactional
     public boolean toggleLike(Long userId, Long venueId, String tag) {
         Venue venue = assertVenueExists(venueId);
@@ -63,22 +64,26 @@ public class TagInteractionService {
         var existing = tagInteractionRepository.findByUserIdAndVenueIdAndTag(userId, venueId, tag);
         if (existing.isPresent()) {
             TagInteraction ti = existing.get();
+            boolean result;
             if (ti.isDeleted()) {
                 // 记录曾被逻辑删除（之前取消点赞且无评分），恢复并设为已赞
                 ti.setDeleted(false);
                 ti.setLiked(true);
                 tagInteractionRepository.save(ti);
-                return true;
+                result = true;
+            } else {
+                // toggle：已赞→取消，未赞→点赞
+                boolean newLiked = !ti.isLiked();
+                ti.setLiked(newLiked);
+                // 若取消点赞且无评分，该行已无业务意义，逻辑删除
+                if (!newLiked && ti.getScore() == null) {
+                    ti.setDeleted(true);
+                }
+                tagInteractionRepository.save(ti);
+                result = newLiked;
             }
-            // toggle：已赞→取消，未赞→点赞
-            boolean newLiked = !ti.isLiked();
-            ti.setLiked(newLiked);
-            // 若取消点赞且无评分，该行已无业务意义，逻辑删除
-            if (!newLiked && ti.getScore() == null) {
-                ti.setDeleted(true);
-            }
-            tagInteractionRepository.save(ti);
-            return newLiked;
+            invalidateVenueAggregates(venueId);
+            return result;
         }
 
         // 首次交互：创建新记录
@@ -93,6 +98,7 @@ public class TagInteractionService {
             // 并发竞态：另一请求已创建（liked=true），幂等返回已赞
             log.debug("toggleLike 并发冲突，幂等返回: userId={}, venueId={}, tag={}", userId, venueId, tag);
         }
+        invalidateVenueAggregates(venueId);
         return true;
     }
 
@@ -101,9 +107,9 @@ public class TagInteractionService {
     /**
      * 对评分维度打分或修改分数（仅保留最新分）。
      * 防刷机制：同一用户同一维度 60 秒内不可重复改分。
-     * 写操作即时失效场所级聚合缓存，理由同 {@link #toggleLike}。
+     * 写操作即时失效场所级聚合缓存与热度缓存，理由同 {@link #toggleLike}
+     * （评价数与满意度均为热度公式输入）。
      */
-    @CacheEvict(value = CacheConfig.CACHE_TAG_STATS, key = "#venueId")
     @Transactional
     public void score(Long userId, Long venueId, String tag, int score) {
         assertVenueExists(venueId);
@@ -129,6 +135,7 @@ public class TagInteractionService {
                 // 仅打分未点赞的记录保持 liked=false，不影响点赞统计
             }
             tagInteractionRepository.save(ti);
+            invalidateVenueAggregates(venueId);
             return;
         }
 
@@ -145,6 +152,7 @@ public class TagInteractionService {
             // 并发竞态：另一请求已创建，幂等忽略
             log.debug("score 并发冲突，幂等忽略: userId={}, venueId={}, tag={}", userId, venueId, tag);
         }
+        invalidateVenueAggregates(venueId);
     }
 
     // ─── 聚合统计 ───────────────────────────────────────────────────────
@@ -238,9 +246,17 @@ public class TagInteractionService {
 
     // ─── 内部工具 ───────────────────────────────────────────────────────
 
+    /**
+     * 写路径聚合缓存逐出：同时失效标签聚合与热度两个内嵌 LoadingCache。
+     * 任何改变 qwt_tag_interactions 的写操作完成后必须调用（见 toggleLike / score）。
+     */
+    private void invalidateVenueAggregates(Long venueId) {
+        tagAggregateStatsService.invalidate(venueId);
+        venueHeatService.invalidate(venueId);
+    }
+
     private Venue assertVenueExists(Long venueId) {
-        return venueRepository.findByIdAndDeletedFalse(venueId)
-                .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
+        return venueLookupService.findById(venueId);
     }
 
     private List<String> deserializeStringList(String json) {

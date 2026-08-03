@@ -13,12 +13,6 @@ public interface TagInteractionRepository extends JpaRepository<TagInteraction, 
 
     Optional<TagInteraction> findByUserIdAndVenueIdAndTag(Long userId, Long venueId, String tag);
 
-    /** 统计场所各标签的点赞数（仅 liked=true 且未删除），返回 Object[]{tag, count} */
-    @Query("SELECT ti.tag, COUNT(ti) FROM TagInteraction ti " +
-           "WHERE ti.venueId = :venueId AND ti.liked = true AND ti.deleted = false " +
-           "GROUP BY ti.tag")
-    List<Object[]> countLikesByVenueGroupByTag(@Param("venueId") Long venueId);
-
     /**
      * 批量统计多个场所各标签的点赞数（列表页展示标签热度用），返回 Object[]{venueId, tag, count}。
      * 一次查询覆盖整页场所，避免按场所逐条查询造成的 N+1。
@@ -46,73 +40,36 @@ public interface TagInteractionRepository extends JpaRepository<TagInteraction, 
                                                          @Param("since") LocalDateTime since,
                                                          @Param("until") LocalDateTime until);
 
-    /** 查询用户对指定场所各标签的点赞状态（liked=true 的记录） */
-    @Query("SELECT ti.tag FROM TagInteraction ti " +
-           "WHERE ti.userId = :userId AND ti.venueId = :venueId AND ti.liked = true AND ti.deleted = false")
-    List<String> findLikedTagsByUserAndVenue(@Param("userId") Long userId, @Param("venueId") Long venueId);
-
-    /** 查询用户对指定场所各标签的评分记录 */
-    @Query("SELECT ti FROM TagInteraction ti " +
-           "WHERE ti.userId = :userId AND ti.venueId = :venueId AND ti.score IS NOT NULL AND ti.deleted = false")
-    List<TagInteraction> findScoredInteractionsByUserAndVenue(@Param("userId") Long userId,
-                                                              @Param("venueId") Long venueId);
-
-    /** 统计时间范围内的评价记录数（score 非空，热度趋势用） */
-    @Query("SELECT COUNT(ti) FROM TagInteraction ti " +
-           "WHERE ti.venueId = :venueId AND ti.score IS NOT NULL AND ti.deleted = false AND ti.updatedAt >= :since")
-    long countRatingsSince(@Param("venueId") Long venueId, @Param("since") LocalDateTime since);
-
-    /** 统计时间范围内的点赞记录数（liked=true，热度趋势用） */
-    @Query("SELECT COUNT(ti) FROM TagInteraction ti " +
-           "WHERE ti.venueId = :venueId AND ti.liked = true AND ti.deleted = false AND ti.updatedAt >= :since")
-    long countLikesSince(@Param("venueId") Long venueId, @Param("since") LocalDateTime since);
-
-    /** 统计场所的评价总人数（去重 userId，score 非空） */
-    @Query("SELECT COUNT(DISTINCT ti.userId) FROM TagInteraction ti " +
-           "WHERE ti.venueId = :venueId AND ti.score IS NOT NULL AND ti.deleted = false")
-    long countDistinctRatersByVenueId(@Param("venueId") Long venueId);
-
     // ─── 合并查询（减少远程 DB 往返，性能优化） ─────────────────────────────
 
-    /** 单行多列聚合投影：评价数 + 点赞数 + 去重评价人数 */
-    interface HeatInteractionStats {
-        Long getRatingcount();
-        Long getLikecount();
-        Long getRaters();
-    }
-
     /**
-     * 单次往返同时获取：近30天评价数、近30天点赞数、总评价人数（去重）。
-     * 使用原生 SQL：JPQL 不支持 COUNT(DISTINCT CASE WHEN ...) 语法。
-     * until 为排他上界——热度统计口径固定为「截至昨日」，见 VenueHeatService 的 statsAsOfDate 约定。
+     * 点赞数 + 三窗口评分聚合的单次往返合并查询（TagAggregateStatsService 专用）。
+     * 返回 Object[]{tag, likeCount, avgAll, countAll, avg30d, count30d, avg7d, count7d}。
+     * <p>
+     * 根因：点赞计数与评分聚合本是同一张表上按 tag 分组的两个视角，早期拆成两条查询
+     * （liked=true 一条、score IS NOT NULL 一条），各占一次跨洲 DB 往返。
+     * 合并为一条：WHERE 取两类交互行的并集，SELECT 内用条件聚合分别统计——
+     * likeCount 只数 liked=true 的行，score 系列只统计 score 非空的行，互不干扰。
+     * <p>
+     * 使用原生 SQL：COUNT/SUM/AVG(CASE WHEN...) 条件聚合同时覆盖点赞与评分两个视角，
+     * 与 VenueRepository.countHeatCounters 的标量子查询 mega-query 同属"压缩 DB 往返"手段。
      */
-    @Query(value = "SELECT " +
-                   "COUNT(CASE WHEN ti.score IS NOT NULL AND ti.updated_at >= :since AND ti.updated_at < :until THEN 1 END) as ratingcount, " +
-                   "COUNT(CASE WHEN ti.liked = true AND ti.updated_at >= :since AND ti.updated_at < :until THEN 1 END) as likecount, " +
-                   "COUNT(DISTINCT CASE WHEN ti.score IS NOT NULL THEN ti.user_id END) as raters " +
-                   "FROM qwt_tag_interactions ti WHERE ti.venue_id = :venueId AND ti.deleted = false",
+    @Query(value = "SELECT ti.tag, " +
+                   "SUM(CASE WHEN ti.liked = true THEN 1 ELSE 0 END) AS like_count, " +
+                   "AVG(CASE WHEN ti.score IS NOT NULL THEN ti.score END) AS avg_all, " +
+                   "COUNT(CASE WHEN ti.score IS NOT NULL THEN 1 END) AS count_all, " +
+                   "AVG(CASE WHEN ti.score IS NOT NULL AND ti.updated_at >= :since30d THEN ti.score END) AS avg_30d, " +
+                   "SUM(CASE WHEN ti.score IS NOT NULL AND ti.updated_at >= :since30d THEN 1 ELSE 0 END) AS count_30d, " +
+                   "AVG(CASE WHEN ti.score IS NOT NULL AND ti.updated_at >= :since7d THEN ti.score END) AS avg_7d, " +
+                   "SUM(CASE WHEN ti.score IS NOT NULL AND ti.updated_at >= :since7d THEN 1 ELSE 0 END) AS count_7d " +
+                   "FROM qwt_tag_interactions ti " +
+                   "WHERE ti.venue_id = :venueId AND ti.deleted = false " +
+                   "AND (ti.liked = true OR ti.score IS NOT NULL) " +
+                   "GROUP BY ti.tag",
            nativeQuery = true)
-    HeatInteractionStats countInteractionsForHeat(@Param("venueId") Long venueId,
-                                                  @Param("since") LocalDateTime since,
-                                                  @Param("until") LocalDateTime until);
-
-    /**
-     * 单次往返同时获取各维度的全量/30天/7天评分聚合。
-     * 返回 Object[]{tag, avgAll, countAll, avg30d, count30d, avg7d, count7d}。
-     * AVG(CASE WHEN ... THEN score END) 中不满足条件的行返回 NULL，AVG 自动忽略 NULL。
-     */
-    @Query("SELECT ti.tag, " +
-           "AVG(ti.score), COUNT(ti), " +
-           "AVG(CASE WHEN ti.updatedAt >= :since30d THEN ti.score END), " +
-           "SUM(CASE WHEN ti.updatedAt >= :since30d THEN 1 ELSE 0 END), " +
-           "AVG(CASE WHEN ti.updatedAt >= :since7d THEN ti.score END), " +
-           "SUM(CASE WHEN ti.updatedAt >= :since7d THEN 1 ELSE 0 END) " +
-           "FROM TagInteraction ti " +
-           "WHERE ti.venueId = :venueId AND ti.score IS NOT NULL AND ti.deleted = false " +
-           "GROUP BY ti.tag")
-    List<Object[]> aggregateScoresMultiWindow(@Param("venueId") Long venueId,
-                                              @Param("since30d") LocalDateTime since30d,
-                                              @Param("since7d") LocalDateTime since7d);
+    List<Object[]> aggregateLikesAndScoresByTag(@Param("venueId") Long venueId,
+                                                @Param("since30d") LocalDateTime since30d,
+                                                @Param("since7d") LocalDateTime since7d);
 
     /**
      * 单次往返获取用户对指定场所的全部交互状态（点赞 + 评分）。

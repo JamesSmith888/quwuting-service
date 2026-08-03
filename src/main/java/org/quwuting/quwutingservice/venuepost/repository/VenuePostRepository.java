@@ -11,24 +11,27 @@ public interface VenuePostRepository extends JpaRepository<VenuePost, Long> {
 
     Page<VenuePost> findByVenueIdAndDeletedFalse(Long venueId, Pageable pageable);
 
-    long countByVenueIdAndDeletedFalse(Long venueId);
-
-    /** 统计时间范围内的新增动态数（热度趋势用） */
-    long countByVenueIdAndDeletedFalseAndCreatedAtAfter(Long venueId, java.time.LocalDateTime since);
-
-    /** 单行多列聚合投影：总数 + 近期新增 */
-    interface TotalRecentStats {
-        Long getTotal();
-        Long getRecent();
+    /** 详情页辅助计数合并投影：动态总数 + 当前用户状态上报标记 */
+    interface DetailStats {
+        Long getPostcount();
+        Boolean getHasmyreport();
     }
 
     /**
-     * 单次往返同时获取动态总数和窗口内新增数（热度聚合优化）。
-     * until 为排他上界——热度统计口径固定为「截至昨日」，见 VenueHeatService 的 statsAsOfDate 约定。
+     * 详情页辅助计数合并查询（单次往返）。
+     * <p>
+     * 动态总数（公共聚合）与"我是否已上报"（个人状态）原本各占一次跨洲 DB 往返，
+     * 合并为一条标量子查询 SELECT。个人状态部分必须实时计算（匿名请求 userId 传 null，
+     * EXISTS 子查询因 user_id = NULL 恒不命中，自然返回 false）。
+     * <p>
+     * 跨表说明：主表为 qwt_venue_posts，qwt_venue_status_reports 仅作只读标量子查询引用。
+     * 使用原生 SQL：JPQL 无法在单条投影中表达 EXISTS + COUNT 两个标量子查询。
      */
-    @Query("SELECT COUNT(p) as total, SUM(CASE WHEN p.createdAt >= :since AND p.createdAt < :until THEN 1 ELSE 0 END) as recent " +
-           "FROM VenuePost p WHERE p.venueId = :venueId AND p.deleted = false")
-    TotalRecentStats countTotalAndRecentByVenueId(@Param("venueId") Long venueId,
-                                                  @Param("since") java.time.LocalDateTime since,
-                                                  @Param("until") java.time.LocalDateTime until);
+    @Query(value = "SELECT " +
+                   "(SELECT COUNT(*) FROM qwt_venue_posts p " +
+                   "  WHERE p.venue_id = :venueId AND p.deleted = false) AS postcount, " +
+                   "(SELECT EXISTS(SELECT 1 FROM qwt_venue_status_reports r " +
+                   "  WHERE r.user_id = :userId AND r.venue_id = :venueId AND r.deleted = false)) AS hasmyreport",
+           nativeQuery = true)
+    DetailStats findDetailStats(@Param("venueId") Long venueId, @Param("userId") Long userId);
 }

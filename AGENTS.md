@@ -33,12 +33,12 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务。
 base/           ← 抽象基类（BaseEntity：id / createdAt / updatedAt / deleted）
 common/         ← 通用响应体（ApiResponse<T>）
 exception/      ← 自定义异常类 + @RestControllerAdvice 全局处理
-config/         ← Spring @Configuration 类（WebMvc、拦截器注册）
+config/         ← Spring @Configuration 类（WebMvc、拦截器注册）+ RequestTimingFilter（请求耗时过滤器）
 security/       ← JWT 工具、AuthInterceptor、UserContext（ThreadLocal 用户上下文）
 
 venue/          ← 场所模块（按功能分包）
   controller/   ← REST 控制器，只定义路由和参数绑定，不含业务逻辑
-  service/      ← 业务逻辑，调用 repository 并转换 DTO
+  service/      ← 业务逻辑：VenueService, VenueHeatService（热度计算 + 内嵌 refresh-ahead 缓存）, VenueViewService（浏览 upsert）, VenueLookupService（@Cacheable(sync) 场所查找缓存层）
   mapper/       ← Entity → Response DTO 转换器（@Component，跨模块复用）
   repository/   ← Spring Data JPA 接口，继承 JpaRepository
   entity/       ← JPA @Entity 实体类，映射数据库表
@@ -103,7 +103,7 @@ venuestatusreport/  ← 场所状态众包上报模块（实时暂停信号，4h
 taginteraction/ ← 标签交互模块（点赞 + 维度评分）
   controller/   ← TagInteractionController（GET /venues/{id}/tags/stats, POST .../like, POST .../score）
   service/      ← TagInteractionService（toggle 点赞、upsert 评分、个人交互状态实时查询、批量点赞数）
-                  TagAggregateStatsService（场所级聚合数据的 @Cacheable 专属 Bean，见「标签交互」章节）
+                  TagAggregateStatsService（场所级聚合数据 + 内嵌 refresh-ahead LoadingCache，见「标签交互」与「查询性能优化」章节）
   entity/       ← TagInteraction 实体（qwt_tag_interactions）
   repository/   ← TagInteractionRepository（含 GROUP BY 聚合查询、批量多场所聚合查询）
   dto/
@@ -332,24 +332,68 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 - `currentStatusDays` 沿用「营业稳定性」中"最近一条状态日志 createdAt 距今天数"的定义，是实时事实，不受"截至昨日"窗口约束
 - **活跃上报覆盖规则**：当 `VenueHeatService` 从 `StatusReportService` 获取到 `activeCount > 0`（近 4 小时有用户报告暂停）时，`computeStatusConfidence` 直接返回 `LOW`，跳过上述矩阵——众包实时信号优先级高于历史稳定性矩阵。根因：矩阵基于历史暂停记录（管理员维护的 `Venue.status` 变迁），无法反映"此刻正在发生"的关门事件；用户现场上报正是为了弥补这一滞后
 
-### 查询性能优化（条件聚合 + 本地缓存）
+### 查询性能优化（两轮：条件聚合 → 跨表合并 + refresh-ahead 缓存）
 
-热度接口和标签统计接口的 DB 往返次数已通过**条件聚合**大幅压缩：
+根因：服务器在阿里云 ECS，数据库在 Supabase（AWS ap-south-1），单次 DB 往返约 300-500ms，**接口延迟 ≈ 串行往返次数 × 单次往返**。应用层优化的唯一抓手是压缩每个接口的串行 DB 往返数；根本解是 DB 迁近区（迁移前所有新接口设计必须以"最少往返"为第一约束）。
 
-- `GET /venues/{id}/heat`：原 14 次串行 DB 往返 → 7 次（浏览 PV+UV 合并、收藏 total+30d 合并、动态 total+30d 合并、评价 rating+like+raters 合并、状态暂停+最新时间合并）
-- `GET /venues/{venueId}/tags/stats`：原 7 次 → 4 次（评分全量+30d+7d 三窗口合并为一条 `AVG(CASE WHEN...)` 查询、用户点赞+评分合并为一条）
+**第一轮（同表条件聚合）**：同一张表的多个 COUNT/aggregation 用 `SUM(CASE WHEN...)` 合并为单条 SQL。**第二轮（跨表合并 + 编排优化）**：跨表单值聚合收敛为标量子查询 mega-query、两步查询合并为联查/upsert、聚合缓存 refresh-ahead。当前各接口冷启动往返数：
 
-根因：服务器在阿里云 ECS，数据库在 Supabase（AWS ap-south-1），单次 DB 往返约 100-200ms，查询次数 × 延迟 = 接口总延迟。压缩查询次数是最直接有效的优化手段。
+| 接口 | 往返构成 | 冷启动 | 缓存命中 |
+|------|---------|--------|---------|
+| `GET /venues/{id}/heat` | mega-query(1) + 收藏趋势(1) + 满意度(0~2，raters<3 跳过) | ~1s | ~3ms |
+| `GET /venues/{venueId}/tags/stats` | 聚合（与详情页共享缓存，单飞回源 1 次）+ 个人状态(1) | ~0.5s | ~10ms |
+| `GET /venues/{id}` | venue 缓存 + tagAggregate 缓存 + postCount/hasMyReport 合并(1) | ~1.2s | ~0.5s |
+| `POST /venues/{id}/view` | upsert(1) | ~0.5s | — |
+| `GET /favorites` | 收藏+场所联查(1) + 标签点赞批量(1) | ~1s | — |
+| `GET /venues` | 主查询(1) + count(1) + 标签点赞批量(1)（hotVenueIds 缓存 5min） | ~1.2s | 同左 |
 
-**本地缓存（Caffeine，60s TTL）**：`VenueHeatService.getHeat` 和 `TagAggregateStatsService.getAggregate` 加了 `@Cacheable`。热度/标签统计是聚合数据，60 秒内的精度偏差对用户无感知，但可避免同一场所短时间内的重复计算（多用户同时浏览、同一用户切换 Tab 等场景）。缓存配置在 `config/CacheConfig`，maxSize=500，TTL=60s。
+关键合并查询（全部在对应 Repository 有根因注释）：
 
-**缓存内容的强制约束（2026-07-31 标签点赞"消失又恢复"事故后确立）**：被缓存的数据必须与请求者身份无关——只允许缓存所有用户共享的聚合结果（点赞总数、评分均值等），禁止把当前用户的个人交互状态（"我是否已赞"、"我的评分"）一并放进缓存值或缓存 key。个人状态必须在每次请求时实时查询（成本是一次简单的按 userId+venueId 查询，远低于聚合计算）。
+- `VenueRepository.countHeatCounters`：**跨 6 张表的标量子查询 mega-query**，一次往返取回热度公式与可信度所需的全部单值计数器。标量子查询是跨表合并的标准手段——各子查询均命中 `(venue_id, ...)` 索引，库内执行毫秒级，网络开销收敛为 1 次往返。多行形态（趋势时间序列、分组均值）不参与标量合并，保持独立查询
+- `TagInteractionRepository.aggregateLikesAndScoresByTag`：点赞计数 + 三窗口评分聚合单条 GROUP BY（两类交互行并集 + 条件聚合分视角统计）
+- `VenuePostRepository.findDetailStats`：动态总数 + "我是否已上报"（EXISTS 标量子查询，个人状态实时不缓存，匿名 userId=null 时 EXISTS 恒 false）
+- `FavoriteRepository.findFavoriteVenuesByUserId`：收藏 + 场所 JPQL 联查（排序键为收藏 createdAt），取代"查收藏再批量查场所"两步
+- `VenueViewRepository.upsertView`：`INSERT ... ON CONFLICT ON CONSTRAINT ... DO NOTHING` 无条件幂等写入，取代 check-then-act（SELECT 存在性 + INSERT + catch）。**约定：有唯一约束的幂等写入一律 upsert**，check-then-act 多一次往返且存在并发窗口
 
-根因：早期 `TagInteractionService.getTagStats` 以 `{venueId, userId}` 为 key 整体缓存（含 likedByMe/myScore），点赞/评分写操作未失效缓存，用户点赞后 60 秒 TTL 内会出现"返回列表再进入详情页看到操作前的状态"；因用户重新打开小程序的间隔通常 > 60s，缓存已自然过期，问题被掩盖，误判为"完全重启后恢复正常"是预期行为。修复方案：聚合数据（点赞计数、评分均值）拆到独立的 `TagAggregateStatsService`，以 venueId 为 key 缓存；个人交互状态在 `TagInteractionService.getTagStats` 中永远实时查询、不缓存；同时 toggleLike/score 写操作对聚合缓存做 `@CacheEvict`，不必等待 TTL 自然过期，保证点赞后所有用户很快就能看到最新点赞数。
+**聚合缓存（refresh-ahead，服务内嵌 Caffeine LoadingCache）**：`venueHeat`（VenueHeatService）与 `tagStats`（TagAggregateStatsService）**不走 Spring CacheManager**——`refreshAfterWrite` 要求 LoadingCache（构建时提供 loader，否则启动报 `refreshAfterWrite requires a LoadingCache`），Spring 缓存抽象无法为单个缓存注入各自的加载器。故采用与 AuthInterceptor 用户缓存相同的"服务内嵌原生 Caffeine"模式：loader 即聚合计算方法本身，获得四项语义：
 
-**Spring `@Cacheable` 自调用陷阱（必须知晓）**：Spring 基于动态代理实现 AOP，方法内部通过 `this.xxx()` 调用同类的另一个 `@Cacheable`/`@CacheEvict` 方法会绕开代理，注解静默失效（不报错，但缓存/失效都不生效）。这是 `TagAggregateStatsService` 被拆成独立 Bean 而非 `TagInteractionService` 内部私有方法的直接原因——被缓存的方法必须从另一个 Bean 上调用。新增任何带缓存注解的方法时，若调用方和被调用方在同一个类里，先检查是否触发此陷阱。
+1. **预刷新**：`refreshAfterWrite(60s)`——条目写入 60s 后，下一次访问立即返回旧值并**异步**重载。活跃场所的用户不再周期性吃到同步冷加载（早期 `expireAfterWrite(60s)` 硬过期导致每 60 秒出现一个 2s+ 慢请求，这是二轮优化要消除的核心症状）
+2. **单飞**：同 key 并发回源只加载一次（LoadingCache 天然语义），详情页并发请求共享同一份回源
+3. **刷新失败保留旧值**：瞬态 DB 抖动降级为数据滞后而非请求失败
+4. **硬过期兜底**：`expireAfterWrite(30min)`，仅长期无访问的条目被驱逐
 
-**新增查询时的约定**：当一个 Service 方法需要同一张表的多个 COUNT/aggregation 时，优先用 `SUM(CASE WHEN condition THEN 1 ELSE 0 END)` 合并为单条 SQL，不拆多次往返。JPQL 不支持 `COUNT(DISTINCT CASE WHEN...)` 时，使用 `@Query(nativeQuery = true)` 并注明原因。
+异步刷新运行在 ForkJoinPool.commonPool，无请求上下文——被缓存值必须与请求者身份无关（见「缓存内容的强制约束」），这是 refresh-ahead 安全的前提。
+
+**实体缓存（Spring CacheManager + sync=true）**：`venueCache`（60s）与 `hotVenueIds`（5min）仍由 `config/CacheConfig` 托管，`@Cacheable(sync = true)`。sync=true 使 Spring 走 `cache.get(key, loader)` 路径，获得与 LoadingCache 相同的单飞语义（非 sync 的 `@Cacheable` 并发冷请求会重复回源）。这两类缓存是单查询低成本加载，到期单飞冷加载可接受，不用 refresh-ahead。
+
+**写路径缓存逐出（显式化）**：聚合缓存改为内嵌 LoadingCache 后，失效从 `@CacheEvict` 注解改为**显式调用属主服务的 `invalidate(venueId)`**（注解无法作用于非 Spring 托管缓存）。完整逐出矩阵——任何改变热度/标签聚合输入的写操作完成后必须逐出对应缓存：
+
+| 写操作 | 逐出动作 |
+|--------|---------|
+| toggleLike / score（TagInteractionService） | `tagAggregateStatsService.invalidate` + `venueHeatService.invalidate` |
+| addFavorite / removeFavorite（FavoriteService） | `venueHeatService.invalidate`（收藏数是热度输入；幂等无写入分支不逐出） |
+| submitReport / cancelReport（StatusReportService） | `venueHeatService.invalidate`（活跃报告数是热度输出） |
+| createPost（VenuePostService） | `venueHeatService.invalidate` + `@CacheEvict(hotVenueIds, allEntries)`（动态数参与热度与热门排序） |
+| updateVenue（VenueService） | `@Caching` 逐出 venueCache + hotVenueIds + `tagAggregateStatsService.invalidate`（tags 是聚合组装依据）+ `venueHeatService.invalidate`（status/状态日志是热度输出） |
+| createVenue（VenueService） | `@CacheEvict(hotVenueIds, allEntries)`（新场所无缓存存量） |
+
+**VenueLookupService（场所查找缓存层）**：独立 Bean（与 `TagAggregateStatsService` 同模式——避免 `@Cacheable` 自调用陷阱），包装 `VenueRepository.findByIdAndDeletedFalse` 和 `findHotVenueIds`。详情页并发请求（详情/标签统计/热度）查询同一场所实体——缓存后仅首个请求回源（sync=true 单飞）。**写路径不使用本缓存**：`VenueService.updateVenue` 直接调用 Repository，通过 `@CacheEvict` 即时失效 `venueCache` 和 `hotVenueIds`。
+
+此外，`AuthInterceptor` 内嵌 Caffeine 用户缓存（2min TTL，maxSize=500，直接使用 Caffeine API 非 Spring CacheManager），消除每个带 token 请求的鉴权查库往返。
+
+**`@CacheEvict` 不可重复（Spring 4.x 平台坑位）**：Spring Boot 4.x 中 `@CacheEvict` 不是 `@Repeatable`，同一方法上写两个 `@CacheEvict` 会编译报错。需用 `@Caching(evict = { @CacheEvict(...), @CacheEvict(...) })` 包装多个失效操作。`VenueService.updateVenue` 即用此模式同时失效 `venueCache`（按 key）和 `hotVenueIds`（allEntries）。
+
+**缓存内容的强制约束（2026-07-31 标签点赞"消失又恢复"事故后确立）**：被缓存的数据必须与请求者身份无关——只允许缓存所有用户共享的聚合结果（点赞总数、评分均值等），禁止把当前用户的个人交互状态（"我是否已赞"、"我的评分"）一并放进缓存值或缓存 key。个人状态必须在每次请求时实时查询（成本是一次简单的按 userId+venueId 查询，远低于聚合计算）。此约束同时是 refresh-ahead 异步刷新安全的前提（刷新线程无请求上下文）。
+
+根因：早期 `TagInteractionService.getTagStats` 以 `{venueId, userId}` 为 key 整体缓存（含 likedByMe/myScore），点赞/评分写操作未失效缓存，用户点赞后 60 秒 TTL 内会出现"返回列表再进入详情页看到操作前的状态"；因用户重新打开小程序的间隔通常 > 60s，缓存已自然过期，问题被掩盖，误判为"完全重启后恢复正常"是预期行为。修复方案：聚合数据（点赞计数、评分均值）拆到独立的 `TagAggregateStatsService`，以 venueId 为 key 缓存；个人交互状态在 `TagInteractionService.getTagStats` 中永远实时查询、不缓存；写操作显式 `invalidate`，不等待刷新周期，保证点赞后所有用户很快看到最新点赞数。
+
+**Spring `@Cacheable` 自调用陷阱（必须知晓）**：Spring 基于动态代理实现 AOP，方法内部通过 `this.xxx()` 调用同类的另一个 `@Cacheable`/`@CacheEvict` 方法会绕开代理，注解静默失效（不报错，但缓存/失效都不生效）。被缓存的方法必须从另一个 Bean 上调用。内嵌 LoadingCache 的 loader（`this::computeXxx`）同理不走代理——loader 方法不要挂任何依赖 AOP 的注解（事务、缓存），其内部调用其他 Bean 的代理方法（如 `venueLookupService.findById`）仍然生效。
+
+**新增查询时的约定**：
+- 同一张表的多个 COUNT/aggregation → `SUM(CASE WHEN...)` 条件聚合合并为单条 SQL；JPQL 不支持 `COUNT(DISTINCT CASE WHEN...)` 时用 `@Query(nativeQuery = true)` 并注明原因
+- 跨表的多个**单值**聚合 → 标量子查询 mega-query 合并为 1 次往返（见 `countHeatCounters`）；多行形态（时间序列/分组）保持独立查询
+- 有唯一约束的幂等写入 → `INSERT ... ON CONFLICT DO NOTHING` upsert，禁止 check-then-act
+- 主从两步查询（先查关系表再查实体表）→ 评估能否联查（见 `findFavoriteVenuesByUserId`）
 
 ---
 
@@ -417,11 +461,11 @@ LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);  
 - `note` 字段存储于 DB 但**不公开返回**（`ActiveReportSummary` 仅含 `activeCount` + `latestReportTime`），仅供管理端查看（`StatusReportResponse` 含 note，后续管理接口使用）
 - `ReportReason` 枚举命名避免敏感词：`CHECK`（门店检查）、`UNKNOWN`（情况不明）、`CLEARED`（清场）——不出现"警察/扫黄"等微信审核敏感词
 
-### 缓存失效（跨 Bean @CacheEvict）
+### 缓存失效（显式 invalidate 热度缓存）
 
-`submitReport` 和 `cancelReport` 标注 `@CacheEvict(value = CACHE_VENUE_HEAT, key = "#venueId")`，写入后立即失效热度缓存。`CACHE_VENUE_HEAT` 的属主是 `VenueHeatService`，跨 Bean 失效是 Spring 缓存的标准能力（缓存名全局唯一），与 `TagInteractionService` 失效 `CACHE_TAG_STATS`（属主 `TagAggregateStatsService`）同模式。
+`submitReport` 和 `cancelReport` 在写入完成后调用 `venueHeatService.invalidate(venueId)` 显式失效热度缓存（热度为 `VenueHeatService` 内嵌 LoadingCache，不走 Spring `@CacheEvict`，见「查询性能优化 → 写路径缓存逐出」）。活跃报告数是热度响应的输出之一，上报/撤销后必须让其他用户及时看到最新信号。
 
-`getActiveReportSummary()` 本身不缓存（无 `@Cacheable`），由 `VenueHeatService.getHeat()` 的 `@Cacheable` 包裹，60s TTL 内的重复请求命中缓存。
+`getActiveReportSummary()` 本身不缓存，仅供 `submitReport` / `cancelReport` 组装响应使用——热度接口已不经由它，活跃上报计数内联在热度 mega-query（`countHeatCounters`）的标量子查询中，随热度缓存整体命中/逐出。
 
 ---
 
@@ -578,8 +622,8 @@ Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(
 `VenueResponse` 新增 `isHot` 字段（boolean），标记该场所在同城市中属于热门场所。
 
 - **城市内相对排名**：按复合评分（见「复合评分排序」）在同城市场所中取 top 20%，最少 1 个。即"热门"是相对同城市其他场所而言，不是绝对分数阈值
-- **查询实现**：`VenueRepository.findHotVenueIds()` 使用 PostgreSQL 窗口函数（`ROW_NUMBER() OVER (PARTITION BY city ORDER BY score DESC)`）在库内完成城市内排名，避免在 Java 侧逐城市遍历。排序口径为 `sortWeight + 收藏数×20 + 动态数×10`（与列表查询的无坐标变体一致，不含距离项——距离是用户维度，场所热度排名不应因请求者位置变化）。Service 层在 `listVenues` 中无条件调用此方法，获取热门 ID 集合后转为 `Set<Long>` 供 `result.map()` 内 `contains` 检查
-- **VenueResponseMapper 三参重载**：`toResponse(Venue, Map<String, Long> tagLikeCounts, boolean isHot)` ——在已有双参重载基础上追加 `isHot` 参数。Service 层先调用 `venueRepository.findHotVenueIds()` 获取热门 ID 集合并转为 `Set<Long>`，再在 `result.map()` 中传入 `hotVenueIds.contains(v.getId())`。双参重载默认 `isHot=false`，单参重载亦默认 `isHot=false`（创建/编辑回显场景无需热门标记）
+- **查询实现**：`VenueRepository.findHotVenueIds()` 使用 PostgreSQL 窗口函数（`ROW_NUMBER() OVER (PARTITION BY city ORDER BY score DESC)`）在库内完成城市内排名，避免在 Java 侧逐城市遍历。排序口径为 `sortWeight + 收藏数×20 + 动态数×10`（与列表查询的无坐标变体一致，不含距离项——距离是用户维度，场所热度排名不应因请求者位置变化）。Service 层通过 `VenueLookupService.getHotVenueIds()`（`@Cacheable(CACHE_HOT_VENUE_IDS)`，5min TTL）获取热门 ID 集合，缓存命中时 <1ms，未命中时执行全表窗口函数查询。场所创建/更新时通过 `@CacheEvict(allEntries=true)` 即时失效
+- **VenueResponseMapper 三参重载**：`toResponse(Venue, Map<String, Long> tagLikeCounts, boolean isHot)` ——在已有双参重载基础上追加 `isHot` 参数。Service 层先调用 `venueLookupService.getHotVenueIds()` 获取热门 ID 集合（`Set<Long>`），再在 `result.map()` 中传入 `hotVenueIds.contains(v.getId())`。双参重载默认 `isHot=false`，单参重载亦默认 `isHot=false`（创建/编辑回显场景无需热门标记）
 
 ---
 
@@ -834,9 +878,21 @@ public class GlobalExceptionHandler {
 - Controller 层禁止 try-catch，统一由 `GlobalExceptionHandler` 处理
 - 日志用 `@Slf4j`，错误级别：业务异常用 `warn`，系统异常用 `error`
 
-### 并发写入竞态处理（唯一约束 + catch 模式）
+### 并发写入竞态处理（upsert 优先，唯一约束 catch 兜底）
 
-对有唯一约束的 INSERT 操作（收藏、标签交互、浏览记录等），check-then-act 存在并发窗口：两个请求同时通过"不存在"检查后都尝试 INSERT，第二个触发唯一约束异常。标准处理模式：
+有唯一约束的写入分两类，处理方式不同：
+
+**① 纯幂等插入（不需要已有行状态）→ `ON CONFLICT DO NOTHING` upsert，首选**。单次 DB 往返完成"不存在则插入、存在则忽略"，去重与并发竞态全部由库内唯一约束兜底，无并发窗口：
+
+```java
+@Query(value = "INSERT INTO ... VALUES (...) ON CONFLICT ON CONSTRAINT <约束名> DO NOTHING",
+       nativeQuery = true)
+void upsertXxx(...);
+```
+
+实例：`VenueViewService.recordView`（浏览记录按天去重）。早期实现为 check-then-act（先 SELECT 存在性再 INSERT），多一次跨洲往返且 SELECT 与 INSERT 之间存在并发窗口——upsert 同时消除两者。
+
+**② 需要依据已有行状态分支（恢复软删 / toggle / 频率限制）→ find-then-modify + 唯一约束 catch 兜底**。此类场景 SELECT 是"必要读"（要拿到已有行才能决定更新/恢复/切换），不属于冗余往返；check-then-act 的并发窗口由 catch 收口：
 
 ```java
 try {
@@ -847,9 +903,46 @@ try {
 }
 ```
 
-适用条件：INSERT 是幂等的（重复插入不影响业务语义）。若 INSERT 后还需后续操作（如 toggle），冲突时应重新查询已有记录再执行后续逻辑。
+实例：`FavoriteService.addFavorite`（软删恢复）、`TagInteractionService.toggleLike/score`（toggle + 冷却检查）、`StatusReportService.submitReport`（软删恢复 + TTL 续期，catch 后必须 `entityManager.clear()`）。若 INSERT 后还需后续操作（如 toggle），冲突时应重新查询已有记录再执行后续逻辑。
 
-已有实例：`VenueViewService.recordView`、`FavoriteService.addFavorite`、`TagInteractionService.toggleLike/score`。
+---
+
+## 请求耗时日志（慢请求定位）
+
+2026-08 接口慢排查后确立。项目早期请求级埋点为零，"慢"无法归因（后端处理 / 网络传输 / 客户端排队无从区分）。慢请求定位依赖以下两层埋点，前后端日志经同一个 `X-Request-Id` 关联。
+
+### RequestTimingFilter（config/RequestTimingFilter.java）
+
+Servlet Filter（继承 `OncePerRequestFilter`，`@Component` 自动注册 + `@Order(Ordered.HIGHEST_PRECEDENCE)`），统一记录所有请求的端到端处理耗时：
+
+```
+INFO  [http] GET /venues/14/tags/stats -> 200 cost=9ms rid=r3-m1abc
+WARN  [http] GET /venues/14 -> 200 cost=2412ms rid=r4-m1abd [SLOW]
+```
+
+- `cost` 覆盖 Filter → AuthInterceptor → Controller → Service 全链路，即"服务端处理耗时"。前端同 rid 日志的 cost − 后端 cost ≈ 网络传输开销（含 Cloudflare Tunnel）
+- `SLOW_THRESHOLD_MS`（当前 1000ms，依据单次跨洲 DB 往返 ~300-500ms 定档）及以上升级为 WARN，便于日志中快速筛出慢请求
+- `rid` 读取前端 `X-Request-Id` 请求头（小程序 `services/requestPerf.ts` 生成）；无此头的请求（curl 等）自动生成 `s` 前缀 ID
+- 必须保持最高优先级：若其他 Filter 排在其前，计时将漏掉前置处理
+
+### AuthInterceptor 用户缓存计时
+
+软鉴权对 JWT 验签后，用户实体通过**内嵌 Caffeine 缓存**（2min TTL，maxSize=500）查询，不再每个请求都查库。`preHandle` 对 JWT 验签与用户查找分别计时，输出 `[auth] uid=.. jwtVerify=..ms lookup=..ms`。`lookup` 在缓存命中时 <1ms，未命中时 = 完整 DB 往返（300~700ms）。role 取自 DB（经缓存），不取自 JWT payload——保证管理员调整角色后 2 分钟内生效。新增鉴权链路逻辑时保持该计时结构。
+
+### 已知慢请求基线（2026-08 二轮优化后实测）
+
+- 服务器 ↔ Supabase（AWS ap-south-1）单次 DB 往返约 300~500ms——应用层无法改变的单次成本，只能压缩往返次数
+- **缓存层**：AuthInterceptor 用户缓存（2min）消除每请求鉴权查库；VenueLookupService 场所缓存（60s，sync 单飞）消除详情页重复场所查询；热门场所 ID 缓存（5min）消除列表窗口函数全表扫描；热度/标签聚合为内嵌 LoadingCache（refresh-ahead，见「查询性能优化」）
+- 二轮优化后实测（本地开发机，缓存命中 vs 冷启动）：
+  - `GET /venues/{id}/heat`：~3ms（缓存命中）/ ~870ms（冷启动，mega-query+趋势 2~4 往返）vs 一轮优化后冷启动 ~2100ms
+  - `GET /venues/{venueId}/tags/stats`：~10ms（聚合缓存被详情请求预热共享）/ ~500ms（冷）
+  - `GET /venues/{id}`（详情）：~480ms（venue+聚合缓存命中，仅 detailStats 1 往返）/ ~1200ms（冷）vs 优化前 ~1600ms
+  - `POST /venues/{id}/view`：~500ms（upsert 1 往返）vs 优化前 ~800ms
+  - `GET /favorites`（收藏）：~1000ms（联查+标签批量 2 往返）vs 优化前 ~1160ms
+  - `GET /venues`（列表）：~1200-2400ms（主查询+count+标签批量 3 往返，冷启动含 hotVenueIds 窗口函数）
+  - 详情页首屏（前端 onLoad 四请求并发）：≈ max(各请求耗时)，不再串行叠加；聚合缓存单飞使并发请求共享回源
+- **剩余根因级优化（待决策）**：DB 迁移至近区（如 ap-southeast-1 / ap-northeast-1），单次往返可降至 60~100ms，所有接口延迟按比例下降。应用层往返压缩已接近形态下限，迁库是下一个数量级的收益
+- 定位顺序：先筛 WARN 的 `[SLOW]` 日志确定后端 cost → 与前端 `[http]` 日志同 rid 对比确定网络占比 → 看 `[auth]` 日志确定 lookup 是缓存命中还是 DB 回源
 
 ---
 
@@ -995,6 +1088,15 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 - 禁止「近 N 天」滚动窗口统计只传 `since` 不传 `until` 上界——必须锚定「截至昨日」（`until = 今天 0 点`），不得让当天未走完的部分数据混入窗口聚合（见「统计口径：截至昨日」章节）
 - 禁止用户状态上报修改 `Venue.status` 字段——上报是独立信号层，`Venue.status` 变更权属管理员/认领人（见「场所状态上报」章节）
 - 禁止在 `ActiveReportSummary`（公开响应）中返回 `note` 字段——note 仅管理端可见，审核安全要求（见「场所状态上报 → 审核安全」）
+- 禁止降低 `RequestTimingFilter` 的优先级或在其中加入业务逻辑——必须保持 `HIGHEST_PRECEDENCE` 且纯观测，否则计时漏掉前置处理或引入额外延迟（见「请求耗时日志」章节）
+- 禁止在拦截器中对每个请求发起无缓存的 DB 查询——跨洲往返 300~700ms × 每请求 = 接口延迟翻倍。拦截器中的高频查找必须使用本地缓存（Caffeine，见 `AuthInterceptor` 用户缓存模式）
+- 禁止在同一方法上堆叠多个 `@CacheEvict` 注解——Spring Boot 4.x 中 `@CacheEvict` 不可重复（`@Repeatable`），编译报错。必须用 `@Caching(evict = { ... })` 包装（见「查询性能优化 → @CacheEvict 不可重复」）
+- 禁止在 fire-and-forget 端点（如 `POST /venues/{id}/view`）中做冗余的场所存在性检查——由调用方（详情页 `GET /venues/{id}`）已校验，fire-and-forget 端点的 DB 查询是纯延迟负担
+- 禁止对有唯一约束的幂等写入用 check-then-act（先 SELECT 存在性再 INSERT + catch 冲突）——一律 `INSERT ... ON CONFLICT DO NOTHING` upsert，单次往返且无并发窗口（见 `VenueViewRepository.upsertView`）
+- 禁止跨表的多个单值聚合各发独立查询——收敛为一条标量子查询 mega-query（见 `VenueRepository.countHeatCounters`）；接口延迟 ≈ 串行往返 × 300~500ms，往返数是第一设计约束
+- 禁止用 `@CacheEvict` 失效 venueHeat / tagStats——二者是服务内嵌 LoadingCache（非 Spring 托管），必须显式调用属主服务 `invalidate(venueId)`；漏掉任何一条写路径的逐出都会造成统计滞后（见「查询性能优化 → 写路径缓存逐出」矩阵）
+- 禁止 `@Cacheable` 省略 `sync = true`——非 sync 的并发冷请求会重复回源（thundering herd），且无法获得单飞语义
+- 禁止内嵌 LoadingCache 的 loader 方法挂 `@Transactional`/`@Cacheable` 等 AOP 注解——loader 经 `this::` 引用直接调用，绕开代理静默失效；loader 内的查询各自走隐式只读事务（见 `VenueHeatService.computeHeat`）
 
 ---
 
@@ -1026,6 +1128,15 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 | 列表页展示的关联统计按 venueId 循环单独查询 | 收集整页 venueId 后一次 `IN (...)` 批量查询（如 `TagInteractionService.batchGetTagLikeCounts`） |
 | 用 venuefeedback 做实时状态上报（误用异步审核做实时信号） | venuefeedback = 异步管理员审核流程；venuestatusreport = 实时 4h TTL 众包信号。两者共存，不可混用（见「场所状态上报」章节） |
 | 用户上报后修改 Venue.status | 用户上报是独立信号层，不改 Venue.status；管理员后续可决定是否据此手动更新（见「独立信号层」章节） |
+| 拦截器中对每个请求 `findById` 查库（无缓存） | 用 Caffeine 内嵌缓存（2min TTL），缓存命中 <1ms，见 `AuthInterceptor` 用户缓存模式 |
+| 在同一方法上写两个 `@CacheEvict` | Spring Boot 4.x 中 `@CacheEvict` 不可重复，编译报错；用 `@Caching(evict = { ... })` 包装 |
+| 收藏列表逐个 `findByIdAndDeletedFalse` 查场所（N+1） | 用 `findByIdInAndDeletedFalse(List<Long>)` 批量查询，1 次往返替代 N 次 |
+| fire-and-forget 端点做冗余场所存在性检查 | 由调用方（详情页 GET /venues/{id}）已校验，fire-and-forget 端点不做重复 DB 查询 |
+| 有唯一约束的幂等写入先 SELECT 再 INSERT | `INSERT ... ON CONFLICT DO NOTHING` upsert 单次往返（见 `upsertView`），check-then-act 多一次往返且有并发窗口 |
+| 跨表聚合一个表一条查询串成长链 | 单值聚合收敛为标量子查询 mega-query（见 `countHeatCounters`），多行形态才独立查询 |
+| 用 @CacheEvict 失效 venueHeat / tagStats | 内嵌 LoadingCache 不走 Spring 缓存，显式调用 `venueHeatService.invalidate` / `tagAggregateStatsService.invalidate` |
+| 新增写操作后忘记逐出聚合缓存 | 对照「查询性能优化 → 写路径缓存逐出」矩阵补 invalidate，缓存新鲜度主保障是写路径显式逐出 |
+| `@Cacheable` 不写 sync / 给内嵌缓存 loader 挂 AOP 注解 | `@Cacheable` 一律 `sync = true`（单飞）；loader 经 this:: 直调绕开代理，不挂事务/缓存注解 |
 
 ---
 
