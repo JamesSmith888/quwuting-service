@@ -1,0 +1,12 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.39-trip",
+  "base_commit_sha": "82f54f62de9db58a194702eb2c7d08dd24cef33c",
+  "prompts": {},
+  "humans": {
+    "h_fbb9b8e239a0dd": {
+      "author": "James Smith(杨鑫) <xin.y@trip.com>"
+    }
+  }
+}
