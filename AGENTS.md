@@ -11,8 +11,9 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务。
 # 编译
 ./mvnw clean compile
 
-# 运行测试
-./mvnw test
+# 运行测试（contextLoads 需连库，约定带 dev profile 执行，
+# 同时验证 SchemaIntegrityChecker 对真实库的完整性检查）
+./mvnw test -Dspring.profiles.active=dev
 
 # 打包（跳过测试）
 ./mvnw clean package -DskipTests
@@ -33,7 +34,7 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务。
 base/           ← 抽象基类（BaseEntity：id / createdAt / updatedAt / deleted）
 common/         ← 通用响应体（ApiResponse<T>）
 exception/      ← 自定义异常类 + @RestControllerAdvice 全局处理
-config/         ← Spring @Configuration 类（WebMvc、拦截器注册）+ RequestTimingFilter（请求耗时过滤器）
+config/         ← Spring @Configuration 类（WebMvc、拦截器注册）+ RequestTimingFilter（请求耗时过滤器）+ SchemaIntegrityChecker（启动时 Schema 完整性检查，fail-fast）
 security/       ← JWT 工具、AuthInterceptor、UserContext（ThreadLocal 用户上下文）
 
 venue/          ← 场所模块（按功能分包）
@@ -631,6 +632,8 @@ Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(
 
 `src/main/resources/db/seed-dev.sql` 提供开发环境种子数据（5 个场所、3 个用户、4 条动态、3 条收藏），覆盖已认领 / 未认领、各场所状态、商家 / 平台动态等场景。使用方式：应用以 dev profile 启动一次（自动建表）后，在 Supabase SQL Editor 或 psql 中手动执行。脚本末尾通过 `setval` 重置 IDENTITY 序列，避免后续自增 ID 冲突。
 
+`src/main/resources/db/repair-schema-identity.sql` 是 2026-08-04 迁移事故的**幂等修复脚本**（回填 NULL id 脏行、重建主键、恢复 IDENTITY、序列定位、恢复 NOT NULL 与默认值），也是任何手工建库/迁库后结构不达标时的标准修复入口。见「Schema 完整性与数据库迁移规范」。
+
 ---
 
 ## HTTP API 规范
@@ -1046,6 +1049,39 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 
 ---
 
+## Schema 完整性与数据库迁移规范
+
+### 事故根因（2026-08-04 确立）
+
+DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：索引和唯一约束保留了，但 **IDENTITY（序列）、主键、NOT NULL、列默认值全部丢失**——9 张 `qwt_*` 表的 id 列全部退化为可空 bigint。损坏极具欺骗性：
+
+- Hibernate `ddl-auto: validate` 只校验表/列存在、类型、索引、唯一键，**不校验主键/identity/NOT NULL**（见 `AbstractSchemaValidator`），启动期毫无告警
+- 读/更新路径不依赖生成主键，一切正常
+- 不回读主键的写入（view upsert）静默积累 id=NULL 脏行
+- 首个 IDENTITY 插入才爆炸：编辑场所改状态触发状态变迁日志写入 → `AssertionFailure: null identifier`（Hibernate 经 JDBC `getGeneratedKeys()` 回读主键，pgjdbc 附加 `RETURNING *`，但 id 列无 identity，插入成功而主键为 NULL）
+
+同一套库上**一切新增写入**（新建场所、收藏、动态、上报、评分）全部损坏，状态变更只是第一个撞上的。
+
+### SchemaIntegrityChecker（config/SchemaIntegrityChecker.java）
+
+启动时 Schema 完整性检查，**fail-fast**（`ApplicationRunner` 抛异常拒绝启动）：
+
+- 基于 JPA 元模型自动枚举全部实体表（`@Table` 名 + 主键属性名），**零硬编码表名**；新增实体自动纳入检查
+- 单次 `pg_catalog` 目录查询（跨洲往返昂贵，禁止逐表查询）校验每张表：主键存在且与实体主键列一致、主键列 NOT NULL、主键列具备 IDENTITY 或序列默认值
+- 仅对 PostgreSQL 生效，其他数据库（测试用 H2）跳过
+- 主键机制损坏时一切写入必然失败或产生脏数据——拒绝启动优于静默损坏
+
+任何环境（本地/生产）启动服务即完成一次完整性校验。**手工变更过数据库结构后，必须启动一次服务确认检查通过**。
+
+### 数据库迁移规范（强制）
+
+- **逻辑迁移一律使用 `pg_dump -Fc` + `pg_restore`**：完整保留 IDENTITY、序列（含当前值）、主键、NOT NULL、默认值、索引、约束
+- **禁止 GUI 工具（DataGrip/DBeaver/Supabase 控制台）拖拽或导出-导入复制表结构**——此类工具按普通列类型重建表，系统性丢失 identity/序列/主键
+- 任何方式手工建库/迁库后：① 启动服务（完整性检查兜底）；② 若检查失败，执行 `src/main/resources/db/repair-schema-identity.sql`（幂等：回填 NULL id 脏行、重建主键、恢复 IDENTITY、序列定位到 max(id)、恢复 NOT NULL 与列默认值）
+- 带显式 id 导入数据后**必须重置序列**（`setval` 到 max(id)），否则下一次插入即主键冲突——修复脚本已内置此步骤
+
+---
+
 ## 命名规范
 
 | 类别 | 规则 | 示例 |
@@ -1097,6 +1133,9 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 - 禁止用 `@CacheEvict` 失效 venueHeat / tagStats——二者是服务内嵌 LoadingCache（非 Spring 托管），必须显式调用属主服务 `invalidate(venueId)`；漏掉任何一条写路径的逐出都会造成统计滞后（见「查询性能优化 → 写路径缓存逐出」矩阵）
 - 禁止 `@Cacheable` 省略 `sync = true`——非 sync 的并发冷请求会重复回源（thundering herd），且无法获得单飞语义
 - 禁止内嵌 LoadingCache 的 loader 方法挂 `@Transactional`/`@Cacheable` 等 AOP 注解——loader 经 `this::` 引用直接调用，绕开代理静默失效；loader 内的查询各自走隐式只读事务（见 `VenueHeatService.computeHeat`）
+- 禁止用 GUI 工具（DataGrip/DBeaver/Supabase 控制台）拖拽或导出-导入方式复制表结构迁移数据库——此类工具按普通列类型重建表，系统性丢失 IDENTITY/序列/主键/NOT NULL，且 Hibernate validate 无法发现（见「Schema 完整性与数据库迁移规范」）；逻辑迁移一律 `pg_dump -Fc` + `pg_restore`
+- 禁止绕过或降级 `SchemaIntegrityChecker`（如改为仅告警、加开关跳过）——主键机制损坏时一切写入必然失败或产生 id=NULL 脏数据，fail-fast 是唯一正确语义（见「Schema 完整性与数据库迁移规范」）
+- 禁止手工建库/迁库后不启动服务验证——启动即触发 Schema 完整性检查，是手工变更结构后的强制验收步骤
 
 ---
 
@@ -1137,6 +1176,9 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 | 用 @CacheEvict 失效 venueHeat / tagStats | 内嵌 LoadingCache 不走 Spring 缓存，显式调用 `venueHeatService.invalidate` / `tagAggregateStatsService.invalidate` |
 | 新增写操作后忘记逐出聚合缓存 | 对照「查询性能优化 → 写路径缓存逐出」矩阵补 invalidate，缓存新鲜度主保障是写路径显式逐出 |
 | `@Cacheable` 不写 sync / 给内嵌缓存 loader 挂 AOP 注解 | `@Cacheable` 一律 `sync = true`（单飞）；loader 经 this:: 直调绕开代理，不挂事务/缓存注解 |
+| 用 DataGrip 等 GUI 工具拖拽复制表做数据库迁移 | `pg_dump -Fc` + `pg_restore` 保留 identity/序列/主键；GUI 拖拽系统性丢失这些属性且 Hibernate validate 查不出来（见「Schema 完整性与数据库迁移规范」） |
+| 遇到 `AssertionFailure: null identifier` 去改业务代码 | 根因在数据库：id 列丢失 IDENTITY/主键（多为迁移事故）。执行 `db/repair-schema-identity.sql` 修复，不从代码层绕 |
+| 带显式 id 导入数据后不重置序列 | `setval` 到 max(id)，否则下一次插入主键冲突（修复脚本已内置；手工导入必须做） |
 
 ---
 
