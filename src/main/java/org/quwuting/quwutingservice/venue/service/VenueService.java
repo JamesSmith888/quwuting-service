@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
 import org.quwuting.quwutingservice.user.enums.UserRole;
@@ -162,7 +163,10 @@ public class VenueService {
     @Transactional(readOnly = true)
     public VenueDetailResponse getVenueDetail(Long id) {
         Venue venue = venueLookupService.findById(id);
-        List<ReactionBadge> topReactions = venueReactionService.getBadges(id, UserContext.getCurrentUserId());
+        // 详情基础响应的徽标固定取默认窗口（近7天）——详情页 Reaction 完整统计走 /reactions/stats
+        // （四窗口全量），本字段仅承载列表快照/兜底展示，不参与详情页 Reaction UI 主流程
+        List<ReactionBadge> topReactions = venueReactionService.getBadges(
+                id, UserContext.getCurrentUserId(), ReactionWindow.DAYS_7);
         VenueResponse base = venueResponseMapper.toResponse(venue, topReactions);
         VenuePostRepository.DetailStats detailStats =
                 venuePostRepository.findDetailStats(id, UserContext.getCurrentUserId());
@@ -181,11 +185,15 @@ public class VenueService {
      * 拆分为两个查询而非传 null 参数：Postgres 将无类型的 null 绑定参数推断为 bytea，
      * 会使 radians() 解析失败。
      * 城市/区县按标准行政区划名精确匹配——写入与查询共用 region picker 词表，禁止模糊匹配。
+     * <p>
+     * {@code window} 控制卡片 Top Reaction 徽标的排序/筛选窗口（近7天/近30天/全部，
+     * 默认近7天——舞厅强时间变化场景，列表默认展示近期热度，见 AGENTS.md「Reaction 快速反馈系统」）。
      */
     @Transactional(readOnly = true)
     public Page<VenueResponse> listVenues(String city, String district,
                                           VenueStatus status, String keyword,
                                           Double latitude, Double longitude,
+                                          String window,
                                           int page, int size) {
         String keywordPattern = StringUtils.hasText(keyword) ? "%" + keyword.trim() + "%" : null;
         page = Math.max(0, page);
@@ -203,7 +211,8 @@ public class VenueService {
         // 批量查询整页场所的 Top Reaction 徽标，避免逐条查询造成的 N+1（见 VenueReactionService#batchGetBadges）
         List<Long> venueIds = result.getContent().stream().map(Venue::getId).toList();
         Map<Long, List<ReactionBadge>> reactionsByVenue =
-                venueReactionService.batchGetBadges(venueIds, UserContext.getCurrentUserId());
+                venueReactionService.batchGetBadges(venueIds, UserContext.getCurrentUserId(),
+                        ReactionWindow.from(window));
         // 查询城市内热门场所 ID 集合（5min 缓存，窗口函数全表计算结果变化频率极低）
         Set<Long> hotVenueIds = venueLookupService.getHotVenueIds();
         return result.map(v -> venueResponseMapper.toResponse(

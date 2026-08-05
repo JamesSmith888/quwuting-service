@@ -9,6 +9,7 @@ import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
+import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -43,8 +44,10 @@ public class FavoriteService {
         if (venues.isEmpty()) {
             return Collections.emptyList();
         }
+        // 收藏 Tab 无窗口切换入口，徽标固定取默认窗口（近7天），与列表页默认一致
         Map<Long, List<ReactionBadge>> reactionsByVenue =
-                venueReactionService.batchGetBadges(venues.stream().map(Venue::getId).toList(), userId);
+                venueReactionService.batchGetBadges(venues.stream().map(Venue::getId).toList(),
+                        userId, ReactionWindow.DAYS_7);
         return venues.stream()
                 .map(v -> venueResponseMapper.toResponse(
                         v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList())))

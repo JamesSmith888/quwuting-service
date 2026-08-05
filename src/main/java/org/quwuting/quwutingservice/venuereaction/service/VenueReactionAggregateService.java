@@ -20,6 +20,10 @@ import java.util.concurrent.TimeUnit;
  * （每个 Reaction 代码的 今日/7天/30天/全部 计数），个人参与状态永远实时查询、不缓存。
  * <p>
  * 每个 venueId 对应的值为 {@code Map<reactionCode, long[]{countAll, countToday, count7d, count30d}>}。
+ * <p>
+ * 2026-08 每日一记模型（见 AGENTS.md「Reaction 快速反馈系统」）：聚合语义不变——四窗口实时统计
+ * 当前全部生效记录（取消即物理删除，天然不计入）；窗口锚点为"此刻"（今天0点 / now-7d / now-30d），
+ * 随时间推移记录自然滑出近期窗口（时间衰减），无需周期性清零。
  */
 @Service
 public class VenueReactionAggregateService {

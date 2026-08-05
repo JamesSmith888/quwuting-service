@@ -358,14 +358,14 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 | `GET /venues/{venueId}/tags/stats` | 聚合（与详情页共享缓存，单飞回源 1 次）+ 个人状态(1) | ~0.5s | ~10ms |
 | `GET /venues/{id}` | venue 缓存 + tagAggregate 缓存 + postCount/hasMyReport 合并(1) | ~1.2s | ~0.5s |
 | `POST /venues/{id}/view` | upsert(1) | ~0.5s | — |
-| `GET /favorites` | 收藏+场所联查(1) + Reaction 徽标批量(1，单条 SQL 返回 countAll+count30d) + 个人参与状态批量(1，需登录才能访问此接口，恒触发) | ~1.2s | — |
-| `GET /venues` | 主查询(1) + count(1) + Reaction 徽标批量(1，单条 SQL 返回 countAll+count30d) + 个人参与状态批量(1，仅登录触发)（hotVenueIds 缓存 5min） | ~1.5s | 同左 |
+| `GET /favorites` | 收藏+场所联查(1) + Reaction 徽标批量(1，单条 SQL 返回 countAll+count7d+count30d) + 个人参与状态批量(1，需登录才能访问此接口，恒触发) | ~1.2s | — |
+| `GET /venues` | 主查询(1) + count(1) + Reaction 徽标批量(1，单条 SQL 返回 countAll+count7d+count30d) + 个人参与状态批量(1，仅登录触发)（hotVenueIds 缓存 5min） | ~1.5s | 同左 |
 
 关键合并查询（全部在对应 Repository 有根因注释）：
 
 - `VenueRepository.countHeatCounters`：**跨 6 张表的标量子查询 mega-query**，一次往返取回热度公式与可信度所需的全部单值计数器。标量子查询是跨表合并的标准手段——各子查询均命中 `(venue_id, ...)` 索引，库内执行毫秒级，网络开销收敛为 1 次往返。多行形态（趋势时间序列、分组均值）不参与标量合并，保持独立查询
 - `TagInteractionRepository.aggregateScoresMultiWindowByTag`：三窗口评分聚合单条 GROUP BY（原点赞计数 + 评分聚合合并查询已随点赞功能移除，仅保留评分部分）
-- `VenueReactionRepository.aggregateByVenue` / `countByVenueIdsGroupByCode`：Reaction 四窗口条件聚合 / 批量场所双计数（countAll + count30d 单条 SQL，条件 SUM 内联），取代原标签点赞批量查询
+- `VenueReactionRepository.aggregateByVenue` / `countByVenueIdsGroupByCode`：Reaction 四窗口条件聚合 / 批量场所三窗口计数（countAll + count7d + count30d 单条 SQL，条件 SUM 内联），取代原标签点赞批量查询
 - `VenuePostRepository.findDetailStats`：动态总数 + "我是否已上报"（EXISTS 标量子查询，个人状态实时不缓存，匿名 userId=null 时 EXISTS 恒 false）
 - `FavoriteRepository.findFavoriteVenuesByUserId`：收藏 + 场所 JPQL 联查（排序键为收藏 createdAt），取代"查收藏再批量查场所"两步
 - `VenueViewRepository.upsertView`：`INSERT ... ON CONFLICT ON CONSTRAINT ... DO NOTHING` 无条件幂等写入，取代 check-then-act（SELECT 存在性 + INSERT + catch）。**约定：有唯一约束的幂等写入一律 upsert**，check-then-act 多一次往返且存在并发窗口
@@ -538,82 +538,70 @@ LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);  
 
 **解法**：统一为类似 Telegram Reaction 的表情化标签（emoji + 文字说明），一次点击表达一种态度，替代原"标签点赞"与"现场状况"评分维度：
 
-- 默认只展示 emoji，长按显示文字说明，点击直接 +1（再次点击取消，toggle 语义）
-- 不做"点赞/倒赞"二元对立（不用 👍👎）——采用具体、中性的正负向 Reaction 共存（如 👴 舞伴年龄偏成熟，而非"倒赞：舞伴年龄大"），避免攻击性评价引发商家纠纷
-- 一个用户对一个场所的一个 Reaction 只能贡献一次（不允许 🔥🔥🔥🔥 刷数据），但允许同时选择多个不同 Reaction
+- 默认只展示 emoji，长按显示文字说明，点击直接 +1（当日再次点击取消）
+- 不做"点赞/倒赞"二元对立（不提供 👍👎 成对选项）——采用具体、中性的正负向 Reaction 共存（如 👴 舞伴年龄偏成熟，而非"倒赞：舞伴年龄大"），避免攻击性评价引发商家纠纷；单个语义具体的正向表达（如 👍 值得推荐、🍺 消费合理）允许
+- 一个用户对一个场所的一个 Reaction **每天最多一次**（不允许 🔥🔥🔥🔥 刷数据），但允许同时选择多个不同 Reaction
+
+### 每日一记模型（2026-08 核心设计决策，替代旧"toggle 软删 hold 模型"）
+
+**数据模型**：`qwt_venue_reactions` 表 `(id, userId, venueId, reactionCode, reactionDate, createdAt, updatedAt, deleted)`，唯一约束 **`UNIQUE(userId, venueId, reactionCode, reactionDate)`**——同一用户每天只能贡献一次同类型 Reaction。每次点击 = 插入一条 `reactionDate = 今天` 的记录；取消 = **物理删除**当日记录（"取消当天 Reaction"语义，不做软删——按日唯一槽位随日期自然消亡，无软删恢复需求，与 Favorite/StatusReport 的软删模式形成有意差异，原因见下）。
+
+**根因（旧模型的三处缺陷 → 每日一记修复）**：
+
+1. **需求语义违约**：需求要求"每天最多点击一次、当天不可重复增加数量、次日自动恢复可点击状态（可再次 +1）"——Reaction 是"用户近期体验评价"，应允许用户次日重新评价。旧 hold 模型（toggle 软删 + 恢复刷新 createdAt）下用户次日点击是"取消"而非"再次表达"，无法自然完成每日重新评价。
+2. **窗口计数本地不可推导 → 双计数 hack**：旧模型下取消可能作用于 createdAt 超窗的旧记录（如持有 40 天后取消），count7d/count30d 的本地 ±1 无法精确推导，迫使前端发明"展示 countAll、排序 count30d"的双计数分离 + 前端只展示 countAll 的妥协。而需求要求列表默认展示近7天、可切换近30天/全部——展示数字必须是所选窗口计数。每日一记模型下取消**只可能作用于当日记录**（今日新增必落在全部窗口内、取消删掉的也必是当日记录），countAll/countToday/count7d/count30d 四个窗口的本地 ±1 **全部精确**，双计数 hack 整体消失，列表窗口切换直接展示窗口计数。
+3. **未来扩展被堵死**：周末热门/实时热门/到店权重等扩展都需要"按日记录"（reaction_date 维度）做聚合，旧模型单行无日期维度，历史数据不可回填。每日一记从第一天起就按日天然聚合。
+
+**时间衰减仍然有效**：不做周期性清零——原始记录永久保留，窗口统计实时计算（countToday/count7d/count30d 按 created_at 滚动窗口，锚点"此刻"：今天0点 / now-7d / now-30d，不同于热度模块"截至昨日"的排他上界约定），记录随日期推移自然滑出近期窗口；"全部"窗口承载历史画像层。两层概念（实时层 vs 画像层）的约定不变。
+
+**为何取消用物理删除而非软删**：软删 + 按日唯一约束下，同日"取消后再点"需要恢复旧行（槽位被软删行占用），与"取消即当日贡献移除"语义叠加复杂度；物理删除使按日槽位随日期自然释放，逻辑最简，且本表无历史追溯需求（个人参与历史不对外展示）。与 Favorite/StatusReport 软删模式的区别：后者的唯一槽位是"永久性"的（user-venue 关系），必须靠软删占用防重复；Reaction 的槽位按日自然过期。
 
 ### Reaction 字典（ReactionCode，后台维护）
 
-Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对刷评价。字典是后台维护的 Java 枚举（`ReactionCode`），emoji + label 由后端唯一定义并通过接口下发，前端不重复硬编码维护第二份字典。与 `RatingDimensions`/`FeedbackType`/`PostPublisherType` 同模式（本项目无独立管理后台 UI，后台维护 = 代码维护 + 发版）。
+Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对刷评价。字典是后台维护的 Java 枚举（`ReactionCode`），emoji + label 由后端唯一定义并通过接口下发，前端 Picker 的静态字典（`constants/reactions.ts`）是镜像副本需两端同步。
 
 | 代码 | Emoji | 说明 |
 |------|-------|------|
 | HOT | 🔥 | 人气旺 |
+| GOOD_VIBE | 💃 | 氛围好 |
+| GOOD_MUSIC | 🎵 | 音乐棒 |
+| RECOMMEND | 👍 | 值得推荐 |
+| FAIR_PRICE | 🍺 | 消费合理 |
 | YOUNG_PARTNER | 👧 | 年轻舞伴多 |
 | OLD_PARTNER | 👴 | 舞伴年龄偏成熟 |
-| GOOD_VIBE | ☺️ | 氛围舒服 |
-| GOOD_MUSIC | 🎵 | 音乐效果好 |
+| CLEAN | ✨ | 干净整洁 |
+| GOOD_SERVICE | 💁 | 服务贴心 |
 | NORMAL | 😐 | 普通 |
+| CROWDED | 👥 | 人多拥挤 |
+| WAITING | ⏳ | 排队太久 |
+| QUIET | 🪑 | 人气冷清 |
 | HIGH_COST | 💰 | 消费较高 |
 | BAD_ENV | 😕 | 环境一般 |
 | SERVICE_ISSUE | 😡 | 服务问题 |
 
-审核安全说明：`BAD_ENV` 未采用需求初稿中的 🤮（呕吐表情），因其强烈厌恶语义与"不引入攻击性反馈"的设计原则相悖——一般般的环境不等于令人作呕，过度负面的图标本身就会诱发"商家纠纷"这一本系统试图规避的问题，故软化为 😕。新增/调整字典条目时同样需要过这道审核安全过滤（参照 venuestatusreport 模块 `ReportReason` 命名规避敏感词的先例）。
+2026-08 扩版（表情越多越好）：初版 9 项 → 16 项，覆盖人气/氛围/音乐/推荐/消费/舞伴/环境/服务/拥挤/排队等舞厅体验维度，按"正向 → 中性 → 负向"的展示序（影响前端 Picker 网格顺序）。
 
-### 数据模型
-
-`qwt_venue_reactions` 表：`(id, userId, venueId, reactionCode, createdAt, updatedAt, deleted)`，一个用户对一个场所的一个 Reaction 至多一行（`UNIQUE(userId, venueId, reactionCode)`）。
-
-**Toggle = 软删除，不做硬删除**（与 Favorite/StatusReport 同模式，符合"不物理删除数据"的 Entity 规范）：
-- 首次参与 → INSERT
-- 已参与再次点击 → `deleted = true`（取消）
-- 曾取消后再次参与 → 恢复（`deleted = false`），**同时刷新 `createdAt = now()`**——这一刷新是时效性设计的核心机制，见下节
-
-Upsert 查找必须不限 `deleted`（`findByUserIdAndVenueIdAndReactionCode`，含软删记录），原因与 `StatusReportService`/`FavoriteService` 相同：`UNIQUE` 约束不含 `deleted` 列，软删记录仍占用唯一槽位，漏查会导致误 INSERT 与唯一约束冲突。
-
-### 时效性设计：不做周期性清零，而是时间衰减 + 多时间窗口（核心设计决策）
-
-**根因**：舞厅场景与传统点评最大的区别是时效性——"有舞池"这类固定属性标签三年不变，但"人气旺""年轻舞伴多"这类 Reaction 可能一个月甚至一晚就变化。若简单累计永久计数（如 🔥 1000 且从不衰减），多年经营变化后展示的数字会失真、误导用户，这正是当前系统要规避的"假大众点评"问题。
-
-**为什么不做"每周/每月重置清零"**：
-1. 新场所数据积累慢——若按周清零，每周初始状态都是空，用户永远看不到历史趋势
-2. 长期稳定经营的门店应享有可信度优势——清零会抹掉这种"久经考验"的信号，对老店不公平
-
-**采用的方案：原始行为永久保留 + 按时间窗口实时统计**（不删除任何生效记录，只在查询时按窗口过滤）：
-
-- `today`（自然日）/ `7天` / `30天` / `全部`：四个窗口的计数全部从同一批 `deleted=false` 记录实时计算，无物化视图、无定时任务清零
-- **`全部`（`countAll`）= 当前生效记录总数**（不含已取消的历史），代表"这家店整体的长期画像"
-- **`7天`/`30天`（`count7d`/`count30d`）= 近期真实活跃的信号**，代表"最近怎么样"——因为 toggle 语义下，只有用户重新访问并**再次确认**（或首次参与）才会刷新 `createdAt`，长期无人再次确认的 Reaction 会自然从近期窗口中"衰退"（即使仍计入 `全部`），而不需要任何后台清理任务
-- 这正是时间衰减的实现方式：**不是删除旧数据，而是让"新鲜度"只由真实用户行为的时间戳决定**——活跃场所的 Reaction 因持续有新用户参与/老用户重新确认而保持在近期窗口内，不活跃或已过时的 Reaction 自然只留存在"全部"这一历史画像层，不会污染代表"现在"的近期窗口
-
-**两层概念**（与用户讨论后确立）：
-- **实时层**（`countToday`/`count7d`）：回答"今晚/最近怎么样"，用于用户"现在去不去"的决策
-- **画像层**（`count30d`/`countAll`）：回答"这家店整体如何"，用于长期认知这家店
-
-**窗口锚点是真实"此刻"，不是"截至昨日"**：与 `VenueHeatService` 的"近30天"等滚动窗口统一锚定「截至昨日」（排除当天不完整数据，见「统计口径：截至昨日」章节）不同，Reaction 的四个窗口锚点均为请求发生的"此刻"（`sinceToday = 今天0点`、`since7d = now - 7天`、`since30d = now - 30天`）。根因：Reaction 是实时众包信号（类似 `VenueStatusReport` 的 TTL 语义），越新鲜的窗口越该反映"现在正在发生什么"，而非追求跨天可比性的历史聚合稳定性——两套时间语义分别服务不同目的，不可混用（同理见「场所状态上报」章节的活跃报告 TTL 窗口）。
-
-**用户重复反馈的时间限制**：不设固定冷却周期（如"30天内只能一次"），而是纯 toggle 语义——用户可随时取消/重新参与，恢复时刷新 `createdAt` 视为一次新的确认。这比"月度唯一约束"更简单且更贴合真实场景（用户体验随时可能变化，应允许随时更新态度）。
+审核安全说明：字典坚持"具体、中性描述"原则——`BAD_ENV` 未采用需求初稿中的 🤮（呕吐表情），因强烈厌恶语义与"不引入攻击性反馈"的设计原则相悖；`RECOMMEND` 的 👍 是**单一正向表达**而非 👍👎 二元组合，允许使用。新增/调整字典条目时需过审核安全过滤（参照 venuestatusreport 模块 `ReportReason` 命名规避敏感词的先例）。
 
 ### 接口
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
-| GET | `/venues/{venueId}/reactions/stats` | 公开（软鉴权） | 字典内全部 Reaction 的四窗口统计 + 当前用户参与状态，详情页"大家对这里的感受"+"查看更多"用 |
-| POST | `/venues/{venueId}/reactions/{code}` | 需登录 | toggle 语义（首次=参与，再次=取消），`code` 为路径变量而非请求体（字典固定，路径更简洁） |
+| GET | `/venues/{venueId}/reactions/stats` | 公开（软鉴权） | 字典内全部 Reaction 的四窗口统计 + 当前用户"今日已参与"状态，详情页"大家对这里的感受"+"查看更多"用 |
+| POST | `/venues/{venueId}/reactions/{code}` | 需登录 | toggle 语义（今日未参与=参与，今日已参与=取消当日），`code` 为路径变量而非请求体（字典固定，路径更简洁） |
+| GET | `/venues?...&window=7d/30d/all` | 公开（软鉴权） | 列表接口新增 `window` 参数：控制卡片 Top Reaction 徽标的排序/筛选窗口，默认 `7d`（近7天） |
+
+**toggle 并发**：同日并发重复插入触发唯一约束冲突 → 幂等视为已参与（`DataIntegrityViolationException` 捕获 + `entityManager.clear()`）。前端每 code 一个 in-flight 守卫（见前端 AGENTS.md）已把同端连点串行化，本防御兜底多端竞态。
 
 ### 列表页 Top Reaction 徽标（VenueResponse.topReactions，替代原 tagLikeCounts）
 
-`GET /venues`、`GET /favorites` 等复用 `VenueResponseMapper` 的接口在 `VenueResponse.tags` 之外携带 `topReactions: List<ReactionBadge>`（最多 4 个，按**近 30 天计数**降序，count30d=0 的不展示）。创建新 Reaction 的入口是前端 Picker 表情选择器（长按卡片触发），不是 count=0 的占位 chips——此决策的根因分析见前端 AGENTS.md「Reaction 快速反馈系统 → 设计决策 → 展示与创建职责分离」。
+`GET /venues`（按 `window` 参数）、`GET /favorites`（固定默认窗口 7d）等复用 `VenueResponseMapper` 的接口在 `VenueResponse.tags` 之外携带 `topReactions: List<ReactionBadge>`（最多 4 个，按所选窗口计数降序，该窗口计数=0 的不展示）。创建新 Reaction 的入口是前端 Picker 表情选择器（长按卡片触发），不是 count=0 的占位 chips——此决策的根因分析见前端 AGENTS.md「Reaction 快速反馈系统 → 设计决策 → 展示与创建职责分离」。
 
-**双计数语义（2026-08 确立）**：`ReactionBadge` 携带 `count30d`（近30天计数，徽标排序/筛选依据）与 `countAll`（全部生效记录数，前端展示的"总数量"）。排序/展示分离的根因：前端乐观更新（点击立即 +1，失败回滚，见前端 AGENTS.md「乐观更新」）下 `countAll` 的本地 ±1 恒精确——生效记录数随 toggle 确定性增减，而 `count30d` 的 ±1 依赖该记录的 `createdAt` 是否落在 30 天窗口内，无法本地精确推导。展示数字若取 count30d，乐观计数会在"已参与但记录超 30 天"的用户取消时失真。
+**三窗口计数语义（2026-08 每日一记模型确立）**：`ReactionBadge` 携带 `countAll` / `count7d` / `count30d` 三个窗口计数 + `reactedByMe`。服务端只做"按所选窗口排序/筛选 Top 4"，前端展示数字 = 所选窗口计数，切换窗口仅本地重算（无需为每个窗口重复请求）。排序/展示统一所选窗口（不再是旧模型的"排序 count30d、展示 countAll"双计数分离）——每日一记模型下取消只作用于当日记录，三窗口的本地 ±1 全部精确，乐观更新无需回滚校正窗口计数。
 
-- **例外：含个人参与状态（`reactedByMe`）**——这是对项目既有"列表层不含个人状态"惯例（原 `tagLikeCounts` 的设计）的刻意打破。原因是产品规则明确要求"点击 Emoji：未参与→+1，已参与→取消"必须在列表页直接可用，用户点击前必须知道自己是否已参与，否则会造成"点了却不知道是加还是减"的困惑。此例外**不违反**「缓存内容的强制约束」——聚合计数仍然缓存共享（`VenueReactionAggregateService`），个人参与状态通过**独立的、不缓存的实时批量查询**（`findActiveCodesByUserAndVenueIds`，一次 `IN` 查询覆盖整页场所）获取，两者未被塞进同一个缓存 key
-- **批量查询**：`VenueReactionService.batchGetBadges(venueIds, currentUserId)` 一次 `IN` 查询（`countByVenueIdsGroupByCode`，单条 SQL 用条件 SUM 同时聚合 countAll 与 count30d）覆盖聚合计数、一次 `IN` 查询覆盖个人状态（仅登录用户触发），避免逐场所查询的 N+1
-- 该批量查询**不缓存**（与原 `batchGetTagLikeCounts` 同理）：列表页请求的场所集合每次不同，复用单场所聚合缓存收益低
-
-### 场所热度公式集成（替代原"点赞数"）
-
-`VenueHeatResponse.reactionCount30d`（原 `likeCount30d`）替代原"近30天标签点赞数"作为热度公式输入：`... + 近30天Reaction总数 × WEIGHT_REACTION(3) + ...`。数据源从 `qwt_tag_interactions`（`liked=true`）切换为 `qwt_venue_reactions`（`deleted=false`），权重值不变（3），语义从"标签点赞数"平移为"Reaction 总数"。热度公式所用窗口（`windowSince`/`windowUntil`，锚定「截至昨日」）与 Reaction 详情统计的窗口（锚定"此刻"）是两套独立计算——同一张 `qwt_venue_reactions` 表被两个不同消费者用不同窗口语义查询，互不干扰，新增/修改任一处窗口逻辑前必须先确认消费者是谁。
+- **例外：含个人参与状态（`reactedByMe`）**——这是对项目既有"列表层不含个人状态"惯例（原 `tagLikeCounts` 的设计）的刻意打破。原因是产品规则明确要求"点击 Emoji：未参与→+1，已参与→取消"必须在列表页直接可用，用户点击前必须知道自己是否已参与，否则会造成"点了却不知道是加还是减"的困惑。此例外**不违反**「缓存内容的强制约束」——聚合计数仍然缓存共享（`VenueReactionAggregateService`），个人参与状态通过**独立的、不缓存的实时批量查询**（`findTodayCodesByUserAndVenueIds`，一次 `IN` 查询覆盖整页场所）获取，两者未被塞进同一个缓存 key
+- **个人状态语义**：`reactedByMe` = "今日已参与"（`reactionDate = 今天` 的记录存在）——次日自动恢复可点击状态，与"每日一记"模型一致
+- **批量查询**：`VenueReactionService.batchGetBadges(venueIds, currentUserId, window)` 一次 `IN` 查询（`countByVenueIdsGroupByCode`，单条 SQL 用条件 SUM 同时聚合 countAll/count7d/count30d）覆盖聚合计数、一次 `IN` 查询覆盖个人状态（仅登录用户触发），避免逐场所查询的 N+1
 
 toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（本模块聚合缓存）与 `VenueHeatService`（Reaction 总量是热度公式输入之一），见 `VenueReactionService.toggle()`。
 
@@ -621,12 +609,17 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 
 `VenueReactionAggregateService` 与 `TagAggregateStatsService`/`VenueHeatService` 同模式：内嵌 Caffeine `LoadingCache<Long, Map<String, long[]>>`（venueId → 每个 Reaction 代码的 `[countAll, countToday, count7d, count30d]`），`refreshAfterWrite(60s)` + `expireAfterWrite(30min)` + 单飞 + 写路径显式 `invalidate`。个人参与状态（`reactedByMe`）永远实时查询、不缓存，与既有的"缓存内容强制约束"完全一致。
 
+### 迁移与数据说明
+
+- `src/main/resources/db/migrate-reaction-daily.sql`：旧 hold 模型 → 每日一记模型的迁移（硬删旧软删行、`reaction_date` 回填 `created_at::date`、唯一约束 (user,venue,code) → (user,venue,code,date)）。**必须在应用启动前手动执行**（ddl-auto: update 对已有数据的表加 NOT NULL 列会失败；生产 validate 模式靠本脚本保证列/约束）。
+- 旧行语义近似：迁移后旧"当前生效"行按 createdAt 日期成为"该日一次点击"，窗口统计语义自洽。
+
 ### 与现有模块的关系（保留 / 删除 / 替换）
 
 | 模块 | 处置 |
 |------|------|
 | 综合评分（RatingDimensions 体验评估 4 维度） | **保留**，用于门店整体质量比较，`taginteraction` 模块继续承载 |
-| 场所热度（VenueHeatService） | **保留**，用于门店流量排序；Reaction 总数替代原点赞数作为其中一项输入 |
+| 场所热度（VenueHeatService） | **保留**，用于门店流量排序；Reaction 近30天总数替代原点赞数作为其中一项输入（查询逻辑不变） |
 | 营业状态 / 场所状态上报 | **保留**，用于实时判断是否值得去，与 Reaction 是两套独立信号层 |
 | 固定属性标签（Venue.tags，如"禁烟""有舞池""自助存包"） | **保留**，纯展示不可互动；原"点赞"这一互动方式已删除 |
 | 标签点赞（`TagInteraction.liked`） | **删除**，替换为 Reaction 快速反馈 |
@@ -635,7 +628,8 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 ### 后续扩展（P1，未在本次实现范围内）
 
 - 门店画像可视化（基于四窗口数据生成"年轻指数/人气/服务/消费"星级评分展示）
-- 热门 Reaction 排序算法优化（当前列表徽标按 30 天原始计数排序；可演进为"今日×5 + 7天×3 + 30天×1"加权评分以更强调近期活跃度）
+- 热门 Reaction 排序算法优化（当前列表徽标按所选窗口原始计数排序；可演进为"今日×5 + 7天×3 + 30天×1"加权评分以更强调近期活跃度）
+- 周末热门 / 实时热门 / 到店用户权重（GPS 到店验证）——每日一记模型已按日聚合，可直接基于 `reaction_date` 实现
 
 ---
 

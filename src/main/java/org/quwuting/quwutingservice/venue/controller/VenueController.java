@@ -53,6 +53,7 @@ public class VenueController {
      * 查询场所列表（支持按城市/区县/状态/关键字筛选，复合评分排序）
      * GET /venues?city=绍兴市&keyword=爵士&latitude=30.0&longitude=120.5&page=0&size=20
      * latitude/longitude 可选：传入后参与邻近加成排序（用户定位，gcj02）
+     * window 可选（7d/30d/all，默认 7d）：卡片 Top Reaction 徽标的统计窗口（近7天/近30天/全部）
      */
     @GetMapping
     public ApiResponse<Page<VenueResponse>> listVenues(
@@ -62,11 +63,12 @@ public class VenueController {
             @RequestParam(required = false) String keyword,
             @RequestParam(required = false) Double latitude,
             @RequestParam(required = false) Double longitude,
+            @RequestParam(required = false) String window,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size
     ) {
         return ApiResponse.ok(
-                venueService.listVenues(city, district, status, keyword, latitude, longitude, page, size));
+                venueService.listVenues(city, district, status, keyword, latitude, longitude, window, page, size));
     }
 
     /**
