@@ -10,6 +10,7 @@ import org.quwuting.quwutingservice.venue.dto.response.VenueHeatResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.enums.StatusConfidence;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
+import org.quwuting.quwutingservice.venuereaction.ReactionCode;
 import org.quwuting.quwutingservice.venuestatusreport.dto.response.ActiveReportSummary;
 import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportService;
 import org.springframework.stereotype.Service;
@@ -27,11 +28,21 @@ import java.util.concurrent.TimeUnit;
  * 场所热度计算服务（多维度聚合）。
  * <p>
  * 热度指数 = 浏览量 × W_VIEW + 收藏总数 × W_FAVORITE + 近期新增收藏 × W_NEW_FAVORITE
- *           + 动态总数 × W_POST + 近期评价数 × W_RATING + 近期点赞数 × W_LIKE
- *           + 满意度 × W_SATISFACTION（无评分时为 0）。
- *           近30天 Reaction 总数替代原「近30天点赞数」（标签点赞已被 Reaction 快速反馈系统替代，
- *           见 AGENTS.md「Reaction 快速反馈系统」章节），数据源为 qwt_venue_reactions。
+ *           + 动态总数 × W_POST + 近期评价数 × W_RATING + 近30天正向 Reaction × W_REACTION
+ *           + 满意度偏移 × W_SATISFACTION（无评分时为 0）。
  * <p>
+ * 2026-08 缺陷修复确立的语义（见 AGENTS.md「场所热度」章节）：
+ * <ul>
+ *   <li><b>Reaction 分极性</b>：仅 {@link ReactionCode.Polarity#POSITIVE} 的 code（人气旺/氛围好等）
+ *       计入热度；NEGATIVE（服务问题/排队太久等）不计入公式，单独以 negativeReactionCount30d
+ *       下发供详情页展示负面信号——修复"被吐槽的店热度反而更高"的语义硬伤。</li>
+ *   <li><b>满意度中性偏移</b>：满意度贡献 = (满意度 − 6) × 20，6 分（及格线）为中性基准，
+ *       高于 6 加分、低于 6 扣分——低分店热度真实下降，口碑差不再"靠收藏/浏览撑高"。</li>
+ *   <li><b>评分计数按 created_at</b>：ratingCount30d 与满意度窗口均按评分创建时间统计，
+ *       改分不刷新窗口，防"定期改分保持计数常青"的刷分漏洞。</li>
+ *   <li><b>公式文案后端下发</b>：formulaText / formulaDetail 由本服务生成（权重唯一事实源），
+ *       前端直接渲染——消灭前端硬编码权重的展示失真风险。</li>
+ * </ul>
  * 权重常量收敛在本类内部，后续基于真实数据分布调优，接口契约不变。
  * <p>
  * DB 往返压缩（两轮优化的最终形态）：
@@ -67,8 +78,31 @@ public class VenueHeatService {
     private static final long WEIGHT_NEW_FAVORITE = 15;
     private static final long WEIGHT_POST = 5;
     private static final long WEIGHT_RATING = 8;
+    /** 正向 Reaction 权重（仅 Polarity.POSITIVE 计入；负向不计入公式，单独展示） */
     private static final long WEIGHT_REACTION = 3;
     private static final long WEIGHT_SATISFACTION = 20;
+
+    /** 满意度中性基准（1-10 分制及格线）：高于 6 加分、低于 6 扣分——低分店热度真实下降 */
+    private static final double SATISFACTION_NEUTRAL = 6.0;
+
+    /** 正向 Reaction code 列表（mega-query 参数，恒非空） */
+    private static final List<String> POSITIVE_REACTION_CODES = positiveCodes();
+    /** 负向 Reaction code 列表（mega-query 参数，恒非空） */
+    private static final List<String> NEGATIVE_REACTION_CODES = negativeCodes();
+
+    private static List<String> positiveCodes() {
+        return java.util.Arrays.stream(ReactionCode.values())
+                .filter(c -> c.getPolarity() == ReactionCode.Polarity.POSITIVE)
+                .map(Enum::name)
+                .toList();
+    }
+
+    private static List<String> negativeCodes() {
+        return java.util.Arrays.stream(ReactionCode.values())
+                .filter(c -> c.getPolarity() == ReactionCode.Polarity.NEGATIVE)
+                .map(Enum::name)
+                .toList();
+    }
 
     /** 满意度最低样本量：评价人数不足此值时不展示具体分数（同时跳过满意度查询） */
     private static final long MIN_RATING_SAMPLE = 3;
@@ -152,7 +186,8 @@ public class VenueHeatService {
 
         // ── 全部单值计数器：跨 6 张表合并为 1 次 DB 往返（标量子查询 mega-query） ──
         VenueRepository.HeatCounters counters = venueRepository.countHeatCounters(
-                venueId, sinceDate30d, today, since30d, windowEnd, reportSince);
+                venueId, sinceDate30d, today, since30d, windowEnd, reportSince,
+                POSITIVE_REACTION_CODES, NEGATIVE_REACTION_CODES);
         long viewCount30d = orZero(counters.getPv());
         long viewUv30d = orZero(counters.getUv());
         long favoriteCount = orZero(counters.getFavtotal());
@@ -160,7 +195,8 @@ public class VenueHeatService {
         long postCount = orZero(counters.getPosttotal());
         long newPostCount30d = orZero(counters.getPostrecent());
         long ratingCount30d = orZero(counters.getRatingcount30d());
-        long reactionCount30d = orZero(counters.getReactioncount30d());
+        long positiveReactionCount30d = orZero(counters.getPositivereactioncount30d());
+        long negativeReactionCount30d = orZero(counters.getNegativereactioncount30d());
         long ratingTotalCount = orZero(counters.getRaters());
         long suspensionCount30d = orZero(counters.getSuspensioncount());
         long currentStatusDays = computeCurrentStatusDays(counters.getLateststatuslogtime());
@@ -174,17 +210,37 @@ public class VenueHeatService {
         // ── 满意度（各维度等权均分，近30天窗口；raters 不足样本量时直接跳过查询） ──
         Double satisfactionScore = computeSatisfaction(venueId, since30d, windowEnd, ratingTotalCount);
 
-        // ── 综合热度指数 ──
+        // ── 综合热度指数（满意度为中性偏移：(分−6)×20，低于 6 分扣分） ──
+        double satisfactionOffset = satisfactionScore != null ? satisfactionScore - SATISFACTION_NEUTRAL : 0;
         long satisfactionComponent = satisfactionScore != null
-                ? Math.round(satisfactionScore * WEIGHT_SATISFACTION)
+                ? Math.round(satisfactionOffset * WEIGHT_SATISFACTION)
                 : 0;
         long heatScore = viewCount30d * WEIGHT_VIEW
                 + favoriteCount * WEIGHT_FAVORITE
                 + newFavoriteCount30d * WEIGHT_NEW_FAVORITE
                 + postCount * WEIGHT_POST
                 + ratingCount30d * WEIGHT_RATING
-                + reactionCount30d * WEIGHT_REACTION
+                + positiveReactionCount30d * WEIGHT_REACTION
                 + satisfactionComponent;
+
+        // ── 公式文案（权重唯一事实源在后端，前端直接渲染，禁止前端硬编码权重） ──
+        String satisfactionTerm = satisfactionScore != null
+                ? String.format(" + %.1f×20", satisfactionOffset)
+                : "";
+        String formulaText = heatScore + " = " + viewCount30d + "×1 + " + favoriteCount + "×10 + "
+                + newFavoriteCount30d + "×15 + " + postCount + "×5 + " + ratingCount30d + "×8 + "
+                + positiveReactionCount30d + "×3" + satisfactionTerm;
+        String formulaDetail = "热度公式：浏览量(" + viewCount30d + ")×1 + 收藏总数(" + favoriteCount + ")×10"
+                + " + 近30天新增收藏(" + newFavoriteCount30d + ")×15 + 动态总数(" + postCount + ")×5"
+                + " + 近30天评分数(" + ratingCount30d + ")×8 + 近30天正向反馈(" + positiveReactionCount30d + ")×3"
+                + (satisfactionScore != null
+                        ? String.format(" + 满意度偏移(%.1f)×20", satisfactionOffset)
+                        : "")
+                + "。满意度为各体验维度等权均分（满分10），6分为中性基准、高于6加分低于6减分；"
+                + (satisfactionScore != null
+                        ? "当前满意度" + satisfactionScore + "分。"
+                        : "当前评价人数不足3人，满意度不参与计算。")
+                + "负向反馈（如服务问题、排队太久）不计入热度，单独展示。";
 
         // ── 状态可信度（二维矩阵 + 活跃报告 override） ──
         StatusConfidence confidence = computeStatusConfidence(
@@ -195,13 +251,14 @@ public class VenueHeatService {
                 viewCount30d, viewUv30d,
                 favoriteCount, newFavoriteCount30d, favoriteTrend,
                 postCount, newPostCount30d,
-                ratingCount30d, reactionCount30d,
+                ratingCount30d, positiveReactionCount30d, negativeReactionCount30d,
                 satisfactionScore, ratingTotalCount,
                 suspensionCount30d, currentStatusDays,
                 venue.getStatus().name(), venue.getStatus().getDisplayName(),
                 confidence.name(),
                 reportSummary.activeCount(),
                 reportSummary.latestReportTime(),
+                formulaText, formulaDetail,
                 statsAsOfDate.toString()
         );
     }

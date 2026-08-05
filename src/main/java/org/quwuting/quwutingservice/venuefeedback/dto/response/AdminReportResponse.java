@@ -7,20 +7,21 @@ import org.quwuting.quwutingservice.venuefeedback.enums.ReportStatus;
 import java.time.LocalDateTime;
 
 /**
- * 用户上报提交响应体。
+ * 管理端上报列表项（GET /admin/reports）。
  * <p>
- * 提交成功返回给上报者：包含处理状态与维护承诺提示（maintenanceHint，
- * 天数来自配置 app.reports.maintenance-days，前端禁止硬编码承诺天数）。
+ * 平台级聚合视图：跨场所列出全部上报，附带场所名称（venueName）供管理员
+ * 直接识别目标门店；处理动作（resolve/dismiss）后 handledAt 落值。
  */
-public record VenueFeedbackResponse(
+public record AdminReportResponse(
         Long id,
         Long venueId,
+        /** 场所名称（批量查询 qwt_venues，场所已逻辑删除时回退占位文案） */
+        String venueName,
         FeedbackType type,
         String typeDisplay,
         String note,
         ReportStatus status,
         String statusDisplay,
-        /** 维护承诺提示文案（如"已通知管理员，我们会在 3 日内维护好"），前端 toast/空态直接展示 */
-        String maintenanceHint,
+        @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime handledAt,
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime createdAt
 ) {}

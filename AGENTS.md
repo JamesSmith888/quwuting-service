@@ -81,15 +81,17 @@ venuepost/      ← 场所动态模块（公告 / 通知）
     response/   ← VenuePostResponse
   enums/        ← PostPublisherType（OWNER 商家 / ADMIN 平台）
 
-venuefeedback/  ← 场所信息纠错反馈模块
-  controller/   ← VenueFeedbackController（POST /venues/{venueId}/feedbacks）
-  service/      ← VenueFeedbackService
+venuefeedback/  ← 统一用户上报模块（原"场所信息纠错反馈"，2026-08-05 泛化；详见「统一用户上报」章节）
+  controller/   ← VenueFeedbackController（POST /venues/{venueId}/feedbacks 提交通道）
+                  ReportAdminController（GET /admin/reports, POST /admin/reports/{id}/resolve|dismiss 管理端）
+  service/      ← VenueFeedbackService（提交、管理端列表/处理/忽略、维护承诺文案组装）
   entity/       ← VenueFeedback 实体（qwt_venue_feedbacks）
-  repository/   ← VenueFeedbackRepository
+  repository/   ← VenueFeedbackRepository（JpaSpecificationExecutor 组合筛选分页）
   dto/
     request/    ← CreateFeedbackRequest（type + note）
-    response/   ← VenueFeedbackResponse
-  enums/        ← FeedbackType（CLOSED_DOWN / SUSPENDED / INACCURATE / OTHER）
+    response/   ← VenueFeedbackResponse（提交响应，含 maintenanceHint）/ AdminReportResponse（管理端列表项）
+  enums/        ← FeedbackType（CLOSED_DOWN / SUSPENDED / INACCURATE / PRICE / OTHER）
+                  ReportStatus（PENDING / RESOLVED / DISMISSED 状态机）
 
 venuestatusreport/  ← 场所状态众包上报模块（实时暂停信号，4h TTL）
   controller/   ← StatusReportController（POST /venues/{venueId}/status-reports, POST .../cancel）
@@ -121,6 +123,15 @@ venuereaction/  ← Reaction 快速反馈模块（Telegram Reaction 式表情反
   dto/
     response/   ← ReactionBadge（列表徽标）/ ReactionStat（详情完整统计）/ ReactionStatsResponse
   ReactionCode  ← Reaction 字典枚举（emoji + label，后台维护，不允许用户自由创建）
+
+venueshare/    ← 场所分享事件模块（分享追踪 P2 数据通道，2026-08-05 新增，详见「分享追踪」章节）
+  controller/   ← VenueShareController（POST /venues/{id}/shares, POST /venues/{id}/share-opens）
+  service/      ← VenueShareService（SHARE/OPEN 事件写入 + 60s 频控，fire-and-forget 语义）
+  entity/       ← VenueShare 实体（qwt_venue_shares，事件日志，只追加）
+  repository/   ← VenueShareRepository（纯 append，无查询需求）
+  dto/
+    request/    ← RecordShareRequest（channel，@Pattern 校验）/ RecordShareOpenRequest（shareFrom）
+  enums/        ← ShareEventType（SHARE / OPEN）
 
 venue/config/   ← 门店默认标签配置
   VenueDefaultsConfig ← @ConfigurationProperties(prefix = "venue.default")，标签合并/过滤工具方法
@@ -279,21 +290,28 @@ heatScore = viewCount30d × 1
           + newFavoriteCount30d × 15
           + postCount × 5
           + ratingCount30d × 8
-          + likeCount30d × 3（已重命名为 reactionCount30d，数据源为 qwt_venue_reactions，见「Reaction 快速反馈系统」章节）
-          + satisfactionScore × 20（无评分时为 0）
+          + positiveReactionCount30d × 3（仅 Polarity.POSITIVE 的 code，见「Reaction 快速反馈系统」章节）
+          + (satisfactionScore − 6) × 20（无评分时为 0，6 分为中性基准）
 ```
 
 权重常量收敛在 `VenueHeatService` 内部，后续基于真实数据分布调优，接口路径与 `heatScore` 语义不变。
 
+**2026-08 缺陷修复确立的三条语义**（详情页热度专项）：
+1. **Reaction 分极性**：仅正向 Reaction（人气旺/氛围好/音乐棒等 9 项）计入热度；负向（服务问题/排队太久/人气冷清/消费较高/环境一般/人多拥挤 6 项）**不计入公式**，以 `negativeReactionCount30d` 单独下发，前端展示"负面反馈 N 条·不计入热度指数"——修复"被吐槽的店热度反而更高"的语义硬伤。中性（普通）也不计入。极性定义在 `ReactionCode.Polarity`（唯一事实源），mega-query 通过 `:positiveCodes`/`:negativeCodes` 参数过滤。
+2. **满意度中性偏移**：满意度贡献 = `(score − 6) × 20`，6 分（及格线）为中性基准，高于 6 加分、低于 6 扣分——低分店热度真实下降，口碑差不再靠收藏/浏览撑高。
+3. **公式文案后端下发**：`VenueHeatResponse.formulaText/formulaDetail` 由后端生成（权重唯一事实源），前端直接渲染、**禁止硬编码权重**（历史上前端 computeHeatFormula 硬编码 ×1/×10/×15/×5/×8/×3/×20，权重调整后展示即失真——已删除）。
+
 ### 数据采集层
 
-**浏览记录（`qwt_venue_views`）**：已登录用户按 `(venueId, userId, viewDate)` 联合唯一约束去重（同一天仅一条）；匿名用户 `userId=null`，每次访问均记录（无法去重，数据仅供参考）。前端进入详情页时 fire-and-forget 调用 `POST /venues/{id}/view`，失败静默。
+**浏览记录（`qwt_venue_views`）**：已登录用户按 `(venueId, userId, viewDate)` 联合唯一约束去重（同一天仅一条）；匿名用户 `userId=null`，无法按身份去重，2026-08 起叠加 **60s 简单频控**（`VenueViewService` 内嵌 Caffeine，key = `venueId:客户端IP`，X-Forwarded-For 第一个地址，取不到时降级为固定 key 的场所级防抖）——压制脚本连点/自动刷新放大 PV。频控尽力而为，多 IP 分布式刷无法拦截；已登录用户由 upsert 按天去重，无需频控。前端进入详情页时 fire-and-forget 调用 `POST /venues/{id}/view`，失败静默。
 
 **状态变迁日志（`qwt_venue_status_logs`）**：每次 `Venue.status` 字段变更时由 `VenueService` 自动写入（含创建时的初始记录 `fromStatus=null`）。记录 `fromStatus`、`toStatus`、`changedBy`、`createdAt`。用于统计"近 N 天暂停营业次数"和"当前状态持续天数"。
 
 ### 满意度计算
 
 综合满意度 = 各维度（`RatingDimensions.ALL`）评分的等权均分，优先取近 30 天窗口数据，无近期数据时回退全量。评价总人数 < 3 时返回 `null`（前端展示"暂无足够评价"）。
+
+**窗口口径（2026-08 确立）**：满意度窗口与 `ratingCount30d` 统一按 `created_at`（评分创建时间）统计，而非 `updated_at`——改分不把记录拉回窗口，防"定期改分让计数/满意度常青"的刷分漏洞（历史实现用 updated_at，用户反复改分即可让该行一直在窗口内）。注意：详情页评分 Tab 的三窗口展示（`TagAggregateStatsService.aggregateScoresMultiWindowByTag`）仍用 updated_at，那是"评分展示"的时效语义，与热度统计口径不同，勿混用。
 
 ### 统计口径：截至昨日（2026-07-31 确立）
 
@@ -413,15 +431,88 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 ---
 
+## 统一用户上报（venuefeedback 模块，2026-08-05 泛化）
+
+### 设计定位
+
+本模块从「场所信息纠错反馈」泛化为**统一用户上报模板**：任何"信息缺失/有误需管理员维护"的场景共用同一张表、同一个提交通道（`POST /venues/{venueId}/feedbacks`）与同一套管理端处理流程（`/admin/reports`）。**新增上报场景 = 扩展 `FeedbackType` 枚举 + 前端入口**，禁止为单个场景新写表/接口/表单——这是"通用模板"的可扩展性保证。
+
+与 `venuestatusreport`（实时 4h TTL 众包信号）的边界保持：本模块是**异步管理员审核流程**（有处理状态），实时信号职责不在此承担。`SUSPENDED` 类型在此 = "不在场但认为状态信息有误"，现场确认关门走 venuestatusreport（见「场所状态上报」章节）。
+
+### 类型与状态机
+
+- `FeedbackType`：CLOSED_DOWN（已关门/停业）/ SUSPENDED（暂停营业）/ INACCURATE（信息有误）/ **PRICE（价格信息缺失或有误——门票/舞伴数据缺失空态的上报入口，2026-08-05 新增）** / OTHER（其他）
+- `ReportStatus` 状态机：PENDING（待处理）→ RESOLVED（已处理）/ DISMISSED（已忽略）。**终态固定不可回退**——RESOLVED 表示管理员已核实并完成维护，DISMISSED 判定为误报/无需处理；布尔 handled 无法区分两种终态语义（历史 `handled` 列保留为实体兜底映射，见下文「Schema 演进」）
+
+### 数据模型
+
+`qwt_venue_feedbacks` 表：venueId + userId + type + note + status + handledBy + handledAt + handled（遗留兜底列）。索引 `(venueId)`、`(userId)`、`(status, createdAt)`（管理端状态筛选分页）。
+
+**Schema 演进（2026-08-05 起默认自动更新，无手动 SQL）**：status 列默认值由 `@ColumnDefault("'PENDING'")` **单一通道**声明（配合 `@Column(length=20, nullable=false)` + 字段初始化器），`ddl-auto:update` 对已有数据的表自动加列时生成 `ADD COLUMN ... NOT NULL DEFAULT 'PENDING'` 不失败，存量行自动落为 PENDING——2026-08-05 曾因 columnDefinition 与 @ColumnDefault **双声明 DEFAULT** 报 "multiple default values specified"（修复 + 根因见「Schema 演进 → 事故根因」）；handledBy / handledAt 为可空列直接自动加列；遗留 `handled` 布尔列由实体字段映射兜底（@Deprecated + `@ColumnDefault("false")`，**双态兼容**：列已存在 → 匹配无操作，列已被历史脚本删除 → update 自动重建且存量行落默认值；insert 恒写 false 不违反约束）。**本模块不再需要任何手动迁移脚本**（上一版 migrate-report-status.sql 已删除）——新增字段一律通过 @ColumnDefault 默认值/可空列让 update 自动完成，规则见「Schema 演进（自动更新优先）」章节。
+
+### 接口
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| POST | `/venues/{venueId}/feedbacks` | 需登录 | 提交上报（type 必填 + note 可选），响应含 maintenanceHint |
+| GET | `/admin/reports` | ADMIN | 平台级列表（status/type 可选筛选，分页倒序，含 venueName） |
+| POST | `/admin/reports/{id}/resolve` | ADMIN | 标记已处理（幂等：终态重复操作直接成功） |
+| POST | `/admin/reports/{id}/dismiss` | ADMIN | 标记已忽略（幂等） |
+
+管理端列表场所名称批量查询（`VenueRepository.findByIdInAndDeletedFalse`）消除 N+1；已逻辑删除的场所回退"已下架场所"占位。
+
+### 维护承诺配置（maintenanceHint）
+
+提交响应携带 `maintenanceHint`（"已通知管理员，我们会在 X 日内维护好"），**X 来自配置 `app.reports.maintenance-days`（`config/ReportsProperties`，默认 3，缺失自动回退）**——前端 toast/空态直接展示，禁止硬编码承诺天数。调整承诺天数只改一处配置。
+
+---
+
+## 分享追踪（venueshare 模块，2026-08-05 新增）
+
+### 设计定位
+
+「去舞厅」是线下社交消费场景，分享（转发到好友/群聊）是产品自然增长的主要通道。本模块承载分享行为的**事件追踪数据通道**（P2）：前端上报分享动作与被分享者打开，数据落 `qwt_venue_shares` 事件日志，支撑邀请排行 / 热门传播门店 / 回流归因分析。**前端入口与分享内容契约见前端 AGENTS.md「分享能力规范」章节**（此处只述后端契约）。
+
+### 数据模型（单表双事件）
+
+`qwt_venue_shares`：`(id, venue_id, user_id, event_type, channel, share_from, created_at)`
+
+| 字段 | 语义 |
+|------|------|
+| `event_type` | SHARE（分享动作） / OPEN（被分享者打开） |
+| `user_id` | 事件发起者（分享者 / 打开者），匿名为 NULL（仅参与 IP 频控，不参与身份归因） |
+| `channel` | 分享渠道（仅 SHARE）：BUTTON（页内按钮）/ MENU（右上角菜单）/ TIMELINE（朋友圈） |
+| `share_from` | 归因来源（仅 OPEN）：原分享者用户 ID，来自分享路径 `share_from` 参数 |
+
+事件日志语义：**只追加，不修改不删除**，无唯一约束（每次分享/打开是一条独立事件）。**Schema 由 ddl-auto:update 自动创建**（2026-08-05「Schema 演进自动更新优先」策略：新表不再写迁移脚本，`@Index` 声明随实体自动建索引）。
+
+### 接口（软鉴权，fire-and-forget）
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| POST | `/venues/{id}/shares` | 软鉴权（匿名可上报） | 记录分享动作，body `{channel}`（可选，@Pattern 校验 400） |
+| POST | `/venues/{id}/share-opens` | 软鉴权（匿名可上报） | 记录分享打开，body `{shareFrom}`（可选） |
+
+与 `POST /venues/{id}/view` 同语义族（`VenueViewService` 模式）：
+
+- **fire-and-forget**：失败不影响主流程；**不做场所存在性校验**（事件端点由详情页发起，场所不存在时详情页已 404，冗余的场所查询对事件端点是不合理的延迟负担；孤儿事件不会被任何统计引用）
+- **60s 频控**：同场所同身份（已登录按 userId，匿名按 IP）60s 窗口内最多记 1 条（Caffeine，`VenueShareService`），压制脚本连点刷事件放大分享/回流量的漏洞（尽力而为，多 IP 分布式刷无法拦截，与浏览频控同语义）
+
+### 边界（与热度公式解耦）
+
+分享维度**不在热度公式闭集内**（公式由产品定义，见「场所热度」章节），本模块**不 invalidate 热度缓存**、不参与任何展示逻辑——纯分析数据源。若未来产品将分享纳入热度公式，需同步修改公式文案（`formulaText`/`formulaDetail` 后端下发）与热度服务。
+
+---
+
 ## 场所状态上报（venuestatusreport 模块）
 
 ### 设计定位
 
-舞厅门店状态变更（警察检查、突然关门）发生频率远高于管理员手动更新 `Venue.status` 的能力——极端情况可能 30 分钟内多轮检查导致反复开关门。`venuefeedback` 模块是异步管理员审核流程（有 `handled` 状态），无法满足实时性需求。此模块提供**实时众包信号层**：用户在现场一键报告"现在关门了"，信号对其他用户即时可见。
+舞厅门店状态变更（警察检查、突然关门）发生频率远高于管理员手动更新 `Venue.status` 的能力——极端情况可能 30 分钟内多轮检查导致反复开关门。`venuefeedback` 模块是异步管理员审核流程（有 PENDING/RESOLVED/DISMISSED 状态机），无法满足实时性需求。此模块提供**实时众包信号层**：用户在现场一键报告"现在关门了"，信号对其他用户即时可见。
 
 **与 venuefeedback 的边界**（重要）：
 
-- `venuefeedback.SUSPENDED` = "我不在场但认为状态信息有误"→ 异步管理员审核 → `handled` 布尔流转
+- `venuefeedback.SUSPENDED` = "我不在场但认为状态信息有误"→ 异步管理员审核 → `ReportStatus` 状态机流转（RESOLVED/DISMISSED）
 - `venuestatusreport` = "我现在就在现场，刚确认关门"→ 实时 TTL 信号 → 自动过期，无需管理员介入
 
 两者共存，语义边界清晰：一个走异步审核，一个走实时众包。`venuefeedback` 不重复承担实时信号职责。
@@ -441,12 +532,28 @@ LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);  
 - 活跃报告数（`activeReportCount`）和最新报告时间（`latestReportTime`）是实时事实，不受"截至昨日"窗口约束
 - 与 `currentStatusDays`（当前状态持续天数）同理：都是"当前状态"这一实时事实，而非滚动窗口聚合
 
+**活跃判定口径契约（2026-08-05 修复，根因案例）**：所有"活跃报告"判定点必须经参数传入同一 TTL 窗口（`StatusReportService.ACTIVE_REPORT_TTL_HOURS` 为唯一常量权威源），**SQL 层禁止自行定义时间窗**。活跃判定点清单：
+
+- `VenueRepository.countHeatCounters` 的 `reportcount` / `latestreporttime`（热度聚合，`reportSince` 参数）
+- `StatusReportRepository.countActiveAndLatestTime`（提交/撤销响应摘要）
+- `VenuePostRepository.findDetailStats` 的 `hasmyreport` EXISTS（详情页个人已报告标记）——**历史实现只过滤 `deleted = false` 漏 TTL 过滤**，与热度聚合口径不一致：TTL 过期后 `activeReportCount` 归零但 `hasMyStatusReport` 恒真，详情页"已报告·补充"按钮永不还原（用户必须手动撤销）。此为修复根因，新增活跃判定查询时必须对照本清单。
+
 ### 接口
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
 | POST | `/venues/{venueId}/status-reports` | 需登录 | 上报暂停（body 可空=快速上报，或含 reason/occurredAt/note） |
 | POST | `/venues/{venueId}/status-reports/cancel` | 需登录 | 撤销我的上报（软删除） |
+| GET | `/status-reports/mine` | 需登录 | 我的全部状态上报（用户级资源，顶层路径，见下「我的上报记录」） |
+
+### 我的上报记录（GET /status-reports/mine，2026-08-05 新增）
+
+详情页「我的上报记录」弹窗的数据源。**用户维度资源**（跨场所），路由放顶层 `/status-reports/mine` 而非场所子资源路径（与 `/favorites` 用户级资源模型一致，区别于 `/venues/{venueId}/status-reports` 的场所子资源）。
+
+- **范围**：仅未撤销（`deleted = false`）记录，含已过期（TTL 外）——「已过期」记录前端标注后提醒用户可重新上报；已撤销记录不返回（撤销是用户主动收回动作，soft delete 属内部实现细节，语义上不再属于"上报记录"）
+- **实现**：`StatusReportRepository.findMyReportsByUserId` 原生 SQL JOIN `qwt_venues` 一次取回场所名称/城市/区县/地址（消除 N+1）；`active` / `expiresAt` 在 `StatusReportService.listMyReports` 按 `ACTIVE_REPORT_TTL_HOURS` 统一计算（TTL 唯一权威源，SQL 不自行定义时间窗）
+- **场所软删除不回退占位**：JOIN 不过滤 `v.deleted`——记录真实性不因场所下架而消失，与 /admin/reports 的"已下架场所"占位策略有意区分（那是管理端当前列表，这是用户历史记录）
+- **响应**：`MyStatusReportResponse`（id/venueId/venueName/venueCity/venueDistrict/venueAddress/createdAt/active/expiresAt），前端展示剩余时间只做 `expiresAt - now` 纯计算，不持有 TTL 常量
 
 ### 数据模型
 
@@ -611,7 +718,7 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 
 ### 迁移与数据说明
 
-- `src/main/resources/db/migrate-reaction-daily.sql`：旧 hold 模型 → 每日一记模型的迁移（硬删旧软删行、`reaction_date` 回填 `created_at::date`、唯一约束 (user,venue,code) → (user,venue,code,date)）。**必须在应用启动前手动执行**（ddl-auto: update 对已有数据的表加 NOT NULL 列会失败；生产 validate 模式靠本脚本保证列/约束）。
+- `src/main/resources/db/migrate-reaction-daily.sql`：旧 hold 模型 → 每日一记模型的历史迁移（硬删旧软删行、`reaction_date` 回填 `created_at::date`、唯一约束 (user,venue,code) → (user,venue,code,date)）。**历史脚本（已执行），属旧范式遗留**——新约定不再新增此类手动脚本，schema 演进一律走 `ddl-auto: update` 自动完成（见「Schema 演进（自动更新优先）」章节）
 - 旧行语义近似：迁移后旧"当前生效"行按 createdAt 日期成为"该日一次点击"，窗口统计语义自洽。
 
 ### 与现有模块的关系（保留 / 删除 / 替换）
@@ -859,7 +966,7 @@ public class Venue {
 - 序列化/反序列化统一收敛在 `mapper/` 组件与 Service 的私有工具方法中（注入 `ObjectMapper`），新增同类字段时复用 `serializeStringList` / `serializeList` / `deserializeList`，不另起炉灶
 - Response DTO 中为 `List<String>`，**空数据返回空列表而非 null**（前端无需判空两套逻辑）
 - Request DTO 中为 `List<String>`，用 `@Size(max = N)` 限制数量、`List<@Size(max = 500) String>` 限制单元素长度，与列长度约束呼应
-- 若字段未来需要独立查询、排序、元数据（如图片描述、上传者），再升级为关联表——届时迁移脚本单独约定
+- 若字段未来需要独立查询、排序、元数据（如图片描述、上传者），再升级为关联表——新表由 `ddl-auto: update` 自动创建，无需手动 SQL（见「Schema 演进（自动更新优先）」章节）
 
 **结构化对象列表**同理：门票（`tickets`）、舞伴费用（`partnerFees`）以 JSON 对象数组存储，DTO 定义为 `venue/dto/` 下的共享 record（`TicketEntry` / `PartnerFeeEntry`，请求与响应复用），Request 中用 `List<@Valid TicketEntry>` 触发嵌套校验，跨字段约束在 Service 层校验。
 
@@ -1103,7 +1210,7 @@ src/main/resources/
   application-prod.yaml     ← 生产（已提交，敏感值全部通过环境变量注入）
 ```
 
-- 基础 `application.yaml` 的 `ddl-auto` 为 `validate`（安全默认），仅 `application-dev.yaml` 覆盖为 `update`
+- 基础 `application.yaml` 的 `ddl-auto` 为 `update`（2026-08-05 起统一自动演进策略，dev/prod 一致）——新增表/列由启动时自动完成，不手动执行 SQL；规则见「Schema 演进（自动更新优先）」章节
 - 禁止在任何 yaml 文件中硬编码数据库密码、密钥等敏感信息
 - 本地开发使用 `application-dev.yaml`，该文件已列入 `.gitignore`
 - 环境变量占位符禁止带空默认值（`${SECRET}` 而非 `${SECRET:}`），确保遗漏配置时启动即失败
@@ -1172,9 +1279,48 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 
 ---
 
-## Schema 完整性与数据库迁移规范
+## Schema 演进与数据库完整性（2026-08-05 确立自动更新优先）
 
-### 事故根因（2026-08-04 确立）
+### Schema 演进策略（默认自动更新，不手动执行 SQL）
+
+**核心决策（2026-08-05）**：schema 演进默认由 Spring Data JPA 的 `ddl-auto: update` 在应用启动时自动完成（新表自动创建、新列自动追加）——**不编写、不执行手动 SQL 迁移脚本**（`application.yaml` 已统一为 update，dev/prod 同策略）。上一版"新增列需手动执行 migrate-*.sql"的约定废止。
+
+**新增列的三条硬规则（保证 update 对已有数据的表自动加列成功）**：
+
+1. **新增 NOT NULL 列必须携带默认值，唯一声明通道是 `@ColumnDefault`**——`@Column(nullable = false) + @ColumnDefault("'XXX'")`（枚举类列；`@ColumnDefault` 的值是原始 SQL 表达式，字符串要带引号如 `"'PENDING'"`）；update 生成 `ALTER TABLE ... ADD COLUMN ... NOT NULL DEFAULT ...`，PostgreSQL 快速默认值不重写表，存量行自动落默认值。**禁止裸 `@Column(nullable = false)` 无默认值**——对已有数据的表加列会直接失败（这是历史 migrate-*.sql 存在的根本原因，如今规则上杜绝）。**禁止在 `columnDefinition` 中携带 DEFAULT/NOT NULL 等与 JPA 元数据重叠的语义**——Hibernate 会把元数据派生的 `default ...` / `not null` / 枚举 `check` 追加到 columnDefinition 原文之后，双声明生成非法 DDL（`... DEFAULT 'X' default 'X' ...` → Postgres "multiple default values specified"）。Java 字段初始化器只负责内存态默认值、**不参与 DDL 生成**，不能替代 @ColumnDefault。`columnDefinition` 仅限方言特有类型片段（如 `jsonb`），禁止写 DEFAULT/NOT NULL
+2. **新增可空列直接加列**（`nullable = true` 或缺省），update 无阻塞
+3. **实体移除字段 ≠ 列被删除**：update **从不删除实体已移除的列、也不把现有列改为可空**。移除字段时必须保留实体映射兜底（@Deprecated 字段 + Java 默认值，insert 继续写该列避免违反 NOT NULL），**禁止**只移除映射导致 insert 违反遗留 NOT NULL 列（历史 `liked` 事故模式，见下文「实体字段移除」小节）
+
+**索引演进**：新增/修改实体 `@Index` 后 update 自动建索引（对已存在同名索引幂等）。
+
+**DDL 失败即启动失败（2026-08-05 起配置）**：`spring.jpa.properties.hibernate.hbm2ddl.halt_on_error: true`（基础配置已统一，dev/prod 继承）——Hibernate 默认对 schema 执行错误只打 WARN 并**照常启动**，留下"半迁移 schema + 运行期才炸"的隐患（见下事故）；开启后任何 DDL 失败直接终止 bootstrap。
+
+### 事故根因（2026-08-05：columnDefinition 与 @ColumnDefault 双声明）
+
+**现象**：启动时 `ALTER TABLE qwt_venue_feedbacks ADD COLUMN status ...` 报 `ERROR: multiple default values specified for column "status"`，随后同批索引建失败（`column "status" does not exist`）；应用却**照常启动成功**（Hibernate 仅 WARN），反馈模块在残缺 schema 上运行，首次读写即炸。
+
+**根因链（为什么会有这个错误决策）**：
+
+1. **把 `columnDefinition` 当成了承载约束的常规通道**。`columnDefinition` 的语义是"原始 DDL 片段，原样拼接"，是给方言特有类型（如 `jsonb`）的逃生口；团队却用它写 DEFAULT/NOT NULL，与 JPA 元数据（`nullable`、`@ColumnDefault`、`@Enumerated` 的 check 生成）对同一约束形成**双声明**。Hibernate 组装列 DDL 时把元数据派生的 `default ...` 追加到原文之后 → `DEFAULT 'PENDING' default 'PENDING'` → Postgres 直接拒绝。
+2. **约定未经真实 Hibernate 版本验证就固化为 AGENTS.md 规则**。旧规则"`columnDefinition` 携带默认值 + 枚举类列再加 `@ColumnDefault`"把两个互斥通道写成"互补"，从未在 update 的 ADD COLUMN 路径上被执行过：`handled` 列早已存在（update 不 alter 存量列），`Venue.status` 只用了 columnDefinition+初始化器（无 @ColumnDefault）恰好没踩雷——**幸存者偏差**让错误约定显得"已被使用验证过"。`status` 是本约定下第一条真正走 ADD COLUMN 路径的新列，一执行即炸。
+3. **无 DDL 失败兜底**。SchemaIntegrityChecker 只校验主键机制，Hibernate 默认吞掉 DDL 错误，二者叠加使"schema 未按实体迁移"完全不可见，直到运行期。
+
+**长期防线（本次已落地）**：① 列默认值唯一声明通道 = `@ColumnDefault`，columnDefinition 禁止携带 DEFAULT/NOT NULL（规则见上）；② `halt_on_error: true` 使 DDL 失败即启动失败；③ 本事故后全库 grep 清理了全部同模式字段（`VenueFeedback.handled`、`Venue.status`、`Venue.sortWeight`）。新增列后若担心，可临时用 `show-sql: true` 启动一次观察生成的 ADD COLUMN 是否单默认值。
+
+### 无法避免手动 SQL 的场景（例外清单）
+
+以下场景 update 无法自动完成，**允许且必须**手动执行，除此之外一律自动演进：
+
+| 场景 | 手段 | 说明 |
+|------|------|------|
+| 跨库/跨环境逻辑迁移 | `pg_dump -Fc` + `pg_restore` | 完整保留 IDENTITY/序列/主键/NOT NULL/默认值/索引/约束；**禁止 GUI 工具（DataGrip/DBeaver/Supabase 控制台）拖拽复制表结构**——系统性丢失 identity/序列/主键 |
+| 主键机制损坏修复 | `db/repair-schema-identity.sql`（幂等） | 回填 NULL id、重建主键、恢复 IDENTITY/序列定位/列默认值；由 SchemaIntegrityChecker fail-fast 兜底发现 |
+| 彻底删除遗留列 | 一次性手动 `ALTER TABLE ... DROP COLUMN` | 仅当冗余列影响可维护性时执行；**默认做法是保留实体映射兜底，不删列** |
+| 数据回填/批量修正 | 一次性手动 UPDATE | 应用层无法表达的历史数据修正（如 2026-08 的 `migrate-reaction-daily.sql` 回填 reaction_date） |
+
+历史迁移脚本（`migrate-reaction-daily.sql` / `migrate-drop-liked-not-null.sql`）是**旧范式遗留**，仅作历史参考，**不再新增此类脚本**——新演进一律走实体列默认值 + update 自动完成。
+
+### 事故根因（2026-08-04 确立，历史背景）
 
 DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：索引和唯一约束保留了，但 **IDENTITY（序列）、主键、NOT NULL、列默认值全部丢失**——9 张 `qwt_*` 表的 id 列全部退化为可空 bigint。损坏极具欺骗性：
 
@@ -1196,12 +1342,17 @@ DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：
 
 任何环境（本地/生产）启动服务即完成一次完整性校验。**手工变更过数据库结构后，必须启动一次服务确认检查通过**。
 
-### 数据库迁移规范（强制）
+### 实体字段移除 ≠ 列被删除（2026-08-05 更新为兜底映射模式）
 
-- **逻辑迁移一律使用 `pg_dump -Fc` + `pg_restore`**：完整保留 IDENTITY、序列（含当前值）、主键、NOT NULL、默认值、索引、约束
-- **禁止 GUI 工具（DataGrip/DBeaver/Supabase 控制台）拖拽或导出-导入复制表结构**——此类工具按普通列类型重建表，系统性丢失 identity/序列/主键
-- 任何方式手工建库/迁库后：① 启动服务（完整性检查兜底）；② 若检查失败，执行 `src/main/resources/db/repair-schema-identity.sql`（幂等：回填 NULL id 脏行、重建主键、恢复 IDENTITY、序列定位到 max(id)、恢复 NOT NULL 与列默认值）
-- 带显式 id 导入数据后**必须重置序列**（`setval` 到 max(id)），否则下一次插入即主键冲突——修复脚本已内置此步骤
+**事故**：`TagInteraction` 在"标签点赞 → Reaction"重构中移除 `liked` 字段，javadoc 声称"liked 列已废弃并移除"，但列从未从库表删除——dev（`ddl-auto: update`）只新增列/约束、**从不删除实体已移除的列、也不把现有列改为可空**；prod（`validate`）不校验列级 NOT NULL。结果：列保持 `NOT NULL` 且无默认值，代码侧 insert 不再提供 `liked` → 任何"首次评分"插入违反 NOT NULL，且被 `score()` 的 `catch (DataIntegrityViolationException)` 误当并发竞态吞掉（事务 rollback-only 后 commit 抛 UnexpectedRollbackException，接口 200 + code=5000 表面成功实为失败），真实根因被掩盖到运行期才爆炸。
+
+**规则（强制，2026-08-05 更新）**：
+
+- 实体移除/弱化字段时，**默认保留字段映射兜底**：@Deprecated 标注 + Java 侧设安全默认值（如 `handled` 遗留列、`avatar_url`/`liked` 先例），保证 insert 继续写该列——**禁止**只移除映射（遗留列 NOT NULL 无默认值时 insert 必炸）
+- 兜底字段的 javadoc 必须描述真实库表状态（**禁止把"意图移除"写成"已移除"**——注释必须与库表事实一致）
+- 仅当冗余列影响可维护性时，才走「无法避免清单」的手动删列（一次性，不新增迁移脚本文件）
+- 现有遗留列：`qwt_tag_interactions.liked`（Java 零引用，NOT NULL 已由 `db/migrate-drop-liked-not-null.sql` 取消）、`qwt_users.avatar_url`（Java 零引用，可空）、`qwt_venue_feedbacks.handled`（状态机引入前遗留，实体 @Deprecated 映射兜底）
+- `catch (DataIntegrityViolationException)` **只允许吞唯一键并发竞态（SQLState 23505）**，其余完整性错误（NOT NULL/列约束/外键）必须继续抛出——参考 `TagInteractionService.isUniqueViolation()` 的判定写法；吞异常必须带具体 SQLState 判定，禁止整类静默吞掉
 
 ---
 
@@ -1226,7 +1377,7 @@ DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：
 - 禁止 Controller 直接调用 Repository
 - 禁止 Entity 直接作为 API 响应体返回
 - 禁止 `@Query(nativeQuery = true)` 无注释使用
-- 禁止 `ddl-auto: create` 或 `update` 出现在生产配置
+- 禁止 `ddl-auto: create` 出现在生产配置（生产与 dev 统一为 `update` 自动演进策略，见「Schema 演进」章节）
 - 禁止在 yaml 文件中硬编码密码、Token 等敏感信息
 - 禁止在 Entity 上使用 `@Data`（会破坏 JPA equals/hashCode 契约）
 - 禁止枚举用 `@Enumerated(EnumType.ORDINAL)`（数据库值依赖顺序，易出错）
@@ -1234,6 +1385,7 @@ DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：
 - 禁止在 pom.xml 显式引入 `com.fasterxml.jackson.core:jackson-databind`（由 Spring Boot BOM 管理）
 - 禁止表名/索引名省略 `qwt_` 前缀（多项目共享同一 Supabase 数据库）
 - 禁止在 `@Column` 中写 MySQL 特有 `columnDefinition`（如 `tinyint`），应省略让 Hibernate 按方言映射
+- 禁止在 `@Column` 的 `columnDefinition` 中携带 DEFAULT / NOT NULL（与 `@ColumnDefault` / `nullable` 双声明同一约束，Hibernate 拼接生成非法 DDL，Postgres 报 "multiple default values specified"）——列默认值一律用 `@ColumnDefault` 单一通道声明（见「Schema 演进」章节）
 - 禁止在用户 API 响应中引入头像等社交属性字段（产品为黄页工具，UserInfoResponse 仅含 id/openId/nickname/role）
 - 禁止在 Venue 模型中使用"人均消费"（price）/"最低消费"（minConsumption）字段——舞厅领域无此概念，消费模型为 tickets（门票规则）+ partnerFees（舞伴费用多模式列表，unit 区分 MINUTE/SONG）
 - 禁止添加 CORS 配置（`addCorsMappings`）——唯一客户端为微信小程序（`wx.request` 不受同源策略约束），CORS 仅降低防御深度
@@ -1309,6 +1461,8 @@ DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：
 | 恢复"标签点赞"功能或用 1-10 打分做实时众包体感 | 已被 Reaction 快速反馈系统替代（`venuereaction` 模块），新增此类需求一律走 Reaction toggle，不复用 taginteraction |
 | Reaction 计数做"每周/每月重置清零" | 原始记录永久保留，按今日/7天/30天/全部四个真实时间窗口实时统计（时间衰减方案），见「Reaction 快速反馈系统」 |
 | Reaction 时间窗口套用「统计口径：截至昨日」 | Reaction 窗口锚点为真实"此刻"（今天0点/7天前/30天前），与热度滚动窗口是两套独立时间语义 |
+| 实体删除字段后不同步迁移脚本处理遗留列（javadoc 写"已移除"但列仍在） | `ddl-auto: update` 不删列/不取消 NOT NULL、`validate` 不校验列级 NOT NULL → 遗留 NOT NULL 列在运行期插入时才爆炸且被 DataIntegrityViolation 兜底误吞。实体删字段必须同步 `db/migrate-*.sql` 迁移，注释写真实状态（见「Schema 完整性与数据库迁移规范 → 实体字段移除 ≠ 列被删除」） |
+| `catch (DataIntegrityViolationException)` 整类吞掉当"并发幂等" | 只允许吞唯一键竞态（SQLState 23505，见 `TagInteractionService.isUniqueViolation`）；NOT NULL/列约束/外键违规必须上抛，否则真实根因被静默掩盖成 200 + 业务码（2026-08-05 liked 列事故） |
 
 ---
 

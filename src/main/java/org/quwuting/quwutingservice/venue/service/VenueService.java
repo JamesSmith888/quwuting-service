@@ -8,8 +8,7 @@ import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
 import org.quwuting.quwutingservice.user.enums.UserRole;
-import org.quwuting.quwutingservice.venue.config.VenueDefaultsConfig;
-import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
+import org.quwuting.quwutingservice.venue.config.VenueDefaultsConfig;import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
 import org.quwuting.quwutingservice.venue.dto.request.CreateVenueRequest;
 import org.quwuting.quwutingservice.venue.dto.response.CityStatsResponse;
@@ -24,6 +23,7 @@ import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
 import org.quwuting.quwutingservice.venuepost.repository.VenuePostRepository;
+import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportService;
 import org.quwuting.quwutingservice.config.CacheConfig;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Caching;
@@ -34,6 +34,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import tools.jackson.databind.ObjectMapper;
 
+import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -168,8 +169,13 @@ public class VenueService {
         List<ReactionBadge> topReactions = venueReactionService.getBadges(
                 id, UserContext.getCurrentUserId(), ReactionWindow.DAYS_7);
         VenueResponse base = venueResponseMapper.toResponse(venue, topReactions);
+        // 「我是否已上报」必须与活跃计数同一 TTL 口径：hasmyreport 的活跃判定带
+        // created_at >= now-4h 过滤（TTL 常量唯一权威源 = StatusReportService，见
+        // VenuePostRepository.findDetailStats javadoc——历史实现漏过滤导致 TTL 过期后
+        // 详情页"已报告·补充"永不还原）
+        LocalDateTime reportSince = LocalDateTime.now().minusHours(StatusReportService.ACTIVE_REPORT_TTL_HOURS);
         VenuePostRepository.DetailStats detailStats =
-                venuePostRepository.findDetailStats(id, UserContext.getCurrentUserId());
+                venuePostRepository.findDetailStats(id, UserContext.getCurrentUserId(), reportSince);
         boolean canManage = computeCanManage(venue);
         long postCount = detailStats.getPostcount() != null ? detailStats.getPostcount() : 0L;
         boolean hasMyStatusReport = Boolean.TRUE.equals(detailStats.getHasmyreport());

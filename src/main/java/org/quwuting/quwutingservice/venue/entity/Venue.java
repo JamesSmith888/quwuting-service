@@ -3,6 +3,7 @@ package org.quwuting.quwutingservice.venue.entity;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
+import org.hibernate.annotations.ColumnDefault;
 import org.quwuting.quwutingservice.base.BaseEntity;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 
@@ -23,8 +24,10 @@ public class Venue extends BaseEntity {
     @Column(nullable = false, length = 100)
     private String name;
 
+    /** 营业状态。列默认值唯一声明通道 = @ColumnDefault（见 AGENTS.md「Schema 演进」） */
     @Enumerated(EnumType.STRING)
-    @Column(length = 20, nullable = false, columnDefinition = "varchar(20) default 'OPEN'")
+    @Column(length = 20, nullable = false)
+    @ColumnDefault("'OPEN'")
     private VenueStatus status = VenueStatus.OPEN;
 
     /** 封面图片 URL */
@@ -92,8 +95,9 @@ public class Venue extends BaseEntity {
     @Column(length = 500)
     private String tags;
 
-    /** 排序权重，越大越靠前 */
-    @Column(nullable = false, columnDefinition = "int default 0")
+    /** 排序权重，越大越靠前。列默认值唯一声明通道 = @ColumnDefault（见 AGENTS.md「Schema 演进」） */
+    @Column(nullable = false)
+    @ColumnDefault("0")
     private Integer sortWeight = 0;
 
     // ===== 门店认领 =====

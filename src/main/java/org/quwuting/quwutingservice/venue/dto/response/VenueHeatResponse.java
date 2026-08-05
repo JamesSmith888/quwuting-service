@@ -9,7 +9,8 @@ import java.util.List;
  * 场所热度响应体（GET /venues/{id}/heat）。
  * <p>
  * 综合浏览量、收藏、评价、营业稳定性等多维度统计。
- * 权重公式收敛在 VenueHeatService 内部，前端只消费最终分值与已公开的分项统计。
+ * 权重公式与公式文案（formulaText/formulaDetail）收敛在 VenueHeatService 内部——
+ * 前端直接渲染公式文案，禁止硬编码权重（2026-08 确立，消灭"权重调整后展示失真"）。
  */
 public record VenueHeatResponse(
         /** 综合热度指数（加权公式见 VenueHeatService） */
@@ -36,10 +37,12 @@ public record VenueHeatResponse(
         long newPostCount30d,
 
         // ── 评价互动 ──
-        /** 近30天评价数（维度评分记录数） */
+        /** 近30天评分数（按 created_at 窗口，改分不刷新窗口，防刷分） */
         long ratingCount30d,
-        /** 近30天 Reaction 总数（原"近30天点赞数"，标签点赞已被 Reaction 快速反馈系统替代） */
-        long reactionCount30d,
+        /** 近30天正向 Reaction 数（仅 Polarity.POSITIVE，热度公式计入项） */
+        long positiveReactionCount30d,
+        /** 近30天负向 Reaction 数（仅 Polarity.NEGATIVE，不计入公式，供详情页展示负面信号） */
+        long negativeReactionCount30d,
 
         // ── 满意度 ──
         /** 综合满意度（1-10，各维度等权均分），评价人数不足时为 null */
@@ -78,6 +81,12 @@ public record VenueHeatResponse(
          */
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
         LocalDateTime latestReportTime,
+
+        // ── 公式文案（后端生成，前端直接渲染） ──
+        /** 热度公式简述（含实际数据，如 "1520 = 120×1 + 30×10 + 5×15 + 2×5 + 4×8 + 10×3 + 2.5×20"） */
+        String formulaText,
+        /** 热度公式详情（问号弹窗完整说明，含满意度中性偏移规则与负向反馈说明） */
+        String formulaDetail,
 
         /**
          * 滚动窗口统计口径的截止日期（yyyy-MM-dd，即"昨天"）。

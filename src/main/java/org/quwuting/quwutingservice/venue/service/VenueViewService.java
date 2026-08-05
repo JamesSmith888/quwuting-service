@@ -1,18 +1,26 @@
 package org.quwuting.quwutingservice.venue.service;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 场所浏览记录服务。
  * <p>
  * 已登录用户按 (venueId, userId, viewDate) 去重（同一天仅记一条）；
- * 匿名用户 userId 为 null，每次访问均记录（无法去重，数据仅供参考）。
+ * 匿名用户 userId 为 null，无法按身份去重——2026-08 起增加 <b>60s 简单频控</b>
+ * （同场所同客户端 IP 60 秒内只记一条），压制脚本连点/自动刷新放大 PV 的漏洞。
+ * 频控是尽力而为（多 IP 分布式刷无法拦截），key 取 X-Forwarded-For 第一个 IP；
+ * 拿不到请求上下文时降级为固定 key（粗粒度"场所级 60s 防抖"，仍能防单端连点）。
  * <p>
  * 写入采用无条件 upsert（{@code INSERT ... ON CONFLICT DO NOTHING}，见
  * {@link VenueViewRepository#upsertView}）：恒为 1 次 DB 往返，去重与并发竞态
@@ -29,17 +37,57 @@ import java.time.LocalDateTime;
 @RequiredArgsConstructor
 public class VenueViewService {
 
+    /** 匿名浏览频控窗口：同一场所同一 IP 在窗口内只计 1 条 */
+    private static final long ANON_RATE_LIMIT_SECONDS = 60;
+
+    /** 匿名频控缓存（key = venueId:ip；未命中时 putIfAbsent 竞争窗口内可能双写一条，无害） */
+    private final Cache<String, Boolean> anonymousViewLimiter = Caffeine.newBuilder()
+            .expireAfterWrite(ANON_RATE_LIMIT_SECONDS, TimeUnit.SECONDS)
+            .maximumSize(50_000)
+            .build();
+
     private final VenueViewRepository venueViewRepository;
 
     /**
-     * 记录一次浏览（单次 DB 往返，幂等）。
+     * 记录一次浏览（匿名用户最多 60s 一条，已登录用户由 upsert 按天去重，恒 1 次 DB 往返）。
      *
      * @param venueId 场所 ID
-     * @param userId  用户 ID，匿名时为 null（匿名记录不参与去重）
+     * @param userId  用户 ID，匿名时为 null（匿名记录参与 IP 频控，不参与按天去重）
      */
     @Transactional
     public void recordView(Long venueId, Long userId) {
+        if (userId == null && isRateLimited(venueId)) {
+            return; // 匿名频控命中：跳过写入（尽力而为，防止脚本连点放大 PV）
+        }
         LocalDate today = LocalDate.now();
         venueViewRepository.upsertView(venueId, userId, today, LocalDateTime.now());
+    }
+
+    /**
+     * 匿名频控判定：同场所同 IP 在 ANON_RATE_LIMIT_SECONDS 内已记录过则返回 true。
+     * putIfAbsent 原子占位——并发首写时可能都通过（最多双写一条匿名记录，对统计无实质影响）。
+     */
+    private boolean isRateLimited(Long venueId) {
+        String ip = resolveClientIp();
+        String key = venueId + ":" + (ip != null ? ip : "anon");
+        return anonymousViewLimiter.asMap().putIfAbsent(key, Boolean.TRUE) != null;
+    }
+
+    /**
+     * 解析客户端 IP：优先 X-Forwarded-For 第一个地址（代理链路真实来源），
+     * 回退 remoteAddr。代理剥离 XFF 时两者同为网关地址——频控退化为"场所级防抖"，仍可接受。
+     */
+    private String resolveClientIp() {
+        ServletRequestAttributes attrs =
+                (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+        if (attrs == null) {
+            return null;
+        }
+        String xff = attrs.getRequest().getHeader("X-Forwarded-For");
+        if (xff != null && !xff.isBlank()) {
+            int comma = xff.indexOf(',');
+            return (comma > 0 ? xff.substring(0, comma) : xff).trim();
+        }
+        return attrs.getRequest().getRemoteAddr();
     }
 }

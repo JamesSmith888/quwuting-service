@@ -126,10 +126,12 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
         Long getPosttotal();
         /** 近30天新增动态 */
         Long getPostrecent();
-        /** 近30天评价数（score 非空的交互记录数） */
+        /** 近30天评分数（score 非空的交互记录数，按 created_at 窗口——改分不刷新窗口，防"定期改分保持计数常青"） */
         Long getRatingcount30d();
-        /** 近30天 Reaction 总数（qwt_venue_reactions 当前生效记录数，替代原"标签点赞数"） */
-        Long getReactioncount30d();
+        /** 近30天正向 Reaction 总数（仅 Polarity.POSITIVE 的 code，热度公式计入项） */
+        Long getPositivereactioncount30d();
+        /** 近30天负向 Reaction 总数（仅 Polarity.NEGATIVE 的 code，不计入公式，单独展示负面信号） */
+        Long getNegativereactioncount30d();
         /** 评价总人数（去重 userId） */
         Long getRaters();
         /** 近30天暂停营业次数（to_status = SUSPENDED 的状态变迁数） */
@@ -179,10 +181,15 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                   AND p.created_at >= :windowSince AND p.created_at < :windowUntil) AS postrecent,
               (SELECT COUNT(*) FROM qwt_tag_interactions ti
                 WHERE ti.venue_id = :venueId AND ti.deleted = false AND ti.score IS NOT NULL
-                  AND ti.updated_at >= :windowSince AND ti.updated_at < :windowUntil) AS ratingcount30d,
+                  AND ti.created_at >= :windowSince AND ti.created_at < :windowUntil) AS ratingcount30d,
               (SELECT COUNT(*) FROM qwt_venue_reactions r
                 WHERE r.venue_id = :venueId AND r.deleted = false
-                  AND r.created_at >= :windowSince AND r.created_at < :windowUntil) AS reactioncount30d,
+                  AND r.reaction_code IN :positiveCodes
+                  AND r.created_at >= :windowSince AND r.created_at < :windowUntil) AS positivereactioncount30d,
+              (SELECT COUNT(*) FROM qwt_venue_reactions r
+                WHERE r.venue_id = :venueId AND r.deleted = false
+                  AND r.reaction_code IN :negativeCodes
+                  AND r.created_at >= :windowSince AND r.created_at < :windowUntil) AS negativereactioncount30d,
               (SELECT COUNT(DISTINCT ti.user_id) FROM qwt_tag_interactions ti
                 WHERE ti.venue_id = :venueId AND ti.deleted = false AND ti.score IS NOT NULL) AS raters,
               (SELECT COUNT(*) FROM qwt_venue_status_logs l
@@ -200,7 +207,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                    @Param("viewUntil") java.time.LocalDate viewUntil,
                                    @Param("windowSince") LocalDateTime windowSince,
                                    @Param("windowUntil") LocalDateTime windowUntil,
-                                   @Param("reportSince") LocalDateTime reportSince);
+                                   @Param("reportSince") LocalDateTime reportSince,
+                                   @Param("positiveCodes") List<String> positiveCodes,
+                                   @Param("negativeCodes") List<String> negativeCodes);
 
     /**
      * 查询城市内热门场所 ID 集合（热度排名前 20%，至少 1 家/城市）。

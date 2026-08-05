@@ -85,10 +85,27 @@ public class TagInteractionService {
         try {
             tagInteractionRepository.save(ti);
         } catch (DataIntegrityViolationException e) {
-            // 并发竞态：另一请求已创建，幂等忽略
+            // 仅吞"唯一键并发竞态"（SQLState 23505：另一请求已创建同 (user,venue,tag) 行）。
+            // 其余数据完整性错误（列约束/NOT NULL/外键等）必须继续抛出——
+            // 2026-08-05 事故：liked 列 NOT NULL 违规曾被此处误吞，事务 rollback-only 后
+            // commit 抛 UnexpectedRollbackException，接口 200 + code=5000 表面成功实为失败，
+            // 真实根因（schema 漂移）被掩盖数周。见 AGENTS.md「schema 变更纪律」。
+            if (!isUniqueViolation(e)) {
+                throw e;
+            }
             log.debug("score 并发冲突，幂等忽略: userId={}, venueId={}, tag={}", userId, venueId, tag);
         }
         invalidateVenueAggregates(venueId);
+    }
+
+    /**
+     * 判定数据完整性异常是否为唯一键冲突（PostgreSQL SQLState 23505）。
+     * 走 mostSpecificCause 穿透 Hibernate 包装层取底层 SQLException。
+     */
+    private static boolean isUniqueViolation(DataIntegrityViolationException e) {
+        Throwable cause = e.getMostSpecificCause();
+        return cause instanceof java.sql.SQLException
+                && "23505".equals(((java.sql.SQLException) cause).getSQLState());
     }
 
     // ─── 聚合统计 ───────────────────────────────────────────────────────

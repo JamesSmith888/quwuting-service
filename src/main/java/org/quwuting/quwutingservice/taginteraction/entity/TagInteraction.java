@@ -11,9 +11,11 @@ import org.quwuting.quwutingservice.base.BaseEntity;
  * 一个用户对一个舞厅的一个评分维度至多一行记录（唯一约束）。
  * tag 字段存储评分维度名称（服务/环境/音响效果/性价比，见 RatingDimensions）。
  * <p>
- * 历史遗留：表名/字段名沿用早期"标签点赞 + 评分"合并设计的命名（liked 列已废弃并移除，
- * 数据库中仍可能存在旧的 liked 列，不再读写），"标签点赞"功能已被 Reaction 快速反馈系统
- * 替代，见 {@link org.quwuting.quwutingservice.venuereaction.entity.VenueReaction}
+ * 历史遗留：表名/字段名沿用早期"标签点赞 + 评分"合并设计的命名。liked 列已完全废弃
+ * （Java 代码零引用），但因 ddl-auto 不删列，数据库仍保留该列——其 NOT NULL 约束已由
+ * db/migrate-drop-liked-not-null.sql 移除（列可空，插入不再受影响；彻底删列见该脚本可选
+ * 步骤）。"标签点赞"功能已被 Reaction 快速反馈系统替代，见
+ * {@link org.quwuting.quwutingservice.venuereaction.entity.VenueReaction}
  * 与 AGENTS.md「Reaction 快速反馈系统」章节。
  */
 @Getter

@@ -3,11 +3,21 @@ spring:
     name: quwuting-service
   jpa:
     hibernate:
-      ddl-auto: validate
+      # Schema 演进策略（2026-08-05 确立）：默认自动更新——新表/新列由
+      # ddl-auto:update 在启动时自动创建/追加，不手动执行 SQL 迁移。
+      # 约束：新增 NOT NULL 列必须用 @ColumnDefault 声明默认值（禁止在
+      # columnDefinition 中重复声明 DEFAULT，见 AGENTS.md「Schema 演进」）；
+      # 实体移除字段必须保留映射兜底或走"无法避免"清单的手动 SQL。
+      ddl-auto: update
     show-sql: false
     properties:
       hibernate:
         format_sql: false
+        # DDL 执行失败即拒绝启动（Hibernate 默认仅 WARN 且应用照常启动，
+        # 会留下"半迁移 schema + 运行期才炸"的隐患——2026-08-05 status 列
+        # 事故中应用带残缺 schema 正常启动）。见 AGENTS.md「Schema 演进」。
+        hbm2ddl:
+          halt_on_error: true
   jackson:
     default-property-inclusion: non_null
     time-zone: Asia/Shanghai
@@ -31,6 +41,12 @@ venue:
     tags:
       - 交谊舞
       - 舞厅
+
+# 用户上报配置
+app:
+  reports:
+    # 平台对用户上报的处理承诺天数（前端提示"我们会在 X 日内维护好"中的 X 由此下发）
+    maintenance-days: 3
 
 # Supabase Storage 配置（前端直传模式，后端仅签发上传凭证）
 supabase:

@@ -22,10 +22,13 @@ public interface TagInteractionRepository extends JpaRepository<TagInteraction, 
     /**
      * 时间窗口内各维度评分聚合（仅供 VenueHeatService 满意度计算使用），返回 Object[]{tag, avgScore, count}。
      * until 为排他上界——热度统计口径固定为「截至昨日」，见 VenueHeatService 的 statsAsOfDate 约定。
+     * <p>
+     * 窗口按 createdAt（评分创建时间）而非 updatedAt：与 mega-query 的 ratingCount30d 同口径
+     * （"近30天产生的评分"），改分不把记录拉回窗口——防"定期改分让满意度/计数常青"的刷分漏洞。
      */
     @Query("SELECT ti.tag, AVG(ti.score), COUNT(ti) FROM TagInteraction ti " +
            "WHERE ti.venueId = :venueId AND ti.score IS NOT NULL AND ti.deleted = false " +
-           "AND ti.updatedAt >= :since AND ti.updatedAt < :until " +
+           "AND ti.createdAt >= :since AND ti.createdAt < :until " +
            "GROUP BY ti.tag")
     List<Object[]> aggregateScoresByVenueSinceGroupByTag(@Param("venueId") Long venueId,
                                                          @Param("since") LocalDateTime since,

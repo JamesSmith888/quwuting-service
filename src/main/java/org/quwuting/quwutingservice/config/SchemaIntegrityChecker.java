@@ -42,7 +42,7 @@ import java.util.StringJoiner;
  * 一切写入必然失败或产生脏数据，早死优于静默损坏。
  * <p>
  * 仅对 PostgreSQL 生效；其他数据库（如测试用 H2）跳过。
- * 修复指引见 AGENTS.md「Schema 完整性与数据库迁移规范」与
+ * 修复指引见 AGENTS.md「Schema 演进与数据库完整性」与
  * {@code src/main/resources/db/repair-schema-identity.sql}。
  */
 @Slf4j
@@ -176,7 +176,7 @@ public class SchemaIntegrityChecker implements ApplicationRunner {
                 常见根因：数据库迁移/重建时丢失 IDENTITY、序列、主键（如 GUI 工具拖拽复制表）。
                 修复：执行 src/main/resources/db/repair-schema-identity.sql（幂等），
                      或以 pg_dump -Fc / pg_restore 从健康备份重建。
-                详见 AGENTS.md「Schema 完整性与数据库迁移规范」。
+                详见 AGENTS.md「Schema 演进与数据库完整性」。
                 ==============================================""");
         return sb.toString();
     }

@@ -10,6 +10,7 @@ import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venuestatusreport.dto.request.SubmitReportRequest;
 import org.quwuting.quwutingservice.venuestatusreport.dto.response.ActiveReportSummary;
+import org.quwuting.quwutingservice.venuestatusreport.dto.response.MyStatusReportResponse;
 import org.quwuting.quwutingservice.venuestatusreport.entity.VenueStatusReport;
 import org.quwuting.quwutingservice.venuestatusreport.enums.ReportReason;
 import org.quwuting.quwutingservice.venuestatusreport.repository.StatusReportRepository;
@@ -18,6 +19,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 场所实时状态报告服务。
@@ -146,5 +148,34 @@ public class StatusReportService {
         if (count >= MAX_REPORTS_PER_HOUR) {
             throw new BusinessException(1006, "操作过于频繁，请稍后再试");
         }
+    }
+
+    /**
+     * 当前用户的全部状态上报记录（"我的上报记录"弹窗数据源）。
+     * <p>
+     * 范围：仅未撤销（deleted=false）的记录，含已过期（TTL 外）——「已过期」记录
+     * 前端标注后提醒用户可重新上报。已撤销记录不返回：撤销是用户主动收回动作，
+     * soft delete 属内部实现细节，语义上不再属于"上报记录"。
+     * <p>
+     * {@code active} / {@code expiresAt} 在本方法按 {@link #ACTIVE_REPORT_TTL_HOURS} 统一计算
+     * （TTL 唯一事实源）——SQL 层不自行定义时间窗，与 findDetailStats / countHeatCounters
+     * 的「活跃判定必须经参数传入同一 TTL 窗口」契约一致（见 VenuePostRepository 修复注记）。
+     */
+    @Transactional(readOnly = true)
+    public List<MyStatusReportResponse> listMyReports() {
+        Long userId = UserContext.requireAuth();
+        LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);
+        return statusReportRepository.findMyReportsByUserId(userId).stream()
+                .map(row -> new MyStatusReportResponse(
+                        row.getId(),
+                        row.getVenueid(),
+                        row.getVenuename(),
+                        row.getVenuecity(),
+                        row.getVenuedistrict(),
+                        row.getVenueaddress(),
+                        row.getCreatedat(),
+                        !row.getCreatedat().isBefore(since),
+                        row.getCreatedat().plusHours(ACTIVE_REPORT_TTL_HOURS)))
+                .toList();
     }
 }

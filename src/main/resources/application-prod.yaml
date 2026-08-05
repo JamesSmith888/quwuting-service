@@ -19,7 +19,9 @@ spring:
       leak-detection-threshold: 30000  # 连接持有超 30s 告警（排查未关闭连接）
   jpa:
     hibernate:
-      ddl-auto: validate
+      # Schema 演进策略（2026-08-05 起）：与基础配置一致，统一 ddl-auto: update
+      # 自动创建/追加表列，不手动执行 SQL 迁移（规则见 AGENTS.md「Schema 演进」章节）
+      ddl-auto: update
     show-sql: false
     properties:
       hibernate:
