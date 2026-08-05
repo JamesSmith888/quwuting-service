@@ -2,10 +2,12 @@ package org.quwuting.quwutingservice.venue.mapper;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.venue.config.VenueDefaultsConfig;
 import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
+import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import tools.jackson.core.type.TypeReference;
@@ -15,7 +17,6 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Venue 实体 → VenueResponse DTO 转换器。
@@ -32,24 +33,28 @@ public class VenueResponseMapper {
     private static final TypeReference<List<PartnerFeeEntry>> PARTNER_FEE_LIST = new TypeReference<>() {};
 
     private final ObjectMapper objectMapper;
+    private final VenueDefaultsConfig defaultsConfig;
 
     public VenueResponse toResponse(Venue v) {
-        return toResponse(v, Collections.emptyMap(), false);
+        return toResponse(v, Collections.emptyList(), false);
     }
 
     /**
-     * @param tagLikeCounts 各标签的点赞数（tag → count），列表页/详情页批量查询后传入；
-     *                      无需展示标签热度的场景（新建/编辑表单回显）传空 Map
+     * @param topReactions Top Reaction 徽标列表，列表页/详情页批量查询后传入；
+     *                      无需展示的场景（新建/编辑表单回显）传空 List
      */
-    public VenueResponse toResponse(Venue v, Map<String, Long> tagLikeCounts) {
-        return toResponse(v, tagLikeCounts, false);
+    public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions) {
+        return toResponse(v, topReactions, false);
     }
 
     /**
-     * @param tagLikeCounts 各标签的点赞数
-     * @param isHot         是否为城市内热门场所（列表页视觉高亮）
+     * @param topReactions Top Reaction 徽标列表
+     * @param isHot        是否为城市内热门场所（列表页视觉高亮）
      */
-    public VenueResponse toResponse(Venue v, Map<String, Long> tagLikeCounts, boolean isHot) {
+    public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot) {
+        List<String> customTags = deserializeStringList(v.getTags(), "tags");
+        List<String> effectiveTags = defaultsConfig.merge(customTags);
+        List<String> defaultTags = defaultsConfig.tags();
         return new VenueResponse(
                 v.getId(),
                 v.getName(),
@@ -69,8 +74,9 @@ public class VenueResponseMapper {
                 deserializeList(v.getPartnerFees(), PARTNER_FEE_LIST, "partnerFees"),
                 v.getContactPhone(),
                 v.getWechatQr(),
-                deserializeStringList(v.getTags(), "tags"),
-                tagLikeCounts != null ? tagLikeCounts : Collections.emptyMap(),
+                effectiveTags,
+                defaultTags,
+                topReactions != null ? topReactions : Collections.emptyList(),
                 v.getSortWeight(),
                 isHot,
                 v.getCreatedAt(),

@@ -29,6 +29,8 @@ import java.util.concurrent.TimeUnit;
  * 热度指数 = 浏览量 × W_VIEW + 收藏总数 × W_FAVORITE + 近期新增收藏 × W_NEW_FAVORITE
  *           + 动态总数 × W_POST + 近期评价数 × W_RATING + 近期点赞数 × W_LIKE
  *           + 满意度 × W_SATISFACTION（无评分时为 0）。
+ *           近30天 Reaction 总数替代原「近30天点赞数」（标签点赞已被 Reaction 快速反馈系统替代，
+ *           见 AGENTS.md「Reaction 快速反馈系统」章节），数据源为 qwt_venue_reactions。
  * <p>
  * 权重常量收敛在本类内部，后续基于真实数据分布调优，接口契约不变。
  * <p>
@@ -65,7 +67,7 @@ public class VenueHeatService {
     private static final long WEIGHT_NEW_FAVORITE = 15;
     private static final long WEIGHT_POST = 5;
     private static final long WEIGHT_RATING = 8;
-    private static final long WEIGHT_LIKE = 3;
+    private static final long WEIGHT_REACTION = 3;
     private static final long WEIGHT_SATISFACTION = 20;
 
     /** 满意度最低样本量：评价人数不足此值时不展示具体分数（同时跳过满意度查询） */
@@ -158,7 +160,7 @@ public class VenueHeatService {
         long postCount = orZero(counters.getPosttotal());
         long newPostCount30d = orZero(counters.getPostrecent());
         long ratingCount30d = orZero(counters.getRatingcount30d());
-        long likeCount30d = orZero(counters.getLikecount30d());
+        long reactionCount30d = orZero(counters.getReactioncount30d());
         long ratingTotalCount = orZero(counters.getRaters());
         long suspensionCount30d = orZero(counters.getSuspensioncount());
         long currentStatusDays = computeCurrentStatusDays(counters.getLateststatuslogtime());
@@ -181,7 +183,7 @@ public class VenueHeatService {
                 + newFavoriteCount30d * WEIGHT_NEW_FAVORITE
                 + postCount * WEIGHT_POST
                 + ratingCount30d * WEIGHT_RATING
-                + likeCount30d * WEIGHT_LIKE
+                + reactionCount30d * WEIGHT_REACTION
                 + satisfactionComponent;
 
         // ── 状态可信度（二维矩阵 + 活跃报告 override） ──
@@ -193,7 +195,7 @@ public class VenueHeatService {
                 viewCount30d, viewUv30d,
                 favoriteCount, newFavoriteCount30d, favoriteTrend,
                 postCount, newPostCount30d,
-                ratingCount30d, likeCount30d,
+                ratingCount30d, reactionCount30d,
                 satisfactionScore, ratingTotalCount,
                 suspensionCount30d, currentStatusDays,
                 venue.getStatus().name(), venue.getStatus().getDisplayName(),
@@ -250,8 +252,9 @@ public class VenueHeatService {
         int count = 0;
         for (Object[] row : scores) {
             String tag = (String) row[0];
-            // 仅体验评估维度参与满意度（排除"现场状况"类：舞伴氛围/客流热度/舞伴年龄层）
-            if (!RatingDimensions.isQualityDimension(tag)) {
+            // 只统计当前合法的评分维度——防御历史 legacy 数据（原"现场状况"三维度已被 Reaction 替代，
+            // 但历史行仍可能存在于表中，见 RatingDimensions 类注释）
+            if (!RatingDimensions.isValid(tag)) {
                 continue;
             }
             Object avg = row[1];

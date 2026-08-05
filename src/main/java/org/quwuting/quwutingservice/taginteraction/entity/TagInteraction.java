@@ -6,12 +6,15 @@ import lombok.Setter;
 import org.quwuting.quwutingservice.base.BaseEntity;
 
 /**
- * 标签交互记录：用户对舞厅标签的点赞与评分。
+ * 评分交互记录：用户对舞厅评分维度的打分。
  * <p>
- * 一个用户对一个舞厅的一个标签至多一行记录（唯一约束），
- * liked 与 score 为两个独立列——可只点赞、只打分、或两者兼有。
- * tag 字段存储标签文本（与 Venue.tags JSON 数组中的字符串一致），
- * 评分维度（服务、环境等）也复用此字段，由 Service 层校验合法性。
+ * 一个用户对一个舞厅的一个评分维度至多一行记录（唯一约束）。
+ * tag 字段存储评分维度名称（服务/环境/音响效果/性价比，见 RatingDimensions）。
+ * <p>
+ * 历史遗留：表名/字段名沿用早期"标签点赞 + 评分"合并设计的命名（liked 列已废弃并移除，
+ * 数据库中仍可能存在旧的 liked 列，不再读写），"标签点赞"功能已被 Reaction 快速反馈系统
+ * 替代，见 {@link org.quwuting.quwutingservice.venuereaction.entity.VenueReaction}
+ * 与 AGENTS.md「Reaction 快速反馈系统」章节。
  */
 @Getter
 @Setter
@@ -31,13 +34,9 @@ public class TagInteraction extends BaseEntity {
     @Column(nullable = false)
     private Long venueId;
 
-    /** 标签文本（描述性标签或评分维度名称），最长 50 字符 */
+    /** 评分维度名称（服务/环境/音响效果/性价比），最长 50 字符 */
     @Column(nullable = false, length = 50)
     private String tag;
-
-    /** 是否点赞（toggle 语义：true=已赞，false=取消） */
-    @Column(nullable = false)
-    private boolean liked = true;
 
     /** 评分 1-10，null 表示未打分 */
     @Column

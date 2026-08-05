@@ -4,12 +4,13 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.favorite.entity.Favorite;
 import org.quwuting.quwutingservice.favorite.repository.FavoriteRepository;
-import org.quwuting.quwutingservice.taginteraction.service.TagInteractionService;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
+import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
+import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -25,7 +26,7 @@ public class FavoriteService {
 
     private final FavoriteRepository favoriteRepository;
     private final VenueResponseMapper venueResponseMapper;
-    private final TagInteractionService tagInteractionService;
+    private final VenueReactionService venueReactionService;
     private final VenueLookupService venueLookupService;
     private final VenueHeatService venueHeatService;
 
@@ -34,7 +35,7 @@ public class FavoriteService {
      * <p>
      * DB 往返压缩：收藏与场所经 {@link FavoriteRepository#findFavoriteVenuesByUserId}
      * 联查一次取回（原"查收藏列表 + 批量查场所"两步各占一次跨洲往返），
-     * 加上整页标签点赞数的批量查询（IN 一次覆盖，避免 N+1），共 2 次往返。
+     * 加上整页 Top Reaction 徽标的批量查询（IN 一次覆盖，避免 N+1），共 2 次往返。
      */
     @Transactional(readOnly = true)
     public List<VenueResponse> getFavoriteVenues(Long userId) {
@@ -42,11 +43,11 @@ public class FavoriteService {
         if (venues.isEmpty()) {
             return Collections.emptyList();
         }
-        Map<Long, Map<String, Long>> tagLikeCountsByVenue =
-                tagInteractionService.batchGetTagLikeCounts(venues.stream().map(Venue::getId).toList());
+        Map<Long, List<ReactionBadge>> reactionsByVenue =
+                venueReactionService.batchGetBadges(venues.stream().map(Venue::getId).toList(), userId);
         return venues.stream()
                 .map(v -> venueResponseMapper.toResponse(
-                        v, tagLikeCountsByVenue.getOrDefault(v.getId(), Collections.emptyMap())))
+                        v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList())))
                 .toList();
     }
 
