@@ -358,14 +358,14 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 | `GET /venues/{venueId}/tags/stats` | 聚合（与详情页共享缓存，单飞回源 1 次）+ 个人状态(1) | ~0.5s | ~10ms |
 | `GET /venues/{id}` | venue 缓存 + tagAggregate 缓存 + postCount/hasMyReport 合并(1) | ~1.2s | ~0.5s |
 | `POST /venues/{id}/view` | upsert(1) | ~0.5s | — |
-| `GET /favorites` | 收藏+场所联查(1) + Reaction 徽标批量(1) + 个人参与状态批量(1，需登录才能访问此接口，恒触发) | ~1.2s | — |
-| `GET /venues` | 主查询(1) + count(1) + Reaction 徽标批量(1) + 个人参与状态批量(1，仅登录触发)（hotVenueIds 缓存 5min） | ~1.5s | 同左 |
+| `GET /favorites` | 收藏+场所联查(1) + Reaction 徽标批量(1，单条 SQL 返回 countAll+count30d) + 个人参与状态批量(1，需登录才能访问此接口，恒触发) | ~1.2s | — |
+| `GET /venues` | 主查询(1) + count(1) + Reaction 徽标批量(1，单条 SQL 返回 countAll+count30d) + 个人参与状态批量(1，仅登录触发)（hotVenueIds 缓存 5min） | ~1.5s | 同左 |
 
 关键合并查询（全部在对应 Repository 有根因注释）：
 
 - `VenueRepository.countHeatCounters`：**跨 6 张表的标量子查询 mega-query**，一次往返取回热度公式与可信度所需的全部单值计数器。标量子查询是跨表合并的标准手段——各子查询均命中 `(venue_id, ...)` 索引，库内执行毫秒级，网络开销收敛为 1 次往返。多行形态（趋势时间序列、分组均值）不参与标量合并，保持独立查询
 - `TagInteractionRepository.aggregateScoresMultiWindowByTag`：三窗口评分聚合单条 GROUP BY（原点赞计数 + 评分聚合合并查询已随点赞功能移除，仅保留评分部分）
-- `VenueReactionRepository.aggregateByVenue` / `countRecentByVenueIdsGroupByCode`：Reaction 四窗口条件聚合 / 批量场所 30 天计数，取代原标签点赞批量查询
+- `VenueReactionRepository.aggregateByVenue` / `countByVenueIdsGroupByCode`：Reaction 四窗口条件聚合 / 批量场所双计数（countAll + count30d 单条 SQL，条件 SUM 内联），取代原标签点赞批量查询
 - `VenuePostRepository.findDetailStats`：动态总数 + "我是否已上报"（EXISTS 标量子查询，个人状态实时不缓存，匿名 userId=null 时 EXISTS 恒 false）
 - `FavoriteRepository.findFavoriteVenuesByUserId`：收藏 + 场所 JPQL 联查（排序键为收藏 createdAt），取代"查收藏再批量查场所"两步
 - `VenueViewRepository.upsertView`：`INSERT ... ON CONFLICT ON CONSTRAINT ... DO NOTHING` 无条件幂等写入，取代 check-then-act（SELECT 存在性 + INSERT + catch）。**约定：有唯一约束的幂等写入一律 upsert**，check-then-act 多一次往返且存在并发窗口
@@ -603,10 +603,12 @@ Upsert 查找必须不限 `deleted`（`findByUserIdAndVenueIdAndReactionCode`，
 
 ### 列表页 Top Reaction 徽标（VenueResponse.topReactions，替代原 tagLikeCounts）
 
-`GET /venues`、`GET /favorites` 等复用 `VenueResponseMapper` 的接口在 `VenueResponse.tags` 之外携带 `topReactions: List<ReactionBadge>`（最多 4 个，按**近 30 天计数**降序，含 count=0 的条目以避免冷启动死锁——若过滤 count=0，当 DB 无 Reaction 数据时列表/详情页均不渲染 Reaction 入口，导致无法创建第一条 Reaction）。
+`GET /venues`、`GET /favorites` 等复用 `VenueResponseMapper` 的接口在 `VenueResponse.tags` 之外携带 `topReactions: List<ReactionBadge>`（最多 4 个，按**近 30 天计数**降序，count30d=0 的不展示）。创建新 Reaction 的入口是前端 Picker 表情选择器（长按卡片触发），不是 count=0 的占位 chips——此决策的根因分析见前端 AGENTS.md「Reaction 快速反馈系统 → 设计决策 → 展示与创建职责分离」。
+
+**双计数语义（2026-08 确立）**：`ReactionBadge` 携带 `count30d`（近30天计数，徽标排序/筛选依据）与 `countAll`（全部生效记录数，前端展示的"总数量"）。排序/展示分离的根因：前端乐观更新（点击立即 +1，失败回滚，见前端 AGENTS.md「乐观更新」）下 `countAll` 的本地 ±1 恒精确——生效记录数随 toggle 确定性增减，而 `count30d` 的 ±1 依赖该记录的 `createdAt` 是否落在 30 天窗口内，无法本地精确推导。展示数字若取 count30d，乐观计数会在"已参与但记录超 30 天"的用户取消时失真。
 
 - **例外：含个人参与状态（`reactedByMe`）**——这是对项目既有"列表层不含个人状态"惯例（原 `tagLikeCounts` 的设计）的刻意打破。原因是产品规则明确要求"点击 Emoji：未参与→+1，已参与→取消"必须在列表页直接可用，用户点击前必须知道自己是否已参与，否则会造成"点了却不知道是加还是减"的困惑。此例外**不违反**「缓存内容的强制约束」——聚合计数仍然缓存共享（`VenueReactionAggregateService`），个人参与状态通过**独立的、不缓存的实时批量查询**（`findActiveCodesByUserAndVenueIds`，一次 `IN` 查询覆盖整页场所）获取，两者未被塞进同一个缓存 key
-- **批量查询**：`VenueReactionService.batchGetBadges(venueIds, currentUserId)` 一次 `IN` 查询覆盖聚合计数、一次 `IN` 查询覆盖个人状态（仅登录用户触发），避免逐场所查询的 N+1
+- **批量查询**：`VenueReactionService.batchGetBadges(venueIds, currentUserId)` 一次 `IN` 查询（`countByVenueIdsGroupByCode`，单条 SQL 用条件 SUM 同时聚合 countAll 与 count30d）覆盖聚合计数、一次 `IN` 查询覆盖个人状态（仅登录用户触发），避免逐场所查询的 N+1
 - 该批量查询**不缓存**（与原 `batchGetTagLikeCounts` 同理）：列表页请求的场所集合每次不同，复用单场所聚合缓存收益低
 
 ### 场所热度公式集成（替代原"点赞数"）

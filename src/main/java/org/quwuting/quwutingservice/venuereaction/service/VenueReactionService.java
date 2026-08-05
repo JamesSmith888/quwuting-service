@@ -132,9 +132,10 @@ public class VenueReactionService {
     }
 
     /**
-     * 批量场所的 Top Reaction 徽标（列表页用），一次 IN 查询覆盖整页场所 + 一次 IN 查询覆盖个人状态。
-     * 不缓存——列表页请求的场所集合每次不同（翻页/筛选变化），复用单场所聚合缓存收益低，
-     * 与既有 batchGetTagLikeCounts 的"批量查询不缓存"约定一致。
+     * 批量场所的 Top Reaction 徽标（列表页用），一次 IN 查询覆盖整页场所的
+     * countAll + count30d（单条 SQL，见 {@link VenueReactionRepository#countByVenueIdsGroupByCode}）
+     * + 一次 IN 查询覆盖个人状态。不缓存——列表页请求的场所集合每次不同（翻页/筛选变化），
+     * 复用单场所聚合缓存收益低，与既有 batchGetTagLikeCounts 的"批量查询不缓存"约定一致。
      * <p>
      * 个人状态例外说明：列表层通常不携带个人状态，但 Reaction 列表卡片明确要求"点击即知是否已参与"
      * （产品规则），故额外做一次批量个人状态查询——仅登录用户触发，成本为一次 IN 查询。
@@ -146,12 +147,16 @@ public class VenueReactionService {
         }
         LocalDateTime since30d = LocalDateTime.now().minusDays(30);
 
-        Map<Long, Map<String, Long>> countsByVenue = new HashMap<>();
-        for (Object[] row : venueReactionRepository.countRecentByVenueIdsGroupByCode(venueIds, since30d)) {
+        // 单条 SQL 同时聚合 countAll 与 count30d：徽标排序/筛选以 count30d 为准，展示以 countAll 为准
+        Map<Long, Map<String, Long>> countAllByVenue = new HashMap<>();
+        Map<Long, Map<String, Long>> count30dByVenue = new HashMap<>();
+        for (Object[] row : venueReactionRepository.countByVenueIdsGroupByCode(venueIds, since30d)) {
             Long venueId = (Long) row[0];
             String code = (String) row[1];
-            Long count = (Long) row[2];
-            countsByVenue.computeIfAbsent(venueId, k -> new HashMap<>()).put(code, count);
+            Long countAll = row[2] != null ? ((Number) row[2]).longValue() : 0L;
+            Long count30d = row[3] != null ? ((Number) row[3]).longValue() : 0L;
+            countAllByVenue.computeIfAbsent(venueId, k -> new HashMap<>()).put(code, countAll);
+            count30dByVenue.computeIfAbsent(venueId, k -> new HashMap<>()).put(code, count30d);
         }
 
         Map<Long, Set<String>> myCodesByVenue = new HashMap<>();
@@ -165,40 +170,43 @@ public class VenueReactionService {
 
         Map<Long, List<ReactionBadge>> result = new HashMap<>();
         for (Long venueId : venueIds) {
-            Map<String, Long> counts = countsByVenue.getOrDefault(venueId, Collections.emptyMap());
+            Map<String, Long> count30ds = count30dByVenue.getOrDefault(venueId, Collections.emptyMap());
+            Map<String, Long> countAlls = countAllByVenue.getOrDefault(venueId, Collections.emptyMap());
             Set<String> myCodes = myCodesByVenue.getOrDefault(venueId, Collections.emptySet());
-            result.put(venueId, buildTopBadgesFromCount30d(counts, myCodes));
+            result.put(venueId, buildTopBadgesFromCounts(count30ds, countAlls, myCodes));
         }
         return result;
     }
 
     private List<ReactionBadge> buildTopBadges(Map<String, long[]> aggregate, Set<String> myCodes) {
+        // aggregate value: long[]{countAll, countToday, count7d, count30d}
         Map<String, Long> count30dByCode = new HashMap<>();
+        Map<String, Long> countAllByCode = new HashMap<>();
         for (Map.Entry<String, long[]> entry : aggregate.entrySet()) {
             count30dByCode.put(entry.getKey(), entry.getValue()[3]);
+            countAllByCode.put(entry.getKey(), entry.getValue()[0]);
         }
-        return buildTopBadgesFromCount30d(count30dByCode, myCodes);
+        return buildTopBadgesFromCounts(count30dByCode, countAllByCode, myCodes);
     }
 
     /**
-     * 从 30 天计数 Map 构建 Top N 徽标（最多 {@value #LIST_BADGE_LIMIT} 个）。
-     * <p>
-     * 包含 count=0 的 ReactionCode——避免冷启动死锁（无数据时 UI 不渲染入口，
-     * 导致无法创建第一条 Reaction，见 AGENTS.md「Reaction 快速反馈系统」章节）。
-     * 按 count 降序排列，count=0 的条目按 {@link ReactionCode} 枚举声明顺序作为稳定平局规则。
+     * 从计数 Map 构建 Top N 徽标（最多 {@value #LIST_BADGE_LIMIT} 个）。
+     * 排序/筛选以 count30d 为准（近30天热度信号），徽标内同时携带 countAll 供前端
+     * 展示"总数量"——count=0 的条目不展示：Reaction 只在有人参与后才出现，
+     * 创建新 Reaction 的入口是前端 Picker 表情选择器（长按卡片 / 点击"+"触发），
+     * 参见 AGENTS.md「Reaction 快速反馈系统」。
      */
-    private List<ReactionBadge> buildTopBadgesFromCount30d(Map<String, Long> count30dByCode, Set<String> myCodes) {
-        // 构建完整字典（缺失的 ReactionCode 补 0），保证 count=0 时 UI 入口仍然可交互
-        Map<String, Long> complete = new LinkedHashMap<>();
-        for (ReactionCode rc : ReactionCode.values()) {
-            complete.put(rc.name(), count30dByCode.getOrDefault(rc.name(), 0L));
-        }
-        return complete.entrySet().stream()
+    private List<ReactionBadge> buildTopBadgesFromCounts(Map<String, Long> count30dByCode,
+                                                         Map<String, Long> countAllByCode,
+                                                         Set<String> myCodes) {
+        return count30dByCode.entrySet().stream()
+                .filter(e -> e.getValue() != null && e.getValue() > 0)
                 .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
                 .limit(LIST_BADGE_LIMIT)
                 .map(e -> {
                     ReactionCode rc = ReactionCode.valueOf(e.getKey());
-                    return new ReactionBadge(rc.name(), rc.getEmoji(), rc.getLabel(), e.getValue(), myCodes.contains(rc.name()));
+                    long countAll = countAllByCode.getOrDefault(e.getKey(), 0L);
+                    return new ReactionBadge(rc.name(), rc.getEmoji(), rc.getLabel(), e.getValue(), countAll, myCodes.contains(rc.name()));
                 })
                 .collect(Collectors.toList());
     }

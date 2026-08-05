@@ -42,14 +42,22 @@ public interface VenueReactionRepository extends JpaRepository<VenueReaction, Lo
                                     @Param("since30d") LocalDateTime since30d);
 
     /**
-     * 批量场所近30天 Reaction 计数（列表页 Top Reaction 徽标用），返回 Object[]{venueId, reactionCode, count}。
-     * 一次 IN 查询覆盖整页场所，避免逐条查询造成的 N+1（与 TagInteractionService 既有约定一致）。
+     * 批量场所的 Reaction 计数（列表页 Top Reaction 徽标用），一次 IN 查询同时返回
+     * {@code countAll}（全部生效记录数）与 {@code count30d}（近30天计数）。
+     * 返回 Object[]{venueId, reactionCode, countAll, count30d}。
+     * <p>
+     * 合并为单条 SQL 而非两条（30天窗口用条件 SUM 内联），保持与
+     * TagInteractionService 既有"一次 IN 查询覆盖整页场所"的 N+1 规避约定。
      */
-    @Query("SELECT r.venueId, r.reactionCode, COUNT(r) FROM VenueReaction r " +
-           "WHERE r.venueId IN :venueIds AND r.deleted = false AND r.createdAt >= :since30d " +
-           "GROUP BY r.venueId, r.reactionCode")
-    List<Object[]> countRecentByVenueIdsGroupByCode(@Param("venueIds") List<Long> venueIds,
-                                                    @Param("since30d") LocalDateTime since30d);
+    @Query(value = "SELECT r.venue_id, r.reaction_code, " +
+                   "COUNT(*) AS count_all, " +
+                   "SUM(CASE WHEN r.created_at >= :since30d THEN 1 ELSE 0 END) AS count_30d " +
+                   "FROM qwt_venue_reactions r " +
+                   "WHERE r.venue_id IN :venueIds AND r.deleted = false " +
+                   "GROUP BY r.venue_id, r.reaction_code",
+           nativeQuery = true)
+    List<Object[]> countByVenueIdsGroupByCode(@Param("venueIds") List<Long> venueIds,
+                                              @Param("since30d") LocalDateTime since30d);
 
     /**
      * 批量场所内当前用户生效中的 Reaction 代码（列表页个人状态，实时查询不缓存）。
