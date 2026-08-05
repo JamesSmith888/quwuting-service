@@ -4,9 +4,10 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.security.UserContext;
-import org.quwuting.quwutingservice.taginteraction.service.TagAggregateStatsService;
-import org.quwuting.quwutingservice.taginteraction.service.TagInteractionService;
+import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
+import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
 import org.quwuting.quwutingservice.user.enums.UserRole;
+import org.quwuting.quwutingservice.venue.config.VenueDefaultsConfig;
 import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
 import org.quwuting.quwutingservice.venue.dto.request.CreateVenueRequest;
@@ -48,11 +49,11 @@ public class VenueService {
     private final VenuePostRepository venuePostRepository;
     private final VenueStatusLogRepository venueStatusLogRepository;
     private final VenueResponseMapper venueResponseMapper;
-    private final TagInteractionService tagInteractionService;
-    private final TagAggregateStatsService tagAggregateStatsService;
+    private final VenueReactionService venueReactionService;
     private final VenueHeatService venueHeatService;
     private final ObjectMapper objectMapper;
     private final VenueLookupService venueLookupService;
+    private final VenueDefaultsConfig defaultsConfig;
 
     @Transactional
     @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
@@ -78,7 +79,7 @@ public class VenueService {
         venue.setPartnerFees(serializeList(normalizePartnerFees(req.partnerFees())));
         venue.setContactPhone(req.contactPhone());
         venue.setWechatQr(req.wechatQr());
-        venue.setTags(serializeStringList(req.tags()));
+        venue.setTags(serializeStringList(defaultsConfig.filterCustomOnly(req.tags())));
         venue.setSortWeight(req.sortWeight() != null ? req.sortWeight() : 0);
         Venue saved = venueRepository.save(venue);
         // 初始状态日志：建立审计链起点（fromStatus=null 表示首次创建）
@@ -136,12 +137,11 @@ public class VenueService {
         venue.setPartnerFees(serializeList(normalizePartnerFees(req.partnerFees())));
         venue.setContactPhone(req.contactPhone());
         venue.setWechatQr(req.wechatQr());
-        venue.setTags(serializeStringList(req.tags()));
+        venue.setTags(serializeStringList(defaultsConfig.filterCustomOnly(req.tags())));
         venue.setSortWeight(req.sortWeight() != null ? req.sortWeight() : venue.getSortWeight());
         VenueResponse response = venueResponseMapper.toResponse(venueRepository.save(venue));
-        // 场所编辑影响两个聚合缓存的内容：tags 是标签聚合的组装依据，status/状态日志
-        // 是热度响应的输出（currentStatus / currentStatusDays）——显式逐出，与其余写路径一致
-        tagAggregateStatsService.invalidate(id);
+        // 场所编辑影响热度响应的输出（status/状态日志 → currentStatus / currentStatusDays）——
+        // 显式逐出，与其余写路径一致
         venueHeatService.invalidate(id);
         return response;
     }
@@ -152,17 +152,18 @@ public class VenueService {
      * canManage 基于软鉴权上下文计算：平台管理员或门店认领人为 true，匿名请求恒为 false。
      * 该字段仅驱动前端管理入口的展示，安全边界在后端各写操作接口的角色校验。
      * <p>
-     * DB 往返压缩：场所实体经 {@link VenueLookupService#findById} 缓存；标签点赞数复用
-     * {@link TagAggregateStatsService#getAggregate} 的聚合缓存（与 /tags/stats 端点共享同一
-     * venueId key，详情页并发请求单飞回源）；动态总数与"我是否已上报"合并为单条标量子查询
+     * DB 往返压缩：场所实体经 {@link VenueLookupService#findById} 缓存；Top Reaction 徽标复用
+     * {@link org.quwuting.quwutingservice.venuereaction.service.VenueReactionAggregateService}
+     * 的聚合缓存（与 /reactions/stats 端点共享同一 venueId key，详情页并发请求单飞回源），
+     * 个人参与状态单独实时查询；动态总数与"我是否已上报"合并为单条标量子查询
      * （{@link VenuePostRepository#findDetailStats}，个人状态实时计算不缓存）。
-     * 缓存全命中时仅 1 次往返，冷启动最多 3 次。
+     * 缓存全命中时仅 2 次往返，冷启动最多 4 次。
      */
     @Transactional(readOnly = true)
     public VenueDetailResponse getVenueDetail(Long id) {
         Venue venue = venueLookupService.findById(id);
-        Map<String, Long> tagLikeCounts = tagAggregateStatsService.getAggregate(id).likeCounts();
-        VenueResponse base = venueResponseMapper.toResponse(venue, tagLikeCounts);
+        List<ReactionBadge> topReactions = venueReactionService.getBadges(id, UserContext.getCurrentUserId());
+        VenueResponse base = venueResponseMapper.toResponse(venue, topReactions);
         VenuePostRepository.DetailStats detailStats =
                 venuePostRepository.findDetailStats(id, UserContext.getCurrentUserId());
         boolean canManage = computeCanManage(venue);
@@ -199,13 +200,14 @@ public class VenueService {
             result = venueRepository.searchRankedNoLocation(
                     blankToNull(city), blankToNull(district), status, keywordPattern, pageable);
         }
-        // 批量查询整页场所的标签点赞数，避免逐条查询造成的 N+1（见 TagInteractionService#batchGetTagLikeCounts）
+        // 批量查询整页场所的 Top Reaction 徽标，避免逐条查询造成的 N+1（见 VenueReactionService#batchGetBadges）
         List<Long> venueIds = result.getContent().stream().map(Venue::getId).toList();
-        Map<Long, Map<String, Long>> tagLikeCountsByVenue = tagInteractionService.batchGetTagLikeCounts(venueIds);
+        Map<Long, List<ReactionBadge>> reactionsByVenue =
+                venueReactionService.batchGetBadges(venueIds, UserContext.getCurrentUserId());
         // 查询城市内热门场所 ID 集合（5min 缓存，窗口函数全表计算结果变化频率极低）
         Set<Long> hotVenueIds = venueLookupService.getHotVenueIds();
         return result.map(v -> venueResponseMapper.toResponse(
-                v, tagLikeCountsByVenue.getOrDefault(v.getId(), Collections.emptyMap()),
+                v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
                 hotVenueIds.contains(v.getId())));
     }
 

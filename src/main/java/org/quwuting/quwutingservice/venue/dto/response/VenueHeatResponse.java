@@ -38,8 +38,8 @@ public record VenueHeatResponse(
         // ── 评价互动 ──
         /** 近30天评价数（维度评分记录数） */
         long ratingCount30d,
-        /** 近30天点赞数 */
-        long likeCount30d,
+        /** 近30天 Reaction 总数（原"近30天点赞数"，标签点赞已被 Reaction 快速反馈系统替代） */
+        long reactionCount30d,
 
         // ── 满意度 ──
         /** 综合满意度（1-10，各维度等权均分），评价人数不足时为 null */

@@ -101,16 +101,29 @@ venuestatusreport/  ← 场所状态众包上报模块（实时暂停信号，4h
     response/   ← ActiveReportSummary（公开）/ StatusReportResponse（管理端，含 note）
   enums/        ← ReportReason（CHECK 门店检查 / UNKNOWN 情况不明 / CLEARED 清场）
 
-taginteraction/ ← 标签交互模块（点赞 + 维度评分）
-  controller/   ← TagInteractionController（GET /venues/{id}/tags/stats, POST .../like, POST .../score）
-  service/      ← TagInteractionService（toggle 点赞、upsert 评分、个人交互状态实时查询、批量点赞数）
-                  TagAggregateStatsService（场所级聚合数据 + 内嵌 refresh-ahead LoadingCache，见「标签交互」与「查询性能优化」章节）
-  entity/       ← TagInteraction 实体（qwt_tag_interactions）
-  repository/   ← TagInteractionRepository（含 GROUP BY 聚合查询、批量多场所聚合查询）
+taginteraction/ ← 评分交互模块（维度评分；原"标签点赞"已被 venuereaction/ 替代，见「Reaction 快速反馈系统」章节）
+  controller/   ← TagInteractionController（GET /venues/{id}/tags/stats, POST .../score）
+  service/      ← TagInteractionService（upsert 评分、个人评分状态实时查询）
+                  TagAggregateStatsService（场所级评分聚合 + 内嵌 refresh-ahead LoadingCache，见「查询性能优化」章节）
+  entity/       ← TagInteraction 实体（qwt_tag_interactions，liked 列为历史遗留字段，不再读写）
+  repository/   ← TagInteractionRepository（含 GROUP BY 聚合查询、三窗口评分聚合查询）
   dto/
-    request/    ← LikeTagRequest / ScoreTagRequest
-    response/   ← TagStatsResponse / TagLikeStats / DimensionScoreStats / WindowScore
-  RatingDimensions ← 系统评分维度常量（服务、环境、音响效果、性价比）
+    request/    ← ScoreTagRequest
+    response/   ← TagStatsResponse / DimensionScoreStats / WindowScore
+  RatingDimensions ← 系统评分维度常量（服务、环境、音响效果、性价比——原"现场状况"三维度已被 Reaction 替代）
+
+venuereaction/  ← Reaction 快速反馈模块（Telegram Reaction 式表情反馈，替代原"标签点赞"，详见「Reaction 快速反馈系统」章节）
+  controller/   ← VenueReactionController（GET /venues/{id}/reactions/stats, POST /venues/{id}/reactions/{code}）
+  service/      ← VenueReactionService（toggle 参与、个人状态实时查询、列表页徽标编排）
+                  VenueReactionAggregateService（场所级四窗口聚合 + 内嵌 refresh-ahead LoadingCache）
+  entity/       ← VenueReaction 实体（qwt_venue_reactions）
+  repository/   ← VenueReactionRepository（四窗口条件聚合查询、批量多场所 Top Reaction 查询）
+  dto/
+    response/   ← ReactionBadge（列表徽标）/ ReactionStat（详情完整统计）/ ReactionStatsResponse
+  ReactionCode  ← Reaction 字典枚举（emoji + label，后台维护，不允许用户自由创建）
+
+venue/config/   ← 门店默认标签配置
+  VenueDefaultsConfig ← @ConfigurationProperties(prefix = "venue.default")，标签合并/过滤工具方法
 
 storage/        ← 文件存储模块（前端直传 Supabase Storage，后端仅签发凭证）
   StorageController  ← GET /storage/upload-token（需登录，签发上传凭证）
@@ -266,7 +279,7 @@ heatScore = viewCount30d × 1
           + newFavoriteCount30d × 15
           + postCount × 5
           + ratingCount30d × 8
-          + likeCount30d × 3
+          + likeCount30d × 3（已重命名为 reactionCount30d，数据源为 qwt_venue_reactions，见「Reaction 快速反馈系统」章节）
           + satisfactionScore × 20（无评分时为 0）
 ```
 
@@ -284,7 +297,7 @@ heatScore = viewCount30d × 1
 
 ### 统计口径：截至昨日（2026-07-31 确立）
 
-`GET /venues/{id}/heat` 的所有滚动窗口指标（近30天浏览/收藏/动态/评价/点赞、近14天收藏趋势）统一以**昨天 24 点**为排他上界，而不是请求发生的"此刻"：
+`GET /venues/{id}/heat` 的所有滚动窗口指标（近30天浏览/收藏/动态/评价/Reaction、近14天收藏趋势）统一以**昨天 24 点**为排他上界，而不是请求发生的"此刻"：
 
 ```java
 LocalDate today = LocalDate.now();
@@ -345,13 +358,14 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 | `GET /venues/{venueId}/tags/stats` | 聚合（与详情页共享缓存，单飞回源 1 次）+ 个人状态(1) | ~0.5s | ~10ms |
 | `GET /venues/{id}` | venue 缓存 + tagAggregate 缓存 + postCount/hasMyReport 合并(1) | ~1.2s | ~0.5s |
 | `POST /venues/{id}/view` | upsert(1) | ~0.5s | — |
-| `GET /favorites` | 收藏+场所联查(1) + 标签点赞批量(1) | ~1s | — |
-| `GET /venues` | 主查询(1) + count(1) + 标签点赞批量(1)（hotVenueIds 缓存 5min） | ~1.2s | 同左 |
+| `GET /favorites` | 收藏+场所联查(1) + Reaction 徽标批量(1) + 个人参与状态批量(1，需登录才能访问此接口，恒触发) | ~1.2s | — |
+| `GET /venues` | 主查询(1) + count(1) + Reaction 徽标批量(1) + 个人参与状态批量(1，仅登录触发)（hotVenueIds 缓存 5min） | ~1.5s | 同左 |
 
 关键合并查询（全部在对应 Repository 有根因注释）：
 
 - `VenueRepository.countHeatCounters`：**跨 6 张表的标量子查询 mega-query**，一次往返取回热度公式与可信度所需的全部单值计数器。标量子查询是跨表合并的标准手段——各子查询均命中 `(venue_id, ...)` 索引，库内执行毫秒级，网络开销收敛为 1 次往返。多行形态（趋势时间序列、分组均值）不参与标量合并，保持独立查询
-- `TagInteractionRepository.aggregateLikesAndScoresByTag`：点赞计数 + 三窗口评分聚合单条 GROUP BY（两类交互行并集 + 条件聚合分视角统计）
+- `TagInteractionRepository.aggregateScoresMultiWindowByTag`：三窗口评分聚合单条 GROUP BY（原点赞计数 + 评分聚合合并查询已随点赞功能移除，仅保留评分部分）
+- `VenueReactionRepository.aggregateByVenue` / `countRecentByVenueIdsGroupByCode`：Reaction 四窗口条件聚合 / 批量场所 30 天计数，取代原标签点赞批量查询
 - `VenuePostRepository.findDetailStats`：动态总数 + "我是否已上报"（EXISTS 标量子查询，个人状态实时不缓存，匿名 userId=null 时 EXISTS 恒 false）
 - `FavoriteRepository.findFavoriteVenuesByUserId`：收藏 + 场所 JPQL 联查（排序键为收藏 createdAt），取代"查收藏再批量查场所"两步
 - `VenueViewRepository.upsertView`：`INSERT ... ON CONFLICT ON CONSTRAINT ... DO NOTHING` 无条件幂等写入，取代 check-then-act（SELECT 存在性 + INSERT + catch）。**约定：有唯一约束的幂等写入一律 upsert**，check-then-act 多一次往返且存在并发窗口
@@ -371,7 +385,8 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 | 写操作 | 逐出动作 |
 |--------|---------|
-| toggleLike / score（TagInteractionService） | `tagAggregateStatsService.invalidate` + `venueHeatService.invalidate` |
+| score（TagInteractionService） | `tagAggregateStatsService.invalidate` + `venueHeatService.invalidate` |
+| toggle（VenueReactionService） | `venueReactionAggregateService.invalidate` + `venueHeatService.invalidate` |
 | addFavorite / removeFavorite（FavoriteService） | `venueHeatService.invalidate`（收藏数是热度输入；幂等无写入分支不逐出） |
 | submitReport / cancelReport（StatusReportService） | `venueHeatService.invalidate`（活跃报告数是热度输出） |
 | createPost（VenuePostService） | `venueHeatService.invalidate` + `@CacheEvict(hotVenueIds, allEntries)`（动态数参与热度与热门排序） |
@@ -470,47 +485,40 @@ LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);  
 
 ---
 
-## 标签交互（taginteraction 模块）
+## 评分交互（taginteraction 模块）
 
 ### 设计定位
 
-标签交互分为两种独立信号：
+评分（rating）：1-10 量化评价，"这个维度体验如何"。适用于系统定义的标准评分维度（`RatingDimensions.ALL`），与管理员标签相互独立，用于计算综合评分（门店整体质量比较）。
 
-- **点赞（endorsement）**：二值信号，"我认同这个标签描述"。适用于管理员添加的描述性标签（Venue.tags）。
-- **评分（rating）**：1-10 量化评价，"这个维度体验如何"。适用于系统定义的标准评分维度（`RatingDimensions.ALL`），与管理员标签相互独立。
+> **历史沿革**：本模块早期还承载"标签点赞"（对 `Venue.tags` 的二值认同信号）与"现场状况"三个众包评分维度（舞伴氛围/客流热度/舞伴年龄层）。2026-08 上线 Reaction 快速反馈系统后，这两类功能均被替代——见「Reaction 快速反馈系统」章节的根因说明。`qwt_tag_interactions.liked` 列作为历史遗留字段保留在库中不再读写（与 `qwt_users.avatar_url` 同处理原则），`TagInteraction.liked` 字段已从实体中移除。
 
 ### 数据模型
 
-`qwt_tag_interactions` 表：一个用户对一个舞厅的一个标签至多一行（`UNIQUE(userId, venueId, tag)`）。`liked`（boolean）与 `score`（Integer 1-10）为两个独立列——可只点赞、只打分、或两者兼有。`tag` 字段存储标签文本（与 Venue.tags JSON 数组中的字符串一致）。
+`qwt_tag_interactions` 表：一个用户对一个舞厅的一个评分维度至多一行（`UNIQUE(userId, venueId, tag)`）。`tag` 字段存储评分维度名称（服务/环境/音响效果/性价比）。
 
 索引：`(venueId, tag)` 覆盖聚合查询，`(venueId, tag, updatedAt)` 覆盖时间窗口查询。
 
 ### 评分维度（RatingDimensions）
 
-系统统一定义的标准维度列表，所有舞厅共享，不依赖管理员是否添加了对应标签。新增维度只需修改 `RatingDimensions.ALL` 常量，前端通过 `tag-stats` 接口的 `dimensions` 字段自动同步。
+系统统一定义的标准维度列表，所有舞厅共享，不依赖管理员是否添加了对应标签。新增维度只需修改 `RatingDimensions.ALL` 常量，前端通过 `tags/stats` 接口的 `dimensions` 字段自动同步。
 
-维度分两类：
+| 维度 | 锚定文案 | 说明 |
+|------|----------|------|
+| 服务、环境、音响效果、性价比 | 1 最差 / 10 最好 | 主观质量打分，全量均分参与综合评分计算 |
 
-| 类别 | 维度 | 锚定文案 | 说明 |
-|------|------|----------|------|
-| 体验评估 | 服务、环境、音响效果、性价比 | 1 最差 / 10 最好 | 主观质量打分，全量均分有参考价值 |
-| 现场状况 | 舞伴氛围、客流热度、舞伴年龄层 | 各异（很少/很多、冷清/爆满、偏成熟/偏年轻） | 众包实时体感上报，时效性强，近 7d/30d 窗口均分更有参考价值 |
-
-"现场状况"维度的设计动机：舞伴和客流是舞厅决策的核心变量（舞伴找客人多的店，客人找舞伴多的店），但无法由管理员维护（实时变化），只能众包。复用评分基础设施（1-10 量表 + 时间窗口 + 防刷冷却）是最低成本方案。
-
-审核安全：维度命名使用角色术语（"舞伴""客流"）和主观体感词（"氛围""热度""年龄层"），不出现"男/女""人数"等字样，避免被解读为按性别统计的社交/陪侍类应用。
+原"现场状况"三维度（舞伴氛围/客流热度/舞伴年龄层）已被 Reaction 快速反馈系统的对应表情替代（👧年轻舞伴多 / 👴舞伴年龄偏成熟 / 🔥人气旺等）——两者语义重叠，是"标签、评分、热度模块信息混杂"问题的直接根因，详见下一章节。
 
 ### 接口
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
-| GET | `/venues/{venueId}/tags/stats` | 公开（软鉴权） | 标签点赞统计 + 维度评分（含时间窗口）+ 当前用户状态 |
-| POST | `/venues/{venueId}/tags/like` | 需登录 | body: `{tag}`，toggle 语义（首次=赞，再次=取消） |
+| GET | `/venues/{venueId}/tags/stats` | 公开（软鉴权） | 维度评分（含时间窗口）+ 当前用户评分状态 |
 | POST | `/venues/{venueId}/tags/score` | 需登录 | body: `{tag, score}`，upsert 语义（首次=打分，再次=修改覆盖） |
 
 ### 防刷机制
 
-评分接口设 60 秒冷却期（`SCORE_COOLDOWN_SECONDS`）：同一用户同一维度在冷却期内重复提交返回 1006 错误。基于 `updatedAt` 判定（改分后自动刷新时间戳）。点赞无冷却（toggle 幂等，唯一约束兜底）。
+评分接口设 60 秒冷却期（`SCORE_COOLDOWN_SECONDS`）：同一用户同一维度在冷却期内重复提交返回 1006 错误。基于 `updatedAt` 判定（改分后自动刷新时间戳）。
 
 ### 时效性
 
@@ -518,19 +526,138 @@ LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);  
 
 ### 约束
 
-- 点赞仅允许对场所当前 `tags` 列表中存在的标签操作（管理员删除标签后不可再赞，历史数据保留但不展示；重新添加后历史恢复）
-- 评分仅允许 `RatingDimensions.ALL` 中的维度
-- 评分只保留最新分（覆盖式），不保留历史版本
-- 热度公式已纳入标签交互数据：`ratingCount30d × 8 + likeCount30d × 3 + satisfactionScore × 20`（见"场所热度"章节）
+- 评分仅允许 `RatingDimensions.ALL` 中的维度，历史遗留维度（如旧的"舞伴氛围"）不再被 `isValid` 承认，相关历史行不参与任何聚合计算
 
-### 列表页标签热度（VenueResponse.tagLikeCounts）
+---
 
-场所列表（`GET /venues`）与收藏列表（`GET /user/favorites` 等复用 `VenueResponseMapper` 的接口）在 `VenueResponse.tags` 之外新增 `tagLikeCounts: Map<String, Long>`（tag → 点赞数），用于卡片上展示标签的认同热度。
+## Reaction 快速反馈系统（venuereaction 模块）
 
-- **不含 `likedByMe`**：列表层是识别信息，不需要"我是否已赞"这一评估层个人状态（详情页 `/tags/stats` 才携带），避免为一整页场所都计算当前用户的个人交互状态
-- **批量查询而非逐条查询**：`TagInteractionService.batchGetTagLikeCounts(List<Long> venueIds)` 用一条 `venueId IN (...)` 分组查询覆盖整页场所，`VenueService.listVenues` / `FavoriteService.getFavoriteVenues` 在拿到 `Page<Venue>`/`List<Venue>` 后统一批量查询一次，禁止在 map 循环里逐个场所查询（N+1）
-- 该批量查询**不缓存**：列表页请求的场所集合每次不同（翻页、筛选变化），复用 `TagAggregateStatsService` 的单场所缓存收益低，直接实时查询
-- `VenueResponseMapper.toResponse(Venue)` 单参重载默认传空 Map（创建/编辑表单回显场景不需要标签热度），`toResponse(Venue, Map<String, Long>)` 重载供需要展示热度的场景显式传入
+### 设计动机与根因（2026-08 确立）
+
+舞厅场景的用户核心诉求不是"查看传统评论"，而是在不能/不便评论的情况下快速了解：这家店现在值不值得去、舞伴年龄和质量如何、氛围人气如何、服务环境等真实体验。早期实现将这类反馈拆散在三处——描述性标签的"点赞"（`TagInteraction.liked`）、"现场状况"众包评分维度（舞伴氛围/客流热度/舞伴年龄层，1-10 打分）、以及场所热度——三者语义高度重叠但交互形态不一致（点赞 vs 1-10 选择器 vs 被动统计），造成"标签、评分、热度模块信息混杂"，用户需要在多套交互里重复表达同一件事，认知负担重。
+
+**解法**：统一为类似 Telegram Reaction 的表情化标签（emoji + 文字说明），一次点击表达一种态度，替代原"标签点赞"与"现场状况"评分维度：
+
+- 默认只展示 emoji，长按显示文字说明，点击直接 +1（再次点击取消，toggle 语义）
+- 不做"点赞/倒赞"二元对立（不用 👍👎）——采用具体、中性的正负向 Reaction 共存（如 👴 舞伴年龄偏成熟，而非"倒赞：舞伴年龄大"），避免攻击性评价引发商家纠纷
+- 一个用户对一个场所的一个 Reaction 只能贡献一次（不允许 🔥🔥🔥🔥 刷数据），但允许同时选择多个不同 Reaction
+
+### Reaction 字典（ReactionCode，后台维护）
+
+Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对刷评价。字典是后台维护的 Java 枚举（`ReactionCode`），emoji + label 由后端唯一定义并通过接口下发，前端不重复硬编码维护第二份字典。与 `RatingDimensions`/`FeedbackType`/`PostPublisherType` 同模式（本项目无独立管理后台 UI，后台维护 = 代码维护 + 发版）。
+
+| 代码 | Emoji | 说明 |
+|------|-------|------|
+| HOT | 🔥 | 人气旺 |
+| YOUNG_PARTNER | 👧 | 年轻舞伴多 |
+| OLD_PARTNER | 👴 | 舞伴年龄偏成熟 |
+| GOOD_VIBE | ☺️ | 氛围舒服 |
+| GOOD_MUSIC | 🎵 | 音乐效果好 |
+| NORMAL | 😐 | 普通 |
+| HIGH_COST | 💰 | 消费较高 |
+| BAD_ENV | 😕 | 环境一般 |
+| SERVICE_ISSUE | 😡 | 服务问题 |
+
+审核安全说明：`BAD_ENV` 未采用需求初稿中的 🤮（呕吐表情），因其强烈厌恶语义与"不引入攻击性反馈"的设计原则相悖——一般般的环境不等于令人作呕，过度负面的图标本身就会诱发"商家纠纷"这一本系统试图规避的问题，故软化为 😕。新增/调整字典条目时同样需要过这道审核安全过滤（参照 venuestatusreport 模块 `ReportReason` 命名规避敏感词的先例）。
+
+### 数据模型
+
+`qwt_venue_reactions` 表：`(id, userId, venueId, reactionCode, createdAt, updatedAt, deleted)`，一个用户对一个场所的一个 Reaction 至多一行（`UNIQUE(userId, venueId, reactionCode)`）。
+
+**Toggle = 软删除，不做硬删除**（与 Favorite/StatusReport 同模式，符合"不物理删除数据"的 Entity 规范）：
+- 首次参与 → INSERT
+- 已参与再次点击 → `deleted = true`（取消）
+- 曾取消后再次参与 → 恢复（`deleted = false`），**同时刷新 `createdAt = now()`**——这一刷新是时效性设计的核心机制，见下节
+
+Upsert 查找必须不限 `deleted`（`findByUserIdAndVenueIdAndReactionCode`，含软删记录），原因与 `StatusReportService`/`FavoriteService` 相同：`UNIQUE` 约束不含 `deleted` 列，软删记录仍占用唯一槽位，漏查会导致误 INSERT 与唯一约束冲突。
+
+### 时效性设计：不做周期性清零，而是时间衰减 + 多时间窗口（核心设计决策）
+
+**根因**：舞厅场景与传统点评最大的区别是时效性——"有舞池"这类固定属性标签三年不变，但"人气旺""年轻舞伴多"这类 Reaction 可能一个月甚至一晚就变化。若简单累计永久计数（如 🔥 1000 且从不衰减），多年经营变化后展示的数字会失真、误导用户，这正是当前系统要规避的"假大众点评"问题。
+
+**为什么不做"每周/每月重置清零"**：
+1. 新场所数据积累慢——若按周清零，每周初始状态都是空，用户永远看不到历史趋势
+2. 长期稳定经营的门店应享有可信度优势——清零会抹掉这种"久经考验"的信号，对老店不公平
+
+**采用的方案：原始行为永久保留 + 按时间窗口实时统计**（不删除任何生效记录，只在查询时按窗口过滤）：
+
+- `today`（自然日）/ `7天` / `30天` / `全部`：四个窗口的计数全部从同一批 `deleted=false` 记录实时计算，无物化视图、无定时任务清零
+- **`全部`（`countAll`）= 当前生效记录总数**（不含已取消的历史），代表"这家店整体的长期画像"
+- **`7天`/`30天`（`count7d`/`count30d`）= 近期真实活跃的信号**，代表"最近怎么样"——因为 toggle 语义下，只有用户重新访问并**再次确认**（或首次参与）才会刷新 `createdAt`，长期无人再次确认的 Reaction 会自然从近期窗口中"衰退"（即使仍计入 `全部`），而不需要任何后台清理任务
+- 这正是时间衰减的实现方式：**不是删除旧数据，而是让"新鲜度"只由真实用户行为的时间戳决定**——活跃场所的 Reaction 因持续有新用户参与/老用户重新确认而保持在近期窗口内，不活跃或已过时的 Reaction 自然只留存在"全部"这一历史画像层，不会污染代表"现在"的近期窗口
+
+**两层概念**（与用户讨论后确立）：
+- **实时层**（`countToday`/`count7d`）：回答"今晚/最近怎么样"，用于用户"现在去不去"的决策
+- **画像层**（`count30d`/`countAll`）：回答"这家店整体如何"，用于长期认知这家店
+
+**窗口锚点是真实"此刻"，不是"截至昨日"**：与 `VenueHeatService` 的"近30天"等滚动窗口统一锚定「截至昨日」（排除当天不完整数据，见「统计口径：截至昨日」章节）不同，Reaction 的四个窗口锚点均为请求发生的"此刻"（`sinceToday = 今天0点`、`since7d = now - 7天`、`since30d = now - 30天`）。根因：Reaction 是实时众包信号（类似 `VenueStatusReport` 的 TTL 语义），越新鲜的窗口越该反映"现在正在发生什么"，而非追求跨天可比性的历史聚合稳定性——两套时间语义分别服务不同目的，不可混用（同理见「场所状态上报」章节的活跃报告 TTL 窗口）。
+
+**用户重复反馈的时间限制**：不设固定冷却周期（如"30天内只能一次"），而是纯 toggle 语义——用户可随时取消/重新参与，恢复时刷新 `createdAt` 视为一次新的确认。这比"月度唯一约束"更简单且更贴合真实场景（用户体验随时可能变化，应允许随时更新态度）。
+
+### 接口
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| GET | `/venues/{venueId}/reactions/stats` | 公开（软鉴权） | 字典内全部 Reaction 的四窗口统计 + 当前用户参与状态，详情页"大家对这里的感受"+"查看更多"用 |
+| POST | `/venues/{venueId}/reactions/{code}` | 需登录 | toggle 语义（首次=参与，再次=取消），`code` 为路径变量而非请求体（字典固定，路径更简洁） |
+
+### 列表页 Top Reaction 徽标（VenueResponse.topReactions，替代原 tagLikeCounts）
+
+`GET /venues`、`GET /favorites` 等复用 `VenueResponseMapper` 的接口在 `VenueResponse.tags` 之外携带 `topReactions: List<ReactionBadge>`（最多 4 个，按**近 30 天计数**降序，含 count=0 的条目以避免冷启动死锁——若过滤 count=0，当 DB 无 Reaction 数据时列表/详情页均不渲染 Reaction 入口，导致无法创建第一条 Reaction）。
+
+- **例外：含个人参与状态（`reactedByMe`）**——这是对项目既有"列表层不含个人状态"惯例（原 `tagLikeCounts` 的设计）的刻意打破。原因是产品规则明确要求"点击 Emoji：未参与→+1，已参与→取消"必须在列表页直接可用，用户点击前必须知道自己是否已参与，否则会造成"点了却不知道是加还是减"的困惑。此例外**不违反**「缓存内容的强制约束」——聚合计数仍然缓存共享（`VenueReactionAggregateService`），个人参与状态通过**独立的、不缓存的实时批量查询**（`findActiveCodesByUserAndVenueIds`，一次 `IN` 查询覆盖整页场所）获取，两者未被塞进同一个缓存 key
+- **批量查询**：`VenueReactionService.batchGetBadges(venueIds, currentUserId)` 一次 `IN` 查询覆盖聚合计数、一次 `IN` 查询覆盖个人状态（仅登录用户触发），避免逐场所查询的 N+1
+- 该批量查询**不缓存**（与原 `batchGetTagLikeCounts` 同理）：列表页请求的场所集合每次不同，复用单场所聚合缓存收益低
+
+### 场所热度公式集成（替代原"点赞数"）
+
+`VenueHeatResponse.reactionCount30d`（原 `likeCount30d`）替代原"近30天标签点赞数"作为热度公式输入：`... + 近30天Reaction总数 × WEIGHT_REACTION(3) + ...`。数据源从 `qwt_tag_interactions`（`liked=true`）切换为 `qwt_venue_reactions`（`deleted=false`），权重值不变（3），语义从"标签点赞数"平移为"Reaction 总数"。热度公式所用窗口（`windowSince`/`windowUntil`，锚定「截至昨日」）与 Reaction 详情统计的窗口（锚定"此刻"）是两套独立计算——同一张 `qwt_venue_reactions` 表被两个不同消费者用不同窗口语义查询，互不干扰，新增/修改任一处窗口逻辑前必须先确认消费者是谁。
+
+toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（本模块聚合缓存）与 `VenueHeatService`（Reaction 总量是热度公式输入之一），见 `VenueReactionService.toggle()`。
+
+### 聚合缓存架构
+
+`VenueReactionAggregateService` 与 `TagAggregateStatsService`/`VenueHeatService` 同模式：内嵌 Caffeine `LoadingCache<Long, Map<String, long[]>>`（venueId → 每个 Reaction 代码的 `[countAll, countToday, count7d, count30d]`），`refreshAfterWrite(60s)` + `expireAfterWrite(30min)` + 单飞 + 写路径显式 `invalidate`。个人参与状态（`reactedByMe`）永远实时查询、不缓存，与既有的"缓存内容强制约束"完全一致。
+
+### 与现有模块的关系（保留 / 删除 / 替换）
+
+| 模块 | 处置 |
+|------|------|
+| 综合评分（RatingDimensions 体验评估 4 维度） | **保留**，用于门店整体质量比较，`taginteraction` 模块继续承载 |
+| 场所热度（VenueHeatService） | **保留**，用于门店流量排序；Reaction 总数替代原点赞数作为其中一项输入 |
+| 营业状态 / 场所状态上报 | **保留**，用于实时判断是否值得去，与 Reaction 是两套独立信号层 |
+| 固定属性标签（Venue.tags，如"禁烟""有舞池""自助存包"） | **保留**，纯展示不可互动；原"点赞"这一互动方式已删除 |
+| 标签点赞（`TagInteraction.liked`） | **删除**，替换为 Reaction 快速反馈 |
+| "现场状况"评分维度（舞伴氛围/客流热度/舞伴年龄层） | **删除**，替换为对应 Reaction（👧/👴/🔥 等） |
+
+### 后续扩展（P1，未在本次实现范围内）
+
+- 门店画像可视化（基于四窗口数据生成"年轻指数/人气/服务/消费"星级评分展示）
+- 热门 Reaction 排序算法优化（当前列表徽标按 30 天原始计数排序；可演进为"今日×5 + 7天×3 + 30天×1"加权评分以更强调近期活跃度）
+
+---
+
+### 系统默认标签（VenueDefaultsConfig）
+
+
+**设计动机与根因**：标签系统最初没有"默认"概念——所有标签由管理员手动输入，SQL seed 数据也需手工写入通用标签。这导致：(1) 数据冗余——每个门店重复存储相同标签；(2) 数据不一致——新门店可能忘记添加基础标签；(3) 修改困难——改一个默认标签需更新所有行。
+
+**架构**：系统默认标签是业务规则（非数据），定义在 `application.yaml`（`venue.default.tags`），读时合并，不在 DB 中存储。
+
+**合并规则**：
+- DB `qwt_venues.tags` 只存储管理员自定义标签
+- 读路径合并：`effectiveTags = defaults ∪ customTags`（去重，默认在前）
+- 写路径防御：`VenueService.createVenue()/updateVenue()` 通过 `VenueDefaultsConfig.filterCustomOnly()` 剥离可能误传的默认标签
+- 配置键 `venue.default.tags` 在 `application.yaml` 中定义，所有 profile 继承默认值
+
+**注入点**（共 3 处）：
+| 类 | 用途 |
+|----|------|
+| `VenueResponseMapper` | 合并默认标签到 `VenueResponse.tags`，填充 `VenueResponse.defaultTags` |
+| `TagAggregateStatsService.computeAggregate()` | 合并默认标签到 venueTags，确保无交互的默认标签以 0 计数出现 |
+| `VenueService.createVenue()/updateVenue()` | 防御性剥离传入标签中的默认标签，确保 DB 纯净 |
+
+**缓存影响**：因 `computeAggregate` 的 venueTags 现在包含默认标签，聚合缓存失效周期不变（60s refresh-ahead），无需调整。
 
 ---
 
@@ -624,13 +751,13 @@ Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(
 
 - **城市内相对排名**：按复合评分（见「复合评分排序」）在同城市场所中取 top 20%，最少 1 个。即"热门"是相对同城市其他场所而言，不是绝对分数阈值
 - **查询实现**：`VenueRepository.findHotVenueIds()` 使用 PostgreSQL 窗口函数（`ROW_NUMBER() OVER (PARTITION BY city ORDER BY score DESC)`）在库内完成城市内排名，避免在 Java 侧逐城市遍历。排序口径为 `sortWeight + 收藏数×20 + 动态数×10`（与列表查询的无坐标变体一致，不含距离项——距离是用户维度，场所热度排名不应因请求者位置变化）。Service 层通过 `VenueLookupService.getHotVenueIds()`（`@Cacheable(CACHE_HOT_VENUE_IDS)`，5min TTL）获取热门 ID 集合，缓存命中时 <1ms，未命中时执行全表窗口函数查询。场所创建/更新时通过 `@CacheEvict(allEntries=true)` 即时失效
-- **VenueResponseMapper 三参重载**：`toResponse(Venue, Map<String, Long> tagLikeCounts, boolean isHot)` ——在已有双参重载基础上追加 `isHot` 参数。Service 层先调用 `venueLookupService.getHotVenueIds()` 获取热门 ID 集合（`Set<Long>`），再在 `result.map()` 中传入 `hotVenueIds.contains(v.getId())`。双参重载默认 `isHot=false`，单参重载亦默认 `isHot=false`（创建/编辑回显场景无需热门标记）
+- **VenueResponseMapper 三参重载**：`toResponse(Venue, List<ReactionBadge> topReactions, boolean isHot)` ——在已有双参重载基础上追加 `isHot` 参数。Service 层先调用 `venueLookupService.getHotVenueIds()` 获取热门 ID 集合（`Set<Long>`），再在 `result.map()` 中传入 `hotVenueIds.contains(v.getId())`。双参重载默认 `isHot=false`，单参重载亦默认 `isHot=false`（创建/编辑回显场景无需热门标记）
 
 ---
 
 ## 开发测试数据
 
-`src/main/resources/db/seed-dev.sql` 提供开发环境种子数据（5 个场所、3 个用户、4 条动态、3 条收藏），覆盖已认领 / 未认领、各场所状态、商家 / 平台动态等场景。使用方式：应用以 dev profile 启动一次（自动建表）后，在 Supabase SQL Editor 或 psql 中手动执行。脚本末尾通过 `setval` 重置 IDENTITY 序列，避免后续自增 ID 冲突。
+`src/main/resources/db/seed-dev.sql` 提供开发环境种子数据（5 个场所、3 个用户、4 条动态、3 条收藏、6 条 Reaction），覆盖已认领 / 未认领、各场所状态、商家 / 平台动态等场景。使用方式：应用以 dev profile 启动一次（自动建表）后，在 Supabase SQL Editor 或 psql 中手动执行。脚本末尾通过 `setval` 重置 IDENTITY 序列，避免后续自增 ID 冲突。
 
 `src/main/resources/db/repair-schema-identity.sql` 是 2026-08-04 迁移事故的**幂等修复脚本**（回填 NULL id 脏行、重建主键、恢复 IDENTITY、序列定位、恢复 NOT NULL 与默认值），也是任何手工建库/迁库后结构不达标时的标准修复入口。见「Schema 完整性与数据库迁移规范」。
 
@@ -686,7 +813,7 @@ public record ApiResponse<T>(int code, String message, T data) {
 | 1004 | 用户不存在 |
 | 1005 | 文件校验失败（类型 / 大小超限） |
 | 1006 | 操作过于频繁（评分防刷冷却期内 / 状态上报频率超限） |
-| 1007 | 无效的标签或评分维度 |
+| 1007 | 无效的评分维度 / Reaction 类型 |
 | 5000 | 未知服务器错误（兜底） |
 | 5001 | 微信接口响应异常（无响应 / 解析失败） |
 | 5002 | 文件保存失败（IO 异常） |
@@ -906,7 +1033,7 @@ try {
 }
 ```
 
-实例：`FavoriteService.addFavorite`（软删恢复）、`TagInteractionService.toggleLike/score`（toggle + 冷却检查）、`StatusReportService.submitReport`（软删恢复 + TTL 续期，catch 后必须 `entityManager.clear()`）。若 INSERT 后还需后续操作（如 toggle），冲突时应重新查询已有记录再执行后续逻辑。
+实例：`FavoriteService.addFavorite`（软删恢复）、`TagInteractionService.score`（冷却检查）、`VenueReactionService.toggle`（软删恢复/切换）、`StatusReportService.submitReport`（软删恢复 + TTL 续期，catch 后必须 `entityManager.clear()`）。若 INSERT 后还需后续操作（如 toggle），冲突时应重新查询已有记录再执行后续逻辑。
 
 ---
 
@@ -1136,6 +1263,10 @@ DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：
 - 禁止用 GUI 工具（DataGrip/DBeaver/Supabase 控制台）拖拽或导出-导入方式复制表结构迁移数据库——此类工具按普通列类型重建表，系统性丢失 IDENTITY/序列/主键/NOT NULL，且 Hibernate validate 无法发现（见「Schema 完整性与数据库迁移规范」）；逻辑迁移一律 `pg_dump -Fc` + `pg_restore`
 - 禁止绕过或降级 `SchemaIntegrityChecker`（如改为仅告警、加开关跳过）——主键机制损坏时一切写入必然失败或产生 id=NULL 脏数据，fail-fast 是唯一正确语义（见「Schema 完整性与数据库迁移规范」）
 - 禁止手工建库/迁库后不启动服务验证——启动即触发 Schema 完整性检查，是手工变更结构后的强制验收步骤
+- 禁止 Reaction 字典使用二元对立的点赞/倒赞图标（如 👍👎）——采用具体、中性的正负向 Reaction 共存，避免攻击性评价引发商家纠纷（见「Reaction 快速反馈系统」章节）
+- 禁止允许用户自由创建 Reaction 代码——字典由后端 `ReactionCode` 枚举唯一维护，新增/调整条目需过审核安全过滤（参照 `ReportReason` 命名规避敏感词的先例）
+- 禁止对 Reaction 做周期性清零（如"每周/每月重置计数"）——采用永久保留原始记录 + 多时间窗口（今日/7天/30天/全部）实时统计的时间衰减方案，见「Reaction 快速反馈系统 → 时效性设计」根因说明
+- 禁止 Reaction 的四个时间窗口套用热度模块「统计口径：截至昨日」的排他上界约定——Reaction 是实时众包信号，窗口锚点为真实"此刻"，与热度滚动窗口是两套独立的时间语义
 
 ---
 
@@ -1164,7 +1295,7 @@ DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：
 | 单行多列聚合查询返回 `Object[]` 再下标强转 | 用 Repository 嵌套接口投影（getter 名 = SELECT alias），编译期类型安全，不受 Spring Data JPA 版本语义变更影响 |
 | 把 likedByMe/myScore 等个人状态塞进以 `{venueId, userId}` 为 key 的聚合缓存 | 聚合数据（venueId 为 key）与个人状态（永远实时查询）彻底分离，写操作对聚合缓存做 `@CacheEvict`，不要只依赖 TTL |
 | 在同一 Service 类内 `this.xxx()` 调用本类的 `@Cacheable` 方法 | 绕开 AOP 代理导致缓存静默失效；把被缓存的方法拆到独立 Bean（如 `TagAggregateStatsService`），从外部注入调用 |
-| 列表页展示的关联统计按 venueId 循环单独查询 | 收集整页 venueId 后一次 `IN (...)` 批量查询（如 `TagInteractionService.batchGetTagLikeCounts`） |
+| 列表页展示的关联统计按 venueId 循环单独查询 | 收集整页 venueId 后一次 `IN (...)` 批量查询（如 `VenueReactionService.batchGetBadges`） |
 | 用 venuefeedback 做实时状态上报（误用异步审核做实时信号） | venuefeedback = 异步管理员审核流程；venuestatusreport = 实时 4h TTL 众包信号。两者共存，不可混用（见「场所状态上报」章节） |
 | 用户上报后修改 Venue.status | 用户上报是独立信号层，不改 Venue.status；管理员后续可决定是否据此手动更新（见「独立信号层」章节） |
 | 拦截器中对每个请求 `findById` 查库（无缓存） | 用 Caffeine 内嵌缓存（2min TTL），缓存命中 <1ms，见 `AuthInterceptor` 用户缓存模式 |
@@ -1179,6 +1310,9 @@ DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：
 | 用 DataGrip 等 GUI 工具拖拽复制表做数据库迁移 | `pg_dump -Fc` + `pg_restore` 保留 identity/序列/主键；GUI 拖拽系统性丢失这些属性且 Hibernate validate 查不出来（见「Schema 完整性与数据库迁移规范」） |
 | 遇到 `AssertionFailure: null identifier` 去改业务代码 | 根因在数据库：id 列丢失 IDENTITY/主键（多为迁移事故）。执行 `db/repair-schema-identity.sql` 修复，不从代码层绕 |
 | 带显式 id 导入数据后不重置序列 | `setval` 到 max(id)，否则下一次插入主键冲突（修复脚本已内置；手工导入必须做） |
+| 恢复"标签点赞"功能或用 1-10 打分做实时众包体感 | 已被 Reaction 快速反馈系统替代（`venuereaction` 模块），新增此类需求一律走 Reaction toggle，不复用 taginteraction |
+| Reaction 计数做"每周/每月重置清零" | 原始记录永久保留，按今日/7天/30天/全部四个真实时间窗口实时统计（时间衰减方案），见「Reaction 快速反馈系统」 |
+| Reaction 时间窗口套用「统计口径：截至昨日」 | Reaction 窗口锚点为真实"此刻"（今天0点/7天前/30天前），与热度滚动窗口是两套独立时间语义 |
 
 ---
 

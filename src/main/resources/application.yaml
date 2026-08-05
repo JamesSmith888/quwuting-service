@@ -25,6 +25,13 @@ jwt:
   secret: ${JWT_SECRET}
   expiry-days: 7
 
+# 门店系统默认标签（所有门店共享，展示时与自定义标签合并）
+venue:
+  default:
+    tags:
+      - 交谊舞
+      - 舞厅
+
 # Supabase Storage 配置（前端直传模式，后端仅签发上传凭证）
 supabase:
   storage:

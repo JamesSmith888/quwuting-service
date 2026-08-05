@@ -4,17 +4,17 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
-import org.quwuting.quwutingservice.taginteraction.dto.request.LikeTagRequest;
 import org.quwuting.quwutingservice.taginteraction.dto.request.ScoreTagRequest;
 import org.quwuting.quwutingservice.taginteraction.dto.response.TagStatsResponse;
 import org.quwuting.quwutingservice.taginteraction.service.TagInteractionService;
 import org.springframework.web.bind.annotation.*;
 
 /**
- * 标签交互接口：点赞 + 维度评分。
+ * 评分交互接口：维度评分。
  * <p>
- * 路由挂载在 /venues/{venueId}/tags 下，语义为"场所的标签交互"。
- * 注意：字面量路径 "tags" 与 VenueController 的 /venues/{id} 不冲突（多一级路径段）。
+ * 路由挂载在 /venues/{venueId}/tags 下。原"标签点赞"（/tags/like）已被 Reaction 快速反馈
+ * 系统替代，见 {@link org.quwuting.quwutingservice.venuereaction.controller.VenueReactionController}
+ * （/venues/{venueId}/reactions）与 AGENTS.md「Reaction 快速反馈系统」章节。
  */
 @RestController
 @RequestMapping("/venues/{venueId}/tags")
@@ -24,25 +24,13 @@ public class TagInteractionController {
     private final TagInteractionService tagInteractionService;
 
     /**
-     * 获取场所标签交互统计（公开，软鉴权：登录时返回个人状态）
-     * GET /venues/{venueId}/tag-stats
+     * 获取场所评分统计（公开，软鉴权：登录时返回个人评分状态）
+     * GET /venues/{venueId}/tags/stats
      */
     @GetMapping("/stats")
     public ApiResponse<TagStatsResponse> getTagStats(@PathVariable Long venueId) {
         Long userId = UserContext.getCurrentUserId();
         return ApiResponse.ok(tagInteractionService.getTagStats(venueId, userId));
-    }
-
-    /**
-     * 切换标签点赞（toggle：首次=赞，再次=取消）
-     * POST /venues/{venueId}/tags/like
-     */
-    @PostMapping("/like")
-    public ApiResponse<Boolean> toggleLike(@PathVariable Long venueId,
-                                           @Valid @RequestBody LikeTagRequest req) {
-        Long userId = UserContext.requireAuth();
-        boolean liked = tagInteractionService.toggleLike(userId, venueId, req.tag());
-        return ApiResponse.ok(liked);
     }
 
     /**

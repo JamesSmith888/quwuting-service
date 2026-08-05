@@ -56,7 +56,7 @@ INSERT INTO qwt_venues (id, name, status, image_url, photos, description, city, 
  '[{"label":"下午场","type":"FIXED","price":15},{"label":"晚场","type":"FIXED","price":20}]',
  '[{"label":"5点前","unit":"MINUTE","minutes":5,"price":20},{"label":"5点后","unit":"MINUTE","minutes":5,"price":30},{"unit":"MINUTE","minutes":10,"price":50}]',
  '13800002222', NULL,
- '["交谊舞","国标","场地宽敞","主题舞会"]', 90, NULL,
+ '["国标","场地宽敞","主题舞会"]', 90, NULL,
  '2026-05-12 10:00:00', '2026-06-20 16:00:00', false);
 
 -- 场所 3：高端定位，仅晚场
@@ -107,7 +107,7 @@ INSERT INTO qwt_venues (id, name, status, image_url, photos, description, city, 
  '[{"label":"下午4点前","type":"FREE"},{"label":"下午4点后","type":"FIXED","price":10}]',
  '[{"unit":"MINUTE","minutes":5,"price":20}]',
  NULL, NULL,
- '["交谊舞","老舞厅"]', 10, NULL,
+ '["老舞厅"]', 10, NULL,
  '2026-05-05 08:00:00', '2026-05-31 18:00:00', false);
 
 -- 场所 6：西安连曲模式（按曲数计费，演示 SONG 计量单位）
@@ -124,7 +124,7 @@ INSERT INTO qwt_venues (id, name, status, image_url, photos, description, city, 
  '[{"label":"","type":"FIXED","price":20}]',
  '[{"unit":"SONG","minutes":3,"price":30},{"unit":"SONG","minutes":4,"price":40},{"unit":"SONG","minutes":5,"price":50}]',
  '13800006666', NULL,
- '["交谊舞","连曲模式","场地宽敞"]', 75, NULL,
+ '["连曲模式","场地宽敞"]', 75, NULL,
  '2026-06-10 10:00:00', '2026-07-01 10:00:00', false);
 
 -- ── 场所动态 ─────────────────────────────────────────────────────────────────
@@ -154,14 +154,10 @@ INSERT INTO qwt_favorites (id, user_id, venue_id, created_at, updated_at, delete
 (2, 3, 2, '2026-06-10 20:30:00', '2026-06-10 20:30:00', false),
 (3, 2, 2, '2026-06-12 19:00:00', '2026-06-12 19:00:00', false);
 
--- ── 标签交互（点赞 + 维度评分） ──────────────────────────────────────────────
+-- ── 评分交互（维度评分；liked 列为历史遗留字段，Reaction 快速反馈系统已替代原"标签点赞"） ──
 
--- 场所 1 标签点赞：用户 3 赞了"莎莎舞"和"驻场舞伴"，用户 2 赞了"莎莎舞"
--- 维度评分：用户 2 和 3 对场所 1 的服务/环境/音响/性价比打分
+-- 场所 1 维度评分：用户 2 和 3 对场所 1 的服务/环境/音响/性价比打分（liked 列不再读写，历史遗留恒为 true/false）
 INSERT INTO qwt_tag_interactions (id, user_id, venue_id, tag, liked, score, created_at, updated_at, deleted) VALUES
-(1, 3, 1, '莎莎舞',     true,  NULL, '2026-06-10 20:00:00', '2026-06-10 20:00:00', false),
-(2, 3, 1, '驻场舞伴',   true,  NULL, '2026-06-10 20:01:00', '2026-06-10 20:01:00', false),
-(3, 2, 1, '莎莎舞',     true,  NULL, '2026-06-15 18:30:00', '2026-06-15 18:30:00', false),
 (4, 3, 1, '服务',       false, 8,    '2026-06-20 21:00:00', '2026-07-20 10:00:00', false),
 (5, 3, 1, '环境',       false, 7,    '2026-06-20 21:01:00', '2026-07-20 10:01:00', false),
 (6, 3, 1, '音响效果',   false, 9,    '2026-06-20 21:02:00', '2026-06-20 21:02:00', false),
@@ -170,15 +166,23 @@ INSERT INTO qwt_tag_interactions (id, user_id, venue_id, tag, liked, score, crea
 (9, 2, 1, '环境',       false, 8,    '2026-07-01 12:01:00', '2026-07-01 12:01:00', false),
 (10, 2, 1, '性价比',    false, 7,    '2026-07-01 12:02:00', '2026-07-18 20:00:00', false);
 
--- 场所 2 标签点赞 + 评分
+-- 场所 2 维度评分
 INSERT INTO qwt_tag_interactions (id, user_id, venue_id, tag, liked, score, created_at, updated_at, deleted) VALUES
-(11, 3, 2, '场地宽敞',  true,  NULL, '2026-06-12 19:30:00', '2026-06-12 19:30:00', false),
-(12, 3, 2, '交谊舞',    true,  NULL, '2026-06-12 19:31:00', '2026-06-12 19:31:00', false),
 (13, 3, 2, '服务',      false, 7,    '2026-06-15 20:00:00', '2026-06-15 20:00:00', false),
 (14, 3, 2, '环境',      false, 8,    '2026-06-15 20:01:00', '2026-06-15 20:01:00', false),
 (15, 3, 2, '音响效果',  false, 9,    '2026-06-15 20:02:00', '2026-06-15 20:02:00', false),
 (16, 2, 2, '服务',      false, 6,    '2026-07-10 14:00:00', '2026-07-16 11:00:00', false),
 (17, 2, 2, '性价比',    false, 5,    '2026-07-10 14:01:00', '2026-07-10 14:01:00', false);
+
+-- ── 场所 Reaction（替代原"标签点赞"，见 AGENTS.md「Reaction 快速反馈系统」） ──────────
+
+INSERT INTO qwt_venue_reactions (id, user_id, venue_id, reaction_code, created_at, updated_at, deleted) VALUES
+(1, 3, 1, 'HOT',            '2026-07-25 20:00:00', '2026-07-25 20:00:00', false),
+(2, 2, 1, 'HOT',            '2026-07-28 21:00:00', '2026-07-28 21:00:00', false),
+(3, 3, 1, 'GOOD_VIBE',      '2026-07-25 20:01:00', '2026-07-25 20:01:00', false),
+(4, 2, 1, 'YOUNG_PARTNER',  '2026-07-28 21:01:00', '2026-07-28 21:01:00', false),
+(5, 3, 2, 'HOT',            '2026-06-12 19:35:00', '2026-06-12 19:35:00', false),
+(6, 3, 2, 'GOOD_MUSIC',     '2026-06-12 19:36:00', '2026-06-12 19:36:00', false);
 
 -- ── 重置 IDENTITY 序列（避免后续自增 ID 冲突） ───────────────────────────────
 
@@ -187,5 +191,6 @@ SELECT setval('qwt_venues_id_seq', (SELECT MAX(id) FROM qwt_venues));
 SELECT setval('qwt_venue_posts_id_seq', (SELECT MAX(id) FROM qwt_venue_posts));
 SELECT setval('qwt_favorites_id_seq', (SELECT MAX(id) FROM qwt_favorites));
 SELECT setval('qwt_tag_interactions_id_seq', (SELECT MAX(id) FROM qwt_tag_interactions));
+SELECT setval('qwt_venue_reactions_id_seq', (SELECT MAX(id) FROM qwt_venue_reactions));
 
 COMMIT;
