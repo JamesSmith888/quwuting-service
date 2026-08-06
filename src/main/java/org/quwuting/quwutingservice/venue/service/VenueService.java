@@ -18,6 +18,7 @@ import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.entity.VenueStatusLog;
 import org.quwuting.quwutingservice.venue.enums.PartnerFeeUnit;
 import org.quwuting.quwutingservice.venue.enums.TicketType;
+import org.quwuting.quwutingservice.venue.enums.VenueSortMode;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
@@ -183,14 +184,33 @@ public class VenueService {
     }
 
     /**
-     * 场所列表：筛选 + 复合评分排序 + 分页。
+     * 场所列表：筛选 + 排序 + 距离半径 + 分页。
      * <p>
-     * 排序为服务端复合评分（公式见 {@link VenueRepository#searchRanked}）：
-     * 运营权重 + 热度（收藏 × 20 + 动态 × 10）+ 邻近加成 100/(1+距离km)。
-     * latitude/longitude 为 null（用户未授权定位）时走无距离变体，退化为权重 + 热度排序——
-     * 拆分为两个查询而非传 null 参数：Postgres 将无类型的 null 绑定参数推断为 bytea，
-     * 会使 radians() 解析失败。
-     * 城市/区县按标准行政区划名精确匹配——写入与查询共用 region picker 词表，禁止模糊匹配。
+     * <b>排序由服务端在库内完成</b>（分页正确性要求排序与分页同一查询，见 AGENTS.md「复合评分排序」）：
+     * <ul>
+     *   <li>recommended（默认）：复合评分 = 运营权重 + 热度（收藏 × 20 + 动态 × 10）+ 邻近加成
+     *       100/(1+距离km)——有定位时本地场所自然置顶，无定位时退化为权重 + 热度；</li>
+     *   <li>distance：纯距离升序（仅展示有坐标的场所）；无定位时降级为推荐排序
+     *       （无法按距离排序，防御性回退而非空列表）；</li>
+     *   <li>heat：运营权重 + 热度（不含距离项，与「热门场所标记」同口径）；</li>
+     *   <li>newest：创建时间倒序。</li>
+     * </ul>
+     * <p>
+     * {@code radiusKm}（可选，km）为距离半径筛选，与排序方式正交：仅在叠加在"含坐标"的查询上
+     * （距离计算需要请求者位置为圆心）。无坐标请求携带 radiusKm 时忽略（前端不会发送——
+     * 前端仅在有定位缓存时附带坐标与半径，此处忽略仅作防御）。
+     * <p>
+     * <b>双查询拆分坑位</b>（AGENTS.md「双查询拆分」）：含 radians()/acos() 距离数学的查询
+     * 必须传非 null 坐标——Postgres 将无类型的 null 绑定参数推断为 bytea，radians() 无法解析。
+     * 因此本方法按"坐标有无 × 排序方式 × 半径有无"显式分流，杜绝向距离查询传 null 坐标：
+     * <pre>
+     * 推荐排序    → 有坐标：searchRanked(坐标, 半径)  无坐标：searchRankedNoLocation
+     * 距离最近    → 有坐标：searchNearest(坐标, 半径) 无坐标：降级 searchRankedNoLocation
+     * 热度最高    → 有坐标且有半径：searchHeatWithinRadius  其余：searchHeat
+     * 最新收录    → 有坐标且有半径：searchNewestWithinRadius 其余：searchNewest
+     * </pre>
+     * 热度最高/最新收录的排序本身不依赖坐标，仅在叠加半径时借用坐标作圆心——所以只有
+     * "有坐标且有半径"才进入 WithRadius 变体，避免无谓地把坐标参数绑定进不含距离数学的查询。
      * <p>
      * {@code window} 控制卡片 Top Reaction 徽标的排序/筛选窗口（近7天/近30天/全部，
      * 默认近7天——舞厅强时间变化场景，列表默认展示近期热度，见 AGENTS.md「Reaction 快速反馈系统」）。
@@ -199,21 +219,18 @@ public class VenueService {
     public Page<VenueResponse> listVenues(String city, String district,
                                           VenueStatus status, String keyword,
                                           Double latitude, Double longitude,
-                                          String window,
+                                          String window, String sort, Double radiusKm,
                                           int page, int size) {
         String keywordPattern = StringUtils.hasText(keyword) ? "%" + keyword.trim() + "%" : null;
         page = Math.max(0, page);
         size = Math.min(Math.max(1, size), MAX_PAGE_SIZE);
         PageRequest pageable = PageRequest.of(page, size);
-        Page<Venue> result;
-        if (latitude != null && longitude != null) {
-            result = venueRepository.searchRanked(
-                    blankToNull(city), blankToNull(district), status, keywordPattern,
-                    latitude, longitude, pageable);
-        } else {
-            result = venueRepository.searchRankedNoLocation(
-                    blankToNull(city), blankToNull(district), status, keywordPattern, pageable);
-        }
+        boolean hasCoords = latitude != null && longitude != null;
+        // radiusKm 为 null / ≤ 0 视为不限（前端 0 = 不限，防御性归一）
+        Double radius = (radiusKm != null && radiusKm > 0) ? radiusKm : null;
+        VenueSortMode sortMode = VenueSortMode.from(sort);
+        Page<Venue> result = dispatchListQuery(sortMode, blankToNull(city), blankToNull(district),
+                status, keywordPattern, hasCoords, latitude, longitude, radius, pageable);
         // 批量查询整页场所的 Top Reaction 徽标，避免逐条查询造成的 N+1（见 VenueReactionService#batchGetBadges）
         List<Long> venueIds = result.getContent().stream().map(Venue::getId).toList();
         Map<Long, List<ReactionBadge>> reactionsByVenue =
@@ -224,6 +241,35 @@ public class VenueService {
         return result.map(v -> venueResponseMapper.toResponse(
                 v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
                 hotVenueIds.contains(v.getId())));
+    }
+
+    /**
+     * 列表查询分流（排序 × 坐标 × 半径 的显式矩阵，见 {@link #listVenues} 注释）。
+     * 坐标必为 null 或双非 null（hasCoords 为准），distance 数学查询只在 hasCoords=true 分支被调用。
+     */
+    private Page<Venue> dispatchListQuery(VenueSortMode sortMode, String city, String district,
+                                          VenueStatus status, String keywordPattern,
+                                          boolean hasCoords, Double latitude, Double longitude,
+                                          Double radius, PageRequest pageable) {
+        return switch (sortMode) {
+            case RECOMMENDED -> hasCoords
+                    ? venueRepository.searchRanked(city, district, status, keywordPattern,
+                            latitude, longitude, radius, pageable)
+                    : venueRepository.searchRankedNoLocation(city, district, status, keywordPattern, pageable);
+            case DISTANCE -> hasCoords
+                    ? venueRepository.searchNearest(city, district, status, keywordPattern,
+                            latitude, longitude, radius, pageable)
+                    // 无定位无法按距离排序：防御性降级为推荐排序（而非空列表/报错）
+                    : venueRepository.searchRankedNoLocation(city, district, status, keywordPattern, pageable);
+            case HEAT -> hasCoords && radius != null
+                    ? venueRepository.searchHeatWithinRadius(city, district, status, keywordPattern,
+                            latitude, longitude, radius, pageable)
+                    : venueRepository.searchHeat(city, district, status, keywordPattern, pageable);
+            case NEWEST -> hasCoords && radius != null
+                    ? venueRepository.searchNewestWithinRadius(city, district, status, keywordPattern,
+                            latitude, longitude, radius, pageable)
+                    : venueRepository.searchNewest(city, district, status, keywordPattern, pageable);
+        };
     }
 
     /** 有场所的城市列表（按场所数倒序），供前端热门城市选择 */

@@ -439,27 +439,50 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 与 `venuestatusreport`（实时 4h TTL 众包信号）的边界保持：本模块是**异步管理员审核流程**（有处理状态），实时信号职责不在此承担。`SUSPENDED` 类型在此 = "不在场但认为状态信息有误"，现场确认关门走 venuestatusreport（见「场所状态上报」章节）。
 
+**匿名决策（2026-08-06，需求根因）**：上报**不强推登录**——未登录用户直接提交（`user_id` = null，响应 `trackable=false`），管理员照常处理（管理端不依赖上报者身份）。但匿名记录无法在个人中心回看（「我的上报记录」按 `user_id` 查询）、处理结果无法回传——前端在匿名提交时提示"一键登录后可查看管理员处理结果"（showModal 不强推）。登录用户上报 → `user_id` 落库 → 个人中心可见全部记录与处理结果。**"匿名可参与、追踪需登录"是本模块的明确设计决策**（前端交互落点见前端 AGENTS.md「我的上报记录」）。
+
 ### 类型与状态机
 
 - `FeedbackType`：CLOSED_DOWN（已关门/停业）/ SUSPENDED（暂停营业）/ INACCURATE（信息有误）/ **PRICE（价格信息缺失或有误——门票/舞伴数据缺失空态的上报入口，2026-08-05 新增）** / OTHER（其他）
 - `ReportStatus` 状态机：PENDING（待处理）→ RESOLVED（已处理）/ DISMISSED（已忽略）。**终态固定不可回退**——RESOLVED 表示管理员已核实并完成维护，DISMISSED 判定为误报/无需处理；布尔 handled 无法区分两种终态语义（历史 `handled` 列保留为实体兜底映射，见下文「Schema 演进」）
+- **处理结果回传（2026-08-06 新增）**：管理员 resolve/dismiss 时可填写 `handleNote`（处理结果说明，≤500 字），随「我的上报记录」回传上报者——"管理员处理完成后反馈处理结果给用户"的载体。不填 = 仅流转状态，用户侧只见处理状态。终态幂等语义下重复处理不覆盖已有 handleNote
 
 ### 数据模型
 
-`qwt_venue_feedbacks` 表：venueId + userId + type + note + status + handledBy + handledAt + handled（遗留兜底列）。索引 `(venueId)`、`(userId)`、`(status, createdAt)`（管理端状态筛选分页）。
+`qwt_venue_feedbacks` 表：venueId + userId（**可空 = 匿名，2026-08-06 放宽**）+ type + note + status + handledBy + handledAt + handleNote（处理结果说明，2026-08-06 新增，可空列自动加列）+ handled（遗留兜底列）。索引 `(venueId)`、`(userId)`、`(status, createdAt)`（管理端状态筛选分页）。
 
-**Schema 演进（2026-08-05 起默认自动更新，无手动 SQL）**：status 列默认值由 `@ColumnDefault("'PENDING'")` **单一通道**声明（配合 `@Column(length=20, nullable=false)` + 字段初始化器），`ddl-auto:update` 对已有数据的表自动加列时生成 `ADD COLUMN ... NOT NULL DEFAULT 'PENDING'` 不失败，存量行自动落为 PENDING——2026-08-05 曾因 columnDefinition 与 @ColumnDefault **双声明 DEFAULT** 报 "multiple default values specified"（修复 + 根因见「Schema 演进 → 事故根因」）；handledBy / handledAt 为可空列直接自动加列；遗留 `handled` 布尔列由实体字段映射兜底（@Deprecated + `@ColumnDefault("false")`，**双态兼容**：列已存在 → 匹配无操作，列已被历史脚本删除 → update 自动重建且存量行落默认值；insert 恒写 false 不违反约束）。**本模块不再需要任何手动迁移脚本**（上一版 migrate-report-status.sql 已删除）——新增字段一律通过 @ColumnDefault 默认值/可空列让 update 自动完成，规则见「Schema 演进（自动更新优先）」章节。
+**Schema 演进（2026-08-05 起默认自动更新，无手动 SQL）**：status 列默认值由 `@ColumnDefault("'PENDING'")` **单一通道**声明（配合 `@Column(length=20, nullable=false)` + 字段初始化器），`ddl-auto:update` 对已有数据的表自动加列时生成 `ADD COLUMN ... NOT NULL DEFAULT 'PENDING'` 不失败，存量行自动落为 PENDING——2026-08-05 曾因 columnDefinition 与 @ColumnDefault **双声明 DEFAULT** 报 "multiple default values specified"（修复 + 根因见「Schema 演进 → 事故根因」）；handledBy / handledAt 为可空列直接自动加列；遗留 `handled` 布尔列由实体字段映射兜底（@Deprecated + `@ColumnDefault("false")`，**双态兼容**：列已存在 → 匹配无操作，列已被历史脚本删除 → update 自动重建且存量行落默认值；insert 恒写 false 不违反约束）。
+
+⚠ **user_id 放宽可空 = 修改已有列约束，update 无法完成**（只加列/约束、不 MODIFY 列），属「无法避免手动 SQL 的场景」例外：需在发布前执行 `db/migrate-feedback-anonymous.sql`（`ALTER TABLE ... ALTER COLUMN user_id DROP NOT NULL`，幂等），**先执行脚本再启动新版应用**（否则匿名 insert 违反 NOT NULL）。本脚本是本例外清单下新增的**唯一允许新增的迁移脚本**（理由：修改列约束无实体声明通道，见「Schema 演进 → 无法避免手动 SQL 的场景」）。
 
 ### 接口
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
-| POST | `/venues/{venueId}/feedbacks` | 需登录 | 提交上报（type 必填 + note 可选），响应含 maintenanceHint |
-| GET | `/admin/reports` | ADMIN | 平台级列表（status/type 可选筛选，分页倒序，含 venueName） |
-| POST | `/admin/reports/{id}/resolve` | ADMIN | 标记已处理（幂等：终态重复操作直接成功） |
-| POST | `/admin/reports/{id}/dismiss` | ADMIN | 标记已忽略（幂等） |
+| POST | `/venues/{venueId}/feedbacks` | **匿名可提交** | 提交上报（type 必填 + note 可选），响应含 maintenanceHint + trackable（2026-08-06 匿名支持） |
+| GET | `/venues/{venueId}/feedbacks/mine` | 需登录 | 我对**当前门店**的上报（详情页弹窗数据源，2026-08-06 新增） |
+| GET | `/feedbacks/mine?venueId=` | 需登录 | 我的上报（venueId 可选：缺省=跨场所全部=个人中心；传值=单门店，2026-08-06 新增，与上者同口径共用 service） |
+| GET | `/admin/reports` | ADMIN | 平台级列表（status/type 可选筛选，分页倒序，含 venueName / handleNote） |
+| POST | `/admin/reports/{id}/resolve` | ADMIN | 标记已处理（幂等；body 可选 `{"note": 处理结果说明}`） |
+| POST | `/admin/reports/{id}/dismiss` | ADMIN | 标记已忽略（幂等；body 可选 `{"note": 处理结果说明}`） |
 
-管理端列表场所名称批量查询（`VenueRepository.findByIdInAndDeletedFalse`）消除 N+1；已逻辑删除的场所回退"已下架场所"占位。
+管理端列表场所名称批量查询（`VenueRepository.findByIdInAndDeletedFalse`）消除 N+1；已逻辑删除的场所回退"已下架场所"占位。「我的上报」记录同样批量回填场所名（同一模式），但**不过滤场所删除**——用户历史记录真实性不因场所下架而消失（与 status-reports/mine 的 JOIN 策略一致）。
+
+### 用户侧 read path（2026-08-06 补全，根因）
+
+2026-08-05 泛化时只建设了 write path（提交）与 admin path（列表/处理），**用户侧 read path 从未设计**；"我的上报记录"一度被错误嫁接在 status-report 的跨场所 mine 接口上（详情页弹窗展示与所在门店无关、feedback 记录用户侧完全不可见——见前端 AGENTS.md「我的上报记录」根因）。本次补全：
+
+- **用户级** `GET /feedbacks/mine`（个人中心：全部场所、各维度上报一览）+ **场所级** `GET /venues/{venueId}/feedbacks/mine`（详情页弹窗：当前门店）——同一 service 方法 `listMyFeedbacks(venueId)` 两个入口，venueId null = 全部
+- 范围：**全部状态**（PENDING/RESOLVED/DISMISSED）均返回——异步审核流程每条记录都有消费价值（待处理 = 未反馈，已处理 = 展示处理结果）；与 status-report 的"已撤销不返回"语义不同（实时信号撤销 = 收回，异步上报无撤销概念）
+- 响应 `MyFeedbackResponse`：id/venueId/venueName/type/typeDisplay/note/status/statusDisplay/handleNote/handledAt/createdAt——处理结果随记录原样回传
+
+### 文本防注入（2026-08-06）
+
+用户自由文本（`note` / `handleNote`，statusReport 的 `note` 同规则）入库前统一经 `common/text/TextSanitizer` 清洗：控制字符剥离（保留 \n）+ trim + 500 字截断——DTO `@Size` 校验拦非法请求，sanitize 兜底防御绕过校验的直落库路径（双保险）。防注入分层约定（全链路）：
+
+- **SQL 注入**：JPA 参数化查询天然免疫（本项目全部查询走 JPA/JPQL/命名参数，无字符串拼接 SQL；原生 SQL 条件一律 `:param IS NULL OR col = :param` 传参，禁拼接）
+- **XSS**：小程序端全部经 `<text>` 文本节点渲染（天然转义）；管理端页面同为小程序原生页面。**约定：任何未来新增的 web/富文本消费端必须对文本做 HTML 转义或仅用文本节点渲染**
+- **协议/日志污染**：sanitize 剥离控制字符，保证入库文本不携带可干扰下游的字节
 
 ### 维护承诺配置（maintenanceHint）
 
@@ -544,14 +567,15 @@ LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);  
 |------|------|------|------|
 | POST | `/venues/{venueId}/status-reports` | 需登录 | 上报暂停（body 可空=快速上报，或含 reason/occurredAt/note） |
 | POST | `/venues/{venueId}/status-reports/cancel` | 需登录 | 撤销我的上报（软删除） |
-| GET | `/status-reports/mine` | 需登录 | 我的全部状态上报（用户级资源，顶层路径，见下「我的上报记录」） |
+| GET | `/status-reports/mine?venueId=` | 需登录 | 我的全部状态上报（用户级资源，顶层路径；venueId 可选，2026-08-06，见下「我的上报记录」） |
 
-### 我的上报记录（GET /status-reports/mine，2026-08-05 新增）
+### 我的上报记录（GET /status-reports/mine，2026-08-05 新增，2026-08-06 收敛）
 
-详情页「我的上报记录」弹窗的数据源。**用户维度资源**（跨场所），路由放顶层 `/status-reports/mine` 而非场所子资源路径（与 `/favorites` 用户级资源模型一致，区别于 `/venues/{venueId}/status-reports` 的场所子资源）。
+「我的上报记录」的用户侧数据源。**用户维度资源**（跨场所），路由放顶层 `/status-reports/mine` 而非场所子资源路径（与 `/favorites` 用户级资源模型一致，区别于 `/venues/{venueId}/status-reports` 的场所子资源）。
 
 - **范围**：仅未撤销（`deleted = false`）记录，含已过期（TTL 外）——「已过期」记录前端标注后提醒用户可重新上报；已撤销记录不返回（撤销是用户主动收回动作，soft delete 属内部实现细节，语义上不再属于"上报记录"）
-- **实现**：`StatusReportRepository.findMyReportsByUserId` 原生 SQL JOIN `qwt_venues` 一次取回场所名称/城市/区县/地址（消除 N+1）；`active` / `expiresAt` 在 `StatusReportService.listMyReports` 按 `ACTIVE_REPORT_TTL_HOURS` 统一计算（TTL 唯一权威源，SQL 不自行定义时间窗）
+- **venueId 可选过滤（2026-08-06）**：null = 跨场所全部（个人中心「我的上报」区块）；非 null = 单门店（详情页「我的上报记录」弹窗——只展示当前门店记录，全部记录入口在个人中心）。与 `venuefeedback.listMyFeedbacks(venueId)` 的可选过滤同构——两套上报（异步审核 / 实时信号）的"个人中心全量 + 详情页单店"消费模型一致
+- **实现**：`StatusReportRepository.findMyReportsByUserId(userId, venueId)` 原生 SQL JOIN `qwt_venues` 一次取回场所名称/城市/区县/地址（消除 N+1）；venueId 过滤用 `:venueId IS NULL OR r.venue_id = :venueId` 参数化传值（防注入约定见 TextSanitizer javadoc）；`active` / `expiresAt` 在 `StatusReportService.listMyReports` 按 `ACTIVE_REPORT_TTL_HOURS` 统一计算（TTL 唯一权威源，SQL 不自行定义时间窗）
 - **场所软删除不回退占位**：JOIN 不过滤 `v.deleted`——记录真实性不因场所下架而消失，与 /admin/reports 的"已下架场所"占位策略有意区分（那是管理端当前列表，这是用户历史记录）
 - **响应**：`MyStatusReportResponse`（id/venueId/venueName/venueCity/venueDistrict/venueAddress/createdAt/active/expiresAt），前端展示剩余时间只做 `expiresAt - now` 纯计算，不持有 TTL 常量
 
@@ -822,23 +846,32 @@ supabase:
 
 ## 列表排序与城市统计
 
-### 复合评分排序
+### 复合评分排序与排序方式（2026-08-06 扩展）
 
-`GET /venues` 支持可选 `latitude` / `longitude`（用户定位，gcj02），列表按服务端复合评分排序（分页正确性要求排序必须在库内完成）：
+`GET /venues` 支持可选 `latitude` / `longitude`（用户定位，gcj02），列表按服务端复合评分排序（分页正确性要求排序必须在库内完成）。2026-08-06 起支持 `sort`（`VenueSortMode` 枚举：recommended/distance/heat/newest，默认 recommended）与 `radiusKm`（可选，km，距离半径筛选）：
 
 ```
-score = sortWeight（运营权重）
-      + 收藏数 × 20 + 动态数 × 10（热度，与 /heat 占位公式同向）
+recommended（默认，复合评分）score = sortWeight（运营权重）
+      + 收藏数 × 20 + 动态数 × 10（热度）
       + 100 / (1 + 距离km)（Haversine 邻近加成，无坐标时为 0）
+distance  = 纯距离升序（Haversine），仅展示有坐标的场所（v.latitude/longitude IS NOT NULL 显式排除），id 兜底 tie-break
+heat      = sortWeight + 收藏数 × 20 + 动态数 × 10（不含距离项，与「热门场所标记」同口径——热度是场所属性，不随请求者位置变化），id 兜底
+newest    = created_at DESC, id DESC
 ```
 
 距离项使本地场所在全国列表中自然置顶，跨城市时衰减至可忽略（100km 外加成 ≈ 1），由热度与运营权重决定顺序。产品意图：默认展示全国列表但"本地化感知"，不自动按城市过滤（早期数据稀疏，自动过滤到无数据城市 = 首屏空白）。
 
+**radiusKm 语义**：>0 生效（≤0/null 视为不限，Service 层归一）；与排序方式正交，仅叠加在"含坐标"的查询上（距离计算需要请求者位置为圆心）。无坐标请求携带 radiusKm 时忽略（前端仅在有定位缓存时附带坐标与半径，后端忽略仅作防御）。谓词写法：`AND (:radiusKm IS NULL OR 距离km <= :radiusKm)`——无坐标场所的距离表达式为 NULL，`NULL <= 半径` 为 NULL 自然被排除（"未知距离的场所不承诺在半径内"）。
+
+**distance 排序无定位降级**：前端/用户无定位时无法按距离排序，Service 防御性降级为 recommended 查询（而非空列表/报错）——`VenueService.dispatchListQuery` 的 switch 分流矩阵：recommended（有坐标/无坐标两查询）、distance（仅坐标查询 + 无坐标降级）、heat / newest（仅在有坐标且有半径时才进入 WithRadius 变体，其余走无坐标变体）。
+
 ### 双查询拆分（Postgres 平台坑位，重要）
 
-排序拆为 `searchRanked`（带坐标）与 `searchRankedNoLocation`（无距离项）两个 JPQL 查询，Service 按坐标有无显式分流，**不要合并为"坐标可空的单查询"**：
+排序拆为多个 JPQL 变体（`searchRanked` 带坐标 / `searchRankedNoLocation` 无坐标 / `searchNearest` / `searchHeat(+WithinRadius)` / `searchNewest(+WithinRadius)`），Service 按"坐标有无 × 排序方式 × 半径有无"显式分流（`dispatchListQuery`），**不要合并为"坐标可空的单查询"**：
 
-Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(:latitude)` 在坐标为 null 时报 `function radians(bytea) does not exist`；SQL 层 `cast(? as float8)` 也救不了（`cannot cast type bytea to double precision`）。唯一干净的解法是让数学函数参数永远非 null——拆查询、Service 分流、`searchRanked` 用原生 `double` 形参（编译期排除 null）。两查询的筛选条件由 `VenueRepository.LIST_FILTERS` 编译期常量共享，避免重复。
+Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(:latitude)` 在坐标为 null 时报 `function radians(bytea) does not exist`；SQL 层 `cast(? as float8)` 也救不了（`cannot cast type bytea to double precision`）。唯一干净的解法是让数学函数参数永远非 null——拆查询、Service 分流、含距离数学的查询（`searchRanked` / `searchNearest` / `*WithinRadius`）用原生 `double` 形参（编译期排除 null）。筛选条件由 `VenueRepository.LIST_FILTERS` 编译期常量共享，距离表达式由 `DISTANCE_KM` 常量共享、热度分由 `HEAT_SCORE` 常量共享、半径谓词由 `RADIUS_PREDICATE` 常量共享，避免重复。
+
+**JPQL 文本块拼接约束**：`""" + 常量 + """` 的**开定界符必须后跟换行**（Java 文本块语法：开定界符后只允许空白 + 换行），禁止写成 `""" + X + """ DESC` 之类同行拼接（编译报 "illegal text block open delimiter"）——常量的拼接处必须把后续内容折到下一行。
 
 ### 城市词表与筛选
 
@@ -917,6 +950,8 @@ public record ApiResponse<T>(int code, String message, T data) {
 | 1005 | 文件校验失败（类型 / 大小超限） |
 | 1006 | 操作过于频繁（评分防刷冷却期内 / 状态上报频率超限） |
 | 1007 | 无效的评分维度 / Reaction 类型 |
+| 1008 | 上报不存在 |
+| 1009 | 无效的排序方式（VenueSortMode.from） |
 | 5000 | 未知服务器错误（兜底） |
 | 5001 | 微信接口响应异常（无响应 / 解析失败） |
 | 5002 | 文件保存失败（IO 异常） |
@@ -1316,9 +1351,10 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 | 跨库/跨环境逻辑迁移 | `pg_dump -Fc` + `pg_restore` | 完整保留 IDENTITY/序列/主键/NOT NULL/默认值/索引/约束；**禁止 GUI 工具（DataGrip/DBeaver/Supabase 控制台）拖拽复制表结构**——系统性丢失 identity/序列/主键 |
 | 主键机制损坏修复 | `db/repair-schema-identity.sql`（幂等） | 回填 NULL id、重建主键、恢复 IDENTITY/序列定位/列默认值；由 SchemaIntegrityChecker fail-fast 兜底发现 |
 | 彻底删除遗留列 | 一次性手动 `ALTER TABLE ... DROP COLUMN` | 仅当冗余列影响可维护性时执行；**默认做法是保留实体映射兜底，不删列** |
+| **修改已有列约束（NOT NULL → 可空）** | **一次性手动 `ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL`** | **update 无法 MODIFY 列约束**（只加列/约束），且无实体声明通道可表达"放宽可空"——如 `qwt_venue_feedbacks.user_id`（2026-08-06 匿名上报，`db/migrate-feedback-anonymous.sql`，幂等）。**执行时机：先执行脚本再启动新版应用**（否则新行为 insert 违反 NOT NULL） |
 | 数据回填/批量修正 | 一次性手动 UPDATE | 应用层无法表达的历史数据修正（如 2026-08 的 `migrate-reaction-daily.sql` 回填 reaction_date） |
 
-历史迁移脚本（`migrate-reaction-daily.sql` / `migrate-drop-liked-not-null.sql`）是**旧范式遗留**，仅作历史参考，**不再新增此类脚本**——新演进一律走实体列默认值 + update 自动完成。
+历史迁移脚本（`migrate-reaction-daily.sql` / `migrate-drop-liked-not-null.sql`）是**旧范式遗留**，仅作历史参考。**一般不再新增此类脚本**——新演进一律走实体列默认值 + update 自动完成；**唯一例外：修改已有列约束（NOT NULL → 可空）**——该场景无实体声明通道、update 无法完成，允许且必须新增一次性脚本（2026-08-06 起 `db/migrate-feedback-anonymous.sql` 为首例，脚本头注释记录根因与执行时机）。
 
 ### 事故根因（2026-08-04 确立，历史背景）
 

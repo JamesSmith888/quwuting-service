@@ -19,4 +19,10 @@ public interface VenueFeedbackRepository extends JpaRepository<VenueFeedback, Lo
 
     /** 按场所查询全部上报（管理端按场所维度使用） */
     List<VenueFeedback> findByVenueIdOrderByCreatedAtDesc(Long venueId);
+
+    /** 当前用户的全部上报（「我的上报记录」个人中心数据源，倒序） */
+    List<VenueFeedback> findByUserIdOrderByCreatedAtDesc(Long userId);
+
+    /** 当前用户对某场所的上报（「我的上报记录」详情页弹窗数据源，倒序） */
+    List<VenueFeedback> findByUserIdAndVenueIdOrderByCreatedAtDesc(Long userId, Long venueId);
 }

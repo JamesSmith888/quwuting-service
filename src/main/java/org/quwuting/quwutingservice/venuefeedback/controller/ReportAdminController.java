@@ -2,6 +2,7 @@ package org.quwuting.quwutingservice.venuefeedback.controller;
 
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
+import org.quwuting.quwutingservice.venuefeedback.dto.request.HandleReportRequest;
 import org.quwuting.quwutingservice.venuefeedback.dto.response.AdminReportResponse;
 import org.quwuting.quwutingservice.venuefeedback.enums.FeedbackType;
 import org.quwuting.quwutingservice.venuefeedback.enums.ReportStatus;
@@ -41,22 +42,27 @@ public class ReportAdminController {
     /**
      * 标记上报为已处理（需 ADMIN）。
      * POST /admin/reports/{id}/resolve
+     * body 可选：{@code {"note": "处理结果说明"}}——处理结果随「我的上报记录」
+     * 回传上报者（2026-08-06 新增，个人中心展示）。
      * 幂等：终态（RESOLVED/DISMISSED）重复操作直接返回成功。
      */
     @PostMapping("/{id}/resolve")
-    public ApiResponse<Void> resolveReport(@PathVariable Long id) {
-        venueFeedbackService.resolveReport(id);
+    public ApiResponse<Void> resolveReport(@PathVariable Long id,
+                                           @RequestBody(required = false) HandleReportRequest request) {
+        venueFeedbackService.resolveReport(id, request);
         return ApiResponse.ok(null);
     }
 
     /**
      * 标记上报为已忽略（需 ADMIN，判定为误报/无需处理）。
      * POST /admin/reports/{id}/dismiss
+     * body 可选：{@code {"note": "处理结果说明"}}。
      * 幂等：终态重复操作直接返回成功。
      */
     @PostMapping("/{id}/dismiss")
-    public ApiResponse<Void> dismissReport(@PathVariable Long id) {
-        venueFeedbackService.dismissReport(id);
+    public ApiResponse<Void> dismissReport(@PathVariable Long id,
+                                           @RequestBody(required = false) HandleReportRequest request) {
+        venueFeedbackService.dismissReport(id, request);
         return ApiResponse.ok(null);
     }
 }

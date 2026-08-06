@@ -21,7 +21,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     List<Venue> findByIdInAndDeletedFalse(List<Long> ids);
 
     /**
-     * 列表筛选条件（两个排序变体共用）。
+     * 列表筛选条件（全部排序变体共用）。
      * 所有参数可空：null 表示不限制；keyword 需调用方预先包装为 %xx%。
      */
     String LIST_FILTERS = """
@@ -36,12 +36,51 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             """;
 
     /**
-     * 列表主查询（带用户坐标）：筛选 + 复合评分排序 + 分页。
+     * Haversine 球面距离（km，别名 v 的场所坐标 → 请求者坐标）。
+     * <p>
+     * <b>只允许在 :latitude / :longitude 恒非 null 的查询中使用</b>（由 Service 保证）：
+     * Postgres 将无类型的 null 绑定参数推断为 bytea，radians() 无法解析——见 AGENTS.md
+     * 「双查询拆分」坑位。无坐标场景必须改调不带本片段的查询，不要向含本片段的查询传 null 坐标。
+     */
+    String DISTANCE_KM = """
+            6371.0 * acos(
+                cos(radians(:latitude)) * cos(radians(v.latitude))
+                * cos(radians(v.longitude) - radians(:longitude))
+                + sin(radians(:latitude)) * sin(radians(v.latitude)))
+            """;
+
+    /**
+     * 距离半径筛选（可选，叠加在筛选条件上，与排序方式正交）。
+     * <p>
+     * radiusKm 为 null（不限）时谓词恒真；有值时仅保留距离 ≤ 半径的场所——
+     * 无坐标场所的距离表达式为 NULL，`NULL <= :radiusKm` 为 NULL 自然被排除
+     * （"未知距离的场所不承诺在半径内"，语义正确）。
+     * <p>
+     * 含本片段的查询必须同时携带 :latitude/:longitude（见 {@link #DISTANCE_KM} 约束）。
+     */
+    String RADIUS_PREDICATE = """
+            AND (:radiusKm IS NULL OR
+            """ + DISTANCE_KM + """
+             <= :radiusKm)
+            """;
+
+    /**
+     * 热度分（不含距离项）：运营权重 + 收藏数 × 20 + 动态数 × 10。
+     * 与「热门场所标记」（findHotVenueIds）同口径——热度是场所属性，不随请求者位置变化。
+     */
+    String HEAT_SCORE = """
+            (v.sortWeight
+             + (SELECT COUNT(f) FROM Favorite f WHERE f.venueId = v.id AND f.deleted = false) * 20
+             + (SELECT COUNT(p) FROM VenuePost p WHERE p.venueId = v.id AND p.deleted = false) * 10)
+            """;
+
+    /**
+     * 列表主查询（推荐排序 + 用户坐标）：筛选 + 复合评分排序 + 分页。
      * <p>
      * 排序公式（服务端排序保证分页正确性）：
      * <pre>
      * score = sortWeight（运营权重）
-     *       + 收藏数 × 20 + 动态数 × 10（热度，与 /venues/{id}/heat 占位公式同向）
+     *       + 收藏数 × 20 + 动态数 × 10（热度）
      *       + 100 / (1 + 距离km)（邻近加成，Haversine）
      * </pre>
      * 距离项使本地场所在全国列表中自然置顶，跨城市时衰减至可忽略，由热度与运营权重决定顺序。
@@ -49,18 +88,19 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * <b>latitude / longitude 必须非 null</b>（由 Service 保证）：Postgres 将无类型的 null
      * 绑定参数推断为 bytea，radians() 无法解析。无坐标场景必须改调 {@link #searchRankedNoLocation}，
      * 不要向本方法传 null。
+     * <p>
+     * {@code radiusKm} 可空：null = 不限（谓词短路，行为与旧版完全一致）；有值 = 距离半径筛选。
      */
     @Query("""
             SELECT v FROM Venue v
-            """ + LIST_FILTERS + """
+            """ + LIST_FILTERS + RADIUS_PREDICATE + """
             ORDER BY (
                 v.sortWeight
                 + (SELECT COUNT(f) FROM Favorite f WHERE f.venueId = v.id AND f.deleted = false) * 20
                 + (SELECT COUNT(p) FROM VenuePost p WHERE p.venueId = v.id AND p.deleted = false) * 10
-                + 100.0 / (1.0 + 6371.0 * acos(
-                    cos(radians(:latitude)) * cos(radians(v.latitude))
-                    * cos(radians(v.longitude) - radians(:longitude))
-                    + sin(radians(:latitude)) * sin(radians(v.latitude))))
+                + 100.0 / (1.0 +
+            """ + DISTANCE_KM + """
+            )
             ) DESC
             """)
     Page<Venue> searchRanked(@Param("city") String city,
@@ -69,26 +109,124 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                              @Param("keyword") String keyword,
                              @Param("latitude") double latitude,
                              @Param("longitude") double longitude,
+                             @Param("radiusKm") Double radiusKm,
                              Pageable pageable);
 
     /**
-     * 列表主查询（无用户坐标）：复合评分退化为 运营权重 + 热度。
+     * 列表主查询（推荐排序，无用户坐标）：复合评分退化为 运营权重 + 热度。
      * 与 {@link #searchRanked} 共用筛选条件，仅排序公式不含距离项。
      */
     @Query("""
             SELECT v FROM Venue v
             """ + LIST_FILTERS + """
-            ORDER BY (
-                v.sortWeight
-                + (SELECT COUNT(f) FROM Favorite f WHERE f.venueId = v.id AND f.deleted = false) * 20
-                + (SELECT COUNT(p) FROM VenuePost p WHERE p.venueId = v.id AND p.deleted = false) * 10
-            ) DESC
+            ORDER BY
+            """ + HEAT_SCORE + """
+            DESC
             """)
     Page<Venue> searchRankedNoLocation(@Param("city") String city,
                                        @Param("district") String district,
                                        @Param("status") VenueStatus status,
                                        @Param("keyword") String keyword,
                                        Pageable pageable);
+
+    /**
+     * 列表主查询（距离最近排序）：纯距离升序，仅保留有坐标的场所。
+     * <p>
+     * 无坐标场所（v.latitude/longitude IS NULL）显式排除——"距离最近"只对距离已知的场所
+     * 有意义，未知距离的场所排在列表末尾只会造成困惑。radiusKm 可空（语义同
+     * {@link #searchRanked}）；坐标必须非 null（Service 保证，见 {@link #DISTANCE_KM}）。
+     * id 兜底 tie-break 保证分页稳定。
+     */
+    @Query("""
+            SELECT v FROM Venue v
+            """ + LIST_FILTERS + """
+            AND v.latitude IS NOT NULL
+            AND v.longitude IS NOT NULL
+            """ + RADIUS_PREDICATE + """
+            ORDER BY
+            """ + DISTANCE_KM + """
+            ASC, v.id ASC
+            """)
+    Page<Venue> searchNearest(@Param("city") String city,
+                              @Param("district") String district,
+                              @Param("status") VenueStatus status,
+                              @Param("keyword") String keyword,
+                              @Param("latitude") double latitude,
+                              @Param("longitude") double longitude,
+                              @Param("radiusKm") Double radiusKm,
+                              Pageable pageable);
+
+    /**
+     * 列表主查询（热度最高排序，无坐标）：运营权重 + 热度 倒序（同推荐排序无坐标变体，
+     * 但与距离无关——选择"热度最高"时排序口径与位置解耦，见 {@link VenueSortMode#HEAT}）。
+     */
+    @Query("""
+            SELECT v FROM Venue v
+            """ + LIST_FILTERS + """
+            ORDER BY
+            """ + HEAT_SCORE + """
+            DESC, v.id DESC
+            """)
+    Page<Venue> searchHeat(@Param("city") String city,
+                           @Param("district") String district,
+                           @Param("status") VenueStatus status,
+                           @Param("keyword") String keyword,
+                           Pageable pageable);
+
+    /**
+     * 列表主查询（热度最高排序 + 距离半径筛选）：热度口径同 {@link #searchHeat}，
+     * 叠加 RADIUS_PREDICATE——热度排序本身不需要坐标，但半径筛选需要以请求者位置为圆心，
+     * 故本查询仅在"有定位且选了半径"时被调用（Service 分流，坐标恒非 null）。
+     */
+    @Query("""
+            SELECT v FROM Venue v
+            """ + LIST_FILTERS + RADIUS_PREDICATE + """
+            ORDER BY
+            """ + HEAT_SCORE + """
+            DESC, v.id DESC
+            """)
+    Page<Venue> searchHeatWithinRadius(@Param("city") String city,
+                                       @Param("district") String district,
+                                       @Param("status") VenueStatus status,
+                                       @Param("keyword") String keyword,
+                                       @Param("latitude") double latitude,
+                                       @Param("longitude") double longitude,
+                                       @Param("radiusKm") Double radiusKm,
+                                       Pageable pageable);
+
+    /**
+     * 列表主查询（最新收录排序）：创建时间倒序（新收录场所优先露出），id 兜底 tie-break。
+     * 无坐标变体：排序与筛选均不依赖距离。
+     */
+    @Query("""
+            SELECT v FROM Venue v
+            """ + LIST_FILTERS + """
+            ORDER BY v.createdAt DESC, v.id DESC
+            """)
+    Page<Venue> searchNewest(@Param("city") String city,
+                             @Param("district") String district,
+                             @Param("status") VenueStatus status,
+                             @Param("keyword") String keyword,
+                             Pageable pageable);
+
+    /**
+     * 列表主查询（最新收录排序 + 距离半径筛选）：排序口径同 {@link #searchNewest}，
+     * 叠加 RADIUS_PREDICATE（坐标恒非 null，Service 分流保证，见
+     * {@link #searchHeatWithinRadius} 注释）。
+     */
+    @Query("""
+            SELECT v FROM Venue v
+            """ + LIST_FILTERS + RADIUS_PREDICATE + """
+            ORDER BY v.createdAt DESC, v.id DESC
+            """)
+    Page<Venue> searchNewestWithinRadius(@Param("city") String city,
+                                         @Param("district") String district,
+                                         @Param("status") VenueStatus status,
+                                         @Param("keyword") String keyword,
+                                         @Param("latitude") double latitude,
+                                         @Param("longitude") double longitude,
+                                         @Param("radiusKm") Double radiusKm,
+                                         Pageable pageable);
 
     /** 城市维度统计：有场所的城市按场所数倒序（供前端"热门城市"选择，数据驱动、免维护） */
     @Query("""

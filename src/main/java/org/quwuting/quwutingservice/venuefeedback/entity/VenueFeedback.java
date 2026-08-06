@@ -37,8 +37,21 @@ public class VenueFeedback extends BaseEntity {
     @Column(nullable = false)
     private Long venueId;
 
-    /** 上报提交者用户 ID（需登录） */
-    @Column(nullable = false)
+    /**
+     * 上报提交者用户 ID（可空 = 匿名上报，2026-08-06 放宽）。
+     * <p>
+     * 匿名决策：上报不强推登录（微信审核与低门槛参与友好），匿名上报 userId = null，
+     * 管理员仍可处理（管理端不依赖上报者身份）；但匿名记录**无法在个人中心回看**
+     * （「我的上报记录」按 userId 查询），处理结果也无法回传——前端在匿名提交后
+     * 提示"登录后上报可查看处理结果"。登录用户上报 → userId 落库 → 个人中心可见
+     * 全部记录与管理端处理结果。这是"匿名可参与、追踪需登录"的明确设计决策。
+     * <p>
+     * ⚠ 列约束迁移：user_id 由 NOT NULL 放宽为可空属**修改已有列约束**，
+     * ddl-auto:update 无法完成（只加列/约束、不 MODIFY 列），需一次性手动 SQL
+     * （见 {@code src/main/resources/db/migrate-feedback-anonymous.sql}，
+     * 执行时机与幂等性说明见 AGENTS.md「Schema 演进 → 无法避免的场景」）。
+     */
+    @Column
     private Long userId;
 
     /** 上报类型（通用模板的类型维度，新增场景扩展枚举即可） */
@@ -77,6 +90,18 @@ public class VenueFeedback extends BaseEntity {
 
     /** 处理时间（管理员标记，未处理为 null）。自动加列：可空列直接成功。 */
     private LocalDateTime handledAt;
+
+    /**
+     * 管理员处理结果说明（2026-08-06 新增，可选，最多 500 字）。
+     * <p>
+     * 「管理员处理完成每个上报后，反馈处理结果给用户」的载体：管理员在 resolve/dismiss
+     * 时填写处理说明（如"已核实并更新门票价格"），随「我的上报记录」回传上报者，
+     * 个人中心展示处理状态 + 处理结果。可空列，ddl-auto:update 自动加列，无需迁移。
+     * 入库前经 {@link org.quwuting.quwutingservice.common.text.TextSanitizer} 清洗
+     * （防注入分层约定见其 javadoc）。
+     */
+    @Column(length = 500)
+    private String handleNote;
 
     /**
      * @deprecated 历史遗留列兜底映射（状态机引入前的布尔字段）。

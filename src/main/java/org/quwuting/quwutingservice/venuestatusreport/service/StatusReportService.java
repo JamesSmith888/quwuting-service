@@ -4,6 +4,7 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.common.text.TextSanitizer;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
@@ -79,7 +80,7 @@ public class StatusReportService {
             if (req.reason() != null) report.setReason(req.reason());
             else if (wasDeleted) report.setReason(ReportReason.UNKNOWN);
             report.setOccurredAt(req.occurredAt());
-            report.setNote(req.note());
+            report.setNote(TextSanitizer.sanitize(req.note()));
             report.setDeleted(false);
             // 刷新 createdAt 续期 TTL（@CreationTimestamp 仅在 INSERT 时设值，UPDATE 需手动设）
             report.setCreatedAt(LocalDateTime.now());
@@ -92,7 +93,7 @@ public class StatusReportService {
             report.setUserId(userId);
             report.setReason(req.reason() != null ? req.reason() : ReportReason.UNKNOWN);
             report.setOccurredAt(req.occurredAt());
-            report.setNote(req.note());
+            report.setNote(TextSanitizer.sanitize(req.note()));
             try {
                 statusReportRepository.save(report);
             } catch (DataIntegrityViolationException e) {
@@ -151,21 +152,24 @@ public class StatusReportService {
     }
 
     /**
-     * 当前用户的全部状态上报记录（"我的上报记录"弹窗数据源）。
+     * 当前用户的全部状态上报记录（「我的上报记录」数据源）。
      * <p>
      * 范围：仅未撤销（deleted=false）的记录，含已过期（TTL 外）——「已过期」记录
      * 前端标注后提醒用户可重新上报。已撤销记录不返回：撤销是用户主动收回动作，
      * soft delete 属内部实现细节，语义上不再属于"上报记录"。
+     * <p>
+     * venueId 可选（2026-08-06）：null = 跨场所全部（个人中心）；非 null = 单门店
+     * （详情页「我的上报记录」弹窗——只展示当前门店记录，全部记录入口在个人中心）。
      * <p>
      * {@code active} / {@code expiresAt} 在本方法按 {@link #ACTIVE_REPORT_TTL_HOURS} 统一计算
      * （TTL 唯一事实源）——SQL 层不自行定义时间窗，与 findDetailStats / countHeatCounters
      * 的「活跃判定必须经参数传入同一 TTL 窗口」契约一致（见 VenuePostRepository 修复注记）。
      */
     @Transactional(readOnly = true)
-    public List<MyStatusReportResponse> listMyReports() {
+    public List<MyStatusReportResponse> listMyReports(Long venueId) {
         Long userId = UserContext.requireAuth();
         LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);
-        return statusReportRepository.findMyReportsByUserId(userId).stream()
+        return statusReportRepository.findMyReportsByUserId(userId, venueId).stream()
                 .map(row -> new MyStatusReportResponse(
                         row.getId(),
                         row.getVenueid(),

@@ -42,12 +42,16 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
                                            @Param("since") LocalDateTime since);
 
     /**
-     * 当前用户的全部状态上报记录（"我的上报记录"弹窗数据源）。
+     * 当前用户的全部状态上报记录（「我的上报记录」数据源）。
      * <p>
      * 范围：仅未撤销（deleted=false）的记录——撤销是用户主动收回动作，soft delete 属内部
      * 实现细节，已撤销记录不再视为"上报记录"；包含已过期（TTL 外）记录，供前端标注
      * 「已过期」提醒用户可重新上报。active 判定不在 SQL 内完成（避免 SQL 层自行定义时间窗），
      * 由 Service 层按 {@code ACTIVE_REPORT_TTL_HOURS} 常量统一计算（TTL 唯一权威源）。
+     * <p>
+     * venueId 可选（2026-08-06）：null = 跨场所全部（个人中心「我的上报」区块）；
+     * 非 null = 单门店（详情页「我的上报记录」弹窗，只展示当前门店记录）——两处消费
+     * 共用同一查询，与 {@code venuefeedback.listMyFeedbacks(venueId)} 的可选过滤同构。
      * <p>
      * JOIN qwt_venues 一次取回场所名称/地址，消除 N+1（与 /admin/reports 的
      * findByIdInAndDeletedFalse 批量回填同思路，此处 JOIN 形态更直接）。
@@ -58,6 +62,8 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
      * 「投影接口 getter 类型」约定（TIMESTAMP 列必须 LocalDateTime）。
      * 别名必须全小写（PG 将未引用标识符折叠为小写，`AS venueId` → venueid 会与
      * getVenueId 失配；全小写别名 + 全小写 getter 是 countHeatCounters 的既定模式）。
+     * venueId 过滤条件 `:venueId IS NULL OR r.venue_id = :venueId` 参数化传值，
+     * 不拼接 SQL（防注入分层约定见 TextSanitizer javadoc）。
      */
     @Query(value = "SELECT r.id AS id, r.venue_id AS venueid, r.created_at AS createdat, " +
                    "       v.name AS venuename, v.city AS venuecity, " +
@@ -65,8 +71,10 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
                    "FROM qwt_venue_status_reports r " +
                    "JOIN qwt_venues v ON v.id = r.venue_id " +
                    "WHERE r.user_id = :userId AND r.deleted = false " +
+                   "  AND (:venueId IS NULL OR r.venue_id = :venueId) " +
                    "ORDER BY r.created_at DESC", nativeQuery = true)
-    List<MyReportRow> findMyReportsByUserId(@Param("userId") Long userId);
+    List<MyReportRow> findMyReportsByUserId(@Param("userId") Long userId,
+                                            @Param("venueId") Long venueId);
 
     /** 投影接口：我的上报记录行（含场所信息，供 GET /status-reports/mine 使用） */
     interface MyReportRow {
