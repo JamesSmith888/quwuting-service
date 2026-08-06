@@ -1,0 +1,456 @@
+package org.quwuting.quwutingservice.dancer.service;
+
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.common.text.TextSanitizer;
+import org.quwuting.quwutingservice.dancer.DancerTagCode;
+import org.quwuting.quwutingservice.dancer.dto.request.CreateDancerRequest;
+import org.quwuting.quwutingservice.dancer.dto.request.RecognizeDancerRequest;
+import org.quwuting.quwutingservice.dancer.dto.response.*;
+import org.quwuting.quwutingservice.dancer.entity.Dancer;
+import org.quwuting.quwutingservice.dancer.entity.DancerRecognition;
+import org.quwuting.quwutingservice.dancer.entity.DancerRecognitionTag;
+import org.quwuting.quwutingservice.dancer.entity.DancerVenue;
+import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
+import org.quwuting.quwutingservice.dancer.enums.DancerVenueRelation;
+import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionRepository;
+import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionTagRepository;
+import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
+import org.quwuting.quwutingservice.dancer.repository.DancerVenueRepository;
+import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.user.enums.UserRole;
+import org.quwuting.quwutingservice.venue.service.VenueLookupService;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.sql.Date;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.*;
+
+/**
+ * 舞伴生态体系核心服务（领域边界：认可/标签/资料/场所关系，独立于舞厅 reaction——
+ * 舞厅 reaction 评价"场所"，舞伴认可评价"个人"，二者互不干扰，见 AGENTS.md「舞伴生态体系」）。
+ * <p>
+ * <b>隐私与真实性边界（本模块第一约束）</b>：
+ * <ul>
+ *   <li>默认 PENDING（审核中）：所有新资料必须经管理员认证后才公开——禁止默认创建
+ *       大量未授权人物主页（先认证、后展示）；</li>
+ *   <li>用户对本模块唯一可写的公开影响 = 「认可 + 字典标签」（无照片上传、无敏感信息、
+ *       不公开私人关系）；标签字典后台维护，禁止自由创建；</li>
+ *   <li>可见性规则：NORMAL 公开；PENDING/HIDDEN 仅创建人本人与平台管理员可见。</li>
+ * </ul>
+ * <b>认可模型</b>：每日一记（一个用户对一个舞伴每天至多一行，取消即物理删除当日记录），
+ * 与 Reaction 快速反馈系统同源——避免老数据永久占优势、防刷票；次日自动恢复可认可状态。
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class DancerService {
+
+    /** 一次认可最多携带的标签数（产品规则：认可理由应聚焦，防止标签堆砌） */
+    public static final int MAX_TAGS_PER_RECOGNITION = 3;
+
+    /** 列表卡片最多展示的 Top 标签数（过多挤占卡片空间，详情页展示全量） */
+    private static final int LIST_TOP_TAGS = 3;
+
+    /** 详情页"最近认可"动态信息展示的天数（含今日） */
+    private static final int RECENT_DAILY_DAYS = 7;
+
+    private final DancerRepository dancerRepository;
+    private final DancerVenueRepository dancerVenueRepository;
+    private final DancerRecognitionRepository recognitionRepository;
+    private final DancerRecognitionTagRepository recognitionTagRepository;
+    private final DancerAggregateService aggregateService;
+    private final VenueLookupService venueLookupService;
+
+    @PersistenceContext
+    private EntityManager entityManager;
+
+    // ─── 创建（两条通道：主动注册 → PENDING；后台创建 → NORMAL） ─────────────────
+
+    /**
+     * 创建舞伴资料。
+     *
+     * @param adminApproved true = 后台创建（管理员，status=NORMAL 直接公开）；false = 主动注册（status=PENDING 待认证）
+     * @return 新建舞伴 ID
+     */
+    @Transactional
+    public Long createDancer(Long userId, CreateDancerRequest request, boolean adminApproved) {
+        String nickname = TextSanitizer.sanitize(request.nickname(), 30);
+        if (nickname.isEmpty()) {
+            throw new BusinessException(1001, "昵称不能为空");
+        }
+        Dancer dancer = new Dancer();
+        dancer.setNickname(nickname);
+        dancer.setAvatarUrl(TextSanitizer.sanitize(request.avatarUrl(), 500));
+        dancer.setBio(TextSanitizer.sanitize(request.bio(), 300));
+        dancer.setGender(TextSanitizer.sanitize(request.gender(), 20));
+        dancer.setCity(TextSanitizer.sanitize(request.city(), 50));
+        dancer.setStatus(adminApproved ? DancerStatus.NORMAL : DancerStatus.PENDING);
+        dancer.setCreatedBy(userId);
+        dancer = dancerRepository.save(dancer);
+
+        if (request.homeVenueId() != null) {
+            attachHomeVenue(dancer.getId(), request.homeVenueId());
+        }
+        return dancer.getId();
+    }
+
+    /** 关联常驻舞厅（存在性校验在 VenueLookupService 缓存层；重复关联幂等，事务失败整体回滚） */
+    private void attachHomeVenue(Long dancerId, Long venueId) {
+        venueLookupService.findById(venueId); // 场所不存在 → BusinessException，整个创建回滚
+        if (dancerVenueRepository.findByDancerIdAndVenueIdAndRelationAndDeletedFalse(
+                dancerId, venueId, DancerVenueRelation.HOME.name()).isEmpty()) {
+            DancerVenue dv = new DancerVenue();
+            dv.setDancerId(dancerId);
+            dv.setVenueId(venueId);
+            dv.setRelation(DancerVenueRelation.HOME);
+            dancerVenueRepository.save(dv);
+        }
+    }
+
+    // ─── 列表 / 详情 ───────────────────────────────────────────────────────────
+
+    /**
+     * 公开舞伴列表（仅 NORMAL），按近7天认可倒序分页。
+     * 批量编排（N+1 规避）：单条分页 SQL 带计数 → 一次 IN 查询覆盖整页的
+     * Top 标签 + 一次 IN JOIN 查询覆盖常驻舞厅名 + 一次 IN 查询覆盖个人"今日已认可"。
+     */
+    @Transactional(readOnly = true)
+    public Page<DancerSummaryResponse> listPublic(String city, int page, int size, Long currentUserId) {
+        LocalDateTime now = LocalDateTime.now();
+        Pageable pageable = PageRequest.of(page, Math.min(size, 50));
+        Page<Object[]> rows = dancerRepository.findPublicPage(
+                city, LocalDate.now().atStartOfDay() /* 今日锚点 = 今日0点 */, now.minusDays(7), pageable);
+        if (rows.isEmpty()) {
+            return new PageImpl<>(Collections.emptyList(), pageable, rows.getTotalElements());
+        }
+        List<Object[]> content = rows.getContent();
+        List<Long> ids = content.stream().map(r -> (Long) r[0]).toList();
+
+        // 行内计数：Object[]{id, ..., count_all(6), count_today(7), count_7d(8)}
+        Map<Long, long[]> countsById = new HashMap<>();
+        for (Object[] row : content) {
+            countsById.put((Long) row[0], new long[]{
+                    ((Number) row[6]).longValue(), ((Number) row[7]).longValue(), ((Number) row[8]).longValue()});
+        }
+        Map<Long, List<DancerTagStat>> tagsById = fetchTopTags(ids);
+        Map<Long, String> homeVenueNameById = fetchHomeVenueNames(ids);
+        Set<Long> myTodayIds = fetchMyTodayIds(ids, currentUserId);
+
+        List<DancerSummaryResponse> summaries = new ArrayList<>(content.size());
+        for (Object[] row : content) {
+            Long id = (Long) row[0];
+            long[] counts = countsById.get(id);
+            summaries.add(new DancerSummaryResponse(
+                    id, (String) row[1], (String) row[2], (String) row[3], (String) row[4], (String) row[5],
+                    DancerStatus.NORMAL, homeVenueNameById.get(id),
+                    counts[0], counts[2], counts[1],
+                    myTodayIds.contains(id), tagsById.getOrDefault(id, Collections.emptyList())));
+        }
+        return new PageImpl<>(summaries, pageable, rows.getTotalElements());
+    }
+
+    /**
+     * 舞伴详情（软鉴权：登录时返回个人状态）。
+     * 可见性规则：NORMAL 所有人可见；PENDING/HIDDEN 仅创建人本人 + 平台管理员。
+     */
+    @Transactional(readOnly = true)
+    public DancerDetailResponse getDetail(Long dancerId, Long currentUserId, UserRole currentRole) {
+        Dancer dancer = findDancerOrThrow(dancerId);
+        if (!canView(dancer, currentUserId, currentRole)) {
+            throw new BusinessException(1003, "该舞伴资料暂不可见");
+        }
+        boolean myToday = currentUserId != null && recognitionRepository
+                .findByUserIdAndDancerIdAndRecognitionDate(currentUserId, dancerId, LocalDate.now()).isPresent();
+        return new DancerDetailResponse(
+                dancer.getId(), dancer.getNickname(), dancer.getAvatarUrl(), dancer.getBio(),
+                dancer.getGender(), dancer.getCity(), dancer.getStatus(),
+                currentUserId != null && dancer.getCreatedBy().equals(currentUserId),
+                myToday, buildStats(dancerId), fetchAllTags(dancerId), fetchVenues(dancerId));
+    }
+
+    /** 单舞伴标签聚合（GET /dancers/{id}/tags，公开接口；先校验舞伴可见性） */
+    @Transactional(readOnly = true)
+    public List<DancerTagStat> getTags(Long dancerId, Long currentUserId, UserRole currentRole) {
+        Dancer dancer = findDancerOrThrow(dancerId);
+        if (!canView(dancer, currentUserId, currentRole)) {
+            throw new BusinessException(1003, "该舞伴资料暂不可见");
+        }
+        return fetchAllTags(dancerId);
+    }
+
+    // ─── 认可（每日一记 toggle 模型） ──────────────────────────────────────────
+
+    /**
+     * 切换认可状态（toggle：今日未认可 → 认可（可携带标签），今日已认可 → 取消）。
+     * <ul>
+     *   <li>未命中今日记录 → 插入 + 写标签（贡献 +1，所有窗口）；</li>
+     *   <li>命中今日记录 → 物理删除认可 + 级联删除当日标签（贡献 -1，所有窗口）；</li>
+     *   <li>同日并发重复插入 → 唯一约束冲突，幂等视为已认可（防连点/多端竞态）。</li>
+     * </ul>
+     * 认可目标须对当前用户可见（NORMAL 或本人资料）。
+     */
+    @Transactional
+    public RecognizeResponse toggleRecognize(Long userId, Long dancerId, RecognizeDancerRequest request,
+                                             UserRole currentRole) {
+        Dancer dancer = findDancerOrThrow(dancerId);
+        if (!canView(dancer, userId, currentRole)) {
+            throw new BusinessException(1003, "该舞伴资料暂不可见");
+        }
+
+        LocalDate today = LocalDate.now();
+        Optional<DancerRecognition> existing = recognitionRepository
+                .findByUserIdAndDancerIdAndRecognitionDate(userId, dancerId, today);
+        boolean recognized;
+        if (existing.isPresent()) {
+            // 取消当日认可：物理删除认可 + 级联删除其标签（"取消当天认可"语义 = 当日贡献整体移除）
+            recognitionTagRepository.deleteByRecognitionId(existing.get().getId());
+            recognitionRepository.delete(existing.get());
+            recognized = false;
+        } else {
+            List<String> tags = validateAndDedupeTags(request);
+            DancerRecognition recognition = new DancerRecognition();
+            recognition.setUserId(userId);
+            recognition.setDancerId(dancerId);
+            recognition.setRecognitionDate(today);
+            try {
+                recognition = recognitionRepository.save(recognition);
+            } catch (DataIntegrityViolationException e) {
+                // 并发竞态：另一请求已创建今日记录，幂等视为已认可
+                log.debug("toggle 认可并发冲突，幂等忽略: userId={}, dancerId={}", userId, dancerId);
+                entityManager.clear();
+                aggregateService.invalidate(dancerId);
+                return new RecognizeResponse(true, buildStats(dancerId));
+            }
+            for (String tag : tags) {
+                DancerRecognitionTag t = new DancerRecognitionTag();
+                t.setRecognitionId(recognition.getId());
+                t.setDancerId(dancerId);
+                t.setUserId(userId);
+                t.setTag(tag);
+                recognitionTagRepository.save(t);
+            }
+            recognized = true;
+        }
+        aggregateService.invalidate(dancerId);
+        return new RecognizeResponse(recognized, buildStats(dancerId));
+    }
+
+    /** 校验并去重标签：全部须命中字典；去重（保持顺序）；最多 MAX_TAGS_PER_RECOGNITION 个 */
+    private List<String> validateAndDedupeTags(RecognizeDancerRequest request) {
+        List<String> raw = request == null || request.tags() == null
+                ? Collections.emptyList() : request.tags();
+        List<String> result = new ArrayList<>();
+        for (String tag : raw) {
+            if (!DancerTagCode.isValid(tag)) {
+                throw new BusinessException(1001, "无效的舞伴标签");
+            }
+            if (!result.contains(tag)) {
+                result.add(tag);
+            }
+        }
+        if (result.size() > MAX_TAGS_PER_RECOGNITION) {
+            throw new BusinessException(1001, "每次认可最多选择" + MAX_TAGS_PER_RECOGNITION + "个标签");
+        }
+        return result;
+    }
+
+    // ─── 我的认可 / 我的舞伴主页 ───────────────────────────────────────────────
+
+    /**
+     * 我的认可记录（个人中心回顾视图，需登录）：最近一次认可在前；同一舞伴多日认可
+     * 只展示最近一条（dedupe by dancerId 且保留最早出现——findMyRecognitions 已按
+     * createdAt 倒序，首次出现即最近一条）。已被软删的舞伴跳过。
+     */
+    @Transactional(readOnly = true)
+    public List<MyDancerRecognitionResponse> listMyRecognitions(Long userId) {
+        List<Object[]> rows = recognitionRepository.findMyRecognitions(userId);
+        if (rows.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<Long> recognitionIds = rows.stream().map(r -> (Long) r[0]).toList();
+        List<Long> dancerIds = rows.stream().map(r -> (Long) r[1]).distinct().toList();
+        Map<Long, Dancer> dancersById = new HashMap<>();
+        for (Dancer d : dancerRepository.findByIds(dancerIds)) {
+            dancersById.put(d.getId(), d);
+        }
+        Map<Long, List<String>> tagsByRecognition = new HashMap<>();
+        for (Object[] row : recognitionTagRepository.findTagsByRecognitionIds(recognitionIds)) {
+            tagsByRecognition.computeIfAbsent((Long) row[0], k -> new ArrayList<>()).add((String) row[1]);
+        }
+        Map<Long, String> homeVenueNameById = fetchHomeVenueNames(dancerIds);
+
+        Set<Long> seenDancerIds = new HashSet<>();
+        List<MyDancerRecognitionResponse> result = new ArrayList<>();
+        for (Object[] row : rows) {
+            Long recognitionId = (Long) row[0];
+            Long dancerId = (Long) row[1];
+            if (!seenDancerIds.add(dancerId)) {
+                continue; // 同舞伴只取最近一条
+            }
+            Dancer dancer = dancersById.get(dancerId);
+            if (dancer == null) {
+                continue; // 舞伴已物理删除（理论上软删，防御性跳过）
+            }
+            result.add(new MyDancerRecognitionResponse(
+                    dancer.getId(), dancer.getNickname(), dancer.getAvatarUrl(), dancer.getBio(),
+                    dancer.getCity(), homeVenueNameById.get(dancerId),
+                    (LocalDate) row[2], tagsByRecognition.getOrDefault(recognitionId, Collections.emptyList())));
+        }
+        return result;
+    }
+
+    /** 我的舞伴主页（创建人视角，含 PENDING/HIDDEN 自有资料；status 由前端渲染徽标） */
+    @Transactional(readOnly = true)
+    public List<DancerSummaryResponse> listMyDancers(Long userId) {
+        List<Dancer> dancers = dancerRepository.findByCreatedByAndDeletedFalseOrderByUpdatedAtDesc(userId);
+        if (dancers.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<Long> ids = dancers.stream().map(Dancer::getId).toList();
+        Map<Long, long[]> countsById = fetchCounts(ids);
+        Map<Long, List<DancerTagStat>> tagsById = fetchTopTags(ids);
+        Map<Long, String> homeVenueNameById = fetchHomeVenueNames(ids);
+        Set<Long> myTodayIds = fetchMyTodayIds(ids, userId);
+
+        List<DancerSummaryResponse> result = new ArrayList<>(dancers.size());
+        for (Dancer d : dancers) {
+            long[] counts = countsById.getOrDefault(d.getId(), new long[]{0L, 0L, 0L});
+            result.add(new DancerSummaryResponse(
+                    d.getId(), d.getNickname(), d.getAvatarUrl(), d.getBio(), d.getGender(), d.getCity(),
+                    d.getStatus(), homeVenueNameById.get(d.getId()),
+                    counts[0], counts[2], counts[1],
+                    myTodayIds.contains(d.getId()), tagsById.getOrDefault(d.getId(), Collections.emptyList())));
+        }
+        return result;
+    }
+
+    // ─── 管理端 ────────────────────────────────────────────────────────────────
+
+    /** 管理员状态切换（PENDING → NORMAL 认证通过 / HIDDEN 下架；NORMAL ↔ HIDDEN 往返） */
+    @Transactional
+    public void updateStatus(Long dancerId, DancerStatus status) {
+        Dancer dancer = findDancerOrThrow(dancerId);
+        dancer.setStatus(status);
+        dancerRepository.save(dancer);
+    }
+
+    // ─── 可见性 / 查询辅助 ──────────────────────────────────────────────────────
+
+    /** 可见性规则：NORMAL 公开；PENDING/HIDDEN 仅创建人本人 + 平台管理员（管理员角色经缓存获取） */
+    private boolean canView(Dancer dancer, Long userId, UserRole role) {
+        if (dancer.getStatus() == DancerStatus.NORMAL) {
+            return true;
+        }
+        if (role == UserRole.ADMIN) {
+            return true;
+        }
+        return userId != null && dancer.getCreatedBy().equals(userId);
+    }
+
+    private Dancer findDancerOrThrow(Long dancerId) {
+        return dancerRepository.findByIdAndDeletedFalse(dancerId)
+                .orElseThrow(() -> new BusinessException(1001, "舞伴不存在"));
+    }
+
+    /** 详情/认可响应用：四窗口统计 + 近7日每日认可（"昨天 +3 前天 +5"动态信息） */
+    private DancerRecognitionStats buildStats(Long dancerId) {
+        long[] agg = aggregateService.getAggregate(dancerId);
+        return new DancerRecognitionStats(agg[0], agg[1], agg[2], agg[3], fetchRecentDaily(dancerId));
+    }
+
+    /** 近7日每日认可（含今日，最近在前）——按 recognitionDate 自然日聚合，与窗口统计口径分离 */
+    private List<DancerRecognitionStats.DailyRecognitionPoint> fetchRecentDaily(Long dancerId) {
+        LocalDate since = LocalDate.now().minusDays(RECENT_DAILY_DAYS - 1L);
+        Map<LocalDate, Long> countByDay = new HashMap<>();
+        for (Object[] row : recognitionRepository.countByDay(dancerId, since)) {
+            countByDay.put(((Date) row[0]).toLocalDate(), ((Number) row[1]).longValue());
+        }
+        List<DancerRecognitionStats.DailyRecognitionPoint> points = new ArrayList<>(RECENT_DAILY_DAYS);
+        for (int i = 0; i < RECENT_DAILY_DAYS; i++) {
+            LocalDate day = LocalDate.now().minusDays(i);
+            points.add(new DancerRecognitionStats.DailyRecognitionPoint(day, countByDay.getOrDefault(day, 0L)));
+        }
+        return points;
+    }
+
+    /** 批量计数：Object[]{countAll, countToday, count7d} by dancerId（我的舞伴主页用） */
+    private Map<Long, long[]> fetchCounts(List<Long> dancerIds) {
+        LocalDateTime now = LocalDateTime.now();
+        Map<Long, long[]> result = new HashMap<>();
+        for (Object[] row : recognitionRepository.countByDancerIds(dancerIds, LocalDate.now().atStartOfDay(), now.minusDays(7))) {
+            result.put((Long) row[0], new long[]{
+                    ((Number) row[1]).longValue(), ((Number) row[2]).longValue(), ((Number) row[3]).longValue()});
+        }
+        return result;
+    }
+
+    /** 批量 Top 标签（最多 LIST_TOP_TAGS 个，按计数倒序——聚合 SQL 已排序，服务层只截断） */
+    private Map<Long, List<DancerTagStat>> fetchTopTags(List<Long> dancerIds) {
+        Map<Long, List<DancerTagStat>> result = new HashMap<>();
+        for (Object[] row : recognitionTagRepository.aggregateByDancerIds(dancerIds)) {
+            Long dancerId = (Long) row[0];
+            String tag = (String) row[1];
+            long count = ((Number) row[2]).longValue();
+            DancerTagCode code = DancerTagCode.valueOf(tag); // 仅字典内代码落库，valueOf 安全
+            List<DancerTagStat> list = result.computeIfAbsent(dancerId, k -> new ArrayList<>());
+            if (list.size() < LIST_TOP_TAGS) {
+                list.add(new DancerTagStat(tag, code.getEmoji(), code.getLabel(), count));
+            }
+        }
+        return result;
+    }
+
+    /** 单舞伴全量标签（详情页标签云，全量不截断） */
+    private List<DancerTagStat> fetchAllTags(Long dancerId) {
+        List<DancerTagStat> result = new ArrayList<>();
+        for (Object[] row : recognitionTagRepository.aggregateByDancer(dancerId)) {
+            String tag = (String) row[0];
+            long count = ((Number) row[1]).longValue();
+            DancerTagCode code = DancerTagCode.valueOf(tag);
+            result.add(new DancerTagStat(tag, code.getEmoji(), code.getLabel(), count));
+        }
+        return result;
+    }
+
+    /** 批量"常去"舞厅名：取每个舞伴最早一条 HOME 关系（venue briefs 按 created_at 升序） */
+    private Map<Long, String> fetchHomeVenueNames(List<Long> dancerIds) {
+        Map<Long, String> result = new HashMap<>();
+        for (Object[] row : dancerVenueRepository.findVenueBriefsByDancerIds(dancerIds)) {
+            Long dancerId = (Long) row[0];
+            if (DancerVenueRelation.HOME.name().equals(row[5]) && !result.containsKey(dancerId)) {
+                result.put(dancerId, (String) row[2]);
+            }
+        }
+        return result;
+    }
+
+    /** 批量个人"今日已认可"舞伴 ID（列表页个人状态，实时查询不缓存；未登录返回空集） */
+    private Set<Long> fetchMyTodayIds(List<Long> dancerIds, Long currentUserId) {
+        if (currentUserId == null || dancerIds.isEmpty()) {
+            return Collections.emptySet();
+        }
+        return new HashSet<>(recognitionRepository
+                .findTodayRecognizedDancerIdsIn(currentUserId, dancerIds, LocalDate.now()));
+    }
+
+    /** 详情页场所关系全量（HOME 常去 + APPEARANCE 出现，均按创建时间升序） */
+    private List<DancerVenueInfo> fetchVenues(Long dancerId) {
+        List<DancerVenueInfo> result = new ArrayList<>();
+        for (Object[] row : dancerVenueRepository.findVenueBriefsByDancerIds(List.of(dancerId))) {
+            result.add(new DancerVenueInfo(
+                    (Long) row[1], (String) row[2], (String) row[3], (String) row[4],
+                    DancerVenueRelation.valueOf((String) row[5]), (String) row[6]));
+        }
+        return result;
+    }
+}

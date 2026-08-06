@@ -59,6 +59,17 @@ user/           ← 用户模块
   enums/        ← UserRole 枚举
   repository/   ← UserRepository
 
+dancer/         ← 舞伴生态体系（独立业务域，2026-08-06 新增，见「舞伴生态体系」章节）
+  controller/   ← DancerController（/dancers）、MyDancerController（/users/me）、AdminDancerController（/admin/dancers）
+  service/      ← DancerService（认可/标签/可见性）、DancerAggregateService（内嵌 refresh-ahead 认可统计缓存）
+  repository/   ← DancerRepository / DancerVenueRepository / DancerRecognitionRepository / DancerRecognitionTagRepository
+  entity/       ← Dancer（qwt_dancers）、DancerVenue（qwt_dancer_venues）、DancerRecognition（qwt_dancer_recognitions）、DancerRecognitionTag（qwt_dancer_recognition_tags）
+  dto/
+    request/    ← CreateDancerRequest / RecognizeDancerRequest / UpdateDancerStatusRequest
+    response/   ← DancerSummaryResponse / DancerDetailResponse / DancerTagStat / DancerVenueInfo / DancerRecognitionStats / RecognizeResponse / MyDancerRecognitionResponse
+  enums/        ← DancerStatus / DancerVenueRelation
+  DancerTagCode ← 舞伴标签字典（后台维护，前端镜像 constants/dancer-tags.ts）
+
 auth/           ← 认证模块
   controller/   ← AuthController（POST /auth/login）
   service/      ← AuthService + WechatService（调用微信 jscode2session）
@@ -90,7 +101,7 @@ venuefeedback/  ← 统一用户上报模块（原"场所信息纠错反馈"，2
   dto/
     request/    ← CreateFeedbackRequest（type + note）
     response/   ← VenueFeedbackResponse（提交响应，含 maintenanceHint）/ AdminReportResponse（管理端列表项）
-  enums/        ← FeedbackType（CLOSED_DOWN / SUSPENDED / INACCURATE / PRICE / OTHER）
+  enums/        ← FeedbackType（CLOSED_DOWN / SUSPENDED / INACCURATE / MISSING_INFO / PRICE / OTHER）
                   ReportStatus（PENDING / RESOLVED / DISMISSED 状态机）
 
 venuestatusreport/  ← 场所状态众包上报模块（实时暂停信号，4h TTL）
@@ -443,7 +454,7 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 ### 类型与状态机
 
-- `FeedbackType`：CLOSED_DOWN（已关门/停业）/ SUSPENDED（暂停营业）/ INACCURATE（信息有误）/ **PRICE（价格信息缺失或有误——门票/舞伴数据缺失空态的上报入口，2026-08-05 新增）** / OTHER（其他）
+- `FeedbackType`：CLOSED_DOWN（已关门/停业）/ SUSPENDED（暂停营业）/ INACCURATE（信息有误）/ **MISSING_INFO（信息缺失——营业时间/联系方式/地址/简介/微信联系等字段缺失的上报入口，2026-08-06 新增，详情页"信息缺失？点此上报"统一使用，note 承载字段说明与用户补充数据）** / **PRICE（价格信息缺失或有误——门票/舞伴数据缺失空态的上报入口，2026-08-05 新增）** / OTHER（其他）
 - `ReportStatus` 状态机：PENDING（待处理）→ RESOLVED（已处理）/ DISMISSED（已忽略）。**终态固定不可回退**——RESOLVED 表示管理员已核实并完成维护，DISMISSED 判定为误报/无需处理；布尔 handled 无法区分两种终态语义（历史 `handled` 列保留为实体兜底映射，见下文「Schema 演进」）
 - **处理结果回传（2026-08-06 新增）**：管理员 resolve/dismiss 时可填写 `handleNote`（处理结果说明，≤500 字），随「我的上报记录」回传上报者——"管理员处理完成后反馈处理结果给用户"的载体。不填 = 仅流转状态，用户侧只见处理状态。终态幂等语义下重复处理不覆盖已有 handleNote
 
@@ -761,6 +772,130 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 - 门店画像可视化（基于四窗口数据生成"年轻指数/人气/服务/消费"星级评分展示）
 - 热门 Reaction 排序算法优化（当前列表徽标按所选窗口原始计数排序；可演进为"今日×5 + 7天×3 + 30天×1"加权评分以更强调近期活跃度）
 - 周末热门 / 实时热门 / 到店用户权重（GPS 到店验证）——每日一记模型已按日聚合，可直接基于 `reaction_date` 实现
+
+---
+
+## 舞伴生态体系（dancer 模块，2026-08-06 新增）
+
+### 设计定位（根因）
+
+「去舞厅」的核心竞争力不是黄页，而是"帮助用户找到值得去的舞厅，以及优秀舞伴"。舞伴体系是
+**独立业务域（Dancer Domain）**，与场所体系解耦：
+
+```
+舞厅
+ ├── 用户体验：VenueReaction（评价"场所"）+ taginteraction 评分 + venuefeedback
+ └── 舞伴生态：dancer 模块（认可/标签评价"个人"）
+```
+
+**产品边界（刻意收窄，避免直播/打赏化）**：本模块**不使用**打赏、礼物、虚拟币、充值积分等概念，
+统一使用"认可/支持/点赞/鼓励"。当前阶段无排行榜/认证体系/推荐算法——但数据模型已为这些
+扩展预留（见「后续扩展」）。用户对舞伴的公开影响 = **认可 + 字典标签**，无金钱交易语义。
+
+**隐私与真实性是第一约束（根因）**：舞伴是**真实个人**。禁止默认创建大量未授权人物主页——
+所有新资料必须经人审核后才进入公开可见区（先认证、后展示，而非先展示、后治理）。
+负面评价真实个人存在诽谤/骚扰风险且难以核验——负向体验走场所 feedback 等既有通道，
+舞伴标签字典**全部为正向信号**。
+
+### 数据模型（4 张新表，全部继承 BaseEntity，ddl-auto:update 自动建表）
+
+| 表 | 职责 | 关键约束 |
+|---|---|---|
+| `qwt_dancers` | 舞伴实体（昵称/头像/简介/性别可选/常驻城市/状态/创建人） | status 默认 `PENDING`（@ColumnDefault），createdBy 必填 |
+| `qwt_dancer_venues` | 舞伴↔舞厅关系（多对多） | UNIQUE(dancerId, venueId, relation)；HOME 常驻 / APPEARANCE 出现 |
+| `qwt_dancer_recognitions` | 认可记录（每日一记模型） | UNIQUE(userId, dancerId, recognitionDate) |
+| `qwt_dancer_recognition_tags` | 认可携带的标签 | UNIQUE(recognitionId, tag)；dancerId/userId 冗余便于聚合 |
+
+- **不强绑定单一舞厅**：一个舞伴可在多个舞厅出现、随时间变化（HOME 可多个、APPEARANCE 随时间增删）。
+  `Dancer.city` 仅作列表按城市筛选的冗余字段，不构成绑定。
+- **性别开放但可选**（业务需求决定）：`gender` 可空，null = 未声明，前端不展示。
+
+### 认可模型（每日一记，复用 Reaction 的 anti-刷票设计）
+
+与 VenueReaction「每日一记」模型完全同源（2026-08 确立，见「Reaction 快速反馈系统」）：
+
+- 每次点击认可 = 插入一行 `recognitionDate = 今天`；取消 = **物理删除**当日记录 + **级联删除**其标签
+- UNIQUE(userId, dancerId, recognitionDate)：同一用户每天只能认可同一舞伴一次，次日自动恢复
+- 窗口统计（countAll/countToday/count7d/count30d）锚点 = `createdAt`（真实"此刻"，与 Reaction
+  同口径）；`recognitionDate` 只承载"每日唯一"语义；「最近认可」动态（昨天 +3 前天 +5）按
+  `recognitionDate` 自然日聚合——两套时间语义职责分离，同 VenueReaction 的 reactionDate/createdAt 约定
+- 排序时间属性优先：公开列表按 **count7d 倒序**而非 countAll——"被认可的历史总量"不应让
+  活跃度低的旧资料长期霸榜（舞厅/舞伴场景具有明显时间属性）
+
+### 标签字典（DancerTagCode，后台维护）
+
+标签来源 = 用户认可行为（认可时从字典勾选，每次最多 3 个）。与 ReactionCode 同模式：
+枚举是唯一事实源（emoji/label），前端静态镜像 `constants/dancer-tags.ts`，修改须两端同步。
+**全部正向**（产品定位 + 真实个人保护）。用户**不可自由创建**标签（防色情/攻击/广告/竞对刷评价）。
+
+### 可见性规则（隐私边界）
+
+| 状态 | 公众列表/详情 | 创建人本人 | 平台管理员 |
+|---|---|---|---|
+| NORMAL | ✅ | ✅ | ✅ |
+| PENDING（默认，主动注册） | ❌ | ✅ | ✅ |
+| HIDDEN（管理员下架） | ❌ | ✅ | ✅ |
+
+`DancerService.canView()` 是唯一判定点（Controller 无权限逻辑）；`getDetail` / `getTags` /
+`toggleRecognize` 均先过可见性校验。认可目标须对当前用户可见。
+
+### 接口
+
+| 接口 | 鉴权 | 说明 |
+|---|---|---|
+| GET /dancers | 软鉴权 | 列表（仅 NORMAL；city 可选；按 count7d 倒序分页；登录含 myRecognizedToday） |
+| POST /dancers | 登录 | 舞伴主动注册 → PENDING；返回新建 ID |
+| GET /dancers/{id} | 软鉴权 | 详情（可见性校验；登录含 isMine + myRecognizedToday + 四窗口统计 + 近7日每日认可 + 标签云 + 常去/出现舞厅） |
+| GET /dancers/{id}/tags | 软鉴权 | 标签聚合（可见性校验） |
+| POST /dancers/{id}/recognitions | 登录 | 认可 toggle（body.tags 可选 0-3 字典标签；返回 RecognizeResponse{recognized, stats}） |
+| GET /users/me/dancer-recognitions | 登录 | 我的认可记录（同舞伴只取最近一条，按认可时间倒序） |
+| GET /users/me/dancers | 登录 | 我的舞伴主页（创建人视角，含 PENDING/HIDDEN + status） |
+| POST /admin/dancers | 管理员 | 后台创建（可信来源直通 NORMAL） |
+| PUT /admin/dancers/{id}/status | 管理员 | 状态切换（PENDING→NORMAL 认证 / HIDDEN 下架） |
+
+### 聚合缓存（DancerAggregateService）
+
+与 VenueReactionAggregateService 同模式：内嵌 Caffeine LoadingCache（60s refresh-ahead /
+30min 过期），只缓存**与用户无关**的舞伴级四窗口统计；个人"今日已认可"永远实时查询。
+写路径（认可/取消）完成后必须 `invalidate(dancerId)`；并发唯一键冲突幂等为已认可
+（每日一记模型的防连点约定，同 VenueReactionService.toggle）。
+
+### 批量查询约定（N+1 规避）
+
+- 列表页：单条分页 SQL 内联计数 → 一次 IN 查询（Top 标签）+ 一次 IN JOIN（常驻舞厅名）+
+  一次 IN 查询（我的今日认可态）——见 `DancerRepository.findPublicPage` / `fetchTopTags` /
+  `fetchHomeVenueNames` / `fetchMyTodayIds`
+- 列表计数 SQL 用 `COUNT(*) FILTER (WHERE created_at >= ...)` 单遍聚合三个窗口
+
+### 与既有模块的关系
+
+| 既有能力 | 关系 |
+|---|---|
+| VenueReaction（评价场所） | **保留并存**，二者语义分层（场所 vs 个人），互不干扰 |
+| taginteraction 评分 | 保留；评分对象是舞厅维度，与舞伴认可不交叉 |
+| TextSanitizer | 昵称/简介/城市/性别入库前统一清洗（长度上限按字段语义传入） |
+| VenueLookupService | 创建时校验 homeVenueId 存在性（缓存层 <1ms） |
+| SchemaIntegrityChecker | 自动纳入 4 张新表（基于 JPA 元模型，零改动） |
+
+### 后续扩展（数据模型已预留，未实现）
+
+- **舞伴排行榜**：基于四窗口统计（今日/7天/30天）加权，可与列表排序演进为同一 SQL
+- **舞伴认证**：DancerStatus + createdBy 已承载"认证人"语义，可扩展 verifiedBy/verifiedAt 字段
+- **标签统计**：recognition_tags 已按 dancerId+tag 建索引，支持任意窗口聚合
+- **推荐算法**：用户认可记录（userId+dancerId+日期）即"行为矩阵"，可直接喂协同过滤
+- **积分体系**（条件性）：当前无积分系统；若引入，认可可作积分消耗项，但积分不可购买/提现/兑换
+
+### 测试（DancerServiceTest）
+
+Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻舞厅关联）、可见性规则
+（NORMAL 公开 / PENDING 仅创建人+管理员 / HIDDEN 管理员可见）、认可 toggle（插入+标签 /
+取消+级联删标签 / 标签字典校验 / 超过 3 个拒绝 / 去重）、我的认可同舞伴去重、管理员认证。
+
+### 种子数据
+
+`src/main/resources/db/seed-dancers-dev.sql`（依赖 seed-dev.sql 的用户/场所）：
+3 位舞伴（NORMAL×2 + PENDING×1）+ HOME/APPEARANCE 关系 + 跨日认可 + 标签，
+演示每日一记聚合、近7天排序、审核中资料不可见三种场景。
 
 ---
 

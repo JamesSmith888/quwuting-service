@@ -1,0 +1,23 @@
+package org.quwuting.quwutingservice.dancer.enums;
+
+/**
+ * 舞伴主页状态（隐私与真实性边界的关键载体）。
+ * <ul>
+ *   <li>{@link #PENDING}：审核中——舞伴<b>主动注册</b>后的初始状态，不对公众展示，
+ *       仅创建人本人与平台管理员可见（见 {@code DancerService#getDetail} 可见性规则）；</li>
+ *   <li>{@link #NORMAL}：正常——经管理员认证后对外展示（列表/详情公开可见）；</li>
+ *   <li>{@link #HIDDEN}：隐藏——管理员操作（资料不实/违规/舞伴要求下架），
+ *       对外与 PENDING 同等不可见。</li>
+ * </ul>
+ * 设计根因（AGENTS.md「舞伴生态体系」章节）：舞伴是<b>真实个人</b>，禁止默认创建大量
+ * 未授权人物主页——所有新资料必须经人审核后才进入公开可见区，把"数据真实性与隐私边界"
+ * 作为领域的第一约束（先认证、后展示，而非先展示、后治理）。
+ */
+public enum DancerStatus {
+    /** 正常展示（管理员认证通过） */
+    NORMAL,
+    /** 隐藏（管理员操作，不对公众展示） */
+    HIDDEN,
+    /** 审核中（舞伴主动注册后的初始状态） */
+    PENDING
+}
