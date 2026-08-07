@@ -19,9 +19,11 @@ spring:
       leak-detection-threshold: 30000  # 连接持有超 30s 告警（排查未关闭连接）
   jpa:
     hibernate:
-      # Schema 演进策略（2026-08-05 起）：与基础配置一致，统一 ddl-auto: update
-      # 自动创建/追加表列，不手动执行 SQL 迁移（规则见 AGENTS.md「Schema 演进」章节）
-      ddl-auto: update
+      # Schema 演进策略（2026-08-07 起）：与基础配置一致，Flyway 迁移 + validate 校验。
+      # 生产 schema 变更一律由 db/migration/V{n} 脚本版本化执行（部署时随应用启动自动
+      # 应用），禁止依赖 ddl-auto 自动演进——历史 ddl-auto:update 无法删列/改约束、
+      # 无版本回滚，是 2026-08-05 schema 事故的温床（根因见 AGENTS.md「Schema 演进」）。
+      ddl-auto: validate
     show-sql: false
     properties:
       hibernate:

@@ -462,9 +462,18 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 `qwt_venue_feedbacks` 表：venueId + userId（**可空 = 匿名，2026-08-06 放宽**）+ type + note + status + handledBy + handledAt + handleNote（处理结果说明，2026-08-06 新增，可空列自动加列）+ handled（遗留兜底列）。索引 `(venueId)`、`(userId)`、`(status, createdAt)`（管理端状态筛选分页）。
 
-**Schema 演进（2026-08-05 起默认自动更新，无手动 SQL）**：status 列默认值由 `@ColumnDefault("'PENDING'")` **单一通道**声明（配合 `@Column(length=20, nullable=false)` + 字段初始化器），`ddl-auto:update` 对已有数据的表自动加列时生成 `ADD COLUMN ... NOT NULL DEFAULT 'PENDING'` 不失败，存量行自动落为 PENDING——2026-08-05 曾因 columnDefinition 与 @ColumnDefault **双声明 DEFAULT** 报 "multiple default values specified"（修复 + 根因见「Schema 演进 → 事故根因」）；handledBy / handledAt 为可空列直接自动加列；遗留 `handled` 布尔列由实体字段映射兜底（@Deprecated + `@ColumnDefault("false")`，**双态兼容**：列已存在 → 匹配无操作，列已被历史脚本删除 → update 自动重建且存量行落默认值；insert 恒写 false 不违反约束）。
+**Schema 演进（2026-08-07 起：Flyway 版本化迁移，见「Schema 演进与数据库完整性」）**：status 列默认值由 `@ColumnDefault("'PENDING'")` **单一通道**声明（配合 `@Column(length=20, nullable=false)` + 字段初始化器）——2026-08-05 曾因 columnDefinition 与 @ColumnDefault **双声明 DEFAULT** 报 "multiple default values specified"（修复 + 根因见「Schema 演进 → 事故根因」）；handledBy / handledAt 为可空列；遗留 `handled` 布尔列由实体字段映射兜底（@Deprecated + `@ColumnDefault("false")`，insert 恒写 false）。表结构变更（含新列/索引/约束）一律新增 `db/migration/V{n}` 迁移脚本，禁止依赖 ddl-auto 自动演进。
 
-⚠ **user_id 放宽可空 = 修改已有列约束，update 无法完成**（只加列/约束、不 MODIFY 列），属「无法避免手动 SQL 的场景」例外：需在发布前执行 `db/migrate-feedback-anonymous.sql`（`ALTER TABLE ... ALTER COLUMN user_id DROP NOT NULL`，幂等），**先执行脚本再启动新版应用**（否则匿名 insert 违反 NOT NULL）。本脚本是本例外清单下新增的**唯一允许新增的迁移脚本**（理由：修改列约束无实体声明通道，见「Schema 演进 → 无法避免手动 SQL 的场景」）。
+⚠ **user_id 可空（2026-08-06 匿名上报）**：旧库曾需手动执行 `db/migrate-feedback-anonymous.sql`（`ALTER COLUMN user_id DROP NOT NULL`）放宽约束（该脚本已执行，勿重复运行）；**新环境由 V1 baseline 直接建成可空列**，无需任何手动步骤。
+
+### 防刷机制（2026-08-07 补齐）
+
+**根因**：feedback 泛化为统一上报模板时（2026-08-05）未对齐其余上报类接口的既有防刷模式——status-report 有 5 次/小时频控、reaction/recognize 有每日唯一约束、view/share 有 60s 频控，唯独 feedback 零防刷（匿名可提交 + 无唯一约束），登录用户连点重复插入、脚本可无限刷脏数据。深层原因：项目防刷机制是"每模块自行实现"（Caffeine 内嵌 / DB 唯一约束），无统一抽象，新增/泛化模块容易遗漏。
+
+**双防线（分层收口）**：
+
+1. **应用层 60s 冷却**（`VenueFeedbackService` 内嵌 Caffeine，与 VenueViewService / VenueShareService 同模式）：key = `venueId:type:identity`，identity 登录取 `u{userId}`、匿名取 `ip:{ClientIpResolver.resolve()}`——同身份对同场所同类型在窗口内重复提交抛 1006。尽力而为（多 IP 分布式刷无法拦截），与 view/share 频控同语义。
+2. **库内 PENDING 部分唯一索引**（`db/migration/V2__feedback_pending_dedup.sql`）：`UNIQUE (user_id, venue_id, type) WHERE user_id IS NOT NULL AND status = 'PENDING'`——登录用户对同一场所同一类型在"待处理"期间只允许一条（管理员处理后旧行移出索引，可再次上报）；匿名行不参与（NULL 无法身份归因）。并发/多实例竞争窗口内撞唯一键时，应用层 catch `DataIntegrityViolationException`（SQLState 23505，经 `DbConstraintViolations.isUniqueViolation`）幂等返回已有 PENDING 记录（与 StatusReportService 并发模式一致）。迁移先清理存量重复（保留每组最早一条）再建索引。
 
 ### 接口
 
@@ -518,7 +527,7 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 | `channel` | 分享渠道（仅 SHARE）：BUTTON（页内按钮）/ MENU（右上角菜单）/ TIMELINE（朋友圈） |
 | `share_from` | 归因来源（仅 OPEN）：原分享者用户 ID，来自分享路径 `share_from` 参数 |
 
-事件日志语义：**只追加，不修改不删除**，无唯一约束（每次分享/打开是一条独立事件）。**Schema 由 ddl-auto:update 自动创建**（2026-08-05「Schema 演进自动更新优先」策略：新表不再写迁移脚本，`@Index` 声明随实体自动建索引）。
+事件日志语义：**只追加，不修改不删除**，无唯一约束（每次分享/打开是一条独立事件）。**表结构（含索引）由 `db/migration/V1__baseline_schema.sql` 权威定义，新变更走 V{n} 迁移**（2026-08-07 起 Flyway 策略，见「Schema 演进与数据库完整性」）。
 
 ### 接口（软鉴权，fire-and-forget）
 
@@ -753,7 +762,7 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 
 ### 迁移与数据说明
 
-- `src/main/resources/db/migrate-reaction-daily.sql`：旧 hold 模型 → 每日一记模型的历史迁移（硬删旧软删行、`reaction_date` 回填 `created_at::date`、唯一约束 (user,venue,code) → (user,venue,code,date)）。**历史脚本（已执行），属旧范式遗留**——新约定不再新增此类手动脚本，schema 演进一律走 `ddl-auto: update` 自动完成（见「Schema 演进（自动更新优先）」章节）
+- `src/main/resources/db/migrate-reaction-daily.sql`：旧 hold 模型 → 每日一记模型的历史迁移（硬删旧软删行、`reaction_date` 回填 `created_at::date`、唯一约束 (user,venue,code) → (user,venue,code,date)）。**历史脚本（已执行），属旧范式遗留，禁止重复执行**——schema 演进一律走 `db/migration/V{n}` 迁移脚本（见「Schema 演进（自动更新优先）」章节）
 - 旧行语义近似：迁移后旧"当前生效"行按 createdAt 日期成为"该日一次点击"，窗口统计语义自洽。
 
 ### 与现有模块的关系（保留 / 删除 / 替换）
@@ -1083,7 +1092,7 @@ public record ApiResponse<T>(int code, String message, T data) {
 | 1003 | 权限不足（非管理员）/ 微信接口业务错误 |
 | 1004 | 用户不存在 |
 | 1005 | 文件校验失败（类型 / 大小超限） |
-| 1006 | 操作过于频繁（评分防刷冷却期内 / 状态上报频率超限） |
+| 1006 | 操作过于频繁（评分防刷冷却期内 / 状态上报频率超限 / 用户上报 60s 冷却） |
 | 1007 | 无效的评分维度 / Reaction 类型 |
 | 1008 | 上报不存在 |
 | 1009 | 无效的排序方式（VenueSortMode.from） |
@@ -1136,7 +1145,7 @@ public class Venue {
 - 序列化/反序列化统一收敛在 `mapper/` 组件与 Service 的私有工具方法中（注入 `ObjectMapper`），新增同类字段时复用 `serializeStringList` / `serializeList` / `deserializeList`，不另起炉灶
 - Response DTO 中为 `List<String>`，**空数据返回空列表而非 null**（前端无需判空两套逻辑）
 - Request DTO 中为 `List<String>`，用 `@Size(max = N)` 限制数量、`List<@Size(max = 500) String>` 限制单元素长度，与列长度约束呼应
-- 若字段未来需要独立查询、排序、元数据（如图片描述、上传者），再升级为关联表——新表由 `ddl-auto: update` 自动创建，无需手动 SQL（见「Schema 演进（自动更新优先）」章节）
+- 若字段未来需要独立查询、排序、元数据（如图片描述、上传者），再升级为关联表——新表走 `db/migration/V{n}` 迁移脚本创建（见「Schema 演进（自动更新优先）」章节）
 
 **结构化对象列表**同理：门票（`tickets`）、舞伴费用（`partnerFees`）以 JSON 对象数组存储，DTO 定义为 `venue/dto/` 下的共享 record（`TicketEntry` / `PartnerFeeEntry`，请求与响应复用），Request 中用 `List<@Valid TicketEntry>` 触发嵌套校验，跨字段约束在 Service 层校验。
 
@@ -1380,7 +1389,7 @@ src/main/resources/
   application-prod.yaml     ← 生产（已提交，敏感值全部通过环境变量注入）
 ```
 
-- 基础 `application.yaml` 的 `ddl-auto` 为 `update`（2026-08-05 起统一自动演进策略，dev/prod 一致）——新增表/列由启动时自动完成，不手动执行 SQL；规则见「Schema 演进（自动更新优先）」章节
+- 基础 `application.yaml` 的 `ddl-auto` 为 `validate`（2026-08-07 起 Flyway 迁移 + validate 校验策略，dev/prod 一致）——schema 变更由 `db/migration/V{n}` 脚本版本化执行，Hibernate 启动时只校验实体与表结构一致；规则见「Schema 演进与数据库完整性」章节
 - 禁止在任何 yaml 文件中硬编码数据库密码、密钥等敏感信息
 - 本地开发使用 `application-dev.yaml`，该文件已列入 `.gitignore`
 - 环境变量占位符禁止带空默认值（`${SECRET}` 而非 `${SECRET:}`），确保遗漏配置时启动即失败
@@ -1449,21 +1458,39 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 
 ---
 
-## Schema 演进与数据库完整性（2026-08-05 确立自动更新优先）
+## Schema 演进与数据库完整性（2026-08-07 起：Flyway 显式迁移 + validate）
 
-### Schema 演进策略（默认自动更新，不手动执行 SQL）
+### Schema 演进策略（Flyway 版本化迁移，Hibernate 只校验）
 
-**核心决策（2026-08-05）**：schema 演进默认由 Spring Data JPA 的 `ddl-auto: update` 在应用启动时自动完成（新表自动创建、新列自动追加）——**不编写、不执行手动 SQL 迁移脚本**（`application.yaml` 已统一为 update，dev/prod 同策略）。上一版"新增列需手动执行 migrate-*.sql"的约定废止。
+**核心决策（2026-08-07）**：schema 演进由 **Flyway 显式版本化迁移**管理（`classpath:db/migration/V{n}__描述.sql`，应用启动时自动按序执行），Hibernate `ddl-auto` 从 `update` 改为 **`validate`**（启动时校验实体映射与实际表结构一致，不一致即拒绝启动，fail-fast）。**废止 2026-08-05 确立的 `ddl-auto: update` 自动演进策略**——其固有缺陷（不能删列/改约束、无版本历史/回滚、多实例并发启动 DDL 竞态、schema 变更与业务代码耦合在启动路径）是生产稳定性隐患（详见下「根因分析（2026-08-07 引入 Flyway）」）。
 
-**新增列的三条硬规则（保证 update 对已有数据的表自动加列成功）**：
+**Flyway 双路径（对已有库零破坏）**：
 
-1. **新增 NOT NULL 列必须携带默认值，唯一声明通道是 `@ColumnDefault`**——`@Column(nullable = false) + @ColumnDefault("'XXX'")`（枚举类列；`@ColumnDefault` 的值是原始 SQL 表达式，字符串要带引号如 `"'PENDING'"`）；update 生成 `ALTER TABLE ... ADD COLUMN ... NOT NULL DEFAULT ...`，PostgreSQL 快速默认值不重写表，存量行自动落默认值。**禁止裸 `@Column(nullable = false)` 无默认值**——对已有数据的表加列会直接失败（这是历史 migrate-*.sql 存在的根本原因，如今规则上杜绝）。**禁止在 `columnDefinition` 中携带 DEFAULT/NOT NULL 等与 JPA 元数据重叠的语义**——Hibernate 会把元数据派生的 `default ...` / `not null` / 枚举 `check` 追加到 columnDefinition 原文之后，双声明生成非法 DDL（`... DEFAULT 'X' default 'X' ...` → Postgres "multiple default values specified"）。Java 字段初始化器只负责内存态默认值、**不参与 DDL 生成**，不能替代 @ColumnDefault。`columnDefinition` 仅限方言特有类型片段（如 `jsonb`），禁止写 DEFAULT/NOT NULL
-2. **新增可空列直接加列**（`nullable = true` 或缺省），update 无阻塞
-3. **实体移除字段 ≠ 列被删除**：update **从不删除实体已移除的列、也不把现有列改为可空**。移除字段时必须保留实体映射兜底（@Deprecated 字段 + Java 默认值，insert 继续写该列避免违反 NOT NULL），**禁止**只移除映射导致 insert 违反遗留 NOT NULL 列（历史 `liked` 事故模式，见下文「实体字段移除」小节）
+- **已有库**（生产/开发，schema 非空）：`baseline-on-migrate: true` + `baseline-version: 1`——首次启动把 `V1__baseline_schema.sql` 标记为基线（**跳过执行**，当前库结构即基线），从 V2 起应用增量迁移。baseline 不校验存量结构，已存在表零影响。
+- **全新环境**（空库）：无 baseline，从 V1 起顺序执行，一次性建成与实体映射一致的全量结构。
 
-**索引演进**：新增/修改实体 `@Index` 后 update 自动建索引（对已存在同名索引幂等）。
+**新增表/列/索引/约束的唯一通道 = 新增 `V{n}` 迁移脚本**（禁止依赖 ddl-auto 自动演进；禁止在迁移脚本外手工改库）。变更流程：改实体 → 写迁移脚本（与实体声明严格一致，命名/类型/默认值/索引约束见 V1 baseline 头注释）→ 本地启动验证 → 部署时随应用自动应用。
 
-**DDL 失败即启动失败（2026-08-05 起配置）**：`spring.jpa.properties.hibernate.hbm2ddl.halt_on_error: true`（基础配置已统一，dev/prod 继承）——Hibernate 默认对 schema 执行错误只打 WARN 并**照常启动**，留下"半迁移 schema + 运行期才炸"的隐患（见下事故）；开启后任何 DDL 失败直接终止 bootstrap。
+**三条硬规则（延续 2026-08-05 事故教训，保证迁移正确性）**：
+
+1. **新增 NOT NULL 列必须携带默认值，唯一声明通道是 `@ColumnDefault`**——`@Column(nullable = false) + @ColumnDefault("'XXX'")`（枚举类列；`@ColumnDefault` 的值是原始 SQL 表达式，字符串要带引号如 `"'PENDING'"`）。迁移脚本中对应 `ADD COLUMN ... NOT NULL DEFAULT ...`，PostgreSQL 快速默认值不重写表，存量行自动落默认值。**禁止裸 `@Column(nullable = false)` 无默认值**（对已有数据的表加列会直接失败——这是历史 migrate-*.sql 存在的根本原因，如今规则上杜绝）。**禁止在 `columnDefinition` 中携带 DEFAULT/NOT NULL 等与 JPA 元数据重叠的语义**——Hibernate 会把元数据派生的 `default ...` / `not null` / 枚举 `check` 追加到 columnDefinition 原文之后，双声明生成非法 DDL（`... DEFAULT 'X' default 'X' ...` → Postgres "multiple default values specified"）。Java 字段初始化器只负责内存态默认值、**不参与 DDL 生成**，不能替代 @ColumnDefault。`columnDefinition` 仅限方言特有类型片段（如 `jsonb`），禁止写 DEFAULT/NOT NULL
+2. **新增可空列直接加列**（`nullable = true` 或缺省），迁移无阻塞
+3. **实体移除字段 ≠ 列被删除**：validate 不校验列级 NOT NULL、Flyway 迁移不自动删列。移除字段时必须保留实体映射兜底（@Deprecated 字段 + Java 默认值，insert 继续写该列避免违反遗留 NOT NULL），**禁止**只移除映射导致 insert 违反遗留 NOT NULL 列（历史 `liked` 事故模式，见下文「实体字段移除」小节）；确需删列时在迁移脚本中显式 `DROP COLUMN`（评估影响后）
+
+**索引演进**：实体 `@Index` 声明与迁移脚本中的 `CREATE [UNIQUE] INDEX` 一一对应；新增索引走 V{n} 脚本（`IF NOT EXISTS` 防御性幂等）。
+
+**DDL 失败即启动失败**：`spring.jpa.properties.hibernate.hbm2ddl.halt_on_error: true` 保留（基础配置已统一）；Flyway 迁移失败同样默认拒绝启动——双重 fail-fast。
+
+### 根因分析（2026-08-07 引入 Flyway，为什么废止 ddl-auto:update）
+
+**为什么当初选了 `ddl-auto: update`（2026-08-05 决策）**：status 列事故后，团队为避免"手写 SQL 与实体不一致"再次发生，决策"新表/新列一律由 update 自动完成，不手动执行 SQL"。该决策在当时解决了"手动 SQL 易错"的痛点，但引入了一组更深的隐患：
+
+1. **update 的能力边界是"只加不减"**：不能删列、不能 MODIFY 约束（NOT NULL→可空、改类型）、不能回滚——schema 只会单向漂移，历史遗留列（`liked`/`handled`/`avatar_url`）只能靠实体映射兜底，永远无法清理，schema 与代码的偏差不可逆地累积。
+2. **无版本历史与可审计性**：schema 变更不可追溯（哪次发布改了什么列无法回答），多实例并发启动时 DDL 存在竞态窗口。
+3. **DDL 与业务代码耦合在启动路径**：任何新实体上线都伴随启动期自动 DDL，出问题就是"启动即改库"，没有"先迁移后发布"的发布纪律。
+4. **与手动脚本并存的双轨混乱**：`db/` 目录的历史 migrate/repair 脚本与 update 并存，执行时机依赖人工（"先执行脚本再启动新版"），流程脆弱。
+
+**为什么 Flyway 是长期方案**：版本化迁移把 schema 变更变成**代码库的一部分**（有版本、有历史、可回滚点、可审计），`baseline-on-migrate` 对存量库零侵入，`validate` 把"实体与库不一致"从运行期隐患提前到启动期 fail-fast。这正是"显式优于隐式、可审计优于自动"的生产级标准。
 
 ### 事故根因（2026-08-05：columnDefinition 与 @ColumnDefault 双声明）
 
@@ -1479,17 +1506,15 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 
 ### 无法避免手动 SQL 的场景（例外清单）
 
-以下场景 update 无法自动完成，**允许且必须**手动执行，除此之外一律自动演进：
+以下场景 **Flyway 迁移脚本无法表达或不宜入链**，允许且必须手动执行，除此之外一律走 V{n} 迁移：
 
 | 场景 | 手段 | 说明 |
 |------|------|------|
 | 跨库/跨环境逻辑迁移 | `pg_dump -Fc` + `pg_restore` | 完整保留 IDENTITY/序列/主键/NOT NULL/默认值/索引/约束；**禁止 GUI 工具（DataGrip/DBeaver/Supabase 控制台）拖拽复制表结构**——系统性丢失 identity/序列/主键 |
 | 主键机制损坏修复 | `db/repair-schema-identity.sql`（幂等） | 回填 NULL id、重建主键、恢复 IDENTITY/序列定位/列默认值；由 SchemaIntegrityChecker fail-fast 兜底发现 |
-| 彻底删除遗留列 | 一次性手动 `ALTER TABLE ... DROP COLUMN` | 仅当冗余列影响可维护性时执行；**默认做法是保留实体映射兜底，不删列** |
-| **修改已有列约束（NOT NULL → 可空）** | **一次性手动 `ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL`** | **update 无法 MODIFY 列约束**（只加列/约束），且无实体声明通道可表达"放宽可空"——如 `qwt_venue_feedbacks.user_id`（2026-08-06 匿名上报，`db/migrate-feedback-anonymous.sql`，幂等）。**执行时机：先执行脚本再启动新版应用**（否则新行为 insert 违反 NOT NULL） |
-| 数据回填/批量修正 | 一次性手动 UPDATE | 应用层无法表达的历史数据修正（如 2026-08 的 `migrate-reaction-daily.sql` 回填 reaction_date） |
+| 历史遗留一次性脚本 | `db/migrate-*.sql`（已执行，勿再运行） | `migrate-feedback-anonymous.sql` / `migrate-reaction-daily.sql` / `migrate-drop-liked-not-null.sql` 为 **Flyway 引入前**的手动迁移，**均已执行**，仅作历史参考，禁止重复执行（新环境由 V1 baseline 直接得到最终结构） |
 
-历史迁移脚本（`migrate-reaction-daily.sql` / `migrate-drop-liked-not-null.sql`）是**旧范式遗留**，仅作历史参考。**一般不再新增此类脚本**——新演进一律走实体列默认值 + update 自动完成；**唯一例外：修改已有列约束（NOT NULL → 可空）**——该场景无实体声明通道、update 无法完成，允许且必须新增一次性脚本（2026-08-06 起 `db/migrate-feedback-anonymous.sql` 为首例，脚本头注释记录根因与执行时机）。
+**新约定**：`db/migration/` 为 schema 变更的**唯一权威通道**（V1 baseline + V{n} 增量）。`db/` 根目录仅保留 seed 脚本与历史参考脚本。任何 schema 变更（含改列约束、删列）优先写成 V{n} 迁移；确属"无法入链"的场景（如上表）才手动执行并记录到 AGENTS.md。
 
 ### 事故根因（2026-08-04 确立，历史背景）
 
@@ -1548,7 +1573,7 @@ DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：
 - 禁止 Controller 直接调用 Repository
 - 禁止 Entity 直接作为 API 响应体返回
 - 禁止 `@Query(nativeQuery = true)` 无注释使用
-- 禁止 `ddl-auto: create` 出现在生产配置（生产与 dev 统一为 `update` 自动演进策略，见「Schema 演进」章节）
+- 禁止 `ddl-auto: create` / `update` 出现在生产配置（生产与 dev 统一为 `validate` + Flyway 迁移策略，见「Schema 演进与数据库完整性」章节）
 - 禁止在 yaml 文件中硬编码密码、Token 等敏感信息
 - 禁止在 Entity 上使用 `@Data`（会破坏 JPA equals/hashCode 契约）
 - 禁止枚举用 `@Enumerated(EnumType.ORDINAL)`（数据库值依赖顺序，易出错）

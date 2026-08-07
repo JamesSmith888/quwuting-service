@@ -3,12 +3,11 @@ spring:
     name: quwuting-service
   jpa:
     hibernate:
-      # Schema 演进策略（2026-08-05 确立）：默认自动更新——新表/新列由
-      # ddl-auto:update 在启动时自动创建/追加，不手动执行 SQL 迁移。
-      # 约束：新增 NOT NULL 列必须用 @ColumnDefault 声明默认值（禁止在
-      # columnDefinition 中重复声明 DEFAULT，见 AGENTS.md「Schema 演进」）；
-      # 实体移除字段必须保留映射兜底或走"无法避免"清单的手动 SQL。
-      ddl-auto: update
+      # Schema 演进策略（2026-08-07 起：Flyway 显式迁移 + validate 校验）：
+      # ddl-auto 从 update 改为 validate——schema 变更一律由 db/migration/V{n} 脚本
+      # 版本化执行，Hibernate 启动时只校验实体映射与实际表结构一致（不一致即
+      # 拒绝启动，fail-fast）。背景根因见 AGENTS.md「Schema 演进与数据库完整性」。
+      ddl-auto: validate
     show-sql: false
     properties:
       hibernate:
@@ -18,6 +17,17 @@ spring:
         # 事故中应用带残缺 schema 正常启动）。见 AGENTS.md「Schema 演进」。
         hbm2ddl:
           halt_on_error: true
+  # Flyway 显式版本化迁移（2026-08-07 引入，替代 ddl-auto:update 自动演进）：
+  # - 迁移脚本位于 classpath:db/migration（V{n}__描述.sql），与应用启动同步执行
+  # - baseline-on-migrate + baseline-version=1：已有库（schema 非空）首次启动将
+  #   V1 标记为基线跳过执行（当前结构即基线），从 V2 起应用增量迁移；全新环境
+  #   （空库）从 V1 顺序执行完整建表——两路径零冲突
+  # - 迁移失败即启动失败（Flyway 默认行为），与 halt_on_error 同语义
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 1
   jackson:
     default-property-inclusion: non_null
     time-zone: Asia/Shanghai

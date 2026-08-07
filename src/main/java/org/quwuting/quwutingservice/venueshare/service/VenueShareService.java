@@ -4,13 +4,12 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.common.web.ClientIpResolver;
 import org.quwuting.quwutingservice.venueshare.entity.VenueShare;
 import org.quwuting.quwutingservice.venueshare.enums.ShareEventType;
 import org.quwuting.quwutingservice.venueshare.repository.VenueShareRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.context.request.RequestContextHolder;
-import org.springframework.web.context.request.ServletRequestAttributes;
 
 import java.util.concurrent.TimeUnit;
 
@@ -89,26 +88,8 @@ public class VenueShareService {
     private boolean isRateLimited(Long venueId, Long userId) {
         String identity = userId != null
                 ? "u" + userId
-                : "ip:" + resolveClientIp();
+                : "ip:" + ClientIpResolver.resolve();
         String key = venueId + ":" + identity;
         return eventLimiter.asMap().putIfAbsent(key, Boolean.TRUE) != null;
-    }
-
-    /**
-     * 解析客户端 IP：优先 X-Forwarded-For 第一个地址（代理链路真实来源），
-     * 回退 remoteAddr。代理剥离 XFF 时两者同为网关地址——频控退化为"场所级防抖"，仍可接受。
-     */
-    private String resolveClientIp() {
-        ServletRequestAttributes attrs =
-                (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
-        if (attrs == null) {
-            return null;
-        }
-        String xff = attrs.getRequest().getHeader("X-Forwarded-For");
-        if (xff != null && !xff.isBlank()) {
-            int comma = xff.indexOf(',');
-            return (comma > 0 ? xff.substring(0, comma) : xff).trim();
-        }
-        return attrs.getRequest().getRemoteAddr();
     }
 }
