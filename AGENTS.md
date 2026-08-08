@@ -61,14 +61,23 @@ user/           ← 用户模块
 
 dancer/         ← 舞伴生态体系（独立业务域，2026-08-06 新增，见「舞伴生态体系」章节）
   controller/   ← DancerController（/dancers）、MyDancerController（/users/me）、AdminDancerController（/admin/dancers）
-  service/      ← DancerService（认可/标签/可见性）、DancerAggregateService（内嵌 refresh-ahead 认可统计缓存）
+  service/      ← DancerService（认可/标签/可见性/审核状态流转+站内信通知）、DancerAggregateService（内嵌 refresh-ahead 认可统计缓存）
   repository/   ← DancerRepository / DancerVenueRepository / DancerRecognitionRepository / DancerRecognitionTagRepository
   entity/       ← Dancer（qwt_dancers）、DancerVenue（qwt_dancer_venues）、DancerRecognition（qwt_dancer_recognitions）、DancerRecognitionTag（qwt_dancer_recognition_tags）
   dto/
-    request/    ← CreateDancerRequest / RecognizeDancerRequest / UpdateDancerStatusRequest
-    response/   ← DancerSummaryResponse / DancerDetailResponse / DancerTagStat / DancerVenueInfo / DancerRecognitionStats / RecognizeResponse / MyDancerRecognitionResponse
-  enums/        ← DancerStatus / DancerVenueRelation
+    request/    ← CreateDancerRequest / RecognizeDancerRequest / UpdateDancerStatusRequest（含可选 reason）
+    response/   ← DancerSummaryResponse / DancerDetailResponse / DancerTagStat / DancerVenueInfo / DancerRecognitionStats / RecognizeResponse / MyDancerRecognitionResponse / AdminDancerResponse
+  enums/        ← DancerStatus（含 REJECTED）/ DancerVenueRelation
   DancerTagCode ← 舞伴标签字典（后台维护，前端镜像 constants/dancer-tags.ts）
+
+message/        ← 站内信（消息中心，2026-08-08 新增，见「站内信（消息中心）」章节）
+  controller/   ← MessageController（GET /users/me/messages, /unread-count, POST /{id}/read, /read-all）
+  service/      ← MessageService（create 供业务模块调用 / list / unreadCount / markOneRead / markAllRead）
+  entity/       ← Message（qwt_messages：userId + type + title + content + relatedType/relatedId + readAt）
+  repository/   ← MessageRepository
+  dto/
+    response/   ← MessageResponse
+  enums/        ← MessageType（DANCER_REVIEW / DANCER_STATUS）
 
 auth/           ← 认证模块
   controller/   ← AuthController（POST /auth/login）
@@ -229,6 +238,36 @@ jwt:
 
 ---
 
+## 场所数据模型（venue 模块）
+
+### 核心信息与地址
+
+`qwt_venues` 承载场所基础信息：名称、营业状态（`status`，`VenueStatus` 枚举）、城市/区县（标准行政区划名，与列表筛选共用同一词表精确匹配）、地址、坐标（`longitude`/`latitude`，导航用）、相册（`photos` JSON 数组字符串列）、简介、联系方式、标签（`tags` JSON 数组字符串列，仅存管理员自定义标签，`VenueDefaultsConfig` 合并系统默认标签）。
+
+### 营业时间（时段列表，2026-08-08 由固定列改造）
+
+**数据形状**：`business_hours`（`varchar(1000)`）JSON 数组字符串列，与 tickets/partnerFees 同模式：
+
+```json
+[{"name":"午场","open":"13:30","close":"17:30"},{"name":"晚场","open":"18:30","close":"01:00"}]
+```
+
+**根因（为什么改造）**：旧建模用 4 个固定列（`afternoon_open/afternoon_close/evening_open/evening_close`）表达营业时间，把"1 个舞厅 → N 个场次"的业务维度硬编码成 2 个固定场次——schema 跟随表单 UI 形状（下午场/晚场两行）反推而非领域模型；任何新场次（早场/午茶场/深夜场）都要改表结构，时段名被烧进列名无法自定义，LocalTime 单列也没有跨天结束（18:30-01:00）的显式契约。同一实体里 tickets/partnerFees 已确立"变长结构化列表 = JSON 数组字符串列 + 强类型 DTO"模式（无独立查询需求时用 JSON 列，需要独立查询/排序/元数据再升级关联表，见「图片上传」章节同款约定），营业时间属同类数据却走了固定列，属设计不一致。
+
+**契约**：
+1. 条目 = `BusinessHoursEntry` record（`name` 可空、`open`/`close` 必填，`@Valid` 级联校验；`@JsonFormat(pattern="HH:mm")` 统一序列化格式，JSON 列与 API 输出均为 `"13:30"` 无秒）；
+2. **跨天语义**：`close < open` 表示结束于次日凌晨（如晚场 18:30-01:00），原样存取、展示端原样呈现，不引入 endNextDay 布尔（行业通行约定，数据自解释）；
+3. 最多 10 条（`@Size(max=10)`，与 tickets/partnerFees 对齐）；
+4. 读取端反序列化失败/空列返回空列表（`VenueResponseMapper` 统一 `deserializeList`），不做显性报错。
+
+**迁移**：`V5__venue_business_hours.sql`——加可空新列 → 存量回填（非空时段按「下午场/晚场」命名组装，顺序与旧展示一致；双场皆空保持 NULL）→ 删 4 旧列 → DO 块防御性校验（残缺时段 WARNING）。已有库 baseline 跳过 V1、空库 V1+V5 顺序执行，两条路径终态一致。
+
+### 消费信息（tickets / partnerFees）
+
+门票规则（`tickets`，`varchar(2000)`）与舞伴费用阶梯（`partnerFees`，`varchar(1000)`）均为 JSON 数组字符串列，DTO 序列化/反序列化（`TicketEntry`/`PartnerFeeEntry`）。舞厅无"人均消费"概念，门票形态多样（固定票/免票/时段免票）用规则列表表达；舞伴计费存在按时长阶梯（5分钟30元）与按连曲（3曲30元）两种模式，`unit` 枚举扩展即支持新计费形态。Service 层 `validateTickets` 校验 FIXED 类型必须带票价（注解无法表达条件必填）。
+
+---
+
 ## 门店认领与管理权限
 
 ### 数据模型
@@ -237,7 +276,7 @@ jwt:
 
 ### 权限判定规则（canManage）
 
-详情接口 `GET /venues/{id}` 返回 `VenueDetailResponse(venue, canManage, postCount)`，其中 `canManage` 由后端基于软鉴权上下文计算：
+详情接口 `GET /venues/{id}` 返回 `VenueDetailResponse(venue, canManage, postCount, hasMyStatusReport, statusUpdatedAt)`，其中 `canManage` 由后端基于软鉴权上下文计算：
 
 1. 平台管理员（`UserRole.ADMIN`）→ 对所有门店为 `true`
 2. 门店认领人（`claimedBy` 等于当前用户 ID）→ 对该门店为 `true`
@@ -256,7 +295,7 @@ jwt:
 ### 详情接口与列表接口的分工
 
 - `GET /venues`（列表）→ `Page<VenueResponse>`：不含权限与统计字段，保持轻量
-- `GET /venues/{id}`（详情）→ `VenueDetailResponse`：组合 `VenueResponse` + `canManage` + `postCount`
+- `GET /venues/{id}`（详情）→ `VenueDetailResponse`：组合 `VenueResponse` + `canManage` + `postCount` + `hasMyStatusReport` + `statusUpdatedAt`（营业状态字段最近一次变更时间，取自 `qwt_venue_status_logs` 最新一条 `createdAt`——`VenueStatusLogRepository.findLatestStatusChangeTime`；语义区别于 `VenueResponse.updatedAt`，后者任意字段编辑都刷新）
 
 record 不支持继承，组合结构（`VenueDetailResponse(VenueResponse venue, ...)`）是详情扩展的标准模式，后续新增详情专属字段一律追加到此 record。
 
@@ -296,21 +335,27 @@ record 不支持继承，组合结构（`VenueDetailResponse(VenueResponse venue
 ### 热度公式
 
 ```
-heatScore = viewCount30d × 1
+heatScore = max(0, viewCount30d × 1
           + favoriteCount × 10
           + newFavoriteCount30d × 15
           + postCount × 5
           + ratingCount30d × 8
           + positiveReactionCount30d × 3（仅 Polarity.POSITIVE 的 code，见「Reaction 快速反馈系统」章节）
-          + (satisfactionScore − 6) × 20（无评分时为 0，6 分为中性基准）
+          + (satisfactionScore − 6) × 20（无评分时为 0，6 分为中性基准）)
 ```
 
 权重常量收敛在 `VenueHeatService` 内部，后续基于真实数据分布调优，接口路径与 `heatScore` 语义不变。
 
-**2026-08 缺陷修复确立的三条语义**（详情页热度专项）：
-1. **Reaction 分极性**：仅正向 Reaction（人气旺/氛围好/音乐棒等 9 项）计入热度；负向（服务问题/排队太久/人气冷清/消费较高/环境一般/人多拥挤 6 项）**不计入公式**，以 `negativeReactionCount30d` 单独下发，前端展示"负面反馈 N 条·不计入热度指数"——修复"被吐槽的店热度反而更高"的语义硬伤。中性（普通）也不计入。极性定义在 `ReactionCode.Polarity`（唯一事实源），mega-query 通过 `:positiveCodes`/`:negativeCodes` 参数过滤。
+**2026-08 缺陷修复确立的语义**（详情页热度专项）：
+1. **Reaction 分极性**：仅正向 Reaction（人气旺/氛围好/音乐棒等）计入热度；负向（服务问题/排队太久等）**不计入公式**，以 `negativeReactionCount30d` 单独下发，前端展示"负面反馈 N 条·不计入热度指数"——修复"被吐槽的店热度反而更高"的语义硬伤。中性（普通）也不计入。极性定义在 `ReactionCode.Polarity`（唯一事实源），**code 列表唯一入口 = `ReactionCode.positiveCodeNames()` / `negativeCodeNames()`**——热度计算、趋势聚合、列表排序 SQL 镜像全部经此取列表，禁止各调用方自行遍历枚举再各自 filter（新增/调整极性遗漏某处即产生口径漂移）。
 2. **满意度中性偏移**：满意度贡献 = `(score − 6) × 20`，6 分（及格线）为中性基准，高于 6 加分、低于 6 扣分——低分店热度真实下降，口碑差不再靠收藏/浏览撑高。
-3. **公式文案后端下发**：`VenueHeatResponse.formulaText/formulaDetail` 由后端生成（权重唯一事实源），前端直接渲染、**禁止硬编码权重**（历史上前端 computeHeatFormula 硬编码 ×1/×10/×15/×5/×8/×3/×20，权重调整后展示即失真——已删除）。
+3. **非负收敛（2026-08-08）**：满意度负偏移可能把总分拉负，`heatScore` 恒 `max(0, 计算值)`——热度指数语义非负（前端详情页 chip 以 `heatScore > 0` 为"有数据"判据，负分会导致详情页隐藏、热度页显示负数的两端展示矛盾）。公式文案对 clamp 场景标注「按0计」。
+4. **公式文案后端下发**：`VenueHeatResponse.formulaText/formulaDetail` 由后端生成（权重唯一事实源），前端直接渲染、**禁止硬编码权重**（历史上前端 computeHeatFormula 硬编码 ×1/×10/×15/×5/×8/×3/×20，权重调整后展示即失真——已删除）。
+
+**列表排序/热门标记的口径（2026-08-08 统一，修复双口径分叉）**：
+- 列表「热度最高」排序（`VenueRepository.searchHeat*`）、推荐排序的热度项（`searchRanked*`）、热门场所标记（`findHotVenueIds`）全部使用 `VenueRepository.HEAT_SCORE` 片段 = **行为热度镜像公式**（sortWeight + 近30天浏览×1 + 收藏×10 + 新增收藏×15 + 动态×5 + 评分×8 + 正向反馈×3，窗口在 SQL 内取 `CURRENT_DATE` 锚定「截至昨日」，与 `VenueHeatService` 一致）。
+- **满意度偏移不进排序**：排序看"行为热度"（可 SQL 镜像、非负、稳定），口碑（±80 微调）在热度页综合呈现——语义划分：排序热度 = 行为热度，展示热度 = 行为热度 + 口碑偏移。
+- **约束**：`HEAT_SCORE` 与 `findHotVenueIds` 是 SQL 双镜像，权重调整必须三处同步（VenueHeatService 常量 + HEAT_SCORE + findHotVenueIds），由本 AGENTS.md 约束；SQL 侧无法引用 Java 常量，镜像一致性靠 `VenueHeatServiceTest` 公式测试 + 代码注释互指维持。
 
 ### 数据采集层
 
@@ -326,7 +371,7 @@ heatScore = viewCount30d × 1
 
 ### 统计口径：截至昨日（2026-07-31 确立）
 
-`GET /venues/{id}/heat` 的所有滚动窗口指标（近30天浏览/收藏/动态/评价/Reaction、近14天收藏趋势）统一以**昨天 24 点**为排他上界，而不是请求发生的"此刻"：
+`GET /venues/{id}/heat` 的所有滚动窗口指标（近30天浏览/收藏/动态/评价/Reaction、近30天趋势序列）统一以**昨天 24 点**为排他上界，而不是请求发生的"此刻"：
 
 ```java
 LocalDate today = LocalDate.now();
@@ -343,15 +388,25 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 - **例外**：`VenueStatusLogRepository.countSuspensionsAndLatestTime` 的 `latestcreatedat`（当前状态持续天数的依据）代表"当前状态"这一实时事实，不是滚动窗口聚合，不受该上界约束，保持全量 `MAX`
 - `VenueHeatResponse.statsAsOfDate`（`yyyy-MM-dd`，即昨天）随接口返回，**前端必须在热度 Tab 醒目展示**（当前实现：Tab 顶部 accent 底色横幅 + 底部数据说明重复提示），不得让用户在不知情的情况下把"含当天不完整数据"的口径当作完整统计解读
 
-### 收藏趋势（VenueHeatResponse.favoriteTrend）
+### 趋势（favoriteTrend / viewTrend / reactionTrend，2026-08-08 重构）
 
-`GET /venues/{id}/heat` 在收藏总数/新增数之外，附带近 14 天每日新增收藏数的时间序列 `favoriteTrend: List<FavoriteTrendPoint(date, count)>`，供前端渲染收藏趋势图。
+`GET /venues/{id}/heat` 附带三组近 30 天每日时间序列，供前端三张趋势图（收藏/浏览/反馈）渲染：
 
-- 窗口取 14 天而非与热度其余指标一致的 30 天：趋势图是给人看"升降走势"的可视化，30 根柱子在小程序小屏图表上过密；14 天足够识别趋势且渲染负担更小。窗口常量 `VenueHeatService.TREND_WINDOW_DAYS` 独立于 `WINDOW_DAYS`，互不影响
-- 窗口锚点为 `statsAsOfDate`（昨天），即 14 天窗口是 `[昨天-13, 昨天]`，不含今天——与上述"统计口径：截至昨日"约定一致
-- 数据源：`FavoriteRepository.countDailyFavoritesSince`（原生 SQL `date_trunc('day', created_at)::date` 分组，JPQL 无法表达按天截断分组，原因已在查询注释中说明）
-- **服务端补零**：`VenueHeatService.computeFavoriteTrend` 对没有收藏记录的日期补 `count=0`，保证返回序列总是 14 个连续日期点，前端无需处理"缺失日期"分支，柱状图天然对齐
-- 与 `newFavoriteCount30d`（30 天窗口总数）同源但独立查询，不做互相推导——两者语义不同（一个是求和统计，一个是按天时间序列），保持查询职责单一
+- `favoriteTrend: List<FavoriteTrendPoint(date, count)>`——每日新增收藏数
+- `viewTrend: List<FavoriteTrendPoint(date, count)>`——每日浏览数（含匿名，与 `viewCount30d` 同源同口径；结构与收藏趋势相同，复用 `FavoriteTrendPoint`）
+- `reactionTrend: List<ReactionTrendPoint(date, positive, negative)>`——每日正/负向反馈分列（分极性语义直接服务 2026-08 确立的「负向不计入热度」规则，正负并排呈现让用户一瞥看出口碑走势）
+
+**窗口 30 天（2026-08-08 由 14 天扩展）**：与其余滚动指标一致。根因：前端时间范围刷选控件（略缩图）需要足够长的全量窗口才有"缩放"意义——全量 = 趋势窗口，默认选中最近 14 天，用户可放大到全量或缩小到 7 天；14 天全量无法表达"拉近看 7 天"。常量 `VenueHeatService.TREND_WINDOW_DAYS`（= `WINDOW_DAYS`）。
+
+**统一取数（趋势 mega-query）**：三组序列由 `VenueRepository.countDailyTrends` **一条 SQL** 返回——`generate_series` 生成连续日期骨架（服务端补零天然达成，替代 Java 侧逐日填充），favorites / views / reactions（正负向各自子查询）四个 GROUP BY 子查询 LEFT JOIN 到骨架。根因：各趋势图一条查询会把热度接口往返从 2~4 次膨胀到 5~7 次（见「查询性能优化」第三轮）。
+
+**时区链缺陷（2026-08-08 实机复现：统计图全空但互动卡片有数）**：`generate_series(date, date, interval)` 的 date 参数被 PG 解析到 **timestamptz 重载**（datetime 类别 preferred type）——骨架列是带时区的时刻，与源表 DATE 列比较时 PG 按 session timezone 提升 DATE，骨架又受 session/JVM 时区链影响，非 UTC 时区下 LEFT JOIN **恒失配**（计数全 0，且骨架日期整体偏移一天）。**标准修复：骨架显式 `CAST(:sinceDate AS timestamp)` 走 timestamp 无时区重载 + 整体 `::date` 收口为纯 date 比较域**——与 session/JVM 时区完全无关（UTC / Asia/Shanghai / America/Los_Angeles 三时区实测窗口与计数一致）。**长期规则：涉及 generate_series 日期骨架的 SQL，参数必须显式 `CAST(... AS timestamp)`（禁裸 `:param::cast`——Hibernate 会把 `::` 吞进参数名报 No parameter named），输出统一 `::date`，禁依赖 PG 隐式重载解析；勿用 `date = timestamptz` 跨类型比较。**
+
+**规则**：
+- 窗口锚点为 `statsAsOfDate`（昨天），即 30 天窗口是 `[昨天-29, 昨天]`，不含今天——与「统计口径：截至昨日」一致
+- 序列恒为 30 个连续日期点（generate_series 骨架保证），前端无需处理"缺失日期"分支
+- 与 `newFavoriteCount30d` 等 30 天窗口总数同源但独立查询，不做互相推导——两者语义不同（求和统计 vs 按天时间序列），保持查询职责单一
+- 旧 `FavoriteRepository.countDailyFavoritesSince` 已删除（唯一调用方迁至趋势 mega-query）
 
 ### 营业稳定性
 
@@ -361,29 +416,38 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 ### 状态可信度（StatusConfidence）
 
-`VenueHeatResponse` 新增 `statusConfidence` 字段，向用户传达"当前状态信息有多可信"。枚举值：`HIGH` / `MEDIUM` / `LOW`。
+`VenueHeatResponse` 返回 `statusConfidence` 等级 + **`statusConfidenceText` 结论文案 + `statusConfidenceRuleDetail` 判定依据**（2026-08-08 新增），向用户传达"当前状态信息有多可信"。枚举值：`HIGH` / `MEDIUM` / `LOW`。**判定逻辑与文案的唯一事实源在 `VenueHeatService`，前端只渲染**（与热度公式文案 `formulaText/formulaDetail` 同模式，规则调整免发前端）。
 
-计算逻辑为二维矩阵——稳定性（suspensionCount30d）× 当前状态持续天数（currentStatusDays）：
+**三维矩阵（2026-08-08 根因修复：旧二维矩阵缺"状态类型"维度）**——稳定性（suspensionCount30d）× 当前状态持续天数（currentStatusDays）× **当前状态类型（营业中 vs 非营业）**：
+
+**营业中（OPEN）**（保留原二维矩阵语义）：
 
 | | currentStatusDays 短（≤ 7 天） | currentStatusDays 长（> 7 天） |
 |------|------|------|
 | **稳定**（suspensionCount30d == 0） | HIGH | HIGH |
 | **不稳定**（suspensionCount30d > 0） | MEDIUM | LOW |
 
-- **稳定场所恒为 HIGH**：近 30 天无暂停记录的场所，无论最近一次状态更新距今多久，可信度都是 HIGH——稳定本身就是最强的可信信号，不需要额外要求"近期更新过"
-- 不稳定场所才按 currentStatusDays 细分：状态刚切换不久（≤7 天）→ MEDIUM（近期确认过，虽然不稳定但刚有更新）；状态持续较长时间（>7 天）→ LOW（不稳定且长时间未确认，数据可能过时）
-- `currentStatusDays` 沿用「营业稳定性」中"最近一条状态日志 createdAt 距今天数"的定义，是实时事实，不受"截至昨日"窗口约束
-- **活跃上报覆盖规则**：当 `VenueHeatService` 从 `StatusReportService` 获取到 `activeCount > 0`（近 4 小时有用户报告暂停）时，`computeStatusConfidence` 直接返回 `LOW`，跳过上述矩阵——众包实时信号优先级高于历史稳定性矩阵。根因：矩阵基于历史暂停记录（管理员维护的 `Venue.status` 变迁），无法反映"此刻正在发生"的关门事件；用户现场上报正是为了弥补这一滞后
+**非营业（已停业 CEASED / 暂停营业 SUSPENDED / 装修中 RENOVATING / 休息中 CLOSED）**：
 
-### 查询性能优化（两轮：条件聚合 → 跨表合并 + refresh-ahead 缓存）
+| | currentStatusDays 短（≤ 7 天） | currentStatusDays 长（> 7 天） |
+|------|------|------|
+| **任意暂停次数** | MEDIUM（建议确认） | HIGH（状态可信） |
+
+**根因**：旧二维矩阵隐含假设"门店营业中"——"稳定门店无论多久没改状态，营业中就是可信的（不更新≠不准确）"只对 OPEN 成立。已停业门店近 30 天暂停 0 次是常态（暂停 = `toStatus = SUSPENDED` 变迁，停业门店不会产生），旧矩阵因此把"长期停业"（本应是最强的停业证据）判为 HIGH 且被前端硬编码成"稳定营业"——"已停业却显示稳定营业"（寻梦缘123 生产实证）。修复要点：
+- **非营业分支不依赖暂停次数**（该指标对非营业门店无区分力），决定可信度的是"该状态已稳定持续多久"（长期未被纠正/反向信号 = 被时间验证，最可信）与"有无反向实时信号"
+- **文案按状态类型分治**：OPEN+HIGH=「稳定营业」，非营业+HIGH=「状态可信」，非营业+MEDIUM=「建议确认」——等级与文案同处生成，杜绝语义错配
+
+**活跃上报覆盖规则**：当 `VenueHeatService` 获取到 `activeCount > 0`（近 4 小时有用户报告暂停）时，`computeStatusConfidence` 直接返回 `LOW`（文案「数据可能过时」+ "近 4 小时有 N 人报告暂停营业"），跳过上述矩阵，**对营业中与非营业状态一视同仁**——众包实时信号优先级高于历史矩阵。根因：矩阵基于历史记录（管理员维护的 `Venue.status` 变迁），无法反映"此刻正在发生"的事件；用户现场上报正是为了弥补这一滞后。
+
+### 查询性能优化（三轮：条件聚合 → 跨表合并 → 趋势合并 + refresh-ahead 缓存）
 
 根因：服务器在阿里云 ECS，数据库在 Supabase（AWS ap-south-1），单次 DB 往返约 300-500ms，**接口延迟 ≈ 串行往返次数 × 单次往返**。应用层优化的唯一抓手是压缩每个接口的串行 DB 往返数；根本解是 DB 迁近区（迁移前所有新接口设计必须以"最少往返"为第一约束）。
 
-**第一轮（同表条件聚合）**：同一张表的多个 COUNT/aggregation 用 `SUM(CASE WHEN...)` 合并为单条 SQL。**第二轮（跨表合并 + 编排优化）**：跨表单值聚合收敛为标量子查询 mega-query、两步查询合并为联查/upsert、聚合缓存 refresh-ahead。当前各接口冷启动往返数：
+**第一轮（同表条件聚合）**：同一张表的多个 COUNT/aggregation 用 `SUM(CASE WHEN...)` 合并为单条 SQL。**第二轮（跨表合并 + 编排优化）**：跨表单值聚合收敛为标量子查询 mega-query、两步查询合并为联查/upsert、聚合缓存 refresh-ahead。**第三轮（趋势合并，2026-08-08）**：多行时间序列（收藏/浏览/正负向 Reaction）合并为一条 generate_series 骨架查询（`countDailyTrends`）。当前各接口冷启动往返数：
 
 | 接口 | 往返构成 | 冷启动 | 缓存命中 |
 |------|---------|--------|---------|
-| `GET /venues/{id}/heat` | mega-query(1) + 收藏趋势(1) + 满意度(0~2，raters<3 跳过) | ~1s | ~3ms |
+| `GET /venues/{id}/heat` | mega-query(1) + 趋势 mega-query(1) + 满意度(0~2，raters<3 跳过) | ~1s | ~3ms |
 | `GET /venues/{venueId}/tags/stats` | 聚合（与详情页共享缓存，单飞回源 1 次）+ 个人状态(1) | ~0.5s | ~10ms |
 | `GET /venues/{id}` | venue 缓存 + tagAggregate 缓存 + postCount/hasMyReport 合并(1) | ~1.2s | ~0.5s |
 | `POST /venues/{id}/view` | upsert(1) | ~0.5s | — |
@@ -398,6 +462,7 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 - `VenuePostRepository.findDetailStats`：动态总数 + "我是否已上报"（EXISTS 标量子查询，个人状态实时不缓存，匿名 userId=null 时 EXISTS 恒 false）
 - `FavoriteRepository.findFavoriteVenuesByUserId`：收藏 + 场所 JPQL 联查（排序键为收藏 createdAt），取代"查收藏再批量查场所"两步
 - `VenueViewRepository.upsertView`：`INSERT ... ON CONFLICT ON CONSTRAINT ... DO NOTHING` 无条件幂等写入，取代 check-then-act（SELECT 存在性 + INSERT + catch）。**约定：有唯一约束的幂等写入一律 upsert**，check-then-act 多一次往返且存在并发窗口
+- `VenueRepository.countDailyTrends`：**趋势 mega-query（第三轮，2026-08-08）**——收藏/浏览/正负向 Reaction 四组按天时间序列合并为一条 `generate_series` 骨架 + 四个 GROUP BY 子查询 LEFT JOIN 的 SELECT。根因：各趋势图一条查询会把热度接口往返从 2~4 次膨胀到 5~7 次（趋势是"多行形态"，不参与单值标量合并，但可四条序列合并为一条多行查询）
 
 **聚合缓存（refresh-ahead，服务内嵌 Caffeine LoadingCache）**：`venueHeat`（VenueHeatService）与 `tagStats`（TagAggregateStatsService）**不走 Spring CacheManager**——`refreshAfterWrite` 要求 LoadingCache（构建时提供 loader，否则启动报 `refreshAfterWrite requires a LoadingCache`），Spring 缓存抽象无法为单个缓存注入各自的加载器。故采用与 AuthInterceptor 用户缓存相同的"服务内嵌原生 Caffeine"模式：loader 即聚合计算方法本身，获得四项语义：
 
@@ -415,12 +480,14 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 | 写操作 | 逐出动作 |
 |--------|---------|
 | score（TagInteractionService） | `tagAggregateStatsService.invalidate` + `venueHeatService.invalidate` |
-| toggle（VenueReactionService） | `venueReactionAggregateService.invalidate` + `venueHeatService.invalidate` |
+| toggle（VenueReactionService） | `venueReactionAggregateService.invalidate` + `venueHeatService.invalidate`（**2026-08-08 起经 `TransactionSynchronization.afterCommit` 延后到事务提交后执行**，见下「失效时机约束」） |
 | addFavorite / removeFavorite（FavoriteService） | `venueHeatService.invalidate`（收藏数是热度输入；幂等无写入分支不逐出） |
 | submitReport / cancelReport（StatusReportService） | `venueHeatService.invalidate`（活跃报告数是热度输出） |
 | createPost（VenuePostService） | `venueHeatService.invalidate` + `@CacheEvict(hotVenueIds, allEntries)`（动态数参与热度与热门排序） |
 | updateVenue（VenueService） | `@Caching` 逐出 venueCache + hotVenueIds + `tagAggregateStatsService.invalidate`（tags 是聚合组装依据）+ `venueHeatService.invalidate`（status/状态日志是热度输出） |
 | createVenue（VenueService） | `@CacheEvict(hotVenueIds, allEntries)`（新场所无缓存存量） |
+
+**失效时机约束（2026-08-08 确立，长期规则）**：`invalidate` 必须在**事务提交后**执行——事务内提交前失效存在竞态窗口：另一线程读到 cache miss → 回源重算 → 读不到本事务未提交数据 → 缓存陈旧值（`refreshAfterWrite(60s)` 内持续返回）。标准做法：`@Transactional` 方法内用 `TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() { afterCommit() { ...invalidate } })`。**示范实现：`VenueReactionService.toggle`（2026-08-08 已落地）；其余写路径（TagInteraction / Favorite / StatusReport / VenuePost / Dancer）仍为提交前失效，存在同款窄竞态——新代码必须按 afterCommit 模式写，存量模块改造列入待办**。
 
 **VenueLookupService（场所查找缓存层）**：独立 Bean（与 `TagAggregateStatsService` 同模式——避免 `@Cacheable` 自调用陷阱），包装 `VenueRepository.findByIdAndDeletedFalse` 和 `findHotVenueIds`。详情页并发请求（详情/标签统计/热度）查询同一场所实体——缓存后仅首个请求回源（sync=true 单飞）。**写路径不使用本缓存**：`VenueService.updateVenue` 直接调用 Repository，通过 `@CacheEvict` 即时失效 `venueCache` 和 `hotVenueIds`。
 
@@ -717,9 +784,11 @@ Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对�
 | GOOD_VIBE | 💃 | 氛围好 |
 | GOOD_MUSIC | 🎵 | 音乐棒 |
 | RECOMMEND | 👍 | 值得推荐 |
+| VALUE | ✌ | 性价比高 |
+| VIBRANT_PARTNER | ⭐ | 舞伴有活力 |
+| SWEET_PARTNER | 🌸 | 舞伴甜美 |
+| MATURE_PARTNER | 💋 | 舞伴成熟 |
 | FAIR_PRICE | 🍺 | 消费合理 |
-| YOUNG_PARTNER | 👧 | 年轻舞伴多 |
-| OLD_PARTNER | 👴 | 舞伴年龄偏成熟 |
 | CLEAN | ✨ | 干净整洁 |
 | GOOD_SERVICE | 💁 | 服务贴心 |
 | NORMAL | 😐 | 普通 |
@@ -730,7 +799,28 @@ Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对�
 | BAD_ENV | 😕 | 环境一般 |
 | SERVICE_ISSUE | 😡 | 服务问题 |
 
-2026-08 扩版（表情越多越好）：初版 9 项 → 16 项，覆盖人气/氛围/音乐/推荐/消费/舞伴/环境/服务/拥挤/排队等舞厅体验维度，按"正向 → 中性 → 负向"的展示序（影响前端 Picker 网格顺序）。
+**2026-08-08 视觉升级扩版**（用户驱动 + 根因分析先行）：
+
+1. **根因**：
+   - 旧 16 项 OpenMoji 表情在列表卡片 chip 与 Picker 弹窗中**视觉同质化严重**——单色矢量图标缺乏品牌辨识度
+   - "年轻舞伴多（👧 15岁）/ 舞伴年龄偏成熟（👴 35岁）"两个维度直接用**具体年龄数字 + 舞伴服务语境**——即使配图是 Q 版虚拟卡通，"具体未成年年龄 + 服务对象"组合的视觉暗示触碰《未成年人保护法》风险
+2. **变更**：字典 16 → 18 项
+   - **删除**：`YOUNG_PARTNER` / `OLD_PARTNER`（具体年龄 + 舞伴服务）
+   - **新增 4 个**（"风格 + 年龄组合"取代"年龄标签"）：
+     - `VIBRANT_PARTNER` ⭐ "舞伴有活力" — 替代 YOUNG_PARTNER 的"年轻/活力"语义，去掉具体年龄
+     - `SWEET_PARTNER` 🌸 "舞伴甜美" — 原"年轻少女"风格化
+     - `MATURE_PARTNER` 💋 "舞伴成熟" — 替代 OLD_PARTNER 的"成熟"语义
+     - `VALUE` ✌ "性价比高" — 新增维度，覆盖 20元/曲级别小钱场景；与 `FAIR_PRICE`（消费合理，中端语义）**不重叠**
+3. **极性**：VALUE / VIBRANT / SWEET / MATURE 均为 `Polarity.POSITIVE`（计入热度公式，与原 YOUNG/OLD_PARTNER 同族）——VALUE 偏正面（"性价比高"是好的），VIBRANT/SWEET/MATURE 是风格描述（非负向信号）
+4. **前端联动**：见前端 AGENTS.md「Reaction 快速反馈系统 → 静态字典」章节的"2026-08-08 视觉升级"纪要（emoji 字符契约保持、emoji 兜底语义、4 个新图命名 / 5 个切图覆盖清单、Picker 4×4 变 4×5 末行 2 个居中）
+5. **迁移**：`src/main/resources/db/migration/V3__reaction_code_visual_upgrade.sql`
+   - `reaction_code = 'YOUNG_PARTNER'` → `'SWEET_PARTNER'`（"年轻"维度映射到"甜美风"——年轻用户偏好甜美风格，映射误差小）
+   - `reaction_code = 'OLD_PARTNER'` → `'MATURE_PARTNER'`（语义直接对应）
+   - VIBRANT_PARTNER / VALUE 历史上不存在，无需迁移
+   - `DO $$ ... RAISE WARNING` 验证剩余 0 行（防御性，应用启动后可 grep 警告日志）
+   - **V3 已进 Flyway 链（target/classes 确认编译）**——正常重启自动跑；**但重置开发库后重新执行 `seed-dev.sql` 会再次引入旧 code**（seed 曾含 YOUNG_PARTNER 数据，已修正为 SWEET_PARTNER）——残留时手动执行下方 UPDATE 兜底
+
+6. **枚举外 code 防御（2026-08-08 线上 500 事故教训）**：`GET /venues/{id}` 因 `VenueReactionService.buildTopBadgesFromCounts` 裸 `ReactionCode.valueOf(e.getKey())` 抛 `IllegalArgumentException`（库中残留 `YOUNG_PARTNER`，枚举已删除）→ 详情页 500。**长期规则**：**从聚合/查询结果按 code 转枚举时，必须先过滤或安全转换（`ReactionCode.isValid(code)` filter 或 `valueOfSafe`），禁止裸 `Enum.valueOf`**——枚举删除/改名后，库中旧 code 仍可能被聚合查询返回，必须优雅跳过（与 `getStats` 用 `ReactionCode.values()` 遍历 + filter、`VenueHeatService` 用 `values()` 流的行为对齐）；枚举内 code 是唯一事实源，库中残留 code 是脏数据，跳过而非让接口崩溃
 
 审核安全说明：字典坚持"具体、中性描述"原则——`BAD_ENV` 未采用需求初稿中的 🤮（呕吐表情），因强烈厌恶语义与"不引入攻击性反馈"的设计原则相悖；`RECOMMEND` 的 👍 是**单一正向表达**而非 👍👎 二元组合，允许使用。新增/调整字典条目时需过审核安全过滤（参照 venuestatusreport 模块 `ReportReason` 命名规避敏感词的先例）。
 
@@ -843,6 +933,7 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 |---|---|---|---|
 | NORMAL | ✅ | ✅ | ✅ |
 | PENDING（默认，主动注册） | ❌ | ✅ | ✅ |
+| REJECTED（审核驳回，2026-08-08 新增） | ❌ | ✅ | ✅ |
 | HIDDEN（管理员下架） | ❌ | ✅ | ✅ |
 
 `DancerService.canView()` 是唯一判定点（Controller 无权限逻辑）；`getDetail` / `getTags` /
@@ -858,9 +949,10 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 | GET /dancers/{id}/tags | 软鉴权 | 标签聚合（可见性校验） |
 | POST /dancers/{id}/recognitions | 登录 | 认可 toggle（body.tags 可选 0-3 字典标签；返回 RecognizeResponse{recognized, stats}） |
 | GET /users/me/dancer-recognitions | 登录 | 我的认可记录（同舞伴只取最近一条，按认可时间倒序） |
-| GET /users/me/dancers | 登录 | 我的舞伴主页（创建人视角，含 PENDING/HIDDEN + status） |
+| GET /users/me/dancers | 登录 | 我的舞伴主页（创建人视角，含 PENDING/HIDDEN/REJECTED + status） |
+| GET /admin/dancers | 管理员 | **审核列表**（含全部状态，status 可选筛选，按提交时间倒序；LEFT JOIN qwt_users 带注册人昵称/头像） |
 | POST /admin/dancers | 管理员 | 后台创建（可信来源直通 NORMAL） |
-| PUT /admin/dancers/{id}/status | 管理员 | 状态切换（PENDING→NORMAL 认证 / HIDDEN 下架） |
+| PUT /admin/dancers/{id}/status | 管理员 | 状态切换（PENDING→NORMAL 审核通过 / PENDING→REJECTED 驳回 / NORMAL↔HIDDEN 下架恢复；body.reason 可选操作说明，**状态变化即向创建人发送站内信**，2026-08-08 新增，见「站内信（消息中心）」） |
 
 ### 聚合缓存（DancerAggregateService）
 
@@ -897,14 +989,62 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 ### 测试（DancerServiceTest）
 
 Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻舞厅关联）、可见性规则
-（NORMAL 公开 / PENDING 仅创建人+管理员 / HIDDEN 管理员可见）、认可 toggle（插入+标签 /
-取消+级联删标签 / 标签字典校验 / 超过 3 个拒绝 / 去重）、我的认可同舞伴去重、管理员认证。
+（NORMAL 公开 / PENDING/HIDDEN/REJECTED 仅创建人+管理员）、认可 toggle（插入+标签 /
+取消+级联删标签 / 标签字典校验 / 超过 3 个拒绝 / 去重）、我的认可同舞伴去重、
+管理端状态切换（通过/驳回/隐藏 → 站内信通知创建人、幂等无通知、REJECTED→HIDDEN 不通知、
+审核列表映射含注册人占位回退）。
 
 ### 种子数据
 
 `src/main/resources/db/seed-dancers-dev.sql`（依赖 seed-dev.sql 的用户/场所）：
 3 位舞伴（NORMAL×2 + PENDING×1）+ HOME/APPEARANCE 关系 + 跨日认可 + 标签，
 演示每日一记聚合、近7天排序、审核中资料不可见三种场景。
+
+---
+
+## 站内信（消息中心，message 模块，2026-08-08 新增）
+
+### 设计定位
+
+站内信是**通用消息基础设施**——承载平台对用户的**主动通知**（当前：舞伴主页审核结果，
+驳回附原因）。前端「消息中心」页面统一展示：站内信（本模块）+「我的上报」
+（venuefeedback / venuestatusreport 业务数据，管理员处理结果经原记录 handleNote 回传，
+**不复制为站内信**——数据源独立、页面统一）。
+
+### 数据模型（qwt_messages，V4 迁移）
+
+| 列 | 说明 |
+|---|---|
+| user_id | 收件人（用户级资源，查询/已读一律按此过滤，越权返回空） |
+| type | MessageType 枚举：DANCER_REVIEW（审核结果）/ DANCER_STATUS（隐藏/恢复状态变更） |
+| title / content | 标题 / 正文（TextSanitizer 清洗入库，长度 ≤100 / ≤500 与列定义一致） |
+| related_type / related_id | 业务软关联（当前 DANCER → 舞伴详情页深链；可扩展 VENUE 等），可空 |
+| read_at | 已读时间（null = 未读；未读数徽标依据） |
+
+### 接口（MessageController，均需登录）
+
+| 接口 | 说明 |
+|---|---|
+| GET /users/me/messages | 我的站内信（分页倒序，read 派生布尔） |
+| GET /users/me/messages/unread-count | 未读数（个人中心 / 首页 FAB 未读徽标） |
+| POST /users/me/messages/{id}/read | 单条标记已读（越权/已读幂等） |
+| POST /users/me/messages/read-all | 全部标记已读（前端打开消息中心即调用——标准通知中心范式） |
+
+### 写入约定
+
+- **业务模块调 `MessageService.create(...)` 发送**（无发件人概念，平台即发件人）；
+  当前唯一调用点 = `DancerService.updateStatus`（审核/隐藏/恢复，**状态实际变化时**
+  才发送，与状态流转同事务——事务失败整体回滚，通知不丢失）
+- **文案规则**：真实正式、只陈述事实（同前端「分享内容契约」）；驳回时 reason
+  经 TextSanitizer 清洗后拼入正文
+- **新增消息类型** = 枚举加值 + 前端 `types/message.ts` 联合类型/文案同步（见前端
+  AGENTS.md「消息中心」）；消息表结构无需变更（type 为 varchar 列）
+
+### 表结构演进
+
+`qwt_messages` 由 `db/migration/V4__messages.sql` 创建（Flyway 版本化迁移，见
+「Schema 演进与数据库完整性」）；`DancerStatus` 新增 `REJECTED` 为纯枚举变更
+（status 列为 varchar，无 DDL）。
 
 ---
 
@@ -1017,6 +1157,18 @@ Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(
 
 **JPQL 文本块拼接约束**：`""" + 常量 + """` 的**开定界符必须后跟换行**（Java 文本块语法：开定界符后只允许空白 + 换行），禁止写成 `""" + X + """ DESC` 之类同行拼接（编译报 "illegal text block open delimiter"）——常量的拼接处必须把后续内容折到下一行。
 
+**JPQL 共享片段（HEAT_SCORE 等）的 HQL 语法约束**（2026-08-08 启动失败根因，已修复）：
+- **根实体必须用实体名 + Java 属性名**：JPQL/HQL（`@Query` 非 native）里 `FROM` 的根实体写数据库表名（`qwt_venue_views` 等）会在启动期查询校验抛 `UnknownEntityException: Could not resolve root entity 'qwt_venue_views'`；列引用也必须用 camelCase 属性名（`vv.venueId` / `vv.viewDate`），不是 snake_case 列名。nativeQuery 查询（`findHotVenueIds` / `countHeatCounters` / `countDailyTrends` 等）不受此约束，仍写表名——两者混在同一文件，改片段前先确认查询是 JPQL 还是 native。
+- **HQL 时间量减法必须带单位后缀**：`CURRENT_DATE - 30` 会被 Hibernate 7 报 `SemanticException: Operand of - is of type 'java.lang.Integer' which is not a temporal amount`，必须写 `CURRENT_DATE - 30 day`。PostgreSQL 原生 SQL 里 `CURRENT_DATE - 30` 合法（日期减整数），nativeQuery 不受影响。
+- 启动期失败先看 `Caused by` 链，Spring Data 对每个 repository 的 @Query 在 bean 创建时逐一校验，修好一个可能暴露下一个（本次连续暴露两处：实体名 → 时间量）。
+
+**native SQL 验证（2026-08-08 线上事故教训，重要）**：`nativeQuery=true` 的查询（`findHotVenueIds` / `countHeatCounters` / `countDailyTrends` 等）**不在启动期校验**——Spring Data 对 repository @Query 的启动校验只覆盖 JPQL（HQL 解析），原生 SQL 是首次调用时懒创建、由**数据库在执行期**解析；Hibernate 7 已移除 `hibernate.query.validate_native_queries`，`hibernate.query.startup_check` 只覆盖注册到 SessionFactory 的命名查询，对 Spring Data repository 原生查询无效。叠加 Mockito 单测 mock 掉 repository，**SQL 文本错误（列引用、别名作用域、时区/类型陷阱）必然漏到运行期**（实例：`findHotVenueIds` 三层子查询重写时中间层漏投影 `heat_score`，外层 WHERE 引用不可见列 → 首请求报 `ERROR: column "heat_score" does not exist`，Position 指向外层引用处）。
+
+**长期规则**：
+1. **改写/新增 native SQL 后必须对真实数据库执行验证**——自动化载体 = `VenueHotVenueIdsSqlTest`（`@Tag("db")` + `@EnabledIfSystemProperty(run.db.tests=true)`，默认跳过不加载上下文）：`./mvnw test -Drun.db.tests=true`（需配置与启动服务相同的数据库/环境变量）；
+2. **多层子查询的列透传契约**：外层 WHERE/ORDER BY 引用的派生列（如 `heat_score`）必须在**每一层中间子查询的投影中出现**——"本层可引用下层列"不等于"外层可引用"，别名作用域逐层收窄，这是本次事故的机械根因；
+3. 单元测试继续 mock repository（SQL 正确性不归单测），但**接线契约**（参数流转、布尔传播）必须有单测锁死（见 `VenueLookupServiceTest` / `FavoriteServiceTest`）。
+
 ### 城市词表与筛选
 
 城市 / 区县按标准行政区划名（前端 `picker mode="region"` 产出，如"绍兴市"）**精确匹配**，写入与查询共用同一词表。禁止模糊匹配兜底——会掩盖写入端数据质量问题。存量脏数据走一次性清洗 SQL，不改查询逻辑。
@@ -1029,9 +1181,18 @@ Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(
 
 `VenueResponse` 新增 `isHot` 字段（boolean），标记该场所在同城市中属于热门场所。
 
-- **城市内相对排名**：按复合评分（见「复合评分排序」）在同城市场所中取 top 20%，最少 1 个。即"热门"是相对同城市其他场所而言，不是绝对分数阈值
-- **查询实现**：`VenueRepository.findHotVenueIds()` 使用 PostgreSQL 窗口函数（`ROW_NUMBER() OVER (PARTITION BY city ORDER BY score DESC)`）在库内完成城市内排名，避免在 Java 侧逐城市遍历。排序口径为 `sortWeight + 收藏数×20 + 动态数×10`（与列表查询的无坐标变体一致，不含距离项——距离是用户维度，场所热度排名不应因请求者位置变化）。Service 层通过 `VenueLookupService.getHotVenueIds()`（`@Cacheable(CACHE_HOT_VENUE_IDS)`，5min TTL）获取热门 ID 集合，缓存命中时 <1ms，未命中时执行全表窗口函数查询。场所创建/更新时通过 `@CacheEvict(allEntries=true)` 即时失效
-- **VenueResponseMapper 三参重载**：`toResponse(Venue, List<ReactionBadge> topReactions, boolean isHot)` ——在已有双参重载基础上追加 `isHot` 参数。Service 层先调用 `venueLookupService.getHotVenueIds()` 获取热门 ID 集合（`Set<Long>`），再在 `result.map()` 中传入 `hotVenueIds.contains(v.getId())`。双参重载默认 `isHot=false`，单参重载亦默认 `isHot=false`（创建/编辑回显场景无需热门标记）
+- **双条件判定（2026-08-08 确立，修复"热度指数 2 也有热门标签"的伪热门缺陷）**：
+  1. **城市内相对排名**：按行为热度（`VenueRepository.HEAT_SCORE` 镜像，见「场所热度」章节）在同城市场所中取 top 20%（CEIL 向上取整）。即"热门"首先是相对同城市其他场所而言——避免跨城市基数差异（上海普通场所的收藏量可能 > 小城市最热门场所）；
+  2. **绝对行为热度门槛**：**行为热度**（完整热度分扣除运营权重 sortWeight，SQL 内 `heat_score - sort_weight`）≥ `venue.hot.min-heat-score`（配置，唯一事实源 = `VenueHotProperties`，**默认 70** ≈ 近30天 7 次收藏 / 70 次浏览 / 14 条动态）。没有实质用户活跃的场所（纯浏览/冷启动）即使城市内排名第一也不得标记热门。
+  - **旧实现缺陷（根因）**：仅相对排名 + `GREATEST(1, CEIL(city_total×0.2))`"至少 1 家/城市"兜底——每城市第一名恒被标记热门，近30天仅 2 次浏览（热度分 2）的冷门店也带热门标签。"热门"退化为"小池塘里最不冷"。兜底已移除，排名与门槛是**与**关系。
+  - **门槛作用范围（2026-08-08 用户反馈二次修复）**：作用于**行为热度部分**（不含运营权重 sortWeight）。sortWeight 仍参与城市内排名（top 20%）与列表排序——运营推广提升曝光属其本职；但**不得伪造热门资格**：历史实现把门槛放在含 sortWeight 的完整分上，运营加权门店（sortWeight=68 等）即使行为热度仅 2（近30天 2 次浏览）也被抬过门槛，出现"详情页热度指数 2 却有热门标签"的自相矛盾（生产实证：南充市 venue 90，sortWeight 20 + 行为 2 = 22 ≥ 20 命中）。门槛移到行为部分后：热门 ⟺ 行为热度 ≥ 门槛，与详情页热度 chip 的核心行为项口径一致。满意度偏移（评分纠偏小项，需 ≥3 评价人才参与计算）不参与热门判定——热门回答"去的人多不多"（行为热度），满意度回答"口碑好不好"（热度指数展示），两语义解耦。
+- **查询实现**：`VenueRepository.findHotVenueIds()` 使用 PostgreSQL 窗口函数（`ROW_NUMBER() OVER (PARTITION BY city ORDER BY heat_score DESC, id)`）在库内完成城市内排名，避免在 Java 侧逐城市遍历。三层子查询结构：最内层 `scored` 一次性计算热度分与 `sort_weight`（公式唯一出现点，避免 SQL 内重复书写导致镜像漂移）→ 中间层窗口排名（**必须同时投影 `heat_score` 与 `sort_weight`**——外层门槛 `heat_score - sort_weight >= :minHotScore` 引用两派生列，漏投影即报 `column ... does not exist`，见「列透传契约」）→ 最外层施加"排名 ≤ top20% 且 行为热度 ≥ 门槛"双条件。排序口径为 `sortWeight + 近30天浏览×1 + 收藏×10 + 新增收藏×15 + 动态×5 + 评分×8 + 正向反馈×3`（与 `HEAT_SCORE` 一致，不含距离项——距离是用户维度，场所热度排名不应因请求者位置变化）。Service 层通过 `VenueLookupService.getHotVenueIds()`（`@Cacheable(CACHE_HOT_VENUE_IDS)`，5min TTL，门槛参数经此注入 SQL——禁止在 SQL/调用方硬编码）获取热门 ID 集合，缓存命中时 <1ms，未命中时执行全表窗口函数查询。场所创建/更新/动态发布时通过 `@CacheEvict(allEntries=true)` 即时失效（收藏增删**不**逐出——5min TTL 的滞后是接受的权衡，见「写路径缓存逐出」矩阵）
+- **消费方（2026-08-08 修复收藏列表缺热门标签；同日新增「热门」快捷筛选）**：
+  - 城市列表 `VenueService.listVenues`：`result.map()` 中传 `hotVenueIds.contains(v.getId())`；同时**支持 `hot=true` 筛选参数**（2026-08-08 新增，供前端「热门」快捷标签）——`hotOnly=true` 时经 `LIST_FILTERS` 的 `AND (:hotOnly = false OR v.id IN :hotIds)` 谓词按同一集合过滤，与城市/状态/距离/排序**正交可叠加**；热门集合在列表查询前一次获取（5min 缓存），筛选参数与 isHot 标记双职责复用；
+  - 收藏列表 `FavoriteService.getFavoriteVenues`：**同口径下发**——历史缺陷：误用 `VenueResponseMapper` 双参重载（默认 `isHot=false`），热门舞厅在"全部城市"正常展示、收藏列表却不展示。修复后与城市列表一样经 `getHotVenueIds()` 取集合后走三参重载（收藏 Tab 无筛选栏，不提供 hot 参数）；
+  - 其余场景（创建/编辑表单回显、详情页基础响应）isHot 无展示语义，恒 false。
+- **热门筛选的查询实现**：谓词挂在共享 `LIST_FILTERS` 片段（全部 7 个列表排序变体共用，含 count 查询自动继承——分页 totalElements 正确）；`hotOnly=false` 时短路恒真（默认口径=不做隐式过滤），`hotOnly=true` 且集合为空（无热门场所）时 `IN 空集` 恒假返回空页而非报错。JPQL 语法层由 `VenueListQueryHqlSyntaxTest`（ANTLR 语法解析，普通 `mvn test` 执行）守卫；参数绑定语义层由 `VenueHotVenueIdsSqlTest` 的 DB 门禁用例覆盖。
+- **VenueResponseMapper 三参重载**：`toResponse(Venue, List<ReactionBadge> topReactions, boolean isHot)` ——**任何渲染 venue-card 卡片的列表场景必须走本重载**；双参/单参重载默认 `isHot=false`，仅限"热门标记无展示语义"的场景（javadoc 已显式标注，防止再次踩双参重载的静默默认值陷阱）。
 
 ---
 
@@ -1210,6 +1371,8 @@ Object[] countPvAndUv(...);
 若投影接口的 getter 声明为遗留类型（如 `java.sql.Date getDay()`），`ProjectingMethodInterceptor` 在把 Hibernate 实际返回的 `LocalDate` 转换为声明类型时找不到匹配的 `Converter`，直接抛 `UnsupportedOperationException: Cannot project java.time.LocalDate to java.sql.Date`——**编译期不报错，只在运行时首次命中该查询才炸**，且异常堆栈指向调用方（`VenueHeatService`）而非真正的根因（Repository 投影接口）。
 
 **规则**：新增/修改任何原生查询（`nativeQuery = true`）的投影接口时，DATE/TIMESTAMP 列一律用 `java.time.LocalDate`/`java.time.LocalDateTime` 声明 getter，禁止使用 `java.sql.*` 包下的类型。JPQL 查询同理（Hibernate 对 JPQL 结果的映射规则一致）。
+
+**`List<Object[]>` / `Page<Object[]>` 多行查询的行内强转同理（2026-08-08 管理端舞伴列表 500 事故根因）**：多行查询虽允许 `Object[]` 返回，但服务层对行内 DATE/TIMESTAMP 列的强转也必须用 `java.time.*` 类型（如 `(LocalDate) row[0]` / `(LocalDateTime) row[7]`），禁止 `(java.sql.Date)` / `(java.sql.Timestamp)` 再 `.toLocalDate()`/`.toLocalDateTime()`——Hibernate 7 实际返回的就是 `java.time.*`，按遗留类型强转运行时抛 `ClassCastException`（编译期不报错，首次命中才炸）。若同时还需要把行映射为 DTO，直接整体改用投影接口更稳。
 
 
 ### 分页参数安全（强制）
@@ -1464,12 +1627,17 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 
 **核心决策（2026-08-07）**：schema 演进由 **Flyway 显式版本化迁移**管理（`classpath:db/migration/V{n}__描述.sql`，应用启动时自动按序执行），Hibernate `ddl-auto` 从 `update` 改为 **`validate`**（启动时校验实体映射与实际表结构一致，不一致即拒绝启动，fail-fast）。**废止 2026-08-05 确立的 `ddl-auto: update` 自动演进策略**——其固有缺陷（不能删列/改约束、无版本历史/回滚、多实例并发启动 DDL 竞态、schema 变更与业务代码耦合在启动路径）是生产稳定性隐患（详见下「根因分析（2026-08-07 引入 Flyway）」）。
 
+**2026-08-08 修复（Spring Boot 4 的 Flyway 集成 + 多应用共库）——两条硬依赖**：
+
+1. **pom 必须使用 `spring-boot-starter-flyway`（Boot 4 拆分模块），禁止只声明 `flyway-core`**。Spring Boot 4 将 Flyway 自动配置从 `spring-boot-autoconfigure` 拆为独立模块（`spring-boot-flyway` / `spring-boot-starter-flyway`）——仅声明 flyway-core 时 Flyway 在 classpath 上但**从不执行**（无 AutoConfiguration 消费 `spring.flyway.*`），`spring.flyway.table` 等配置全部静默失效。**2026-08-08 事故**：pom 只有 flyway-core，V2/V3 之前靠手动执行生效（幸存者偏差），V4 建新表 `qwt_messages` 被跳过 → Hibernate validate 启动失败 "missing table [qwt_messages]"。
+2. **`spring.flyway.table` 必须为应用专属历史表（`qwt_flyway_schema_history`）**。本数据库与**其他应用共用**（同一 Supabase 项目 postgres 库），默认表 `flyway_schema_history` 已被其他应用占用（历史最大版本远高于本应用 V4）——Flyway 读到其历史后把所有 ≤ 该版本的迁移视为已应用直接跳过（`out-of-order=false`）。**多应用共库场景：每个应用必须用独立历史表**，否则后接入的应用迁移永不执行。
+
 **Flyway 双路径（对已有库零破坏）**：
 
 - **已有库**（生产/开发，schema 非空）：`baseline-on-migrate: true` + `baseline-version: 1`——首次启动把 `V1__baseline_schema.sql` 标记为基线（**跳过执行**，当前库结构即基线），从 V2 起应用增量迁移。baseline 不校验存量结构，已存在表零影响。
 - **全新环境**（空库）：无 baseline，从 V1 起顺序执行，一次性建成与实体映射一致的全量结构。
 
-**新增表/列/索引/约束的唯一通道 = 新增 `V{n}` 迁移脚本**（禁止依赖 ddl-auto 自动演进；禁止在迁移脚本外手工改库）。变更流程：改实体 → 写迁移脚本（与实体声明严格一致，命名/类型/默认值/索引约束见 V1 baseline 头注释）→ 本地启动验证 → 部署时随应用自动应用。
+**新增表/列/索引/约束的唯一通道 = 新增 `V{n}` 迁移脚本**（禁止依赖 ddl-auto 自动演进；禁止在迁移脚本外手工改库）。变更流程：改实体 → 写迁移脚本（与实体声明严格一致，命名/类型/默认值/索引约束见 V1 baseline 头注释）→ 本地启动验证（观察 `DbMigrate` 日志确认迁移真实执行）→ 部署时随应用自动应用。**验证红线**：启动日志必须出现 `Migrating schema ... to version "V{n}"` 与 `Successfully applied`；迁移"配置了但从未执行"是 2026-08-08 事故的深层根因（V2/V3 靠手动执行掩盖了 Flyway 未生效）。
 
 **三条硬规则（延续 2026-08-05 事故教训，保证迁移正确性）**：
 
@@ -1548,7 +1716,7 @@ DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：
 - 兜底字段的 javadoc 必须描述真实库表状态（**禁止把"意图移除"写成"已移除"**——注释必须与库表事实一致）
 - 仅当冗余列影响可维护性时，才走「无法避免清单」的手动删列（一次性，不新增迁移脚本文件）
 - 现有遗留列：`qwt_tag_interactions.liked`（Java 零引用，NOT NULL 已由 `db/migrate-drop-liked-not-null.sql` 取消）、`qwt_users.avatar_url`（Java 零引用，可空）、`qwt_venue_feedbacks.handled`（状态机引入前遗留，实体 @Deprecated 映射兜底）
-- `catch (DataIntegrityViolationException)` **只允许吞唯一键并发竞态（SQLState 23505）**，其余完整性错误（NOT NULL/列约束/外键）必须继续抛出——参考 `TagInteractionService.isUniqueViolation()` 的判定写法；吞异常必须带具体 SQLState 判定，禁止整类静默吞掉
+- `catch (DataIntegrityViolationException)` **只允许吞唯一键并发竞态（SQLState 23505）**，其余完整性错误（NOT NULL/列约束/外键）必须继续抛出——参考 `TagInteractionService.isUniqueViolation()` 的判定写法；吞异常必须带具体 SQLState 判定，禁止整类静默吞掉。**Reaction toggle（2026-08-08 收敛）**：`VenueReactionService.toggle` 曾整类吞掉 `DataIntegrityViolationException`（venue 存在性虽已前置校验，但外键/NOT NULL 等新错误形态会同样被静默吞成"已参与"），已改为 `DbConstraintViolations.isUniqueViolation(e)` 判定、非 23505 一律上抛
 
 ---
 
@@ -1611,6 +1779,8 @@ DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：
 - 禁止允许用户自由创建 Reaction 代码——字典由后端 `ReactionCode` 枚举唯一维护，新增/调整条目需过审核安全过滤（参照 `ReportReason` 命名规避敏感词的先例）
 - 禁止对 Reaction 做周期性清零（如"每周/每月重置计数"）——采用永久保留原始记录 + 多时间窗口（今日/7天/30天/全部）实时统计的时间衰减方案，见「Reaction 快速反馈系统 → 时效性设计」根因说明
 - 禁止 Reaction 的四个时间窗口套用热度模块「统计口径：截至昨日」的排他上界约定——Reaction 是实时众包信号，窗口锚点为真实"此刻"，与热度滚动窗口是两套独立的时间语义
+- 禁止在 JPQL/HQL（`@Query` 非 native）中写数据库表名或 snake_case 列名——根实体必须用实体名、列必须用 Java 属性名（camelCase），否则启动期 `UnknownEntityException`；nativeQuery 不受此限（见「双查询拆分 → JPQL 共享片段的 HQL 语法约束」）
+- 禁止在 JPQL/HQL 中写裸整数时间量减法（`CURRENT_DATE - 30`）——必须带单位后缀 `CURRENT_DATE - 30 day`，否则 Hibernate 7 启动期抛 `SemanticException: ... not a temporal amount`（见「双查询拆分 → JPQL 共享片段的 HQL 语法约束」）
 
 ---
 
@@ -1641,6 +1811,8 @@ DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：
 | 在同一 Service 类内 `this.xxx()` 调用本类的 `@Cacheable` 方法 | 绕开 AOP 代理导致缓存静默失效；把被缓存的方法拆到独立 Bean（如 `TagAggregateStatsService`），从外部注入调用 |
 | 列表页展示的关联统计按 venueId 循环单独查询 | 收集整页 venueId 后一次 `IN (...)` 批量查询（如 `VenueReactionService.batchGetBadges`） |
 | 用 venuefeedback 做实时状态上报（误用异步审核做实时信号） | venuefeedback = 异步管理员审核流程；venuestatusreport = 实时 4h TTL 众包信号。两者共存，不可混用（见「场所状态上报」章节） |
+| JPQL 子查询根实体写数据库表名（`FROM qwt_venue_views`）/ 列写 snake_case | HQL 必须用实体名 + camelCase 属性名（`FROM VenueView vv ... vv.venueId`），启动期查询校验抛 `UnknownEntityException`；nativeQuery 才用表名 |
+| HQL 时间量减法写 `CURRENT_DATE - 30` | 带单位后缀 `CURRENT_DATE - 30 day`（Hibernate 7 裸整数报 `SemanticException: not a temporal amount`）；PostgreSQL native SQL 的日期减整数不受影响 |
 | 用户上报后修改 Venue.status | 用户上报是独立信号层，不改 Venue.status；管理员后续可决定是否据此手动更新（见「独立信号层」章节） |
 | 拦截器中对每个请求 `findById` 查库（无缓存） | 用 Caffeine 内嵌缓存（2min TTL），缓存命中 <1ms，见 `AuthInterceptor` 用户缓存模式 |
 | 在同一方法上写两个 `@CacheEvict` | Spring Boot 4.x 中 `@CacheEvict` 不可重复，编译报错；用 `@Caching(evict = { ... })` 包装 |
@@ -1675,3 +1847,4 @@ DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：
 - [ ] Entity 无 MySQL 特有 `columnDefinition`
 - [ ] 新增 Repository 方法有对应 Service 单元测试
 - [ ] `./mvnw test` 通过
+- [ ] 新增表/列：`db/migration/V{n}` 迁移脚本 + `./mvnw spring-boot:run`（dev）启动日志出现 `Migrating schema ... version "V{n}"` + `Successfully applied`（**迁移必须真实执行**——2026-08-08 教训：仅声明 flyway-core 不会触发迁移）

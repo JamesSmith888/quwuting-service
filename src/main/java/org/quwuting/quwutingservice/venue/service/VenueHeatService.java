@@ -2,13 +2,14 @@ package org.quwuting.quwutingservice.venue.service;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
-import org.quwuting.quwutingservice.favorite.repository.FavoriteRepository;
 import org.quwuting.quwutingservice.taginteraction.RatingDimensions;
 import org.quwuting.quwutingservice.taginteraction.repository.TagInteractionRepository;
 import org.quwuting.quwutingservice.venue.dto.response.FavoriteTrendPoint;
+import org.quwuting.quwutingservice.venue.dto.response.ReactionTrendPoint;
 import org.quwuting.quwutingservice.venue.dto.response.VenueHeatResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.enums.StatusConfidence;
+import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuereaction.ReactionCode;
 import org.quwuting.quwutingservice.venuestatusreport.dto.response.ActiveReportSummary;
@@ -19,9 +20,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -35,9 +34,13 @@ import java.util.concurrent.TimeUnit;
  * <ul>
  *   <li><b>Reaction 分极性</b>：仅 {@link ReactionCode.Polarity#POSITIVE} 的 code（人气旺/氛围好等）
  *       计入热度；NEGATIVE（服务问题/排队太久等）不计入公式，单独以 negativeReactionCount30d
- *       下发供详情页展示负面信号——修复"被吐槽的店热度反而更高"的语义硬伤。</li>
+ *       下发供详情页展示负面信号——修复"被吐槽的店热度反而更高"的语义硬伤。
+ *       极性 code 列表唯一事实源 = {@link ReactionCode#positiveCodeNames()}，禁止各调用方自行 filter。</li>
  *   <li><b>满意度中性偏移</b>：满意度贡献 = (满意度 − 6) × 20，6 分（及格线）为中性基准，
  *       高于 6 加分、低于 6 扣分——低分店热度真实下降，口碑差不再"靠收藏/浏览撑高"。</li>
+ *   <li><b>非负收敛（2026-08-08）</b>：满意度负偏移可能把总分拉负，热度指数语义非负，
+ *       clamp 到 0（前端详情页 chip 以 heatScore &gt; 0 为"有数据"判据，负分导致两端
+ *       展示矛盾——详情页隐藏、热度页显示负数的根因）。公式文案标注「按0计」。</li>
  *   <li><b>评分计数按 created_at</b>：ratingCount30d 与满意度窗口均按评分创建时间统计，
  *       改分不刷新窗口，防"定期改分保持计数常青"的刷分漏洞。</li>
  *   <li><b>公式文案后端下发</b>：formulaText / formulaDetail 由本服务生成（权重唯一事实源），
@@ -45,13 +48,16 @@ import java.util.concurrent.TimeUnit;
  * </ul>
  * 权重常量收敛在本类内部，后续基于真实数据分布调优，接口契约不变。
  * <p>
- * DB 往返压缩（两轮优化的最终形态）：
+ * DB 往返压缩（三轮优化的最终形态）：
  * <ol>
  *   <li>第一轮（条件聚合）：同表多指标合并，14 次 → 6 次；</li>
  *   <li>第二轮（跨表 mega-query，{@link VenueRepository#countHeatCounters}）：
- *       6 张表的全部单值计数器收敛为一条标量子查询 SELECT，回源仅
- *       mega-query(1) + 收藏趋势(1) + 满意度(0~2，raters 不足时跳过) ≈ 2~4 次往返。</li>
+ *       6 张表的全部单值计数器收敛为一条标量子查询 SELECT；</li>
+ *   <li>第三轮（趋势 mega-query，{@link VenueRepository#countDailyTrends}，2026-08-08）：
+ *       收藏/浏览/正负向 Reaction 四组按天时间序列合并为一条 generate_series + LEFT JOIN
+ *       SELECT——若各趋势图一条查询会把往返从 2~4 次膨胀到 5~7 次（见「最少往返」约束）。</li>
  * </ol>
+ * 回源 = mega-query(1) + 趋势(1) + 满意度(0~2，raters 不足时跳过) ≈ 2~4 次往返。
  * <p>
  * 缓存策略（refresh-ahead，2026-08 确立）：内嵌 Caffeine {@link LoadingCache}，
  * 不走 Spring CacheManager——refreshAfterWrite 要求 LoadingCache（构建时提供 loader），
@@ -85,24 +91,10 @@ public class VenueHeatService {
     /** 满意度中性基准（1-10 分制及格线）：高于 6 加分、低于 6 扣分——低分店热度真实下降 */
     private static final double SATISFACTION_NEUTRAL = 6.0;
 
-    /** 正向 Reaction code 列表（mega-query 参数，恒非空） */
-    private static final List<String> POSITIVE_REACTION_CODES = positiveCodes();
-    /** 负向 Reaction code 列表（mega-query 参数，恒非空） */
-    private static final List<String> NEGATIVE_REACTION_CODES = negativeCodes();
-
-    private static List<String> positiveCodes() {
-        return java.util.Arrays.stream(ReactionCode.values())
-                .filter(c -> c.getPolarity() == ReactionCode.Polarity.POSITIVE)
-                .map(Enum::name)
-                .toList();
-    }
-
-    private static List<String> negativeCodes() {
-        return java.util.Arrays.stream(ReactionCode.values())
-                .filter(c -> c.getPolarity() == ReactionCode.Polarity.NEGATIVE)
-                .map(Enum::name)
-                .toList();
-    }
+    /** 正向 Reaction code 列表（mega-query / 趋势查询参数，恒非空；唯一事实源 = ReactionCode） */
+    private static final List<String> POSITIVE_REACTION_CODES = ReactionCode.positiveCodeNames();
+    /** 负向 Reaction code 列表（mega-query / 趋势查询参数，恒非空；唯一事实源 = ReactionCode） */
+    private static final List<String> NEGATIVE_REACTION_CODES = ReactionCode.negativeCodeNames();
 
     /** 满意度最低样本量：评价人数不足此值时不展示具体分数（同时跳过满意度查询） */
     private static final long MIN_RATING_SAMPLE = 3;
@@ -110,8 +102,16 @@ public class VenueHeatService {
     /** 时间窗口：30 天 */
     private static final int WINDOW_DAYS = 30;
 
-    /** 收藏趋势图窗口：14 天——比 30 天更适合小程序小屏图表的柱状数量，且足以看出升降走势 */
-    private static final int TREND_WINDOW_DAYS = 14;
+    /**
+     * 趋势图窗口：30 天（2026-08-08 由 14 天扩展，与其余滚动指标一致）。
+     * 根因：时间范围刷选控件（略缩图）需要足够长的全量窗口才有"缩放"意义——
+     * 全量=趋势窗口，默认选中最近 14 天，用户可放大到全量或缩小到 7 天；
+     * 14 天全量无法表达"拉近看 7 天"的语义。
+     */
+    private static final int TREND_WINDOW_DAYS = 30;
+
+    /** 热度指数非负下界：满意度负偏移可能把总分拉负，负热度无展示语义（clamp 到 0） */
+    private static final long HEAT_SCORE_FLOOR = 0L;
 
     /** 状态可信度矩阵阈值：不稳定门店状态持续天数 ≤ 此值视为"近期确认过"（MEDIUM），> 此值为 LOW */
     private static final long CONFIDENCE_RECENT_DAYS = 7;
@@ -124,17 +124,14 @@ public class VenueHeatService {
 
     private final VenueLookupService venueLookupService;
     private final VenueRepository venueRepository;
-    private final FavoriteRepository favoriteRepository;
     private final TagInteractionRepository tagInteractionRepository;
     private final LoadingCache<Long, VenueHeatResponse> heatCache;
 
     public VenueHeatService(VenueLookupService venueLookupService,
                             VenueRepository venueRepository,
-                            FavoriteRepository favoriteRepository,
                             TagInteractionRepository tagInteractionRepository) {
         this.venueLookupService = venueLookupService;
         this.venueRepository = venueRepository;
-        this.favoriteRepository = favoriteRepository;
         this.tagInteractionRepository = tagInteractionRepository;
         // loader 为 computeHeat（实例方法引用）：字段必须先于缓存构建完成赋值。
         // 异步刷新默认运行在 ForkJoinPool.commonPool——热度计算不依赖请求上下文，安全。
@@ -204,8 +201,19 @@ public class VenueHeatService {
                 (int) orZero(counters.getReportcount()),
                 counters.getLatestreporttime());
 
-        // ── 收藏趋势（多行时间序列，独立 1 次往返，近14天每日新增，截至昨天） ──
-        List<FavoriteTrendPoint> favoriteTrend = computeFavoriteTrend(venueId, statsAsOfDate);
+        // ── 趋势（多行时间序列，独立 1 次往返：收藏/浏览/正负向 Reaction 四序列合一，
+        //    近30天每日、截至昨天、缺失日补零——见 VenueRepository.countDailyTrends） ──
+        List<FavoriteTrendPoint> favoriteTrend = new ArrayList<>(TREND_WINDOW_DAYS);
+        List<FavoriteTrendPoint> viewTrend = new ArrayList<>(TREND_WINDOW_DAYS);
+        List<ReactionTrendPoint> reactionTrend = new ArrayList<>(TREND_WINDOW_DAYS);
+        for (VenueRepository.DailyTrendRow row : venueRepository.countDailyTrends(
+                venueId, sinceDate30d, statsAsOfDate, sinceDate30d, today,
+                since30d, windowEnd, POSITIVE_REACTION_CODES, NEGATIVE_REACTION_CODES)) {
+            String day = row.getDay().toString();
+            favoriteTrend.add(new FavoriteTrendPoint(day, orZero(row.getFavcount())));
+            viewTrend.add(new FavoriteTrendPoint(day, orZero(row.getViewcount())));
+            reactionTrend.add(new ReactionTrendPoint(day, orZero(row.getPosreaction()), orZero(row.getNegreaction())));
+        }
 
         // ── 满意度（各维度等权均分，近30天窗口；raters 不足样本量时直接跳过查询） ──
         Double satisfactionScore = computeSatisfaction(venueId, since30d, windowEnd, ratingTotalCount);
@@ -215,21 +223,27 @@ public class VenueHeatService {
         long satisfactionComponent = satisfactionScore != null
                 ? Math.round(satisfactionOffset * WEIGHT_SATISFACTION)
                 : 0;
-        long heatScore = viewCount30d * WEIGHT_VIEW
+        long rawHeatScore = viewCount30d * WEIGHT_VIEW
                 + favoriteCount * WEIGHT_FAVORITE
                 + newFavoriteCount30d * WEIGHT_NEW_FAVORITE
                 + postCount * WEIGHT_POST
                 + ratingCount30d * WEIGHT_RATING
                 + positiveReactionCount30d * WEIGHT_REACTION
                 + satisfactionComponent;
+        // 非负收敛：满意度负偏移可能把总分拉负——热度指数语义非负（负热度无展示意义，
+        // 前端详情页 chip 以 heatScore > 0 为"有数据"判据，负分会导致两端展示矛盾，
+        // 见后端 AGENTS.md「场所热度 → 非负收敛」），clamp 到 0。
+        boolean heatClamped = rawHeatScore < HEAT_SCORE_FLOOR;
+        long heatScore = Math.max(HEAT_SCORE_FLOOR, rawHeatScore);
 
         // ── 公式文案（权重唯一事实源在后端，前端直接渲染，禁止前端硬编码权重） ──
         String satisfactionTerm = satisfactionScore != null
                 ? String.format(" + %.1f×20", satisfactionOffset)
                 : "";
+        String clampSuffix = heatClamped ? "（满意度负偏移按0计）" : "";
         String formulaText = heatScore + " = " + viewCount30d + "×1 + " + favoriteCount + "×10 + "
                 + newFavoriteCount30d + "×15 + " + postCount + "×5 + " + ratingCount30d + "×8 + "
-                + positiveReactionCount30d + "×3" + satisfactionTerm;
+                + positiveReactionCount30d + "×3" + satisfactionTerm + clampSuffix;
         String formulaDetail = "热度公式：浏览量(" + viewCount30d + ")×1 + 收藏总数(" + favoriteCount + ")×10"
                 + " + 近30天新增收藏(" + newFavoriteCount30d + ")×15 + 动态总数(" + postCount + ")×5"
                 + " + 近30天评分数(" + ratingCount30d + ")×8 + 近30天正向反馈(" + positiveReactionCount30d + ")×3"
@@ -240,22 +254,27 @@ public class VenueHeatService {
                 + (satisfactionScore != null
                         ? "当前满意度" + satisfactionScore + "分。"
                         : "当前评价人数不足3人，满意度不参与计算。")
-                + "负向反馈（如服务问题、排队太久）不计入热度，单独展示。";
+                + "负向反馈（如服务问题、排队太久）不计入热度，单独展示。"
+                + (heatClamped
+                        ? "满意度负偏移使总分低于0，热度指数按0计（不出现负热度）。"
+                        : "");
 
-        // ── 状态可信度（二维矩阵 + 活跃报告 override） ──
-        StatusConfidence confidence = computeStatusConfidence(
-                suspensionCount30d, currentStatusDays, reportSummary.activeCount() > 0);
+        // ── 状态可信度（三维判定：状态类型 × 稳定性 × 持续天数；活跃报告 override） ──
+        StatusConfidenceResult confidence = computeStatusConfidence(
+                venue.getStatus(), suspensionCount30d, currentStatusDays, reportSummary.activeCount());
 
         return new VenueHeatResponse(
                 heatScore,
                 viewCount30d, viewUv30d,
-                favoriteCount, newFavoriteCount30d, favoriteTrend,
+                favoriteCount, newFavoriteCount30d, favoriteTrend, viewTrend, reactionTrend,
                 postCount, newPostCount30d,
                 ratingCount30d, positiveReactionCount30d, negativeReactionCount30d,
                 satisfactionScore, ratingTotalCount,
                 suspensionCount30d, currentStatusDays,
                 venue.getStatus().name(), venue.getStatus().getDisplayName(),
-                confidence.name(),
+                confidence.level().name(),
+                confidence.text(),
+                confidence.ruleDetail(),
                 reportSummary.activeCount(),
                 reportSummary.latestReportTime(),
                 formulaText, formulaDetail,
@@ -265,27 +284,6 @@ public class VenueHeatService {
 
     private static long orZero(Long value) {
         return value != null ? value : 0L;
-    }
-
-    /**
-     * 计算近 {@link #TREND_WINDOW_DAYS} 天每日新增收藏数（含 asOfDate 当天，即截至昨天），
-     * 缺失的日期补零，保证图表时间轴连续。
-     */
-    private List<FavoriteTrendPoint> computeFavoriteTrend(Long venueId, LocalDate asOfDate) {
-        LocalDate sinceDate = asOfDate.minusDays(TREND_WINDOW_DAYS - 1);
-        LocalDateTime sinceDateTime = sinceDate.atStartOfDay();
-        LocalDateTime untilDateTime = asOfDate.plusDays(1).atStartOfDay();
-        Map<LocalDate, Long> countByDay = new HashMap<>();
-        for (FavoriteRepository.DailyFavoriteCount row :
-                favoriteRepository.countDailyFavoritesSince(venueId, sinceDateTime, untilDateTime)) {
-            countByDay.put(row.getDay(), row.getCount());
-        }
-        List<FavoriteTrendPoint> points = new ArrayList<>(TREND_WINDOW_DAYS);
-        for (int i = 0; i < TREND_WINDOW_DAYS; i++) {
-            LocalDate day = sinceDate.plusDays(i);
-            points.add(new FavoriteTrendPoint(day.toString(), countByDay.getOrDefault(day, 0L)));
-        }
-        return points;
     }
 
     /**
@@ -336,27 +334,66 @@ public class VenueHeatService {
     }
 
     /**
-     * 状态可信度：活跃报告 override + 二维矩阵。
+     * 状态可信度判定结果：等级 + 结论文案 + 判定依据文案。
+     * <p>
+     * 文案唯一事实源在后端（与热度公式 formulaText/formulaDetail 同模式）——前端只渲染、
+     * 禁止前端硬编码可信度文案。2026-08-08 根因修复：旧实现等级在后端、文案在前端，
+     * 前端把 HIGH 硬编码为「稳定营业」，导致"已停业（近30天暂停 0 次）→ HIGH → 稳定营业"
+     * 的语义错配（寻梦缘123 生产实证）；文案收编到后端后，等级与文案由同一处按
+     * 「等级 × 当前状态类型」同步生成，两端永远一致。
+     */
+    private record StatusConfidenceResult(StatusConfidence level, String text, String ruleDetail) {}
+
+    /**
+     * 状态可信度：活跃报告 override + 三维矩阵（状态类型 × 稳定性 × 持续天数）。
      * <p>
      * 第一优先级：有活跃用户报告（TTL 内）→ 恒为 LOW。众包实时信号的说明力高于历史统计——
-     * 有用户在现场报告"关了"，这比"30天内管理员改过N次状态"更能说明当前问题。
+     * 有用户在现场报告"关了/异常"，与展示状态不一致即"数据可能过时"（无论门店当前状态类型）。
      * <p>
-     * 二维矩阵（无活跃报告时）：
+     * 三维矩阵（无活跃报告时）。核心建模修正（2026-08-08 根因）：旧二维矩阵
+     * 「稳定性 × 持续天数」隐含假设门店处于营业中——"稳定门店无论多久没改状态，营业中就是
+     * 可信的（不更新≠不准确）"只对营业中成立；已停业/暂停等非营业门店近30天暂停 0 次是常态
+     * （暂停=SUSPENDED 变迁，停业门店不会产生），旧矩阵因此把"长期停业"（本应是最强的停业
+     * 证据）误判为 HIGH 却配上"稳定营业"文案。故判定必须按当前状态类型分治：
      * <pre>
-     *                    稳定（30d 内 0 次暂停）    不稳定（30d 内 ≥1 次暂停）
-     * 状态持续 ≤ 7天      HIGH（近期确认）          MEDIUM（状态多变）
-     * 状态持续 > 7天      HIGH（稳定营业）          LOW（需确认 / 数据可能过时）
+     * 营业中（OPEN）：
+     *   近30天 0 次暂停                → HIGH（稳定营业——不更新≠不准确）
+     *   近30天 ≥1 次暂停 + 持续 ≤7天   → MEDIUM（状态多变，近期确认过）
+     *   近30天 ≥1 次暂停 + 持续 >7天   → LOW（不稳定且久未确认，数据可能过时）
+     *
+     * 非营业（已停业/暂停营业/装修中/休息中）：
+     *   状态持续 >7天                  → HIGH（状态可信——长期未被纠正/反向信号 = 被时间验证）
+     *   状态持续 ≤7天                  → MEDIUM（建议确认——刚变更，未经时间验证，可能随时恢复或为误报）
      * </pre>
-     * 核心洞察：稳定门店无论多久没改状态，"营业中"就是可信的——不更新≠不准确。
+     * 非营业分支不依赖暂停次数：对非营业门店该指标无区分力（0 次是常态），决定可信度的是
+     * 「该状态已稳定持续多久」与「有无反向实时信号（活跃报告 override）」。等级结论（text）
+     * 与判定依据（ruleDetail）随状态类型区分生成，杜绝"已停业却显示稳定营业"类语义错配。
      */
-    private StatusConfidence computeStatusConfidence(long suspensionCount30d, long currentStatusDays,
-                                                       boolean hasActiveReports) {
-        if (hasActiveReports) {
-            return StatusConfidence.LOW;
+    private StatusConfidenceResult computeStatusConfidence(VenueStatus status, long suspensionCount30d,
+                                                           long currentStatusDays, int activeReportCount) {
+        if (activeReportCount > 0) {
+            return new StatusConfidenceResult(StatusConfidence.LOW, "数据可能过时",
+                    "判定规则：近 4 小时有 " + activeReportCount + " 人报告暂停营业，与当前状态不一致，数据可能过时。");
         }
-        if (suspensionCount30d == 0) {
-            return StatusConfidence.HIGH;
+        if (status == VenueStatus.OPEN) {
+            if (suspensionCount30d == 0) {
+                return new StatusConfidenceResult(StatusConfidence.HIGH, "稳定营业",
+                        "判定规则：近30天暂停 " + suspensionCount30d + " 次 = 稳定。稳定门店无论多久未更新状态，\"营业中\"即为可信——不更新不等于不准确。");
+            }
+            if (currentStatusDays <= CONFIDENCE_RECENT_DAYS) {
+                return new StatusConfidenceResult(StatusConfidence.MEDIUM, "状态多变",
+                        "判定规则：近30天暂停 " + suspensionCount30d + " 次 = 不稳定。不稳定门店状态持续 ≤7天为\"近期确认\"（建议关注），>7天为\"数据可能过时\"。当前属近期确认范围。");
+            }
+            return new StatusConfidenceResult(StatusConfidence.LOW, "数据可能过时",
+                    "判定规则：近30天暂停 " + suspensionCount30d + " 次 = 不稳定。不稳定门店状态持续 >7天为\"数据可能过时\"。建议出发前电话确认或提交反馈。");
         }
-        return currentStatusDays <= CONFIDENCE_RECENT_DAYS ? StatusConfidence.MEDIUM : StatusConfidence.LOW;
+        if (currentStatusDays > CONFIDENCE_RECENT_DAYS) {
+            return new StatusConfidenceResult(StatusConfidence.HIGH, "状态可信",
+                    "判定规则：当前状态（" + status.getDisplayName() + "）已持续 " + currentStatusDays
+                            + " 天，长时间未被纠正或收到反向信号，该状态信息可信。");
+        }
+        return new StatusConfidenceResult(StatusConfidence.MEDIUM, "建议确认",
+                "判定规则：当前状态（" + status.getDisplayName() + "）刚变更 " + currentStatusDays
+                        + " 天，未经时间验证，建议出发前确认最新情况。");
     }
 }

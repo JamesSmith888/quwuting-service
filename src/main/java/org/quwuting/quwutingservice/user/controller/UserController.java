@@ -17,7 +17,7 @@ import org.springframework.web.bind.annotation.RestController;
  * 用户接口（均需登录）。
  * <p>
  * GET  /user/me      — 获取当前用户最新信息（前端静默刷新用户态的唯一通道）
- * POST /user/profile — 更新昵称
+ * POST /user/profile — 更新资料（昵称 / 头像，至少一项）
  */
 @RestController
 @RequestMapping("/user")
@@ -40,7 +40,7 @@ public class UserController {
     }
 
     /**
-     * 更新当前用户昵称。
+     * 更新当前用户资料（昵称 / 头像，至少一项）。
      * POST /user/profile
      */
     @PostMapping("/profile")

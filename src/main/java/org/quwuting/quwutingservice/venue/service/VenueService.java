@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.venuereaction.ReactionCode;
 import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
@@ -48,6 +49,12 @@ public class VenueService {
 
     private static final int MAX_PAGE_SIZE = 50;
 
+    /**
+     * 列表排序/热门标记的「行为热度」公式所需的正向 Reaction code 列表
+     * （HEAT_SCORE SQL 镜像的 :positiveCodes 参数，唯一事实源 = ReactionCode）。
+     */
+    private static final List<String> POSITIVE_REACTION_CODES = ReactionCode.positiveCodeNames();
+
     private final VenueRepository venueRepository;
     private final VenuePostRepository venuePostRepository;
     private final VenueStatusLogRepository venueStatusLogRepository;
@@ -68,16 +75,14 @@ public class VenueService {
         venue.setImageUrl(req.imageUrl());
         venue.setPhotos(serializeStringList(req.photos()));
         venue.setDescription(req.description());
-        // 城市/区县必须来自前端 region picker 的标准行政区划名（与列表筛选共用同一词表，精确匹配）
+        // 城市必填、区县选填（2026-08-08 放宽：行政区非业务必填），须来自前端 region
+        // picker 的标准行政区划名（与列表筛选共用同一词表，精确匹配）
         venue.setCity(req.city().trim());
-        venue.setDistrict(req.district().trim());
+        venue.setDistrict(req.district() == null ? null : req.district().trim());
         venue.setAddress(req.address());
         venue.setLongitude(req.longitude());
         venue.setLatitude(req.latitude());
-        venue.setAfternoonOpen(req.afternoonOpen());
-        venue.setAfternoonClose(req.afternoonClose());
-        venue.setEveningOpen(req.eveningOpen());
-        venue.setEveningClose(req.eveningClose());
+        venue.setBusinessHours(serializeList(req.businessHours()));
         venue.setTickets(serializeList(req.tickets()));
         venue.setPartnerFees(serializeList(normalizePartnerFees(req.partnerFees())));
         venue.setContactPhone(req.contactPhone());
@@ -128,14 +133,11 @@ public class VenueService {
         venue.setPhotos(serializeStringList(req.photos()));
         venue.setDescription(req.description());
         venue.setCity(req.city().trim());
-        venue.setDistrict(req.district().trim());
+        venue.setDistrict(req.district() == null ? null : req.district().trim());
         venue.setAddress(req.address());
         venue.setLongitude(req.longitude());
         venue.setLatitude(req.latitude());
-        venue.setAfternoonOpen(req.afternoonOpen());
-        venue.setAfternoonClose(req.afternoonClose());
-        venue.setEveningOpen(req.eveningOpen());
-        venue.setEveningClose(req.eveningClose());
+        venue.setBusinessHours(serializeList(req.businessHours()));
         venue.setTickets(serializeList(req.tickets()));
         venue.setPartnerFees(serializeList(normalizePartnerFees(req.partnerFees())));
         venue.setContactPhone(req.contactPhone());
@@ -180,7 +182,11 @@ public class VenueService {
         boolean canManage = computeCanManage(venue);
         long postCount = detailStats.getPostcount() != null ? detailStats.getPostcount() : 0L;
         boolean hasMyStatusReport = Boolean.TRUE.equals(detailStats.getHasmyreport());
-        return new VenueDetailResponse(base, canManage, postCount, hasMyStatusReport);
+        // 营业状态字段的最近一次变更时间（详情弹窗「营业状态更新」展示源）：
+        // 取自状态日志表最新一条 createdAt，而非整个场所记录的 updatedAt——
+        // 后者任意字段编辑都刷新，语义不匹配"营业状态何时更新的"
+        return new VenueDetailResponse(base, canManage, postCount, hasMyStatusReport,
+                venueStatusLogRepository.findLatestStatusChangeTime(id));
     }
 
     /**
@@ -188,11 +194,12 @@ public class VenueService {
      * <p>
      * <b>排序由服务端在库内完成</b>（分页正确性要求排序与分页同一查询，见 AGENTS.md「复合评分排序」）：
      * <ul>
-     *   <li>recommended（默认）：复合评分 = 运营权重 + 热度（收藏 × 20 + 动态 × 10）+ 邻近加成
-     *       100/(1+距离km)——有定位时本地场所自然置顶，无定位时退化为权重 + 热度；</li>
+     *   <li>recommended（默认）：复合评分 = 行为热度（{@code VenueRepository.HEAT_SCORE} 镜像公式，
+     *       2026-08-08 与热度页统一，见「场所热度」章节）+ 邻近加成 100/(1+距离km)——有定位时
+     *       本地场所自然置顶，无定位时退化为行为热度；</li>
      *   <li>distance：纯距离升序（仅展示有坐标的场所）；无定位时降级为推荐排序
      *       （无法按距离排序，防御性回退而非空列表）；</li>
-     *   <li>heat：运营权重 + 热度（不含距离项，与「热门场所标记」同口径）；</li>
+     *   <li>heat：行为热度（不含距离项，与「热门场所标记」同口径）；</li>
      *   <li>newest：创建时间倒序。</li>
      * </ul>
      * <p>
@@ -214,12 +221,18 @@ public class VenueService {
      * <p>
      * {@code window} 控制卡片 Top Reaction 徽标的排序/筛选窗口（近7天/近30天/全部，
      * 默认近7天——舞厅强时间变化场景，列表默认展示近期热度，见 AGENTS.md「Reaction 快速反馈系统」）。
+     * <p>
+     * {@code hot}（可选，2026-08-08 新增「热门」快捷筛选）：true 时仅返回热门场所——
+     * ID ∈ {@link VenueLookupService#getHotVenueIds()}（城市内 top 20% 且 热度分 ≥ 门槛，
+     * 5min 缓存）。与城市/状态/距离等筛选正交可叠加；默认不传 = 不过滤（默认口径不做隐式过滤）。
+     * 热门集合同时用于响应 isHot 标记，一次获取两处复用。
      */
     @Transactional(readOnly = true)
     public Page<VenueResponse> listVenues(String city, String district,
                                           VenueStatus status, String keyword,
                                           Double latitude, Double longitude,
                                           String window, String sort, Double radiusKm,
+                                          Boolean hot,
                                           int page, int size) {
         String keywordPattern = StringUtils.hasText(keyword) ? "%" + keyword.trim() + "%" : null;
         page = Math.max(0, page);
@@ -229,15 +242,18 @@ public class VenueService {
         // radiusKm 为 null / ≤ 0 视为不限（前端 0 = 不限，防御性归一）
         Double radius = (radiusKm != null && radiusKm > 0) ? radiusKm : null;
         VenueSortMode sortMode = VenueSortMode.from(sort);
+        // 热门场所 ID 集合（5min 缓存）：列表查询前获取，一次取用双职责——
+        // ① hot 筛选参数（hotOnly=true 时按集合过滤）② 响应 isHot 标记
+        Set<Long> hotVenueIds = venueLookupService.getHotVenueIds();
+        boolean hotOnly = Boolean.TRUE.equals(hot);
         Page<Venue> result = dispatchListQuery(sortMode, blankToNull(city), blankToNull(district),
-                status, keywordPattern, hasCoords, latitude, longitude, radius, pageable);
+                status, keywordPattern, hasCoords, latitude, longitude, radius,
+                POSITIVE_REACTION_CODES, hotOnly, hotVenueIds, pageable);
         // 批量查询整页场所的 Top Reaction 徽标，避免逐条查询造成的 N+1（见 VenueReactionService#batchGetBadges）
         List<Long> venueIds = result.getContent().stream().map(Venue::getId).toList();
         Map<Long, List<ReactionBadge>> reactionsByVenue =
                 venueReactionService.batchGetBadges(venueIds, UserContext.getCurrentUserId(),
                         ReactionWindow.from(window));
-        // 查询城市内热门场所 ID 集合（5min 缓存，窗口函数全表计算结果变化频率极低）
-        Set<Long> hotVenueIds = venueLookupService.getHotVenueIds();
         return result.map(v -> venueResponseMapper.toResponse(
                 v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
                 hotVenueIds.contains(v.getId())));
@@ -246,29 +262,35 @@ public class VenueService {
     /**
      * 列表查询分流（排序 × 坐标 × 半径 的显式矩阵，见 {@link #listVenues} 注释）。
      * 坐标必为 null 或双非 null（hasCoords 为准），distance 数学查询只在 hasCoords=true 分支被调用。
+     * {@code hotOnly}/{@code hotIds} 透传给全部变体（热门筛选与排序正交，见 LIST_FILTERS 注释）。
      */
     private Page<Venue> dispatchListQuery(VenueSortMode sortMode, String city, String district,
                                           VenueStatus status, String keywordPattern,
                                           boolean hasCoords, Double latitude, Double longitude,
-                                          Double radius, PageRequest pageable) {
+                                          Double radius, List<String> positiveCodes,
+                                          boolean hotOnly, Set<Long> hotIds, PageRequest pageable) {
         return switch (sortMode) {
             case RECOMMENDED -> hasCoords
                     ? venueRepository.searchRanked(city, district, status, keywordPattern,
-                            latitude, longitude, radius, pageable)
-                    : venueRepository.searchRankedNoLocation(city, district, status, keywordPattern, pageable);
+                            latitude, longitude, radius, positiveCodes, hotOnly, hotIds, pageable)
+                    : venueRepository.searchRankedNoLocation(city, district, status, keywordPattern,
+                            positiveCodes, hotOnly, hotIds, pageable);
             case DISTANCE -> hasCoords
                     ? venueRepository.searchNearest(city, district, status, keywordPattern,
-                            latitude, longitude, radius, pageable)
+                            latitude, longitude, radius, hotOnly, hotIds, pageable)
                     // 无定位无法按距离排序：防御性降级为推荐排序（而非空列表/报错）
-                    : venueRepository.searchRankedNoLocation(city, district, status, keywordPattern, pageable);
+                    : venueRepository.searchRankedNoLocation(city, district, status, keywordPattern,
+                            positiveCodes, hotOnly, hotIds, pageable);
             case HEAT -> hasCoords && radius != null
                     ? venueRepository.searchHeatWithinRadius(city, district, status, keywordPattern,
-                            latitude, longitude, radius, pageable)
-                    : venueRepository.searchHeat(city, district, status, keywordPattern, pageable);
+                            latitude, longitude, radius, positiveCodes, hotOnly, hotIds, pageable)
+                    : venueRepository.searchHeat(city, district, status, keywordPattern,
+                            positiveCodes, hotOnly, hotIds, pageable);
             case NEWEST -> hasCoords && radius != null
                     ? venueRepository.searchNewestWithinRadius(city, district, status, keywordPattern,
-                            latitude, longitude, radius, pageable)
-                    : venueRepository.searchNewest(city, district, status, keywordPattern, pageable);
+                            latitude, longitude, radius, hotOnly, hotIds, pageable)
+                    : venueRepository.searchNewest(city, district, status, keywordPattern,
+                            hotOnly, hotIds, pageable);
         };
     }
 

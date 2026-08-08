@@ -12,6 +12,7 @@ import org.springframework.data.repository.query.Param;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecificationExecutor<Venue> {
 
@@ -23,6 +24,14 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     /**
      * 列表筛选条件（全部排序变体共用）。
      * 所有参数可空：null 表示不限制；keyword 需调用方预先包装为 %xx%。
+     * <p>
+     * {@code hotOnly} / {@code hotIds}（2026-08-08 新增「热门」快捷筛选）：
+     * 热门筛选 = 仅保留热门场所（ID ∈ 城市内 top 20% 且 热度分 ≥ 门槛的集合，
+     * 集合由 {@link VenueLookupService#getHotVenueIds} 计算，5min 缓存）。
+     * {@code hotOnly=false} 时谓词短路恒真（不筛选，默认口径=不做隐式过滤）；
+     * {@code hotOnly=true} 时按集合过滤，集合为空（无热门场所）则 IN 空集恒假——
+     * 返回空列表而非报错，语义正确。使用本片段的查询方法必须声明这两个参数
+     * （boolean + Set&lt;Long&gt;，禁 null，Service 层保证）。
      */
     String LIST_FILTERS = """
             WHERE v.deleted = false
@@ -33,6 +42,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                    OR v.name LIKE :keyword
                    OR v.address LIKE :keyword
                    OR v.description LIKE :keyword)
+              AND (:hotOnly = false OR v.id IN :hotIds)
             """;
 
     /**
@@ -65,13 +75,54 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             """;
 
     /**
-     * 热度分（不含距离项）：运营权重 + 收藏数 × 20 + 动态数 × 10。
-     * 与「热门场所标记」（findHotVenueIds）同口径——热度是场所属性，不随请求者位置变化。
+     * 热度分（不含距离项）：运营权重 + 「行为热度」。
+     * <p>
+     * <b>2026-08-08 口径统一</b>（修复列表/详情双口径分叉）：本片段是
+     * {@link org.quwuting.quwutingservice.venue.service.VenueHeatService#computeHeat}
+     * 热度公式的<b>行为部分</b>镜像——近30天浏览×1 + 收藏总数×10 + 近30天新增收藏×15
+     * + 动态总数×5 + 近30天评分数×8 + 近30天正向 Reaction×3。满意度偏移
+     * （口碑微调 ±80）仅参与热度页综合展示，不进列表排序——排序看"行为热度"，
+     * 口碑在热度页呈现（权重唯一事实源 = VenueHeatService，调整权重必须同步本片段
+     * 与 findHotVenueIds 双处镜像，见后端 AGENTS.md「场所热度」章节）。
+     * <p>
+     * 窗口统一锚定「截至昨日」（与 VenueHeatService 的 [since30d, today) 一致）：
+     * CURRENT_DATE 为今天（服务器时区 Asia/Shanghai，见 application.yaml），排他上界 =
+     * 今天 0 点。同一天内多次请求结果稳定，不随请求时刻漂移。
+     * <p>
+     * 注意：本片段引用 {@code :positiveCodes} 参数（正向 code 列表，来自
+     * ReactionCode.positiveCodeNames()）——使用本片段的查询方法必须声明该参数。
+     */
+    /**
+     * JPQL 子查询注意：
+     * <ul>
+     *   <li>根实体必须用<b>实体名</b>（VenueView/Favorite/...），列引用必须用<b>Java 属性名</b>
+     *       （camelCase）——本片段是 HQL 字符串（非 nativeQuery），写数据库表名（qwt_venue_views 等）
+     *       会在启动期查询校验时报 UnknownEntityException。nativeQuery 查询（如 findHotVenueIds /
+     *       countHeatCounters）不受此约束，仍用表名。</li>
+     *   <li>HQL 时间量减法必须带单位后缀（{@code CURRENT_DATE - 30 day}）；裸整数
+     *       （{@code CURRENT_DATE - 30}）会被 Hibernate 7 报 SemanticException
+     *       "Operand of - is of type 'java.lang.Integer' which is not a temporal amount"。
+     *       此处窗口 = [今天-30天, 今天)，即「截至昨日」30 天。</li>
+     * </ul>
      */
     String HEAT_SCORE = """
             (v.sortWeight
-             + (SELECT COUNT(f) FROM Favorite f WHERE f.venueId = v.id AND f.deleted = false) * 20
-             + (SELECT COUNT(p) FROM VenuePost p WHERE p.venueId = v.id AND p.deleted = false) * 10)
+             + (SELECT COUNT(*) FROM VenueView vv
+                WHERE vv.venueId = v.id AND vv.viewDate >= (CURRENT_DATE - 30 day) AND vv.viewDate < CURRENT_DATE) * 1
+             + (SELECT COUNT(*) FROM Favorite f
+                WHERE f.venueId = v.id AND f.deleted = false) * 10
+             + (SELECT COUNT(*) FROM Favorite f2
+                WHERE f2.venueId = v.id AND f2.deleted = false
+                  AND f2.createdAt >= (CURRENT_DATE - 30 day) AND f2.createdAt < CURRENT_DATE) * 15
+             + (SELECT COUNT(*) FROM VenuePost p
+                WHERE p.venueId = v.id AND p.deleted = false) * 5
+             + (SELECT COUNT(*) FROM TagInteraction ti
+                WHERE ti.venueId = v.id AND ti.deleted = false AND ti.score IS NOT NULL
+                  AND ti.createdAt >= (CURRENT_DATE - 30 day) AND ti.createdAt < CURRENT_DATE) * 8
+             + (SELECT COUNT(*) FROM VenueReaction r
+                WHERE r.venueId = v.id AND r.deleted = false
+                  AND r.reactionCode IN :positiveCodes
+                  AND r.createdAt >= (CURRENT_DATE - 30 day) AND r.createdAt < CURRENT_DATE) * 3)
             """;
 
     /**
@@ -79,8 +130,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * <p>
      * 排序公式（服务端排序保证分页正确性）：
      * <pre>
-     * score = sortWeight（运营权重）
-     *       + 收藏数 × 20 + 动态数 × 10（热度）
+     * score = 行为热度（HEAT_SCORE：运营权重 + 近30天浏览×1 + 收藏×10 + 新增收藏×15
+     *                     + 动态×5 + 评分×8 + 正向反馈×3，见 HEAT_SCORE 注释）
      *       + 100 / (1 + 距离km)（邻近加成，Haversine）
      * </pre>
      * 距离项使本地场所在全国列表中自然置顶，跨城市时衰减至可忽略，由热度与运营权重决定顺序。
@@ -95,10 +146,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             SELECT v FROM Venue v
             """ + LIST_FILTERS + RADIUS_PREDICATE + """
             ORDER BY (
-                v.sortWeight
-                + (SELECT COUNT(f) FROM Favorite f WHERE f.venueId = v.id AND f.deleted = false) * 20
-                + (SELECT COUNT(p) FROM VenuePost p WHERE p.venueId = v.id AND p.deleted = false) * 10
-                + 100.0 / (1.0 +
+            """ + HEAT_SCORE + """
+            + 100.0 / (1.0 +
             """ + DISTANCE_KM + """
             )
             ) DESC
@@ -110,6 +159,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                              @Param("latitude") double latitude,
                              @Param("longitude") double longitude,
                              @Param("radiusKm") Double radiusKm,
+                             @Param("positiveCodes") List<String> positiveCodes,
+                             @Param("hotOnly") boolean hotOnly,
+                             @Param("hotIds") Set<Long> hotIds,
                              Pageable pageable);
 
     /**
@@ -127,6 +179,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                        @Param("district") String district,
                                        @Param("status") VenueStatus status,
                                        @Param("keyword") String keyword,
+                                       @Param("positiveCodes") List<String> positiveCodes,
+                                       @Param("hotOnly") boolean hotOnly,
+                                       @Param("hotIds") Set<Long> hotIds,
                                        Pageable pageable);
 
     /**
@@ -154,6 +209,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                               @Param("latitude") double latitude,
                               @Param("longitude") double longitude,
                               @Param("radiusKm") Double radiusKm,
+                              @Param("hotOnly") boolean hotOnly,
+                              @Param("hotIds") Set<Long> hotIds,
                               Pageable pageable);
 
     /**
@@ -171,6 +228,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                            @Param("district") String district,
                            @Param("status") VenueStatus status,
                            @Param("keyword") String keyword,
+                           @Param("positiveCodes") List<String> positiveCodes,
+                           @Param("hotOnly") boolean hotOnly,
+                           @Param("hotIds") Set<Long> hotIds,
                            Pageable pageable);
 
     /**
@@ -192,6 +252,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                        @Param("latitude") double latitude,
                                        @Param("longitude") double longitude,
                                        @Param("radiusKm") Double radiusKm,
+                                       @Param("positiveCodes") List<String> positiveCodes,
+                                       @Param("hotOnly") boolean hotOnly,
+                                       @Param("hotIds") Set<Long> hotIds,
                                        Pageable pageable);
 
     /**
@@ -207,6 +270,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                              @Param("district") String district,
                              @Param("status") VenueStatus status,
                              @Param("keyword") String keyword,
+                             @Param("hotOnly") boolean hotOnly,
+                             @Param("hotIds") Set<Long> hotIds,
                              Pageable pageable);
 
     /**
@@ -226,6 +291,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                          @Param("latitude") double latitude,
                                          @Param("longitude") double longitude,
                                          @Param("radiusKm") Double radiusKm,
+                                         @Param("hotOnly") boolean hotOnly,
+                                         @Param("hotIds") Set<Long> hotIds,
                                          Pageable pageable);
 
     /** 城市维度统计：有场所的城市按场所数倒序（供前端"热门城市"选择，数据驱动、免维护） */
@@ -350,27 +417,176 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                    @Param("negativeCodes") List<String> negativeCodes);
 
     /**
-     * 查询城市内热门场所 ID 集合（热度排名前 20%，至少 1 家/城市）。
+     * 趋势单日行投影（热度页 收藏/浏览/反馈 三张趋势图的统一数据源）。
+     * getter 类型约定：day 必须声明为 java.time.LocalDate，且 SQL 侧骨架必须显式
+     * {@code ::date} 转成 DATE 列（2026-08-08 缺陷修复，见 {@link #countDailyTrends} 根因）。
      * <p>
-     * 排序口径与列表查询一致：sortWeight + 收藏数×20 + 动态数×10（不含距离项，距离是用户维度）。
-     * 使用 PostgreSQL 窗口函数 ROW_NUMBER + COUNT 实现"城市内相对排名"，
-     * 避免跨城市基数差异（上海普通场所的收藏量可能 > 小城市最热门场所）。
+     * 根因：generate_series(date, date, interval) 会被 Postgres 解析到
+     * <b>timestamptz 重载</b>（datetime 类别的 preferred type），返回列类型是
+     * timestamptz——Hibernate 6+ 对原生查询默认映射为 java.time.Instant，
+     * Spring Data 投影对具体类目标（LocalDate 非接口）无 Instant→LocalDate
+     * Converter，运行期抛 UnsupportedOperationException。骨架经 ::date 后列类型为
+     * DATE，JDBC 返回 java.sql.Date，经 Jsr310Converters.DateToLocalDateConverter
+     * 正常转换（与 {@link HeatCounters} 的 LocalDateTime 同理，勿再移除该 cast）。
+     */
+    interface DailyTrendRow {
+        java.time.LocalDate getDay();
+        /** 当日新增收藏数 */
+        Long getFavcount();
+        /** 当日浏览数（含匿名，按日计数） */
+        Long getViewcount();
+        /** 当日正向反馈数 */
+        Long getPosreaction();
+        /** 当日负向反馈数 */
+        Long getNegreaction();
+    }
+
+    /**
+     * 热度趋势 mega-query：一条 DB 往返取回 收藏/浏览/正负 Reaction 四组按天时间序列。
      * <p>
-     * 数据规模小（每城市 5~30 家），单次全表查询无性能压力。
+     * 根因（两层）：热度页三张趋势图若各自一条查询（favorites / views / reactions 各
+     * GROUP BY day），热度接口往返从 2~4 次膨胀到 5~7 次——违反「最少往返」第一约束。
+     * 四组序列都是"以 venueId 为键、按天分组的单值聚合"，收敛为一条 SELECT：
+     * generate_series 生成连续日期骨架（天然补零），四张源表 GROUP BY day 后 LEFT JOIN 骨架。
+     * <p>
+     * <b>时区链缺陷（2026-08-08 实机复现，用户反馈"统计图全空但互动卡片有数"）</b>：
+     * generate_series(date, date, interval) 的 date 参数会被 PG 解析到 <b>timestamptz 重载</b>
+     * （datetime 类别 preferred type），date→timestamptz 与 timestamptz→::date 的往返
+     * 依赖 session timezone——session/JVM 时区不一致时骨架整体偏移一天、且与源表 DATE 列
+     * LEFT JOIN 恒失配（计数全 0）。上轮修复只在 SELECT 投影加 d.day::date（解决投影类型
+     * 异常），ON 条件仍失配；本轮改为<b>骨架显式 ::timestamp 重载 + ::date 收口</b>——
+     * generate_series(timestamp, timestamp, interval) 返回无时区 timestamp，::date 直接
+     * 截断，与 session/JVM 时区<b>完全无关</b>（已用 UTC / Asia/Shanghai / America/Los_Angeles
+     * 三时区实测：窗口恒 [sinceDate, asOfDate]、计数一致）。ON 条件为 date = date 纯比较。
+     * <p>
+     * 窗口语义（与 VenueHeatService「截至昨日」口径一致）：
+     * <ul>
+     *   <li>day 骨架 = [sinceDate, asOfDate]（即 [今天-30, 昨天]，共 30 天）</li>
+     *   <li>favorites / reactions 按 created_at 过滤 [windowSince, windowUntil)（今天0点为排他上界）</li>
+     *   <li>views 按 view_date（DATE 列）过滤 [viewSince, viewUntil)</li>
+     * </ul>
+     */
+    @Query(value = """
+            SELECT d.day,
+                   COALESCE(f.cnt, 0) AS favcount,
+                   COALESCE(v.cnt, 0) AS viewcount,
+                   COALESCE(pr.cnt, 0) AS posreaction,
+                   COALESCE(nr.cnt, 0) AS negreaction
+            FROM (SELECT generate_series(CAST(:sinceDate AS timestamp), CAST(:asOfDate AS timestamp), interval '1 day')::date AS day) AS d
+            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS cnt
+                       FROM qwt_favorites
+                       WHERE venue_id = :venueId AND deleted = false
+                         AND created_at >= :windowSince AND created_at < :windowUntil
+                       GROUP BY 1) f ON f.day = d.day
+            LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
+                       FROM qwt_venue_views
+                       WHERE venue_id = :venueId
+                         AND view_date >= :viewSince AND view_date < :viewUntil
+                       GROUP BY 1) v ON v.day = d.day
+            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS cnt
+                       FROM qwt_venue_reactions
+                       WHERE venue_id = :venueId AND deleted = false
+                         AND reaction_code IN :positiveCodes
+                         AND created_at >= :windowSince AND created_at < :windowUntil
+                       GROUP BY 1) pr ON pr.day = d.day
+            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS cnt
+                       FROM qwt_venue_reactions
+                       WHERE venue_id = :venueId AND deleted = false
+                         AND reaction_code IN :negativeCodes
+                         AND created_at >= :windowSince AND created_at < :windowUntil
+                       GROUP BY 1) nr ON nr.day = d.day
+            ORDER BY d.day
+            """, nativeQuery = true)
+    List<DailyTrendRow> countDailyTrends(@Param("venueId") Long venueId,
+                                         @Param("sinceDate") java.time.LocalDate sinceDate,
+                                         @Param("asOfDate") java.time.LocalDate asOfDate,
+                                         @Param("viewSince") java.time.LocalDate viewSince,
+                                         @Param("viewUntil") java.time.LocalDate viewUntil,
+                                         @Param("windowSince") LocalDateTime windowSince,
+                                         @Param("windowUntil") LocalDateTime windowUntil,
+                                         @Param("positiveCodes") List<String> positiveCodes,
+                                         @Param("negativeCodes") List<String> negativeCodes);
+
+    /**
+     * 查询城市内热门场所 ID 集合（城市内热度排名前 20% 且 热度分 ≥ 绝对门槛）。
+     * <p>
+     * 排序口径与列表查询一致（{@link #HEAT_SCORE} 行为热度镜像，2026-08-08 与列表
+     * 排序统一——修复此前 fav×20+post×10 旧公式与热度页 heatScore 的双口径分叉）。
+     * <p>
+     * <b>双条件判定（2026-08-08 确立，修复"热度指数 2 也有热门标签"的伪热门缺陷）</b>：
+     * <ul>
+     *   <li><b>城市内相对排名</b>：ROW_NUMBER + COUNT 窗口函数取同城市 top 20%
+     *       （CEIL 向上取整）——避免跨城市基数差异（上海普通场所的收藏量可能 &gt;
+     *       小城市最热门场所）。旧实现 GREATEST(1, CEIL(...)) 的"至少 1 家/城市"
+     *       兜底已被<b>移除</b>：它使每个城市的第一名恒被标记热门，哪怕热度分仅
+     *       等于 2 次浏览——"小池塘里最不冷"被误读为"热门"；</li>
+     *   <li><b>绝对热度门槛</b>：<b>行为热度</b>（完整热度分扣除运营权重 sortWeight，
+     *       即 {@code heat_score - sort_weight}）≥ {@code :minHotScore}（配置
+     *       {@code venue.hot.min-heat-score}，唯一事实源 =
+     *       {@link org.quwuting.quwutingservice.venue.config.VenueHotProperties}）——
+     *       没有实质用户活跃的场所（纯浏览/冷启动）即使城市内排名第一也不得标记
+     *       热门。
+     *       <b>门槛为何作用于行为热度部分（2026-08-08 用户反馈根因修复）</b>：
+     *       运营权重 sortWeight 仍参与排名（top 20%）与列表排序（运营推广提升曝光属
+     *       其本职），但<b>不得伪造热门资格</b>——历史实现把门槛放在含 sortWeight
+     *       的完整分上，运营加权门店（如 sortWeight=68）即使行为热度仅 2（近30天
+     *       2 次浏览）也能被抬过门槛，出现"详情页热度指数 2 却有热门标签"的自相矛盾。
+     *       门槛改到行为部分后：热门 ⟺ 行为热度 ≥ 门槛，与详情页热度 chip 的核心
+     *       行为项口径一致（满意度偏移属评分纠偏小项，不参与热门判定，见 AGENTS.md
+     *       「热门场所标记」演进说明）。</li>
+     * </ul>
+     * 三层子查询结构：最内层 scored 一次性计算热度分与 sort_weight（公式唯一出现点），
+     * 中间层在其上做窗口排名，最外层施加排名 + 门槛双条件——避免公式在 SQL 中
+     * 重复书写导致镜像漂移。
+     * <p>
+     * <b>列透传契约（2026-08-08 线上事故根因，勿再犯）</b>：外层 WHERE 引用的
+     * {@code heat_score} / {@code sort_weight} 都是派生列——<b>中间层子查询必须把它们
+     * 选进投影</b>（{@code SELECT id, heat_score, sort_weight, ...}）。历史缺陷：
+     * 重写为三层结构时中间层只投影了 id/rn/city_total，外层 {@code WHERE ... AND heat_score >= ?}
+     * 引用了该层不可见的列 → 运行期报 {@code ERROR: column "heat_score" does not exist}。
+     * nativeQuery 不受启动期 JPQL 校验覆盖（见 AGENTS.md「native SQL 验证」），
+     * 此类错误只能在真实数据库执行时暴露。
+     * <p>
+     * 数据规模小（每城市 5~30 家），单次全表查询无性能压力；结果由
+     * VenueLookupService 缓存 5min（变化频率极低）。
+     * <p>
+     * 窗口日期在 SQL 内取 CURRENT_DATE（与 {@link #HEAT_SCORE} 一致），无参数日期依赖。
      */
     @Query(value = """
             SELECT id FROM (
-                SELECT v.id,
-                       ROW_NUMBER() OVER (PARTITION BY v.city ORDER BY (
+                SELECT id,
+                       heat_score,
+                       sort_weight,
+                       ROW_NUMBER() OVER (PARTITION BY city ORDER BY heat_score DESC, id) AS rn,
+                       COUNT(*) OVER (PARTITION BY city) AS city_total
+                FROM (
+                    SELECT v.id, v.city,
+                           v.sort_weight AS sort_weight,
                            v.sort_weight
-                           + (SELECT COUNT(*) FROM qwt_favorites f WHERE f.venue_id = v.id AND f.deleted = false) * 20
-                           + (SELECT COUNT(*) FROM qwt_venue_posts p WHERE p.venue_id = v.id AND p.deleted = false) * 10
-                       ) DESC, v.id) AS rn,
-                       COUNT(*) OVER (PARTITION BY v.city) AS city_total
-                FROM qwt_venues v
-                WHERE v.deleted = false
+                           + (SELECT COUNT(*) FROM qwt_venue_views vv
+                              WHERE vv.venue_id = v.id AND vv.view_date >= (CURRENT_DATE - 30) AND vv.view_date < CURRENT_DATE) * 1
+                           + (SELECT COUNT(*) FROM qwt_favorites f
+                              WHERE f.venue_id = v.id AND f.deleted = false) * 10
+                           + (SELECT COUNT(*) FROM qwt_favorites f2
+                              WHERE f2.venue_id = v.id AND f2.deleted = false
+                                AND f2.created_at >= (CURRENT_DATE - 30) AND f2.created_at < CURRENT_DATE) * 15
+                           + (SELECT COUNT(*) FROM qwt_venue_posts p
+                              WHERE p.venue_id = v.id AND p.deleted = false) * 5
+                           + (SELECT COUNT(*) FROM qwt_tag_interactions ti
+                              WHERE ti.venue_id = v.id AND ti.deleted = false AND ti.score IS NOT NULL
+                                AND ti.created_at >= (CURRENT_DATE - 30) AND ti.created_at < CURRENT_DATE) * 8
+                           + (SELECT COUNT(*) FROM qwt_venue_reactions r
+                              WHERE r.venue_id = v.id AND r.deleted = false
+                                AND r.reaction_code IN :positiveCodes
+                                AND r.created_at >= (CURRENT_DATE - 30) AND r.created_at < CURRENT_DATE) * 3
+                           AS heat_score
+                    FROM qwt_venues v
+                    WHERE v.deleted = false
+                ) scored
             ) ranked
-            WHERE rn <= GREATEST(1, CEIL(city_total * 0.2))
+            WHERE rn <= CEIL(city_total * 0.2)
+              AND heat_score - sort_weight >= :minHotScore
             """, nativeQuery = true)
-    List<Long> findHotVenueIds();
+    List<Long> findHotVenueIds(@Param("positiveCodes") List<String> positiveCodes,
+                               @Param("minHotScore") int minHotScore);
 }

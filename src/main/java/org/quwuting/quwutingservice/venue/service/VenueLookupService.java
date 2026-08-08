@@ -3,8 +3,10 @@ package org.quwuting.quwutingservice.venue.service;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.venue.config.VenueHotProperties;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
+import org.quwuting.quwutingservice.venuereaction.ReactionCode;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -33,6 +35,7 @@ import java.util.Set;
 public class VenueLookupService {
 
     private final VenueRepository venueRepository;
+    private final VenueHotProperties venueHotProperties;
 
     /**
      * 按 ID 查询场所（含缓存）。
@@ -53,10 +56,22 @@ public class VenueLookupService {
      * 获取热门场所 ID 集合（含缓存）。
      * 底层为窗口函数全表查询，结果变化频率极低（收藏/动态增减才影响排序），
      * 5min TTL 可大幅减少列表接口的 DB 往返次数。
+     * <p>
+     * 排序口径为行为热度镜像公式（见 {@link VenueRepository#findHotVenueIds}），
+     * 需要正向 Reaction code 列表（唯一事实源 = ReactionCode）。
+     * <p>
+     * 热门判定 = 城市内 top 20% <b>且</b> 行为热度（完整热度分扣除运营权重 sortWeight，
+     * 即 SQL 内 {@code heat_score - sort_weight}）≥ {@code venue.hot.min-heat-score}
+     * （绝对门槛，见 {@link VenueHotProperties}）——排除"小池塘里最不冷"的伪热门；
+     * 门槛参数经本方法注入 SQL（配置唯一事实源，禁止在 SQL/调用方硬编码）。
+     * sortWeight 仍参与城市内排名与列表排序（运营推广提升曝光），但不得伪造热门
+     * 资格（2026-08-08 用户反馈根因修复：运营加权门店若行为热度不足门槛，不得标记
+     * 热门——保证与详情页热度指数口径一致，见 AGENTS.md「热门场所标记」）。
      */
     @Cacheable(value = CacheConfig.CACHE_HOT_VENUE_IDS, sync = true)
     @Transactional(readOnly = true)
     public Set<Long> getHotVenueIds() {
-        return new HashSet<>(venueRepository.findHotVenueIds());
+        return new HashSet<>(venueRepository.findHotVenueIds(
+                ReactionCode.positiveCodeNames(), venueHotProperties.minHeatScore()));
     }
 }

@@ -17,10 +17,13 @@ import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionTagReposi
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVenueRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.message.enums.MessageType;
+import org.quwuting.quwutingservice.message.service.MessageService;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
@@ -32,8 +35,8 @@ import static org.mockito.Mockito.*;
 /**
  * DancerService 单元测试（Mockito，不依赖数据库）。
  * 覆盖：创建（PENDING/NORMAL/清洗/常驻舞厅关联）、可见性规则（NORMAL 公开 /
- * PENDING 仅创建人+管理员）、认可每日一记 toggle（插入+标签 / 取消+级联删标签）、
- * 标签字典校验、认可目标可见性。
+ * PENDING/HIDDEN/REJECTED 仅创建人+管理员）、认可每日一记 toggle（插入+标签 / 取消+级联删标签）、
+ * 标签字典校验、认可目标可见性、管理端状态切换（通过/驳回/隐藏 → 站内信通知创建人）。
  */
 @ExtendWith(MockitoExtension.class)
 class DancerServiceTest {
@@ -50,6 +53,8 @@ class DancerServiceTest {
     private DancerAggregateService aggregateService;
     @Mock
     private VenueLookupService venueLookupService;
+    @Mock
+    private MessageService messageService;
 
     private DancerService dancerService;
 
@@ -58,7 +63,7 @@ class DancerServiceTest {
     @BeforeEach
     void setUp() {
         dancerService = new DancerService(dancerRepository, dancerVenueRepository, recognitionRepository,
-                recognitionTagRepository, aggregateService, venueLookupService);
+                recognitionTagRepository, aggregateService, venueLookupService, messageService);
 
         dancer = new Dancer();
         dancer.setId(1L);
@@ -318,15 +323,95 @@ class DancerServiceTest {
         assertEquals(2L, result.get(1).dancerId());
     }
 
-    // ─── 管理端状态切换 ─────────────────────────────────────────────────────
+    // ─── 管理端状态切换（审核 → 站内信通知创建人） ────────────────────────────
 
     @Test
-    void updateStatus_approvesPendingDancer() {
+    void updateStatus_approvePending_sendsReviewMessage() {
         dancer.setStatus(DancerStatus.PENDING);
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
 
-        dancerService.updateStatus(1L, DancerStatus.NORMAL);
+        dancerService.updateStatus(1L, DancerStatus.NORMAL, null);
 
         verify(dancerRepository).save(argThat(d -> d.getStatus() == DancerStatus.NORMAL));
+        // 审核通过 → 站内信（DANCER_REVIEW，收件人 = 创建人，软关联 DANCER 详情页）
+        verify(messageService).create(eq(1L), eq(MessageType.DANCER_REVIEW),
+                eq("舞伴主页审核通过"), contains("已通过审核"), eq("DANCER"), eq(1L));
+    }
+
+    @Test
+    void updateStatus_rejectPending_sendsReviewMessageWithReason() {
+        dancer.setStatus(DancerStatus.PENDING);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+
+        dancerService.updateStatus(1L, DancerStatus.REJECTED, "昵称与真实身份不符");
+
+        verify(dancerRepository).save(argThat(d -> d.getStatus() == DancerStatus.REJECTED));
+        // 驳回原因随站内信回传创建人（reason 清洗后拼入正文）
+        verify(messageService).create(eq(1L), eq(MessageType.DANCER_REVIEW),
+                eq("舞伴主页未通过审核"), contains("昵称与真实身份不符"), eq("DANCER"), eq(1L));
+    }
+
+    @Test
+    void updateStatus_hideNormal_sendsStatusMessage() {
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+
+        dancerService.updateStatus(1L, DancerStatus.HIDDEN, null);
+
+        verify(dancerRepository).save(argThat(d -> d.getStatus() == DancerStatus.HIDDEN));
+        verify(messageService).create(eq(1L), eq(MessageType.DANCER_STATUS),
+                eq("舞伴主页已隐藏"), contains("已被隐藏"), eq("DANCER"), eq(1L));
+    }
+
+    @Test
+    void updateStatus_sameStatus_idempotentNoMessage() {
+        // dancer 初始 NORMAL，目标仍 NORMAL：无变更、无通知
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+
+        dancerService.updateStatus(1L, DancerStatus.NORMAL, null);
+
+        verify(dancerRepository, never()).save(any());
+        verify(messageService, never()).create(anyLong(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void updateStatus_rejectedToHidden_noMessage() {
+        dancer.setStatus(DancerStatus.REJECTED);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+
+        dancerService.updateStatus(1L, DancerStatus.HIDDEN, null);
+
+        verify(dancerRepository).save(argThat(d -> d.getStatus() == DancerStatus.HIDDEN));
+        // REJECTED → HIDDEN 属管理侧内部流转，不产生用户通知
+        verify(messageService, never()).create(anyLong(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void getDetail_rejected_hiddenFromOthers() {
+        dancer.setStatus(DancerStatus.REJECTED);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> dancerService.getDetail(1L, 99L, UserRole.USER));
+        assertEquals(1003, ex.getCode());
+    }
+
+    @Test
+    void listAdminDancers_mapsRowsWithCreatorFallback() {
+        // 管理端列表行：{id, nickname, avatar, bio, gender, city, status, created_at, u.nickname, u.avatar_url}
+        // 时间列按 Hibernate 7 native 查询映射为 java.time.LocalDateTime（禁 java.sql.Timestamp，
+        // 见后端 AGENTS.md「native 查询时间列强转约定」——2026-08-08 DancerService 修复后
+        // 本测试同步，否则 mock 类型与服务强转不一致抛 ClassCastException）。
+        var row = new Object[]{1L, "小雅", null, "舞姿优秀", "FEMALE", "杭州", "PENDING",
+                LocalDateTime.of(2026, 8, 8, 10, 0), null, null};
+        org.springframework.data.domain.Page<Object[]> page =
+                new org.springframework.data.domain.PageImpl<Object[]>(Collections.singletonList(row));
+        when(dancerRepository.findAdminPage(eq("PENDING"), any())).thenReturn(page);
+
+        var result = dancerService.listAdminDancers(DancerStatus.PENDING, 0, 20);
+
+        assertEquals(1, result.getTotalElements());
+        assertEquals("小雅", result.getContent().get(0).nickname());
+        assertEquals("未知用户", result.getContent().get(0).creatorNickname(), "注册人已删时回退占位");
+        assertEquals(DancerStatus.PENDING, result.getContent().get(0).status());
     }
 }

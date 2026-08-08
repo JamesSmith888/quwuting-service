@@ -13,7 +13,9 @@ public enum FileCategory {
     /** 场所相册图片 */
     VENUE_PHOTO("venue-photos"),
     /** 场所微信二维码 */
-    VENUE_QR("venue-qr");
+    VENUE_QR("venue-qr"),
+    /** 用户头像 */
+    USER_AVATAR("user-avatars");
 
     private final String pathPrefix;
 

@@ -7,8 +7,6 @@ import org.hibernate.annotations.ColumnDefault;
 import org.quwuting.quwutingservice.base.BaseEntity;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 
-import java.time.LocalTime;
-
 @Getter
 @Setter
 @Entity
@@ -48,7 +46,8 @@ public class Venue extends BaseEntity {
     @Column(nullable = false, length = 50)
     private String city;
 
-    @Column(nullable = false, length = 50)
+    /** 区/县，选填（2026-08-08 放宽：行政区非业务必填，城市已足够定位粒度；缺失时展示以 '' 兜底） */
+    @Column(length = 50)
     private String district;
 
     @Column(length = 200)
@@ -57,16 +56,23 @@ public class Venue extends BaseEntity {
     private Double longitude;
     private Double latitude;
 
-    // ===== 营业时间 =====
+    // ===== 营业时间（时段列表） =====
 
-    /** 下午场开始 */
-    private LocalTime afternoonOpen;
-    /** 下午场结束 */
-    private LocalTime afternoonClose;
-    /** 晚场开始 */
-    private LocalTime eveningOpen;
-    /** 晚场结束 */
-    private LocalTime eveningClose;
+    /**
+     * 营业时段列表 JSON，如
+     * [{"name":"午场","open":"13:30","close":"17:30"},{"name":"晚场","open":"18:30","close":"01:00"}]。
+     * 与 tickets/partnerFees 同模式（变长结构化列表 → JSON 数组字符串列，DTO 序列化/反序列化）。
+     * <p>
+     * 建模背景（2026-08-08，根因见 AGENTS.md「场所数据模型」）：旧固定列
+     * （afternoon_open/afternoon_close/evening_open/evening_close）把"1 个舞厅 → N 个场次"
+     * 的业务维度硬编码成 2 个固定场次，新增场次需改表结构；本列改为时段列表，
+     * 时段数量与命名自由。
+     * <p>
+     * 跨天契约：close &lt; open 表示结束于次日凌晨（如 18:30-01:00），原样存取；
+     * name 可空（空时段展示省略前缀）；open/close 必填（请求端 @Valid 校验）。
+     */
+    @Column(length = 1000)
+    private String businessHours;
 
     // ===== 消费（JSON 数组字符串，与 tags/photos 同模式） =====
 

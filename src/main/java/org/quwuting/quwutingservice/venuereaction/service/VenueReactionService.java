@@ -4,6 +4,7 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.common.db.DbConstraintViolations;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
@@ -17,6 +18,8 @@ import org.quwuting.quwutingservice.venuereaction.repository.VenueReactionReposi
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -39,7 +42,11 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class VenueReactionService {
 
-    /** 列表卡片最多展示的 Top Reaction 数（只展示 emoji，过多会挤占卡片空间） */
+    /**
+     * 列表卡片最多展示的 Top Reaction 数（只展示 emoji，过多会挤占卡片空间）。
+     * 当前用户已参与的 code 不受此限制——"点击即知是否已参与"是产品契约，
+     * 参与项必须恒在徽标内，见 {@link #buildTopBadgesFromCounts} javadoc（2026-08-08 根因修复）。
+     */
     private static final int LIST_BADGE_LIMIT = 4;
 
     private final VenueReactionRepository venueReactionRepository;
@@ -87,14 +94,28 @@ public class VenueReactionService {
                 venueReactionRepository.save(reaction);
                 reacted = true;
             } catch (DataIntegrityViolationException e) {
+                if (!DbConstraintViolations.isUniqueViolation(e)) {
+                    // 非唯一键冲突（NOT NULL/列约束/外键）不能当并发竞态吞掉——
+                    // 项目统一约定（见 AGENTS.md「并发与幂等」）：只允许吞 SQLState 23505
+                    throw e;
+                }
                 // 并发竞态：另一请求已创建今日记录，幂等视为已参与
                 log.debug("toggle Reaction 并发冲突，幂等忽略: userId={}, venueId={}, code={}", userId, venueId, code);
                 entityManager.clear();
                 reacted = true;
             }
         }
-        aggregateService.invalidate(venueId);
-        venueHeatService.invalidate(venueId); // Reaction 总量是热度公式输入之一
+        // 聚合/热度缓存失效必须延后到事务提交后（2026-08-08 根因修复）：
+        // 事务提交前失效存在竞态窗口——另一线程读到 cache miss → 回源重算 → 读不到本事务
+        // 未提交数据 → 缓存陈旧值（refreshAfterWrite 60s 内持续返回）。afterCommit 注册的
+        // 回调在提交完成后执行，此时任何回源都能读到已提交数据。
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                aggregateService.invalidate(venueId);
+                venueHeatService.invalidate(venueId); // Reaction 总量是热度公式输入之一
+            }
+        });
         return reacted;
     }
 
@@ -212,11 +233,19 @@ public class VenueReactionService {
     }
 
     /**
-     * 从三窗口计数 Map 构建 Top N 徽标（最多 {@value #LIST_BADGE_LIMIT} 个）。
+     * 从三窗口计数 Map 构建 Top N 徽标（Top {@value #LIST_BADGE_LIMIT} 个 + 当前用户已参与的 code）。
      * 排序/筛选以所选窗口（{@link ReactionWindow}）的计数为准，徽标内同时携带三个窗口计数
      * 供前端按窗口展示 + 乐观更新本地 ±1（每日一记模型下全部窗口均精确）——
      * count=0 的条目不展示：Reaction 只在有人参与后才出现，创建新 Reaction 的入口是
      * 前端 Picker 表情选择器（长按卡片 / 点击"+"触发），参见 AGENTS.md「Reaction 快速反馈系统」。
+     * <p>
+     * 2026-08-08 根因修复：**当前用户已参与的 code 不受 Top N 截断**。用户刚参与的
+     * 新 code（窗口计数常为 1）可能排在截断线以下，若被截断，列表数据重取（收藏 Tab
+     * onShow 刷新 / 下拉刷新 / Skyline 列表回收重派）后卡片上"我参与的 chip"会凭空消失，
+     * 而详情页（/reactions/stats 全量）仍在——两页不一致，根因见 AGENTS.md「跨页一致性同步」。
+     * 参与即贡献 ≥1（今日记录计入全部窗口，含任意排序窗口），追加项天然满足
+     * "count>0 才展示"不变量；已参与 code 若已在 Top N 内则不重复追加。
+     * 追加位置在 Top N 之后（前端按窗口计数重排展示，顺序无需在此维护）。
      */
     private List<ReactionBadge> buildTopBadgesFromCounts(Map<String, Long> countAllByCode,
                                                          Map<String, Long> count7dByCode,
@@ -226,18 +255,37 @@ public class VenueReactionService {
         Map<String, Long> sortKeyByCode = window == ReactionWindow.DAYS_30
                 ? count30dByCode
                 : (window == ReactionWindow.ALL ? countAllByCode : count7dByCode);
-        return sortKeyByCode.entrySet().stream()
+        List<Map.Entry<String, Long>> ranked = sortKeyByCode.entrySet().stream()
                 .filter(e -> e.getValue() != null && e.getValue() > 0)
+                // 2026-08-08 防御：枚举外的残留 code（历史数据/seed 旧值/未来误写）跳过不崩——
+                // 枚举删除/改名后，库中旧 code 仍可能被聚合查询返回（如 V3 迁移前的
+                // YOUNG_PARTNER/OLD_PARTNER）。裸 valueOf 会抛 IllegalArgumentException
+                // 让整个详情/列表接口 500。与 getStats（ReactionCode.values() 遍历 + filter）
+                // 和 VenueHeatService（values() 流）的"枚举外 code 优雅忽略"行为对齐。
+                .filter(e -> ReactionCode.isValid(e.getKey()))
                 .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
-                .limit(LIST_BADGE_LIMIT)
-                .map(e -> {
-                    ReactionCode rc = ReactionCode.valueOf(e.getKey());
-                    long countAll = countAllByCode.getOrDefault(e.getKey(), 0L);
-                    long count7d = count7dByCode.getOrDefault(e.getKey(), 0L);
-                    long count30d = count30dByCode.getOrDefault(e.getKey(), 0L);
-                    return new ReactionBadge(rc.name(), rc.getEmoji(), rc.getLabel(),
-                            countAll, count7d, count30d, myCodes.contains(rc.name()));
-                })
                 .collect(Collectors.toList());
+        // 先取 Top N（按所选窗口计数降序）
+        List<Map.Entry<String, Long>> selected =
+                new ArrayList<>(ranked.stream().limit(LIST_BADGE_LIMIT).toList());
+        // 用户已参与的 code 不受 Top N 截断（2026-08-08 根因修复，见方法 javadoc）：
+        // myCodes 中的 code 必在 ranked 内（参与 → 今日记录计入全部窗口 → 各窗口计数 ≥1），
+        // 仅在截断线以下时追加，已在 Top N 内则不重复。
+        for (Map.Entry<String, Long> e : ranked) {
+            if (myCodes.contains(e.getKey())
+                    && selected.stream().noneMatch(s -> s.getKey().equals(e.getKey()))) {
+                selected.add(e);
+            }
+        }
+        List<ReactionBadge> badges = new ArrayList<>();
+        for (Map.Entry<String, Long> e : selected) {
+            ReactionCode rc = ReactionCode.valueOf(e.getKey());
+            badges.add(new ReactionBadge(rc.name(), rc.getEmoji(), rc.getLabel(),
+                    countAllByCode.getOrDefault(e.getKey(), 0L),
+                    count7dByCode.getOrDefault(e.getKey(), 0L),
+                    count30dByCode.getOrDefault(e.getKey(), 0L),
+                    myCodes.contains(rc.name())));
+        }
+        return badges;
     }
 }

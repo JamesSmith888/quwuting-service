@@ -50,13 +50,15 @@ public class VenueController {
     }
 
     /**
-     * 查询场所列表（支持按城市/区县/状态/关键字/距离半径筛选，多排序方式 + 分页）
-     * GET /venues?city=绍兴市&keyword=爵士&latitude=30.0&longitude=120.5&sort=recommended&radiusKm=100&page=0&size=20
+     * 查询场所列表（支持按城市/区县/状态/关键字/距离半径/热门筛选，多排序方式 + 分页）
+     * GET /venues?city=绍兴市&keyword=爵士&latitude=30.0&longitude=120.5&sort=recommended&radiusKm=100&hot=true&page=0&size=20
      * latitude/longitude 可选：传入后参与邻近加成排序（用户定位，gcj02）
      * sort 可选（recommended/distance/heat/newest，默认 recommended）：
      *   推荐排序（复合评分+邻近加成）/ 距离最近 / 热度最高 / 最新收录
      * radiusKm 可选（km，>0 生效）：距离半径筛选，与排序方式正交；需配合 latitude/longitude
      * window 可选（7d/30d/all，默认 7d）：卡片 Top Reaction 徽标的统计窗口（近7天/近30天/全部）
+     * hot 可选（true 仅返回热门场所，2026-08-08 新增）：ID ∈ 城市内 top 20% 且 热度分 ≥ 门槛
+     *   的集合（见 VenueLookupService#getHotVenueIds）；与城市/状态/距离筛选正交可叠加
      */
     @GetMapping
     public ApiResponse<Page<VenueResponse>> listVenues(
@@ -69,12 +71,13 @@ public class VenueController {
             @RequestParam(required = false) String window,
             @RequestParam(required = false) String sort,
             @RequestParam(required = false) Double radiusKm,
+            @RequestParam(required = false) Boolean hot,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size
     ) {
         return ApiResponse.ok(
                 venueService.listVenues(city, district, status, keyword, latitude, longitude,
-                        window, sort, radiusKm, page, size));
+                        window, sort, radiusKm, hot, page, size));
     }
 
     /**

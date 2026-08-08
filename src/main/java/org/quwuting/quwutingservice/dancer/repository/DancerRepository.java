@@ -58,4 +58,28 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
                                   @Param("sinceToday") LocalDateTime sinceToday,
                                   @Param("since7d") LocalDateTime since7d,
                                   Pageable pageable);
+
+    /**
+     * 管理端舞伴列表（仅 ADMIN，含全部状态，按提交时间倒序——新注册优先审核）。
+     * status 可选过滤（null = 全部）。LEFT JOIN qwt_users 取注册人信息（用户已删时
+     * 昵称/头像为 null，服务层回退占位）。返回 Object[]：
+     * {id, nickname, avatar_url, bio, gender, city, status, created_at, u.nickname, u.avatar_url}。
+     * countQuery 与主查询共用状态过滤条件，保证分页总数与筛选一致。
+     */
+    @Query(value = """
+            SELECT d.id, d.nickname, d.avatar_url, d.bio, d.gender, d.city, d.status, d.created_at,
+                   u.nickname AS creator_nickname, u.avatar_url AS creator_avatar_url
+            FROM qwt_dancers d
+            LEFT JOIN qwt_users u ON u.id = d.created_by AND u.deleted = false
+            WHERE d.deleted = false
+              AND (:status IS NULL OR d.status = :status)
+            ORDER BY d.created_at DESC, d.id DESC
+            """,
+            countQuery = """
+            SELECT COUNT(*) FROM qwt_dancers d
+            WHERE d.deleted = false
+              AND (:status IS NULL OR d.status = :status)
+            """,
+            nativeQuery = true)
+    Page<Object[]> findAdminPage(@Param("status") String status, Pageable pageable);
 }

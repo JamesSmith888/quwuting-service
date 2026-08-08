@@ -25,13 +25,31 @@ public class UserService {
         return userInfoMapper.toResponse(requireUser(userId));
     }
 
-    /** 更新用户昵称（nickname 必填，请求体已校验） */
+    /**
+     * 更新用户资料（昵称 / 头像，按请求中提供的字段局部更新）。
+     * nickname 与 avatarUrl 至少提供一个，否则抛 1005 参数错误。
+     */
     @Transactional
     public UserInfoResponse updateProfile(Long userId, UpdateProfileRequest request) {
         User user = requireUser(userId);
-        user.setNickname(request.nickname().trim());
+
+        String nickname = request.nickname() == null ? null : request.nickname().trim();
+        String avatarUrl = request.avatarUrl() == null ? null : request.avatarUrl().trim();
+        if (isBlank(nickname) && isBlank(avatarUrl)) {
+            throw new BusinessException(1005, "昵称或头像至少提供一项");
+        }
+        if (!isBlank(nickname)) {
+            user.setNickname(nickname);
+        }
+        if (!isBlank(avatarUrl)) {
+            user.setAvatarUrl(avatarUrl);
+        }
         userRepository.save(user);
         return userInfoMapper.toResponse(user);
+    }
+
+    private boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     private User requireUser(Long userId) {

@@ -6,7 +6,10 @@ package org.quwuting.quwutingservice.dancer.enums;
  *   <li>{@link #PENDING}：审核中——舞伴<b>主动注册</b>后的初始状态，不对公众展示，
  *       仅创建人本人与平台管理员可见（见 {@code DancerService#getDetail} 可见性规则）；</li>
  *   <li>{@link #NORMAL}：正常——经管理员认证后对外展示（列表/详情公开可见）；</li>
- *   <li>{@link #HIDDEN}：隐藏——管理员操作（资料不实/违规/舞伴要求下架），
+ *   <li>{@link #REJECTED}：已驳回——管理员审核未通过（资料不实/不符合平台规范等），
+ *       对外与 PENDING 同等不可见，站内信通知创建人并附驳回原因（2026-08-08 新增，
+ *       见 AGENTS.md「舞伴审核与站内信」）；</li>
+ *   <li>{@link #HIDDEN}：隐藏——管理员操作（上线后被下架：资料不实/违规/舞伴要求下架），
  *       对外与 PENDING 同等不可见。</li>
  * </ul>
  * 设计根因（AGENTS.md「舞伴生态体系」章节）：舞伴是<b>真实个人</b>，禁止默认创建大量
@@ -19,5 +22,7 @@ public enum DancerStatus {
     /** 隐藏（管理员操作，不对公众展示） */
     HIDDEN,
     /** 审核中（舞伴主动注册后的初始状态） */
-    PENDING
+    PENDING,
+    /** 已驳回（管理员审核未通过，不对公众展示；站内信附驳回原因） */
+    REJECTED
 }

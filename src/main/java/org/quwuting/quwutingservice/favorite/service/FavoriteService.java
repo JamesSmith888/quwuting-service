@@ -19,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Slf4j
 @Service
@@ -37,6 +38,12 @@ public class FavoriteService {
      * DB 往返压缩：收藏与场所经 {@link FavoriteRepository#findFavoriteVenuesByUserId}
      * 联查一次取回（原"查收藏列表 + 批量查场所"两步各占一次跨洲往返），
      * 加上整页 Top Reaction 徽标的批量查询（IN 一次覆盖，避免 N+1），共 2 次往返。
+     * <p>
+     * <b>热门标记（2026-08-08 修复）</b>：收藏列表与城市列表同为 venue-card 卡片
+     * 展示场景，isHot 必须与 {@code VenueService.listVenues} 同口径下发——经
+     * {@link VenueLookupService#getHotVenueIds()}（5min 缓存）取热门 ID 集合后
+     * 传入 {@link VenueResponseMapper} 三参重载。历史缺陷：本方法误用双参重载
+     * （默认 isHot=false），导致"全部城市列表正常展示热门标签、收藏列表却不展示"。
      */
     @Transactional(readOnly = true)
     public List<VenueResponse> getFavoriteVenues(Long userId) {
@@ -48,9 +55,13 @@ public class FavoriteService {
         Map<Long, List<ReactionBadge>> reactionsByVenue =
                 venueReactionService.batchGetBadges(venues.stream().map(Venue::getId).toList(),
                         userId, ReactionWindow.DAYS_7);
+        // 热门 ID 集合为全局缓存（5min TTL），收藏列表跨城市展示同样按"城市内
+        // top 20% + 绝对门槛"标记——与城市列表同口径（见 VenueLookupService#getHotVenueIds）
+        Set<Long> hotVenueIds = venueLookupService.getHotVenueIds();
         return venues.stream()
                 .map(v -> venueResponseMapper.toResponse(
-                        v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList())))
+                        v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
+                        hotVenueIds.contains(v.getId())))
                 .toList();
     }
 

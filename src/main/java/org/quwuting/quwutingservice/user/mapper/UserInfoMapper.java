@@ -13,6 +13,7 @@ public class UserInfoMapper {
                 user.getId(),
                 user.getOpenId(),
                 user.getNickname(),
+                user.getAvatarUrl(),
                 user.getRole()
         );
     }

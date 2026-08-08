@@ -19,6 +19,11 @@ spring:
           halt_on_error: true
   # Flyway 显式版本化迁移（2026-08-07 引入，替代 ddl-auto:update 自动演进）：
   # - 迁移脚本位于 classpath:db/migration（V{n}__描述.sql），与应用启动同步执行
+  # - table 必须为 quwuting 专属历史表（qwt_flyway_schema_history）——本数据库与
+  #   其他应用共用（同一 Supabase 项目 postgres 库），共用默认表 flyway_schema_history
+  #   会让 Flyway 读到其他应用的历史（版本远高于本应用），把本应用全部迁移静默跳过
+  #   （2026-08-08 事故：V4 qwt_messages 建表迁移被跳过 → Hibernate validate 启动失败，
+  #   根因见 AGENTS.md「Schema 演进与数据库完整性 → 多应用共库」）
   # - baseline-on-migrate + baseline-version=1：已有库（schema 非空）首次启动将
   #   V1 标记为基线跳过执行（当前结构即基线），从 V2 起应用增量迁移；全新环境
   #   （空库）从 V1 顺序执行完整建表——两路径零冲突
@@ -26,6 +31,7 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+    table: qwt_flyway_schema_history
     baseline-on-migrate: true
     baseline-version: 1
   jackson:
@@ -51,6 +57,15 @@ venue:
     tags:
       - 交谊舞
       - 舞厅
+  # 「热门场所」标记（2026-08-08 确立，唯一事实源 = VenueHotProperties）：
+  # 热门 = 城市内热度排名前 20% 且 行为热度（完整热度分扣除运营权重 sortWeight）
+  # ≥ 本门槛。相对排名解决跨城市基数差异，绝对门槛排除"小池塘里最不冷"的伪热门。
+  # 门槛作用于行为热度部分（2026-08-08 用户反馈根因修复）：sortWeight 仍参与排名与
+  # 列表排序（运营推广提升曝光），但不得伪造热门资格——运营加权门店若行为热度不足
+  # 门槛（如近30天仅 2 次浏览）不得标记热门，保证与详情页热度指数口径一致。
+  # 默认 70 ≈ 近30天 7 次收藏 / 70 次浏览 / 14 条动态 的最低活跃信号。
+  hot:
+    min-heat-score: 70
 
 # 用户上报配置
 app:

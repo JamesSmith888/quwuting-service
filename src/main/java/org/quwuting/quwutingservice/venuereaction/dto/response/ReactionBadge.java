@@ -1,7 +1,8 @@
 package org.quwuting.quwutingservice.venuereaction.dto.response;
 
 /**
- * 列表卡片展示的 Reaction 徽标（Top N，按所选统计窗口热度排序）。
+ * 列表卡片展示的 Reaction 徽标（Top N，按所选统计窗口热度排序；
+ * 当前用户已参与的 code 不受 Top N 截断，见 {@code VenueReactionService#buildTopBadgesFromCounts}）。
  * <p>
  * 含 reactedByMe（个人状态）——刻意打破"列表层不含个人状态"的惯例，
  * 因为列表页 Reaction 明确要求"点击即知是否已参与"（产品规则）。

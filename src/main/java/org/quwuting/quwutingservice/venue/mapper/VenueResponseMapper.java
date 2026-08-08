@@ -3,6 +3,7 @@ package org.quwuting.quwutingservice.venue.mapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.venue.config.VenueDefaultsConfig;
+import org.quwuting.quwutingservice.venue.dto.BusinessHoursEntry;
 import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
@@ -13,8 +14,6 @@ import org.springframework.util.StringUtils;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 
-import java.time.LocalTime;
-import java.time.format.DateTimeFormatter;
 import java.util.Collections;
 import java.util.List;
 
@@ -27,14 +26,15 @@ import java.util.List;
 @RequiredArgsConstructor
 public class VenueResponseMapper {
 
-    private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
     private static final TypeReference<List<TicketEntry>> TICKET_LIST = new TypeReference<>() {};
     private static final TypeReference<List<PartnerFeeEntry>> PARTNER_FEE_LIST = new TypeReference<>() {};
+    private static final TypeReference<List<BusinessHoursEntry>> BUSINESS_HOURS_LIST = new TypeReference<>() {};
 
     private final ObjectMapper objectMapper;
     private final VenueDefaultsConfig defaultsConfig;
 
+    /** 创建/编辑表单回显场景（无徽标、无热门标记；卡片展示场景勿用，见三参重载 javadoc） */
     public VenueResponse toResponse(Venue v) {
         return toResponse(v, Collections.emptyList(), false);
     }
@@ -42,6 +42,11 @@ public class VenueResponseMapper {
     /**
      * @param topReactions Top Reaction 徽标列表，列表页/详情页批量查询后传入；
      *                      无需展示的场景（新建/编辑表单回显）传空 List
+     *
+     * <p><b>注意：本重载 isHot 恒为 false</b>——仅限"热门标记无展示语义"的场景
+     * （创建/编辑表单回显、详情页基础响应）。任何渲染 venue-card 卡片的列表场景
+     * （城市列表/收藏列表）必须调用三参重载传入真实 isHot，禁止本重载用于卡片
+     * 展示（历史缺陷：收藏列表热门标签恒不展示，见三参重载 javadoc）。
      */
     public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions) {
         return toResponse(v, topReactions, false);
@@ -49,7 +54,13 @@ public class VenueResponseMapper {
 
     /**
      * @param topReactions Top Reaction 徽标列表
-     * @param isHot        是否为城市内热门场所（列表页视觉高亮）
+     * @param isHot        是否为城市内热门场所（城市内 top 20% 且热度分 ≥ 门槛，
+     *                     见 {@link org.quwuting.quwutingservice.venue.service.VenueLookupService#getHotVenueIds}）
+     *
+     * <p><b>卡片展示场景（列表/收藏等任何渲染 venue-card 的接口）必须走本重载</b>，
+     * 传入真实 isHot——历史缺陷：FavoriteService 误用双参重载（默认 isHot=false），
+     * 导致收藏列表热门标签恒不展示。双参/单参重载仅限"热门标记无展示语义"的
+     * 场景（创建/编辑表单回显、详情页基础响应）。
      */
     public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot) {
         List<String> customTags = deserializeStringList(v.getTags(), "tags");
@@ -68,8 +79,7 @@ public class VenueResponseMapper {
                 v.getAddress(),
                 v.getLongitude(),
                 v.getLatitude(),
-                formatHours(v.getAfternoonOpen(), v.getAfternoonClose()),
-                formatHours(v.getEveningOpen(), v.getEveningClose()),
+                deserializeList(v.getBusinessHours(), BUSINESS_HOURS_LIST, "businessHours"),
                 deserializeList(v.getTickets(), TICKET_LIST, "tickets"),
                 deserializeList(v.getPartnerFees(), PARTNER_FEE_LIST, "partnerFees"),
                 v.getContactPhone(),
@@ -84,12 +94,7 @@ public class VenueResponseMapper {
         );
     }
 
-    private String formatHours(LocalTime open, LocalTime close) {
-        if (open == null || close == null) return null;
-        return open.format(TIME_FMT) + " - " + close.format(TIME_FMT);
-    }
-
-    /** 反序列化 JSON 数组字符串列（tags / photos），空数据返回空列表而非 null */
+    /** 反序列化 JSON 数组字符串列（tags / photos / businessHours），空数据返回空列表而非 null */
     private List<String> deserializeStringList(String json, String fieldName) {
         return deserializeList(json, STRING_LIST, fieldName);
     }

@@ -42,7 +42,7 @@ CREATE TABLE qwt_venues (
     photos          varchar(5000),
     description     varchar(500),
     city            varchar(50)  NOT NULL,
-    district        varchar(50)  NOT NULL,
+    district        varchar(50),
     address         varchar(200),
     longitude       double precision,
     latitude        double precision,

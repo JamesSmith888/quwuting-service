@@ -27,8 +27,22 @@ public record VenueHeatResponse(
         long favoriteCount,
         /** 近30天新增收藏 */
         long newFavoriteCount30d,
-        /** 近14天每日新增收藏趋势（收藏趋势图用），按日期升序，无收藏的日期已补零 */
+        /**
+         * 近30天每日新增收藏趋势（收藏趋势图用），按日期升序，无收藏的日期已补零。
+         * 窗口与其余滚动指标一致为 30 天（2026-08-08 由 14 天扩展——时间范围刷选
+         * 控件需要足够长的全量窗口才能"缩放"，见 AGENTS.md「时间范围刷选控件」）。
+         */
         List<FavoriteTrendPoint> favoriteTrend,
+        /**
+         * 近30天每日浏览数趋势（浏览趋势图用），结构与收藏趋势一致（date + count）。
+         * 浏览记录按日去重计数，含匿名（与 viewCount30d 同源同口径，截至昨日）。
+         */
+        List<FavoriteTrendPoint> viewTrend,
+        /**
+         * 近30天每日 Reaction 趋势（反馈趋势图用，正/负向分列），按日期升序已补零。
+         * 分极性数据直接服务 2026-08 确立的「负向不计入热度」语义——负向单独呈现。
+         */
+        List<ReactionTrendPoint> reactionTrend,
 
         // ── 动态 ──
         /** 动态总数 */
@@ -61,11 +75,24 @@ public record VenueHeatResponse(
         String currentStatusDisplay,
 
         /**
-         * 状态可信度等级（HIGH / MEDIUM / LOW），由「当前状态持续天数」与「近30天暂停次数」二维矩阵派生。
-         * 稳定门店（30天内0次暂停）恒为 HIGH；不稳定 + 状态持续 ≤7天为 MEDIUM；不稳定 + >7天为 LOW。
-         * 前端据此渲染颜色分级与行动建议，不持有判定逻辑。
+         * 状态可信度等级（HIGH / MEDIUM / LOW），由三维判定派生：
+         * 当前状态类型（营业中 vs 非营业）× 近30天暂停次数 × 状态持续天数，活跃报告 override 为 LOW。
+         * 判定逻辑与文案的唯一事实源在 VenueHeatService，前端只渲染（见 statusConfidenceText / statusConfidenceRuleDetail）。
          */
         String statusConfidence,
+        /**
+         * 状态可信度结论文案（如「稳定营业」/「状态可信」/「建议确认」/「数据可能过时」），
+         * 由后端按「等级 × 当前状态类型」生成下发——前端直接渲染，禁止前端硬编码文案
+         * （与 formulaText 同模式：文案唯一事实源在后端，规则调整免发前端）。
+         * 2026-08-08 根因修复：已停业门店近30天暂停 0 次被判 HIGH 后，前端硬编码
+         * 「稳定营业」造成"已停业却显示稳定营业"的语义错配，文案生成由此收编到后端。
+         */
+        String statusConfidenceText,
+        /**
+         * 状态可信度判定依据文案（如「判定规则：近30天暂停 0 次 = 稳定…」），
+         * 后端生成下发，营业状态详情弹窗「可信度」区块直接渲染。
+         */
+        String statusConfidenceRuleDetail,
 
         // ── 用户实时状态报告（独立信号层，不修改 Venue.status） ──
         /**

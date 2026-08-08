@@ -20,6 +20,8 @@ import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionTagReposi
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVenueRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.message.enums.MessageType;
+import org.quwuting.quwutingservice.message.service.MessageService;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -30,7 +32,6 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.sql.Date;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
@@ -70,6 +71,7 @@ public class DancerService {
     private final DancerRecognitionTagRepository recognitionTagRepository;
     private final DancerAggregateService aggregateService;
     private final VenueLookupService venueLookupService;
+    private final MessageService messageService;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -336,12 +338,84 @@ public class DancerService {
 
     // ─── 管理端 ────────────────────────────────────────────────────────────────
 
-    /** 管理员状态切换（PENDING → NORMAL 认证通过 / HIDDEN 下架；NORMAL ↔ HIDDEN 往返） */
+    /** 注册人占位文案（qwt_users 已软删时回退，审核页仍可辨识来源） */
+    private static final String CREATOR_GONE_NAME = "未知用户";
+
+    /**
+     * 管理端舞伴列表（仅 ADMIN，含全部状态，按提交时间倒序——新注册优先审核）。
+     * status 可选过滤；LEFT JOIN qwt_users 取注册人昵称/头像（用户已删时回退占位）。
+     */
+    @Transactional(readOnly = true)
+    public Page<AdminDancerResponse> listAdminDancers(DancerStatus status, int page, int size) {
+        Pageable pageable = PageRequest.of(page, Math.min(size, 50));
+        Page<Object[]> rows = dancerRepository.findAdminPage(status == null ? null : status.name(), pageable);
+        List<AdminDancerResponse> content = rows.getContent().stream()
+                .map(r -> new AdminDancerResponse(
+                        (Long) r[0], (String) r[1], (String) r[2], (String) r[3], (String) r[4], (String) r[5],
+                        DancerStatus.valueOf((String) r[6]),
+                        r[8] != null ? (String) r[8] : CREATOR_GONE_NAME, (String) r[9],
+                        (LocalDateTime) r[7]))
+                .toList();
+        return new PageImpl<>(content, pageable, rows.getTotalElements());
+    }
+
+    /**
+     * 管理员状态切换（审核通过 PENDING→NORMAL / 驳回 PENDING→REJECTED / 下架或恢复
+     * NORMAL↔HIDDEN）。状态实际变化时向创建人发送站内信（2026-08-08 新增，
+     * 见 AGENTS.md「舞伴审核与站内信」）：
+     * <ul>
+     *   <li>PENDING → NORMAL：审核通过（DANCER_REVIEW）；</li>
+     *   <li>PENDING → REJECTED：驳回，附 reason（DANCER_REVIEW）；</li>
+     *   <li>NORMAL ↔ HIDDEN：隐藏 / 恢复展示（DANCER_STATUS）。</li>
+     * </ul>
+     * 站内信收件人 = 舞伴创建人（createdBy），与状态流转同事务（通知不丢失）。
+     *
+     * @param reason 操作说明（可选）：驳回时建议填写原因，随站内信回传创建人
+     */
     @Transactional
-    public void updateStatus(Long dancerId, DancerStatus status) {
+    public void updateStatus(Long dancerId, DancerStatus status, String reason) {
         Dancer dancer = findDancerOrThrow(dancerId);
+        DancerStatus from = dancer.getStatus();
+        if (from == status) {
+            return; // 幂等：目标状态相同直接返回（无变更不产生通知）
+        }
         dancer.setStatus(status);
         dancerRepository.save(dancer);
+        notifyStatusChange(dancer, from, status, reason);
+    }
+
+    /**
+     * 状态变更站内信（与状态流转同事务，事务失败整体回滚保证通知不丢失）。
+     * 文案真实正式、只陈述事实（同「分享内容契约」——禁止营销化描述）。
+     */
+    private void notifyStatusChange(Dancer dancer, DancerStatus from, DancerStatus to, String reason) {
+        String nickname = dancer.getNickname();
+        MessageType type;
+        String title;
+        String content;
+        if (to == DancerStatus.NORMAL && from == DancerStatus.PENDING) {
+            type = MessageType.DANCER_REVIEW;
+            title = "舞伴主页审核通过";
+            content = "你的舞伴主页「" + nickname + "」已通过审核，现在可以在舞伴列表中展示。";
+        } else if (to == DancerStatus.REJECTED && from == DancerStatus.PENDING) {
+            type = MessageType.DANCER_REVIEW;
+            title = "舞伴主页未通过审核";
+            String reasonText = reason == null || reason.isBlank()
+                    ? "" : "，原因：" + TextSanitizer.sanitize(reason, 200);
+            content = "你的舞伴主页「" + nickname + "」未通过审核" + reasonText
+                    + "。可修改资料后重新提交。";
+        } else if (to == DancerStatus.HIDDEN && from != DancerStatus.REJECTED) {
+            type = MessageType.DANCER_STATUS;
+            title = "舞伴主页已隐藏";
+            content = "你的舞伴主页「" + nickname + "」已被隐藏，暂不对其他用户展示。";
+        } else if (to == DancerStatus.NORMAL && from != DancerStatus.PENDING) {
+            type = MessageType.DANCER_STATUS;
+            title = "舞伴主页已恢复展示";
+            content = "你的舞伴主页「" + nickname + "」已恢复展示。";
+        } else {
+            return; // 其余流转（REJECTED→HIDDEN 等）不产生通知
+        }
+        messageService.create(dancer.getCreatedBy(), type, title, content, "DANCER", dancer.getId());
     }
 
     // ─── 可见性 / 查询辅助 ──────────────────────────────────────────────────────
@@ -373,7 +447,7 @@ public class DancerService {
         LocalDate since = LocalDate.now().minusDays(RECENT_DAILY_DAYS - 1L);
         Map<LocalDate, Long> countByDay = new HashMap<>();
         for (Object[] row : recognitionRepository.countByDay(dancerId, since)) {
-            countByDay.put(((Date) row[0]).toLocalDate(), ((Number) row[1]).longValue());
+            countByDay.put((LocalDate) row[0], ((Number) row[1]).longValue());
         }
         List<DancerRecognitionStats.DailyRecognitionPoint> points = new ArrayList<>(RECENT_DAILY_DAYS);
         for (int i = 0; i < RECENT_DAILY_DAYS; i++) {

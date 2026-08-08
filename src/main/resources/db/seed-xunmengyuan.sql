@@ -43,7 +43,7 @@ BEGIN
   -- ── 2. 场所：寻梦缘 ──
   INSERT INTO qwt_venues (
     name, status, image_url, photos, description, city, district, address,
-    longitude, latitude, afternoon_open, afternoon_close, evening_open, evening_close,
+    longitude, latitude, business_hours,
     tickets, partner_fees, contact_phone, wechat_qr, tags, sort_weight, claimed_by,
     created_at, updated_at, deleted
   ) VALUES (
@@ -53,7 +53,7 @@ BEGIN
     '寻梦缘舞厅位于崇川区校西路京扬广场2楼（当家人对面，乘电梯直达）。场地宽敞明亮，空调开放，音响灯光专业。下午场以交谊舞、国标为主，晚场增设莎莎、拉丁等流行舞种，定期举办主题舞会。欢迎新老舞友光临，也可来电预约包场。',
     '南通市', '崇川区', '校西路当家人对面电梯京扬广场2楼',
     120.873, 32.015,
-    '14:00', '17:30', '19:00', '23:30',
+    '[{"name":"下午场","open":"14:00","close":"17:30"},{"name":"晚场","open":"19:00","close":"23:30"}]',
     '[{"label":"下午场","type":"FIXED","price":15},{"label":"晚场","type":"FIXED","price":20}]',
     '[{"unit":"MINUTE","minutes":4,"price":20},{"unit":"MINUTE","minutes":10,"price":45},{"unit":"MINUTE","minutes":60,"price":200}]',
     '13800005555', NULL,
