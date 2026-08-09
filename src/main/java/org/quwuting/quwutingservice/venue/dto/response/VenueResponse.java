@@ -39,13 +39,14 @@ public record VenueResponse(
         /** 系统默认标签子集（tags 中索引 0..N-1），前端据此区分不可删除的系统标签与可删除的自定义标签 */
         List<String> defaultTags,
         /**
-         * Top Reaction 徽标（按所选窗口计数排序，最多 4 个 + 当前用户已参与的 code 不受截断，
-         * count=0 的不展示），替代原 tagLikeCounts。
-         * 含 reactedByMe（当前用户是否已参与）——刻意打破"列表层不含个人状态"的惯例，
-         * 见 {@link org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge} 类注释。
-         * 2026-08-08 契约变更：用户已参与的 code 恒在徽标内（"点击即知是否已参与"），
-         * 即使其窗口计数低于 Top 4 截断线——截断会使用户刚参与的 chip 在列表重取后消失，
-         * 根因见 AGENTS.md「Reaction 快速反馈系统 → 跨页一致性同步」。
+         * Reaction 徽标（**完整展示**：所选窗口内所有用户点击过的全部表情，count>0 的
+         * 一个不落，按所选窗口计数降序，**不做任何截断**——需求 2026-08-09：取所有用户
+         * 的所有已点击表情全部展示），替代原 tagLikeCounts。
+         * 默认窗口 = 近7天（列表页可经 {@code window} 参数切换；收藏列表 / 详情基础响应
+         * 固定近7天）；统计口径 = 所选窗口内**所有用户**对该门店的 reaction 数据。
+         * 个人参与状态（reactedByMe）仅作徽标标注属性、不参与集合构成，见
+         * {@link org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge}
+         * 类注释与 {@code VenueReactionService#buildTopBadgesFromCounts} javadoc。
          */
         List<ReactionBadge> topReactions,
         Integer sortWeight,

@@ -43,11 +43,16 @@ import java.util.stream.Collectors;
 public class VenueReactionService {
 
     /**
-     * 列表卡片最多展示的 Top Reaction 数（只展示 emoji，过多会挤占卡片空间）。
-     * 当前用户已参与的 code 不受此限制——"点击即知是否已参与"是产品契约，
-     * 参与项必须恒在徽标内，见 {@link #buildTopBadgesFromCounts} javadoc（2026-08-08 根因修复）。
+     * topReactions 是<b>纯众包完整展示</b>：返回所选窗口（默认近7天）内<b>所有用户</b>
+     * 点击过的<b>全部</b> Reaction 表情（count>0 的 code 一个不落，按所选窗口计数降序），
+     * **不做任何截断**（需求 2026-08-09：取所有用户的所有已点击表情全部展示）。
+     * 个人参与状态（reactedByMe）只是徽标的标注属性（驱动"点击即知是否已参与"），
+     * 不参与集合构成。
+     * 前端卡片 chips 容器为 flex-wrap 换行布局，可容纳全部表情（见 venue-card.wxss
+     * .reaction-chips——2026-08-09 契约纠正：原先"Top 4 截断"（含 2026-08-08 的"当前
+     * 用户已参与 code 不受截断"豁免、以及 2026-08-09 上午的"纯 Top N"口径）均属错误
+     * 理解——需求本义是"近7天全部用户数据"的全部展示，不做截断。
      */
-    private static final int LIST_BADGE_LIMIT = 4;
 
     private final VenueReactionRepository venueReactionRepository;
     private final VenueReactionAggregateService aggregateService;
@@ -147,8 +152,11 @@ public class VenueReactionService {
     }
 
     /**
-     * 单场所的 Top Reaction 徽标（详情基础响应用），按所选窗口计数排序，count=0 的不展示。
-     * 复用聚合缓存的窗口分量，个人状态单独实时查询（成本为一次按 userId+venueId+date 的索引查询）。
+     * 单场所的 Reaction 徽标（详情基础响应用），按所选窗口计数排序，count=0 的不展示。
+     * <b>完整展示</b>：返回所选窗口（默认近7天）内所有用户点击过的全部表情，**不做任何
+     * 截断**（2026-08-09 需求定稿，见 {@link #buildTopBadgesFromCounts} javadoc）。
+     * 复用聚合缓存的窗口分量，个人状态（reactedByMe）单独实时查询（成本为一次按
+     * userId+venueId+date 的索引查询），仅作徽标标注属性、不参与集合构成。
      *
      * @param window 徽标排序/筛选窗口（null → 默认近7天）
      */
@@ -163,13 +171,14 @@ public class VenueReactionService {
     }
 
     /**
-     * 批量场所的 Top Reaction 徽标（列表页用），一次 IN 查询覆盖整页场所的
+     * 批量场所的 Reaction 徽标（列表页用），一次 IN 查询覆盖整页场所的
      * countAll + count7d + count30d（单条 SQL，见 {@link VenueReactionRepository#countByVenueIdsGroupByCode}）
      * + 一次 IN 查询覆盖个人状态。不缓存——列表页请求的场所集合每次不同（翻页/筛选变化），
      * 复用单场所聚合缓存收益低，与既有 batchGetTagLikeCounts 的"批量查询不缓存"约定一致。
      * <p>
-     * 个人状态例外说明：列表层通常不携带个人状态，但 Reaction 列表卡片明确要求"点击即知是否已参与"
-     * （产品规则），故额外做一次批量个人状态查询——仅登录用户触发，成本为一次 IN 查询。
+     * <b>完整展示</b>：集合构成 = 所选窗口（默认近7天）内所有用户点击过的全部表情
+     * （count>0 全返回，**不做任何截断**，2026-08-09 需求定稿）。个人状态（reactedByMe）
+     * 仅为徽标标注属性（驱动"点击即知是否已参与"），不参与集合构成。
      *
      * @param window 徽标排序/筛选窗口（null → 默认近7天）
      */
@@ -233,19 +242,17 @@ public class VenueReactionService {
     }
 
     /**
-     * 从三窗口计数 Map 构建 Top N 徽标（Top {@value #LIST_BADGE_LIMIT} 个 + 当前用户已参与的 code）。
+     * 从三窗口计数 Map 构建 Reaction 徽标（**全部 count>0 的 code，不做任何截断**）。
      * 排序/筛选以所选窗口（{@link ReactionWindow}）的计数为准，徽标内同时携带三个窗口计数
      * 供前端按窗口展示 + 乐观更新本地 ±1（每日一记模型下全部窗口均精确）——
      * count=0 的条目不展示：Reaction 只在有人参与后才出现，创建新 Reaction 的入口是
      * 前端 Picker 表情选择器（长按卡片 / 点击"+"触发），参见 AGENTS.md「Reaction 快速反馈系统」。
      * <p>
-     * 2026-08-08 根因修复：**当前用户已参与的 code 不受 Top N 截断**。用户刚参与的
-     * 新 code（窗口计数常为 1）可能排在截断线以下，若被截断，列表数据重取（收藏 Tab
-     * onShow 刷新 / 下拉刷新 / Skyline 列表回收重派）后卡片上"我参与的 chip"会凭空消失，
-     * 而详情页（/reactions/stats 全量）仍在——两页不一致，根因见 AGENTS.md「跨页一致性同步」。
-     * 参与即贡献 ≥1（今日记录计入全部窗口，含任意排序窗口），追加项天然满足
-     * "count>0 才展示"不变量；已参与 code 若已在 Top N 内则不重复追加。
-     * 追加位置在 Top N 之后（前端按窗口计数重排展示，顺序无需在此维护）。
+     * <b>完整展示（2026-08-09 需求定稿）</b>：返回所选窗口内<b>所有用户</b>点击过的<b>全部</b>
+     * 表情（不做 Top N 截断）。历史口径演进：① 2026-08-08 "当前用户已参与的 code 不受
+     * Top 4 截断"豁免——把交互层状态保持问题错误上升为数据契约变更；② 2026-08-09 上午
+     * "纯 Top N"——仍保留 4 条截断，同样违背"全部展示"需求本义。两版均已撤销。
+     * 个人参与状态（myCodes）只作徽标标注属性（reactedByMe），不参与集合构成。
      */
     private List<ReactionBadge> buildTopBadgesFromCounts(Map<String, Long> countAllByCode,
                                                          Map<String, Long> count7dByCode,
@@ -265,20 +272,9 @@ public class VenueReactionService {
                 .filter(e -> ReactionCode.isValid(e.getKey()))
                 .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
                 .collect(Collectors.toList());
-        // 先取 Top N（按所选窗口计数降序）
-        List<Map.Entry<String, Long>> selected =
-                new ArrayList<>(ranked.stream().limit(LIST_BADGE_LIMIT).toList());
-        // 用户已参与的 code 不受 Top N 截断（2026-08-08 根因修复，见方法 javadoc）：
-        // myCodes 中的 code 必在 ranked 内（参与 → 今日记录计入全部窗口 → 各窗口计数 ≥1），
-        // 仅在截断线以下时追加，已在 Top N 内则不重复。
-        for (Map.Entry<String, Long> e : ranked) {
-            if (myCodes.contains(e.getKey())
-                    && selected.stream().noneMatch(s -> s.getKey().equals(e.getKey()))) {
-                selected.add(e);
-            }
-        }
+        // 完整展示：全部 count>0 的 code 均返回，不做任何截断（2026-08-09 需求定稿，见方法 javadoc）
         List<ReactionBadge> badges = new ArrayList<>();
-        for (Map.Entry<String, Long> e : selected) {
+        for (Map.Entry<String, Long> e : ranked) {
             ReactionCode rc = ReactionCode.valueOf(e.getKey());
             badges.add(new ReactionBadge(rc.name(), rc.getEmoji(), rc.getLabel(),
                     countAllByCode.getOrDefault(e.getKey(), 0L),

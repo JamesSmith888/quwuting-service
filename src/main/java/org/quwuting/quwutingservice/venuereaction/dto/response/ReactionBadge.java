@@ -1,11 +1,12 @@
 package org.quwuting.quwutingservice.venuereaction.dto.response;
 
 /**
- * 列表卡片展示的 Reaction 徽标（Top N，按所选统计窗口热度排序；
- * 当前用户已参与的 code 不受 Top N 截断，见 {@code VenueReactionService#buildTopBadgesFromCounts}）。
+ * 列表卡片展示的 Reaction 徽标（**完整展示**：所选统计窗口内所有用户点击过的全部表情，
+ * 按窗口计数降序，该窗口计数=0 不展示；**不做任何截断**——需求 2026-08-09：取所有用户
+ * 的所有已点击表情全部展示，见 {@code VenueReactionService#buildTopBadgesFromCounts} javadoc）。
  * <p>
- * 含 reactedByMe（个人状态）——刻意打破"列表层不含个人状态"的惯例，
- * 因为列表页 Reaction 明确要求"点击即知是否已参与"（产品规则）。
+ * 含 reactedByMe（个人状态）——打破"列表层不含个人状态"的惯例，但个人状态只是
+ * 徽标的**标注属性**（驱动"点击即知是否已参与"的交互），**不参与徽标集合构成**。
  * 该字段来自单独的、不缓存的实时批量查询，不与场所级聚合缓存混在一起
  * （聚合计数仍然缓存共享，个人状态永远实时查询——与既有的"缓存内容强制约束"一致）。
  * <p>
@@ -22,7 +23,7 @@ package org.quwuting.quwutingservice.venuereaction.dto.response;
  * @param countAll    全部历史记录数（"全部"窗口展示值）
  * @param count7d     近7天计数（"近7天"窗口展示值，列表默认窗口）
  * @param count30d    近30天计数（"近30天"窗口展示值）
- * @param reactedByMe 当前用户今日是否已参与（未登录恒为 false）
+ * @param reactedByMe 当前用户今日是否已参与（未登录恒为 false；仅标注属性，不参与集合构成）
  */
 public record ReactionBadge(
         String code,

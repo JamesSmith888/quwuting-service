@@ -258,7 +258,8 @@ jwt:
 1. 条目 = `BusinessHoursEntry` record（`name` 可空、`open`/`close` 必填，`@Valid` 级联校验；`@JsonFormat(pattern="HH:mm")` 统一序列化格式，JSON 列与 API 输出均为 `"13:30"` 无秒）；
 2. **跨天语义**：`close < open` 表示结束于次日凌晨（如晚场 18:30-01:00），原样存取、展示端原样呈现，不引入 endNextDay 布尔（行业通行约定，数据自解释）；
 3. 最多 10 条（`@Size(max=10)`，与 tickets/partnerFees 对齐）；
-4. 读取端反序列化失败/空列返回空列表（`VenueResponseMapper` 统一 `deserializeList`），不做显性报错。
+4. 读取端反序列化失败/空列返回空列表（`VenueResponseMapper` 统一 `deserializeList`），不做显性报错；
+5. **展示派生在前端（2026-08-09 确立，后端零改动）**：徽标「未到营业时间」由前端 `utils/venueStatus.ts` 按 `status × 当前时刻 × businessHours` 派生（OPEN 且当前不在任何时段时展示派生态 NOT_OPEN_YET）——`statusDisplay` 恒为存储态展示名（分享标题等稳定事实消费方），后端禁止把时间判定烧进 `statusDisplay` 或新增 DB 枚举（会破坏筛选/审计语义且引入服务器时区假设），详见前端 AGENTS.md「营业状态展示派生」。
 
 **迁移**：`V5__venue_business_hours.sql`——加可空新列 → 存量回填（非空时段按「下午场/晚场」命名组装，顺序与旧展示一致；双场皆空保持 NULL）→ 删 4 旧列 → DO 块防御性校验（残缺时段 WARNING）。已有库 baseline 跳过 V1、空库 V1+V5 顺序执行，两条路径终态一致。
 
@@ -836,11 +837,16 @@ Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对�
 
 ### 列表页 Top Reaction 徽标（VenueResponse.topReactions，替代原 tagLikeCounts）
 
-`GET /venues`（按 `window` 参数）、`GET /favorites`（固定默认窗口 7d）等复用 `VenueResponseMapper` 的接口在 `VenueResponse.tags` 之外携带 `topReactions: List<ReactionBadge>`（最多 4 个，按所选窗口计数降序，该窗口计数=0 的不展示）。创建新 Reaction 的入口是前端 Picker 表情选择器（长按卡片触发），不是 count=0 的占位 chips——此决策的根因分析见前端 AGENTS.md「Reaction 快速反馈系统 → 设计决策 → 展示与创建职责分离」。
+`GET /venues`（按 `window` 参数）、`GET /favorites`（固定默认窗口 7d）等复用 `VenueResponseMapper` 的接口在 `VenueResponse.tags` 之外携带 `topReactions: List<ReactionBadge>`（**完整展示**：所选窗口内所有用户点击过的全部表情，count>0 的 code 一个不落、按所选窗口计数降序，**不做任何截断**）。创建新 Reaction 的入口是前端 Picker 表情选择器（长按卡片触发），不是 count=0 的占位 chips——此决策的根因分析见前端 AGENTS.md「Reaction 快速反馈系统 → 设计决策 → 展示与创建职责分离」。
 
-**三窗口计数语义（2026-08 每日一记模型确立）**：`ReactionBadge` 携带 `countAll` / `count7d` / `count30d` 三个窗口计数 + `reactedByMe`。服务端只做"按所选窗口排序/筛选 Top 4"，前端展示数字 = 所选窗口计数，切换窗口仅本地重算（无需为每个窗口重复请求）。排序/展示统一所选窗口（不再是旧模型的"排序 count30d、展示 countAll"双计数分离）——每日一记模型下取消只作用于当日记录，三窗口的本地 ±1 全部精确，乐观更新无需回滚校正窗口计数。
+**完整展示契约（2026-08-09 需求定稿）**：topReactions 的集合构成 = **所选窗口（默认近7天）内所有用户点击过的全部表情**，不做任何截断。列表页/收藏列表/详情基础响应的默认窗口均为近7天（列表页可经 `window` 参数切换）——需求本义是"查询近7天全部（所有用户）的 reaction 数据，全部展示"。
 
-- **例外：含个人参与状态（`reactedByMe`）**——这是对项目既有"列表层不含个人状态"惯例（原 `tagLikeCounts` 的设计）的刻意打破。原因是产品规则明确要求"点击 Emoji：未参与→+1，已参与→取消"必须在列表页直接可用，用户点击前必须知道自己是否已参与，否则会造成"点了却不知道是加还是减"的困惑。此例外**不违反**「缓存内容的强制约束」——聚合计数仍然缓存共享（`VenueReactionAggregateService`），个人参与状态通过**独立的、不缓存的实时批量查询**（`findTodayCodesByUserAndVenueIds`，一次 `IN` 查询覆盖整页场所）获取，两者未被塞进同一个缓存 key
+- **历史错误（2026-08-08 / 2026-08-09 上午引入、2026-08-09 下午撤销）**：① 2026-08-08 为修复"列表卡片 toggle 后被重取抹掉 chip"的交互层状态保持缺陷，错误地把"当前用户已参与的 code 不受 Top N 截断"上升为数据契约（保留 Top 4 截断 + 豁免个人项）——交互层问题错误升级为数据契约；② 2026-08-09 上午"纯 Top N"——仍保留 4 条截断，同样违背"全部展示"需求本义。**撤销后（最终口径）**：返回所选窗口内全部 count>0 的 code，无任何截断——用户刚参与的 code 必在返回中（count>0 即返回），"chip 被重取抹掉"从根上消失；个人参与状态（reactedByMe）仅作徽标标注属性、不参与集合构成
+- **长期规则**：topReactions 这类"列表摘要"数据契约**返回所选窗口内所有用户点击过的全部表情（无截断）**，个人状态（reactedByMe）只作徽标标注属性、不参与集合构成；交互层状态保持问题（chip 被重取抹掉等）一律在前端交互层解决（乐观更新 + 幂等 reconcile），**禁止通过修改数据契约豁免**——数据契约只表达数据口径，交互层状态由前端自洽
+
+**三窗口计数语义（2026-08 每日一记模型确立）**：`ReactionBadge` 携带 `countAll` / `count7d` / `count30d` 三个窗口计数 + `reactedByMe`。服务端只做"按所选窗口排序/筛选（count=0 不返回）"，前端展示数字 = 所选窗口计数，切换窗口仅本地重算（无需为每个窗口重复请求）。排序/展示统一所选窗口（不再是旧模型的"排序 count30d、展示 countAll"双计数分离）——每日一记模型下取消只作用于当日记录，三窗口的本地 ±1 全部精确，乐观更新无需回滚校正窗口计数。
+
+- **例外：含个人参与状态（`reactedByMe`）**——这是对项目既有"列表层不含个人状态"惯例（原 `tagLikeCounts` 的设计）的刻意打破。原因是产品规则明确要求"点击 Emoji：未参与→+1，已参与→取消"必须在列表页直接可用，用户点击前必须知道自己是否已参与，否则会造成"点了却不知道是加还是减"的困惑。**注意**：此例外仅指徽标**携带**个人状态字段，不改变徽标**集合构成**（见上"完整展示契约"）。此例外**不违反**「缓存内容的强制约束」——聚合计数仍然缓存共享（`VenueReactionAggregateService`），个人参与状态通过**独立的、不缓存的实时批量查询**（`findTodayCodesByUserAndVenueIds`，一次 `IN` 查询覆盖整页场所）获取，两者未被塞进同一个缓存 key
 - **个人状态语义**：`reactedByMe` = "今日已参与"（`reactionDate = 今天` 的记录存在）——次日自动恢复可点击状态，与"每日一记"模型一致
 - **批量查询**：`VenueReactionService.batchGetBadges(venueIds, currentUserId, window)` 一次 `IN` 查询（`countByVenueIdsGroupByCode`，单条 SQL 用条件 SUM 同时聚合 countAll/count7d/count30d）覆盖聚合计数、一次 `IN` 查询覆盖个人状态（仅登录用户触发），避免逐场所查询的 N+1
 
