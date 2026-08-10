@@ -19,8 +19,8 @@ import java.util.List;
 /**
  * 站内信服务（通用消息中心后端，2026-08-08 新增，见 AGENTS.md「站内信（消息中心）」）。
  * <ul>
- *   <li><b>写</b>：{@link #create}——业务模块（当前为舞伴审核）在状态流转时调用，
- *       发件人是平台（无发件人概念），收件人 = 业务关联用户；</li>
+ *   <li><b>写</b>：{@link #create}——业务模块（当前为舞伴审核、上报处理结果）在状态
+ *       流转时调用，发件人是平台（无发件人概念），收件人 = 业务关联用户；</li>
  *   <li><b>读</b>：{@link #list} 分页倒序 + {@link #unreadCount}（未读徽标）；
  *       {@link #markOneRead} / {@link #markAllRead} 标记已读（打开消息中心即全量已读）。</li>
  * </ul>

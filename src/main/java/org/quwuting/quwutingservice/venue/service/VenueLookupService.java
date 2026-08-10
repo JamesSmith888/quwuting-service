@@ -36,6 +36,7 @@ public class VenueLookupService {
 
     private final VenueRepository venueRepository;
     private final VenueHotProperties venueHotProperties;
+    private final org.quwuting.quwutingservice.config.PointsProperties pointsProperties;
 
     /**
      * 按 ID 查询场所（含缓存）。
@@ -72,6 +73,7 @@ public class VenueLookupService {
     @Transactional(readOnly = true)
     public Set<Long> getHotVenueIds() {
         return new HashSet<>(venueRepository.findHotVenueIds(
-                ReactionCode.positiveCodeNames(), venueHotProperties.minHeatScore()));
+                ReactionCode.positiveCodeNames(), pointsProperties.heatWeight(),
+                venueHotProperties.minHeatScore()));
     }
 }

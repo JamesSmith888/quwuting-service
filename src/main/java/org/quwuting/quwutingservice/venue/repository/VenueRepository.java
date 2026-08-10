@@ -2,6 +2,7 @@ package org.quwuting.quwutingservice.venue.repository;
 
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
+import org.quwuting.quwutingservice.config.VenueHeatWeights;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -80,17 +81,21 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * <b>2026-08-08 口径统一</b>（修复列表/详情双口径分叉）：本片段是
      * {@link org.quwuting.quwutingservice.venue.service.VenueHeatService#computeHeat}
      * 热度公式的<b>行为部分</b>镜像——近30天浏览×1 + 收藏总数×10 + 近30天新增收藏×15
-     * + 动态总数×5 + 近30天评分数×8 + 近30天正向 Reaction×3。满意度偏移
-     * （口碑微调 ±80）仅参与热度页综合展示，不进列表排序——排序看"行为热度"，
-     * 口碑在热度页呈现（权重唯一事实源 = VenueHeatService，调整权重必须同步本片段
-     * 与 findHotVenueIds 双处镜像，见后端 AGENTS.md「场所热度」章节）。
+     * + 动态总数×5 + 近30天评分数×8 + 近30天正向 Reaction×3
+     * <b>+ 近30天收到积分 × :pointsWeight（2026-08-10 V2 新增，权重来自配置
+     * app.points.heat-weight，运营校准对象）</b>。满意度偏移（口碑微调 ±80）仅参与
+     * 热度页综合展示，不进列表排序——排序看"行为热度"，口碑在热度页呈现
+     * （权重唯一事实源 = {@link org.quwuting.quwutingservice.config.VenueHeatWeights}
+     * + PointsProperties，调整权重必须同步本片段与 findHotVenueIds 双处镜像，
+     * 见后端 AGENTS.md「场所热度」章节）。
      * <p>
      * 窗口统一锚定「截至昨日」（与 VenueHeatService 的 [since30d, today) 一致）：
      * CURRENT_DATE 为今天（服务器时区 Asia/Shanghai，见 application.yaml），排他上界 =
      * 今天 0 点。同一天内多次请求结果稳定，不随请求时刻漂移。
      * <p>
-     * 注意：本片段引用 {@code :positiveCodes} 参数（正向 code 列表，来自
-     * ReactionCode.positiveCodeNames()）——使用本片段的查询方法必须声明该参数。
+     * 注意：本片段引用 {@code :positiveCodes}（正向 code 列表，来自
+     * ReactionCode.positiveCodeNames()）与 {@code :pointsWeight}（积分权重，
+     * 来自 PointsProperties）——使用本片段的查询方法必须声明这两个参数。
      */
     /**
      * JPQL 子查询注意：
@@ -103,26 +108,39 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      *       （{@code CURRENT_DATE - 30}）会被 Hibernate 7 报 SemanticException
      *       "Operand of - is of type 'java.lang.Integer' which is not a temporal amount"。
      *       此处窗口 = [今天-30天, 今天)，即「截至昨日」30 天。</li>
+     *   <li>积分目标类型用<b>全限定枚举字面量</b>（HQL 标准做法，无需参数）——
+     *       与 {@link org.quwuting.quwutingservice.points.entity.PointsTransaction}
+     *       的 targetType 枚举字段比较。</li>
      * </ul>
      */
     String HEAT_SCORE = """
             (v.sortWeight
              + (SELECT COUNT(*) FROM VenueView vv
-                WHERE vv.venueId = v.id AND vv.viewDate >= (CURRENT_DATE - 30 day) AND vv.viewDate < CURRENT_DATE) * 1
+                WHERE vv.venueId = v.id AND vv.viewDate >= (CURRENT_DATE - 30 day) AND vv.viewDate < CURRENT_DATE) * """
+            + VenueHeatWeights.VIEW + """
              + (SELECT COUNT(*) FROM Favorite f
-                WHERE f.venueId = v.id AND f.deleted = false) * 10
+                WHERE f.venueId = v.id AND f.deleted = false) * """
+            + VenueHeatWeights.FAVORITE + """
              + (SELECT COUNT(*) FROM Favorite f2
                 WHERE f2.venueId = v.id AND f2.deleted = false
-                  AND f2.createdAt >= (CURRENT_DATE - 30 day) AND f2.createdAt < CURRENT_DATE) * 15
+                  AND f2.createdAt >= (CURRENT_DATE - 30 day) AND f2.createdAt < CURRENT_DATE) * """
+            + VenueHeatWeights.NEW_FAVORITE + """
              + (SELECT COUNT(*) FROM VenuePost p
-                WHERE p.venueId = v.id AND p.deleted = false) * 5
+                WHERE p.venueId = v.id AND p.deleted = false) * """
+            + VenueHeatWeights.POST + """
              + (SELECT COUNT(*) FROM TagInteraction ti
                 WHERE ti.venueId = v.id AND ti.deleted = false AND ti.score IS NOT NULL
-                  AND ti.createdAt >= (CURRENT_DATE - 30 day) AND ti.createdAt < CURRENT_DATE) * 8
+                  AND ti.createdAt >= (CURRENT_DATE - 30 day) AND ti.createdAt < CURRENT_DATE) * """
+            + VenueHeatWeights.RATING + """
              + (SELECT COUNT(*) FROM VenueReaction r
                 WHERE r.venueId = v.id AND r.deleted = false
                   AND r.reactionCode IN :positiveCodes
-                  AND r.createdAt >= (CURRENT_DATE - 30 day) AND r.createdAt < CURRENT_DATE) * 3)
+                  AND r.createdAt >= (CURRENT_DATE - 30 day) AND r.createdAt < CURRENT_DATE) * """
+            + VenueHeatWeights.REACTION + """
+             + (SELECT COALESCE(SUM(-pt.delta), 0) FROM PointsTransaction pt
+                WHERE pt.targetType = org.quwuting.quwutingservice.points.enums.PointsTargetType.VENUE
+                  AND pt.targetId = v.id AND pt.delta < 0
+                  AND pt.createdAt >= (CURRENT_DATE - 30 day) AND pt.createdAt < CURRENT_DATE) * :pointsWeight)
             """;
 
     /**
@@ -160,6 +178,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                              @Param("longitude") double longitude,
                              @Param("radiusKm") Double radiusKm,
                              @Param("positiveCodes") List<String> positiveCodes,
+                             @Param("pointsWeight") int pointsWeight,
                              @Param("hotOnly") boolean hotOnly,
                              @Param("hotIds") Set<Long> hotIds,
                              Pageable pageable);
@@ -180,6 +199,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                        @Param("status") VenueStatus status,
                                        @Param("keyword") String keyword,
                                        @Param("positiveCodes") List<String> positiveCodes,
+                                       @Param("pointsWeight") int pointsWeight,
                                        @Param("hotOnly") boolean hotOnly,
                                        @Param("hotIds") Set<Long> hotIds,
                                        Pageable pageable);
@@ -229,6 +249,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                            @Param("status") VenueStatus status,
                            @Param("keyword") String keyword,
                            @Param("positiveCodes") List<String> positiveCodes,
+                           @Param("pointsWeight") int pointsWeight,
                            @Param("hotOnly") boolean hotOnly,
                            @Param("hotIds") Set<Long> hotIds,
                            Pageable pageable);
@@ -253,6 +274,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                        @Param("longitude") double longitude,
                                        @Param("radiusKm") Double radiusKm,
                                        @Param("positiveCodes") List<String> positiveCodes,
+                                       @Param("pointsWeight") int pointsWeight,
                                        @Param("hotOnly") boolean hotOnly,
                                        @Param("hotIds") Set<Long> hotIds,
                                        Pageable pageable);
@@ -347,6 +369,10 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
         Long getReportcount();
         /** TTL 窗口内最新上报时间，null = 无活跃上报 */
         LocalDateTime getLatestreporttime();
+        /** 收到积分总数（target_type='VENUE' 的全量 SUM，2026-08-10 V2 新增） */
+        Long getPointsreceivedtotal();
+        /** 近30天收到积分（target_type='VENUE' 的窗口 SUM，热度公式积分输入项） */
+        Long getPointsreceived30d();
     }
 
     /**
@@ -405,7 +431,12 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
               (SELECT COUNT(*) FROM qwt_venue_status_reports r
                 WHERE r.venue_id = :venueId AND r.deleted = false AND r.created_at >= :reportSince) AS reportcount,
               (SELECT MAX(r.created_at) FROM qwt_venue_status_reports r
-                WHERE r.venue_id = :venueId AND r.deleted = false AND r.created_at >= :reportSince) AS latestreporttime
+                WHERE r.venue_id = :venueId AND r.deleted = false AND r.created_at >= :reportSince) AS latestreporttime,
+              (SELECT COALESCE(SUM(-pt.delta), 0) FROM qwt_points_transactions pt
+                WHERE pt.target_type = 'VENUE' AND pt.target_id = :venueId AND pt.delta < 0) AS pointsreceivedtotal,
+              (SELECT COALESCE(SUM(-pt.delta), 0) FROM qwt_points_transactions pt
+                WHERE pt.target_type = 'VENUE' AND pt.target_id = :venueId AND pt.delta < 0
+                  AND pt.created_at >= :windowSince AND pt.created_at < :windowUntil) AS pointsreceived30d
             """, nativeQuery = true)
     HeatCounters countHeatCounters(@Param("venueId") Long venueId,
                                    @Param("viewSince") java.time.LocalDate viewSince,
@@ -439,6 +470,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
         Long getPosreaction();
         /** 当日负向反馈数 */
         Long getNegreaction();
+        /** 当日收到积分（target_type='VENUE' 的 SUM，2026-08-10 V2 新增，已补零） */
+        Long getPoints();
     }
 
     /**
@@ -471,7 +504,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                    COALESCE(f.cnt, 0) AS favcount,
                    COALESCE(v.cnt, 0) AS viewcount,
                    COALESCE(pr.cnt, 0) AS posreaction,
-                   COALESCE(nr.cnt, 0) AS negreaction
+                   COALESCE(nr.cnt, 0) AS negreaction,
+                   COALESCE(pt.cnt, 0) AS points
             FROM (SELECT generate_series(CAST(:sinceDate AS timestamp), CAST(:asOfDate AS timestamp), interval '1 day')::date AS day) AS d
             LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS cnt
                        FROM qwt_favorites
@@ -495,6 +529,11 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                          AND reaction_code IN :negativeCodes
                          AND created_at >= :windowSince AND created_at < :windowUntil
                        GROUP BY 1) nr ON nr.day = d.day
+            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, SUM(-delta) AS cnt
+                       FROM qwt_points_transactions
+                       WHERE target_type = 'VENUE' AND target_id = :venueId AND delta < 0
+                         AND created_at >= :windowSince AND created_at < :windowUntil
+                       GROUP BY 1) pt ON pt.day = d.day
             ORDER BY d.day
             """, nativeQuery = true)
     List<DailyTrendRow> countDailyTrends(@Param("venueId") Long venueId,
@@ -564,21 +603,30 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                            v.sort_weight AS sort_weight,
                            v.sort_weight
                            + (SELECT COUNT(*) FROM qwt_venue_views vv
-                              WHERE vv.venue_id = v.id AND vv.view_date >= (CURRENT_DATE - 30) AND vv.view_date < CURRENT_DATE) * 1
+                              WHERE vv.venue_id = v.id AND vv.view_date >= (CURRENT_DATE - 30) AND vv.view_date < CURRENT_DATE) * """
+            + VenueHeatWeights.VIEW + """
                            + (SELECT COUNT(*) FROM qwt_favorites f
-                              WHERE f.venue_id = v.id AND f.deleted = false) * 10
+                              WHERE f.venue_id = v.id AND f.deleted = false) * """
+            + VenueHeatWeights.FAVORITE + """
                            + (SELECT COUNT(*) FROM qwt_favorites f2
                               WHERE f2.venue_id = v.id AND f2.deleted = false
-                                AND f2.created_at >= (CURRENT_DATE - 30) AND f2.created_at < CURRENT_DATE) * 15
+                                AND f2.created_at >= (CURRENT_DATE - 30) AND f2.created_at < CURRENT_DATE) * """
+            + VenueHeatWeights.NEW_FAVORITE + """
                            + (SELECT COUNT(*) FROM qwt_venue_posts p
-                              WHERE p.venue_id = v.id AND p.deleted = false) * 5
+                              WHERE p.venue_id = v.id AND p.deleted = false) * """
+            + VenueHeatWeights.POST + """
                            + (SELECT COUNT(*) FROM qwt_tag_interactions ti
                               WHERE ti.venue_id = v.id AND ti.deleted = false AND ti.score IS NOT NULL
-                                AND ti.created_at >= (CURRENT_DATE - 30) AND ti.created_at < CURRENT_DATE) * 8
+                                AND ti.created_at >= (CURRENT_DATE - 30) AND ti.created_at < CURRENT_DATE) * """
+            + VenueHeatWeights.RATING + """
                            + (SELECT COUNT(*) FROM qwt_venue_reactions r
                               WHERE r.venue_id = v.id AND r.deleted = false
                                 AND r.reaction_code IN :positiveCodes
-                                AND r.created_at >= (CURRENT_DATE - 30) AND r.created_at < CURRENT_DATE) * 3
+                                AND r.created_at >= (CURRENT_DATE - 30) AND r.created_at < CURRENT_DATE) * """
+            + VenueHeatWeights.REACTION + """
+                           + (SELECT COALESCE(SUM(-pt.delta), 0) FROM qwt_points_transactions pt
+                              WHERE pt.target_type = 'VENUE' AND pt.target_id = v.id AND pt.delta < 0
+                                AND pt.created_at >= (CURRENT_DATE - 30) AND pt.created_at < CURRENT_DATE) * :pointsWeight
                            AS heat_score
                     FROM qwt_venues v
                     WHERE v.deleted = false
@@ -588,5 +636,6 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
               AND heat_score - sort_weight >= :minHotScore
             """, nativeQuery = true)
     List<Long> findHotVenueIds(@Param("positiveCodes") List<String> positiveCodes,
+                               @Param("pointsWeight") int pointsWeight,
                                @Param("minHotScore") int minHotScore);
 }

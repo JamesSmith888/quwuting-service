@@ -1,0 +1,25 @@
+package org.quwuting.quwutingservice.points.enums;
+
+/**
+ * 积分挣取来源（可扩展：新增挣取场景 = 加枚举 + 对应发放逻辑）。
+ * <p>
+ * 幂等键 = (user_id, source_type, source_id)：同一用户同一来源只发一次分，
+ * 由 qwt_points_transactions 的部分唯一索引（delta > 0 AND source_id IS NOT NULL）
+ * 在库内兜底（SQLState 23505 按并发幂等吞掉，与 feedback/reaction 同模式）。
+ */
+public enum PointsSourceType {
+    /** 每日打卡，source_id = qwt_daily_checkins.id */
+    DAILY_CHECK_IN,
+    /** 上报被管理员采纳（ADOPTED），source_id = qwt_venue_feedbacks.id */
+    FEEDBACK_REWARD,
+    /**
+     * 暂停营业报告被管理员采纳（2026-08-10 新增，source_id = qwt_venue_status_reports.id）。
+     * 采纳 = 管理员核实暂停属实并标记门店 SUSPENDED；奖励与采纳同事务、幂等
+     * （(user, source_type, source_id) 部分唯一索引兜底，与 FEEDBACK_REWARD 同模式）。
+     */
+    STATUS_REPORT_REWARD,
+    /** 管理端人工调整（可正可负，纠正误发/惩罚刷分），source_id = 操作管理员 id */
+    ADMIN_ADJUST,
+    /** 赠送（用户消费动作，delta < 0，必带 target_type + target_id；source_id 空） */
+    GIFT
+}

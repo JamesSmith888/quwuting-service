@@ -1,6 +1,7 @@
 package org.quwuting.quwutingservice.dancer.repository;
 
 import org.quwuting.quwutingservice.dancer.entity.DancerVenue;
+import org.quwuting.quwutingservice.dancer.enums.DancerVenueRelation;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -8,10 +9,19 @@ import org.springframework.data.repository.query.Param;
 import java.util.List;
 import java.util.Optional;
 
+/**
+ * 派生查询 relation 参数类型 = 实体字段类型（{@link DancerVenueRelation} 枚举）——
+ * 2026-08-10 修复：曾声明为 String，Spring Data 按字段类型校验绑定参数时抛
+ * "argument [HOME] is not assignable to DancerVenueRelation"（createDancer 因前端
+ * 不传 homeVenueId 从未触发该缺陷，updateDancer HOME 替换首次真实暴露）。
+ */
 public interface DancerVenueRepository extends JpaRepository<DancerVenue, Long> {
 
     Optional<DancerVenue> findByDancerIdAndVenueIdAndRelationAndDeletedFalse(
-            Long dancerId, Long venueId, String relation);
+            Long dancerId, Long venueId, DancerVenueRelation relation);
+
+    /** 舞伴某关系类型全部记录（编辑时 HOME 关系完整替换用） */
+    List<DancerVenue> findByDancerIdAndRelationAndDeletedFalse(Long dancerId, DancerVenueRelation relation);
 
     /**
      * 批量舞伴的场所关系简述（列表页/详情页一次 JOIN 查询覆盖整页舞伴，规避 N+1）。

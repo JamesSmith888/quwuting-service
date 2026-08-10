@@ -23,8 +23,20 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
     List<Dancer> findByCreatedByAndDeletedFalseOrderByUpdatedAtDesc(Long createdBy);
 
     /**
+     * 公开舞伴的常驻城市列表（列表页城市筛选词表，升序去重）。
+     * 与 venue 域 /venues/cities 同模式：聚合真实数据而非静态词表（新增城市自动出现）。
+     */
+    @Query("SELECT DISTINCT d.city FROM Dancer d " +
+            "WHERE d.city IS NOT NULL AND d.city <> '' " +
+            "AND d.status = 'NORMAL' AND d.deleted = false " +
+            "ORDER BY d.city")
+    List<String> findPublicCities();
+
+    /**
      * 公开舞伴列表（仅 NORMAL），按近7天认可数倒序（时间属性优先，避免老数据永久占优），
-     * 同分以 id 倒序兜底（新资料优先）。返回 Object[]：
+     * <b>同分以近30天收到积分倒序为次级信号（2026-08-10 V2 新增：积分 = 用户"表达支持"
+     * 的量化信号，不影响认可主导口径，仅作 tie-break——是否升级为加权在 P2 按数据定）</b>，
+     * 再以 id 倒序兜底（新资料优先）。返回 Object[]：
      * {id, nickname, avatar_url, bio, gender, city, count_all, count_today, count_7d}。
      * <p>
      * 近7天窗口为滚动锚点（createdAt >= now-7d，与 Reaction 同口径）；排序只依据
@@ -44,9 +56,15 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
                 FROM qwt_dancer_recognitions WHERE deleted = false
                 GROUP BY dancer_id
             ) a ON a.dancer_id = d.id
+            LEFT JOIN (
+                SELECT target_id AS dancer_id, SUM(-delta) AS points30d
+                FROM qwt_points_transactions
+                WHERE target_type = 'DANCER' AND delta < 0 AND created_at >= :since30d
+                GROUP BY target_id
+            ) p ON p.dancer_id = d.id
             WHERE d.status = 'NORMAL' AND d.deleted = false
               AND (:city IS NULL OR d.city = :city)
-            ORDER BY COALESCE(a.cnt7, 0) DESC, d.id DESC
+            ORDER BY COALESCE(a.cnt7, 0) DESC, COALESCE(p.points30d, 0) DESC, d.id DESC
             """,
             countQuery = """
             SELECT COUNT(*) FROM qwt_dancers d
@@ -57,6 +75,7 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
     Page<Object[]> findPublicPage(@Param("city") String city,
                                   @Param("sinceToday") LocalDateTime sinceToday,
                                   @Param("since7d") LocalDateTime since7d,
+                                  @Param("since30d") LocalDateTime since30d,
                                   Pageable pageable);
 
     /**

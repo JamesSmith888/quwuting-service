@@ -40,20 +40,24 @@ class VenueLookupServiceTest {
 
     @BeforeEach
     void setUp() {
-        // 显式构造配置实例（门槛 70 = 当前默认，2026-08-08 用户反馈后上调）：
+        // 显式构造配置实例（门槛 70 = 当前默认，2026-08-08 用户反馈后上调；
+        // 积分权重 2 = V2 初始保守值，校准机制对象）：
         // 验证配置路径下接线正确，与 DEFAULT 回退语义无关
-        service = new VenueLookupService(venueRepository, new VenueHotProperties(70));
+        service = new VenueLookupService(venueRepository, new VenueHotProperties(70),
+                new org.quwuting.quwutingservice.config.PointsProperties(2, 5, 5, 2,
+                        new org.quwuting.quwutingservice.config.PointsProperties.GiftLimits(10, 20, 5)));
     }
 
     @Test
     void getHotVenueIds_passesConfiguredMinHeatScoreToRepository() {
-        when(venueRepository.findHotVenueIds(anyList(), eq(70))).thenReturn(List.of(1L, 2L, 3L));
+        when(venueRepository.findHotVenueIds(anyList(), eq(2), eq(70))).thenReturn(List.of(1L, 2L, 3L));
 
         var result = service.getHotVenueIds();
 
         assertEquals(3, result.size());
         assertTrue(result.contains(1L));
-        // 门槛必须来自配置（本测试构造的 70），且正向 code 列表仍为唯一事实源
-        verify(venueRepository).findHotVenueIds(eq(ReactionCode.positiveCodeNames()), eq(70));
+        // 门槛必须来自配置（本测试构造的 70），且正向 code 列表仍为唯一事实源；
+        // 积分权重（2）也必须来自配置传入 SQL（V2 校准机制：改配置即生效）
+        verify(venueRepository).findHotVenueIds(eq(ReactionCode.positiveCodeNames()), eq(2), eq(70));
     }
 }

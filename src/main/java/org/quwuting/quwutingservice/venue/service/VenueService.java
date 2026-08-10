@@ -64,6 +64,7 @@ public class VenueService {
     private final ObjectMapper objectMapper;
     private final VenueLookupService venueLookupService;
     private final VenueDefaultsConfig defaultsConfig;
+    private final org.quwuting.quwutingservice.config.PointsProperties pointsProperties;
 
     @Transactional
     @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
@@ -149,6 +150,40 @@ public class VenueService {
         // 显式逐出，与其余写路径一致
         venueHeatService.invalidate(id);
         return response;
+    }
+
+    /**
+     * 报告采纳联动：将门店标记为「暂停营业」（2026-08-10 新增）。
+     * <p>
+     * 供 {@link StatusReportService#adoptReport} 在采纳流转事务内调用（REQUIRED 传播
+     * 加入同一事务）——管理员核实暂停报属实后，门店营业状态随之改为 SUSPENDED，
+     * 与 updateVenue 同模式写状态变迁日志 + 失效场所/热门缓存。
+     * <p>
+     * 幂等：门店已是 SUSPENDED 时直接返回（不重复写变迁日志——状态未变，审计链
+     * 不应产生冗余记录）；缓存逐出经 {@link @Caching} 在方法返回后仍会执行（无害）。
+     */
+    @Transactional
+    @Caching(evict = {
+            @CacheEvict(value = CacheConfig.CACHE_VENUE, key = "#venueId"),
+            @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
+    })
+    public void markSuspendedByReport(Long venueId, Long changedBy) {
+        Venue venue = venueRepository.findByIdAndDeletedFalse(venueId)
+                .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
+        if (venue.getStatus() == VenueStatus.SUSPENDED) {
+            return; // 已是暂停营业：不重复写变迁日志（幂等，审计链无冗余）
+        }
+        VenueStatusLog statusLog = new VenueStatusLog();
+        statusLog.setVenueId(venue.getId());
+        statusLog.setFromStatus(venue.getStatus());
+        statusLog.setToStatus(VenueStatus.SUSPENDED);
+        statusLog.setChangedBy(changedBy);
+        venueStatusLogRepository.save(statusLog);
+        venue.setStatus(VenueStatus.SUSPENDED);
+        venueRepository.save(venue);
+        // 热度失效：status 是热度响应输出（currentStatus / currentStatusDays）的组成部分，
+        // 与 updateVenue 的显式逐出同模式（venueHeat 为服务内嵌 LoadingCache，不走 @CacheEvict）
+        venueHeatService.invalidate(venueId);
     }
 
     /**
@@ -248,7 +283,8 @@ public class VenueService {
         boolean hotOnly = Boolean.TRUE.equals(hot);
         Page<Venue> result = dispatchListQuery(sortMode, blankToNull(city), blankToNull(district),
                 status, keywordPattern, hasCoords, latitude, longitude, radius,
-                POSITIVE_REACTION_CODES, hotOnly, hotVenueIds, pageable);
+                POSITIVE_REACTION_CODES, pointsProperties.heatWeight(),
+                hotOnly, hotVenueIds, pageable);
         // 批量查询整页场所的 Top Reaction 徽标，避免逐条查询造成的 N+1（见 VenueReactionService#batchGetBadges）
         List<Long> venueIds = result.getContent().stream().map(Venue::getId).toList();
         Map<Long, List<ReactionBadge>> reactionsByVenue =
@@ -267,25 +303,25 @@ public class VenueService {
     private Page<Venue> dispatchListQuery(VenueSortMode sortMode, String city, String district,
                                           VenueStatus status, String keywordPattern,
                                           boolean hasCoords, Double latitude, Double longitude,
-                                          Double radius, List<String> positiveCodes,
+                                          Double radius, List<String> positiveCodes, int pointsWeight,
                                           boolean hotOnly, Set<Long> hotIds, PageRequest pageable) {
         return switch (sortMode) {
             case RECOMMENDED -> hasCoords
                     ? venueRepository.searchRanked(city, district, status, keywordPattern,
-                            latitude, longitude, radius, positiveCodes, hotOnly, hotIds, pageable)
+                            latitude, longitude, radius, positiveCodes, pointsWeight, hotOnly, hotIds, pageable)
                     : venueRepository.searchRankedNoLocation(city, district, status, keywordPattern,
-                            positiveCodes, hotOnly, hotIds, pageable);
+                            positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
             case DISTANCE -> hasCoords
                     ? venueRepository.searchNearest(city, district, status, keywordPattern,
                             latitude, longitude, radius, hotOnly, hotIds, pageable)
                     // 无定位无法按距离排序：防御性降级为推荐排序（而非空列表/报错）
                     : venueRepository.searchRankedNoLocation(city, district, status, keywordPattern,
-                            positiveCodes, hotOnly, hotIds, pageable);
+                            positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
             case HEAT -> hasCoords && radius != null
                     ? venueRepository.searchHeatWithinRadius(city, district, status, keywordPattern,
-                            latitude, longitude, radius, positiveCodes, hotOnly, hotIds, pageable)
+                            latitude, longitude, radius, positiveCodes, pointsWeight, hotOnly, hotIds, pageable)
                     : venueRepository.searchHeat(city, district, status, keywordPattern,
-                            positiveCodes, hotOnly, hotIds, pageable);
+                            positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
             case NEWEST -> hasCoords && radius != null
                     ? venueRepository.searchNewestWithinRadius(city, district, status, keywordPattern,
                             latitude, longitude, radius, hotOnly, hotIds, pageable)

@@ -1,6 +1,7 @@
 package org.quwuting.quwutingservice.venuefeedback.dto.response;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
+import org.quwuting.quwutingservice.venuefeedback.enums.FeedbackField;
 import org.quwuting.quwutingservice.venuefeedback.enums.FeedbackType;
 import org.quwuting.quwutingservice.venuefeedback.enums.ReportStatus;
 
@@ -21,6 +22,12 @@ public record AdminReportResponse(
         FeedbackType type,
         String typeDisplay,
         String note,
+        /** 纠错目标字段（2026-08-10 新增，可空 = 非纠错场景；管理端按字段核对） */
+        FeedbackField field,
+        /** 纠错目标字段展示文案（可空） */
+        String fieldDisplay,
+        /** 用户认为正确的数据（2026-08-10 新增，可空 = 未提供纠正值） */
+        String correctedValue,
         ReportStatus status,
         String statusDisplay,
         /** 管理员处理结果说明（未填写为 null，随「我的上报记录」回传上报者） */

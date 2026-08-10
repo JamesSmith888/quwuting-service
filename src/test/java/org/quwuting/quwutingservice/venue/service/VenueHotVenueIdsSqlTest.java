@@ -70,6 +70,7 @@ class VenueHotVenueIdsSqlTest {
         Page<Venue> page = venueRepository.searchRankedNoLocation(
                 null, null, null, null,
                 org.quwuting.quwutingservice.venuereaction.ReactionCode.positiveCodeNames(),
+                2 /* 积分权重（与 PointsProperties 默认一致；本测试只验证 SQL 语义层） */,
                 true, venueLookupService.getHotVenueIds(), PageRequest.of(0, 20));
         assertNotNull(page, "热门筛选列表查询应执行成功（参数绑定/谓词合法）");
         // 热门筛选语义：返回的每一家都必须在热门集合内

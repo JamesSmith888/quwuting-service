@@ -15,7 +15,11 @@ public enum FileCategory {
     /** 场所微信二维码 */
     VENUE_QR("venue-qr"),
     /** 用户头像 */
-    USER_AVATAR("user-avatars");
+    USER_AVATAR("user-avatars"),
+    /** 舞伴相册照片（本人上传，PENDING 审核后公开） */
+    DANCER_PHOTO("dancer-photos"),
+    /** 舞伴头像（本人编辑资料时上传） */
+    DANCER_AVATAR("dancer-avatars");
 
     private final String pathPrefix;
 

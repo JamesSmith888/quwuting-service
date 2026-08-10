@@ -47,6 +47,8 @@ class VenueHeatServiceTest {
     @Mock
     private TagInteractionRepository tagInteractionRepository;
     @Mock
+    private org.quwuting.quwutingservice.config.PointsProperties pointsProperties;
+    @Mock
     private VenueRepository.HeatCounters counters;
 
     private VenueHeatService heatService;
@@ -56,10 +58,11 @@ class VenueHeatServiceTest {
     @BeforeEach
     void setUp() {
         heatService = new VenueHeatService(venueLookupService, venueRepository,
-                tagInteractionRepository);
+                tagInteractionRepository, pointsProperties);
         venue = new Venue();
         venue.setId(1L);
         venue.setStatus(VenueStatus.OPEN);
+        when(pointsProperties.heatWeight()).thenReturn(2);
 
         when(venueLookupService.findById(1L)).thenReturn(venue);
         // 趋势 mega-query：无数据（generate_series 骨架由 SQL 保证连续，此处空列表即可）
@@ -80,6 +83,8 @@ class VenueHeatServiceTest {
         when(counters.getRatingcount30d()).thenReturn(0L);
         when(counters.getPositivereactioncount30d()).thenReturn(0L);
         when(counters.getNegativereactioncount30d()).thenReturn(0L);
+        when(counters.getPointsreceivedtotal()).thenReturn(0L);
+        when(counters.getPointsreceived30d()).thenReturn(0L);
         when(counters.getRaters()).thenReturn(0L);
         when(counters.getSuspensioncount()).thenReturn(0L);
         when(counters.getLateststatuslogtime()).thenReturn(null);
@@ -166,6 +171,7 @@ class VenueHeatServiceTest {
                     @Override public Long getViewcount() { return 10L; }
                     @Override public Long getPosreaction() { return 3L; }
                     @Override public Long getNegreaction() { return 2L; }
+                    @Override public Long getPoints() { return 0L; }
                 },
                 new VenueRepository.DailyTrendRow() {
                     @Override public LocalDate getDay() { return d2; }
@@ -173,6 +179,7 @@ class VenueHeatServiceTest {
                     @Override public Long getViewcount() { return 5L; }
                     @Override public Long getPosreaction() { return 0L; }
                     @Override public Long getNegreaction() { return 1L; }
+                    @Override public Long getPoints() { return 0L; }
                 }));
 
         VenueHeatResponse resp = heatService.getHeat(1L);
@@ -185,6 +192,8 @@ class VenueHeatServiceTest {
         assertEquals(2L, resp.reactionTrend().get(0).negative(), "反馈趋势应回填负向计数");
         assertEquals(0L, resp.reactionTrend().get(1).positive(), "无数据日应补零");
         assertEquals(d1.toString(), resp.favoriteTrend().get(0).date(), "日期应为 yyyy-MM-dd");
+        assertEquals(2, resp.pointsTrend().size(), "收到积分趋势应含全部骨架行");
+        assertEquals(0L, resp.pointsTrend().get(0).count(), "无积分日应补零");
     }
 
     // ── 状态可信度（2026-08-08 三维矩阵：状态类型 × 稳定性 × 持续天数） ────────────

@@ -1,6 +1,23 @@
 spring:
   application:
     name: quwuting-service
+  # HikariCP 连接池统一调优（2026-08-10 事故根因修复，见 AGENTS.md「连接池与数据库抖动韧性」）：
+  # 生产 systemd 以 dev profile 运行，application-dev.yaml 是唯一生效的数据源配置，原 prod.yaml
+  # 的调优从未生效——连接池一直走 Spring Boot 默认值（keepalive 关闭、max-lifetime 30min、
+  # connection-timeout 30s），死连接无法提前剔除，故障请求挂死（实测 19s）。
+  # 场景：低流量小程序 + 跨洲高延迟 DB（ECS↔Supabase 事务池化 6543，单次往返 300~500ms）。
+  # 本块置于基础配置，dev/prod 全环境生效，禁止在各环境 yaml 重复声明（防漂移）。
+  datasource:
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 2
+      idle-timeout: 300000             # 空闲 5min 回收
+      max-lifetime: 900000             # 连接最长 15min，低于 Supabase 池化器侧任何空闲回收窗口
+      connection-timeout: 10000        # 获取连接 10s 快速失败（与前端请求超时同值）
+      leak-detection-threshold: 30000  # 连接持有超 30s 告警（排查未关闭连接）
+      validation-timeout: 3000         # 探活/校验 3s 上限（正常往返 500ms，余量充足）
+      keepalive-time: 60000            # 每 60s 对空闲连接执行 isValid 探活：提前剔除死连接、
+                                       # 保持 socket 活跃，避免被池化器/NAT 空闲回收后"借出即挂"
   jpa:
     hibernate:
       # Schema 演进策略（2026-08-07 起：Flyway 显式迁移 + validate 校验）：
@@ -72,6 +89,26 @@ app:
   reports:
     # 平台对用户上报的处理承诺天数（前端提示"我们会在 X 日内维护好"中的 X 由此下发）
     maintenance-days: 3
+  # 积分系统配置（2026-08-10 V2：全部参数配置化，禁止业务硬编码）
+  points:
+    # 每日打卡奖励（积分）
+    check-in-reward: 2
+    # 上报被管理员采纳后的奖励（积分；V2 决策：不设每日条数上限，防刷由管理员采纳把关）
+    feedback-reward: 5
+    # 暂停营业报告被管理员采纳后的奖励（积分；与 feedback-reward 同属众包信号采纳池，
+    # 独立键便于运营分别调节，2026-08-10）
+    status-report-reward: 5
+    # 积分对热度公式的权重（V2 三阶段校准机制的校准对象——初始保守值 2，
+    # 上线 2 周后按"积分贡献占比 ∈ [5%,15%]"目标区间校准，改本值重启即生效，
+    # 公式文案后端下发自动同步，见 AGENTS.md「积分系统 · 排名权重校准」）
+    heat-weight: 2
+    gift:
+      # 单次赠送上限（积分）
+      max-per-gift: 10
+      # 每日赠送总额上限（积分）
+      max-per-day: 20
+      # 单目标每日赠送上限（积分）
+      max-per-target-day: 5
 
 # Supabase Storage 配置（前端直传模式，后端仅签发上传凭证）
 supabase:

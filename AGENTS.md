@@ -110,8 +110,8 @@ venuefeedback/  ← 统一用户上报模块（原"场所信息纠错反馈"，2
   dto/
     request/    ← CreateFeedbackRequest（type + note）
     response/   ← VenueFeedbackResponse（提交响应，含 maintenanceHint）/ AdminReportResponse（管理端列表项）
-  enums/        ← FeedbackType（CLOSED_DOWN / SUSPENDED / INACCURATE / MISSING_INFO / PRICE / OTHER）
-                  ReportStatus（PENDING / RESOLVED / DISMISSED 状态机）
+  enums/        ← FeedbackType（CLOSED_DOWN / SUSPENDED / RESUMED / INACCURATE / MISSING_INFO / PRICE / OTHER）
+                  ReportStatus（PENDING / ADOPTED / ADOPTED_NO_REWARD / RESOLVED / DISMISSED 状态机）
 
 venuestatusreport/  ← 场所状态众包上报模块（实时暂停信号，4h TTL）
   controller/   ← StatusReportController（POST /venues/{venueId}/status-reports, POST .../cancel）
@@ -342,10 +342,17 @@ heatScore = max(0, viewCount30d × 1
           + postCount × 5
           + ratingCount30d × 8
           + positiveReactionCount30d × 3（仅 Polarity.POSITIVE 的 code，见「Reaction 快速反馈系统」章节）
+          + pointsReceived30d × app.points.heat-weight（2026-08-10 V2 新增：近30天收到积分，
+            权重运营可校准——初始 2，V2 三阶段校准机制见「积分系统」章节）
           + (satisfactionScore − 6) × 20（无评分时为 0，6 分为中性基准）)
 ```
 
-权重常量收敛在 `VenueHeatService` 内部，后续基于真实数据分布调优，接口路径与 `heatScore` 语义不变。
+**权重收敛（2026-08-10 V2 重构，根治三处镜像漂移）**：非配置化权重常量收敛到
+`config/VenueHeatWeights`（一处定义、三处引用：`VenueHeatService` 常量引用 +
+`VenueRepository.HEAT_SCORE` 字符串拼接 + `findHotVenueIds` 字符串拼接）；
+积分权重是运营可调参数走 `PointsProperties.heatWeight()`（JPQL 参数 `:pointsWeight`
+注入，SQL 侧不硬编码）。**调整权重只改一处即可生效**（公式文案由后端下发自动同步）。
+SQL 侧镜像一致性由 `VenueHeatServiceTest` 公式测试 + 本 AGENTS.md 约束维持。
 
 **2026-08 缺陷修复确立的语义**（详情页热度专项）：
 1. **Reaction 分极性**：仅正向 Reaction（人气旺/氛围好/音乐棒等）计入热度；负向（服务问题/排队太久等）**不计入公式**，以 `negativeReactionCount30d` 单独下发，前端展示"负面反馈 N 条·不计入热度指数"——修复"被吐槽的店热度反而更高"的语义硬伤。中性（普通）也不计入。极性定义在 `ReactionCode.Polarity`（唯一事实源），**code 列表唯一入口 = `ReactionCode.positiveCodeNames()` / `negativeCodeNames()`**——热度计算、趋势聚合、列表排序 SQL 镜像全部经此取列表，禁止各调用方自行遍历枚举再各自 filter（新增/调整极性遗漏某处即产生口径漂移）。
@@ -354,8 +361,9 @@ heatScore = max(0, viewCount30d × 1
 4. **公式文案后端下发**：`VenueHeatResponse.formulaText/formulaDetail` 由后端生成（权重唯一事实源），前端直接渲染、**禁止硬编码权重**（历史上前端 computeHeatFormula 硬编码 ×1/×10/×15/×5/×8/×3/×20，权重调整后展示即失真——已删除）。
 
 **列表排序/热门标记的口径（2026-08-08 统一，修复双口径分叉）**：
-- 列表「热度最高」排序（`VenueRepository.searchHeat*`）、推荐排序的热度项（`searchRanked*`）、热门场所标记（`findHotVenueIds`）全部使用 `VenueRepository.HEAT_SCORE` 片段 = **行为热度镜像公式**（sortWeight + 近30天浏览×1 + 收藏×10 + 新增收藏×15 + 动态×5 + 评分×8 + 正向反馈×3，窗口在 SQL 内取 `CURRENT_DATE` 锚定「截至昨日」，与 `VenueHeatService` 一致）。
+- 列表「热度最高」排序（`VenueRepository.searchHeat*`）、推荐排序的热度项（`searchRanked*`）、热门场所标记（`findHotVenueIds`）全部使用 `VenueRepository.HEAT_SCORE` 片段 = **行为热度镜像公式**（sortWeight + 近30天浏览×1 + 收藏×10 + 新增收藏×15 + 动态×5 + 评分×8 + 正向反馈×3 **+ 近30天收到积分×:pointsWeight（2026-08-10 V2）**，窗口在 SQL 内取 `CURRENT_DATE` 锚定「截至昨日」，与 `VenueHeatService` 一致）。
 - **满意度偏移不进排序**：排序看"行为热度"（可 SQL 镜像、非负、稳定），口碑（±80 微调）在热度页综合呈现——语义划分：排序热度 = 行为热度，展示热度 = 行为热度 + 口碑偏移。
+- **约束（2026-08-10 V2 权重收敛）**：`HEAT_SCORE` 与 `findHotVenueIds` 是 SQL 双镜像；全部非配置化权重经 `VenueHeatWeights` 常量拼接、积分权重经 `:pointsWeight` 参数注入（配置唯一事实源 `app.points.heat-weight`）——**调整权重只改一处**（常量或配置），镜像一致性由 `VenueHeatServiceTest` 公式测试 + 代码注释互指维持。
 - **约束**：`HEAT_SCORE` 与 `findHotVenueIds` 是 SQL 双镜像，权重调整必须三处同步（VenueHeatService 常量 + HEAT_SCORE + findHotVenueIds），由本 AGENTS.md 约束；SQL 侧无法引用 Java 常量，镜像一致性靠 `VenueHeatServiceTest` 公式测试 + 代码注释互指维持。
 
 ### 数据采集层
@@ -522,13 +530,15 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 ### 类型与状态机
 
-- `FeedbackType`：CLOSED_DOWN（已关门/停业）/ SUSPENDED（暂停营业）/ INACCURATE（信息有误）/ **MISSING_INFO（信息缺失——营业时间/联系方式/地址/简介/微信联系等字段缺失的上报入口，2026-08-06 新增，详情页"信息缺失？点此上报"统一使用，note 承载字段说明与用户补充数据）** / **PRICE（价格信息缺失或有误——门票/舞伴数据缺失空态的上报入口，2026-08-05 新增）** / OTHER（其他）
-- `ReportStatus` 状态机：PENDING（待处理）→ RESOLVED（已处理）/ DISMISSED（已忽略）。**终态固定不可回退**——RESOLVED 表示管理员已核实并完成维护，DISMISSED 判定为误报/无需处理；布尔 handled 无法区分两种终态语义（历史 `handled` 列保留为实体兜底映射，见下文「Schema 演进」）
+- `FeedbackType`：CLOSED_DOWN（已关门/停业）/ SUSPENDED（暂停营业）/ **RESUMED（门店已恢复营业——2026-08-10 新增，与 CLOSED_DOWN/SUSPENDED 相反的纠正信号：门店存储态为「已停业」CEASED 时，详情页报告操作 chip 翻转为「报告恢复营业」，提交本类型走异步管理员审核；管理员核实后经 updateVenue 将状态改回 OPEN（恢复通道 = 既有 updateVenue，与暂停报采纳 markSuspendedByReport 对称）。为什么走 venuefeedback 而非 venuestatusreport：纠正的是存储态（CEASED→OPEN），属异步审核职责；4h TTL 实时信号层对"已停业"门店无决策意义，前端收敛逻辑见前端 AGENTS.md「报告操作状态机」）** / INACCURATE（信息有误）/ **MISSING_INFO（信息缺失——营业时间/联系方式/地址/简介/微信联系等字段缺失的上报入口，2026-08-06 新增，详情页"信息缺失？点此上报"统一使用，note 承载字段说明与用户补充数据）** / **PRICE（价格信息缺失或有误——门票/舞伴数据缺失空态的上报入口，2026-08-05 新增）** / OTHER（其他）
+- `ReportStatus` 状态机：PENDING（待处理）→ **ADOPTED（已采纳·奖励，2026-08-10 V2 新增）/ ADOPTED_NO_REWARD（已采纳·未奖励，2026-08-10 三动作定稿新增）/ RESOLVED（已处理，2026-08-10 起管理端无 UI 入口，保留兼容历史）/ DISMISSED（已忽略）**。**终态固定不可回退**——**ADOPTED** 表示管理员核实并**采纳**该上报（如按纠错内容更新门店数据/确认状态异常属实）→ **同一事务发放积分奖励**（仅登录用户，匿名采纳不发；幂等见「积分系统」章节）；**ADOPTED_NO_REWARD** 表示上报被采纳但管理员选择不发积分（采纳动作 `reward=false`，与 RESOLVED 的"核实后未采纳"语义区分，上报者可见「已采纳·未奖励」）；RESOLVED 表示管理员完成核实但信息无需采纳应用（**不发分**）；DISMISSED 判定为误报/无需处理（**不发分**）。布尔 handled 无法区分多种终态语义（历史 `handled` 列保留为实体兜底映射，见下文「Schema 演进」）。**「采纳」独立于「已处理」是 V2 核心决策：奖励资格取决于"上报是否真的被采用"而非"管理员有没有点过按钮"**（根因与决策记录见 `docs/积分系统-需求设计-V2-2026-08-10.md`）
 - **处理结果回传（2026-08-06 新增）**：管理员 resolve/dismiss 时可填写 `handleNote`（处理结果说明，≤500 字），随「我的上报记录」回传上报者——"管理员处理完成后反馈处理结果给用户"的载体。不填 = 仅流转状态，用户侧只见处理状态。终态幂等语义下重复处理不覆盖已有 handleNote
+- **处理结果站内信（2026-08-10 新增，替代原"不复制为站内信"决策）**：`VenueFeedbackService.handleByAdmin` 在 **PENDING → 任一终态实际流转时**向上报者（userId 非空）发送 `FEEDBACK_RESULT` 站内信（与状态流转**同事务**、幂等——终态重复操作不重复发信；**匿名上报（userId null）不通知**，与积分奖励同一匿名边界）。正文 = 场所名 + 上报类型 + 终态结论（ADOPTED 明确"已奖励积分" / ADOPTED_NO_REWARD 明确"未奖励积分" / RESOLVED "已处理" / DISMISSED "已忽略"）+ 可选 `handleNote`（"管理员说明："前缀回传）；软关联 `VENUE`（前端深链场所详情页）。**根因**：消息中心设计（2026-08-08）把站内信窄化为"平台主动通知（舞伴审核）"，处理结果被视为纯被动业务数据（只经 handleNote 回传、无已读语义）——早于 2026-08-10 FAB 红点"有新提醒"语义，上报者无法被主动提醒处理结果（曾被列为 P3 遗留"采纳站内信"）。**长期约定：凡是"状态流转对用户有结果"的通知都必须走站内信**（同事务、幂等、匿名边界），不得只落在业务记录上
+- **结构化纠错载荷（2026-08-10 新增）**：`INACCURATE` 类型可携带 `field`（哪个字段有误，受控词汇表 `FeedbackField`：NAME/ADDRESS/HOURS/TICKET/PARTNER/CONTACT/WECHAT/DESCRIPTION/OTHER——与前端 `MISSING_INFO_FIELDS` data-key 同源 + name + other 兜底）+ `correctedValue`（用户认为正确的数据，≤500 字，TextSanitizer 清洗；空白不入库存 NULL）。**根因**：门店数据经 OCR 批量导入系统性错误，旧载荷只有自由文本 `note`（"哪里错了"与"正确值"混在一起），管理端无法机器可读核对纠错建议。`field`/`correctedValue` 均可空：只指出字段或只提供正确值都是有效上报。**其余类型忽略这两个字段（不落库）**——缺失（MISSING_INFO/PRICE）、状态（SUSPENDED/CLOSED_DOWN）、其他（OTHER）的语义仍由 note 承载
 
 ### 数据模型
 
-`qwt_venue_feedbacks` 表：venueId + userId（**可空 = 匿名，2026-08-06 放宽**）+ type + note + status + handledBy + handledAt + handleNote（处理结果说明，2026-08-06 新增，可空列自动加列）+ handled（遗留兜底列）。索引 `(venueId)`、`(userId)`、`(status, createdAt)`（管理端状态筛选分页）。
+`qwt_venue_feedbacks` 表：venueId + userId（**可空 = 匿名，2026-08-06 放宽**）+ type + note + **field（纠错目标字段，可空，2026-08-10 V8 新增）+ corrected_value（用户认为正确的数据，可空，2026-08-10 V8 新增）** + status + handledBy + handledAt + handleNote（处理结果说明，2026-08-06 新增，可空列自动加列）+ handled（遗留兜底列）。索引 `(venueId)`、`(userId)`、`(status, createdAt)`（管理端状态筛选分页）+ PENDING 部分唯一索引（防刷，见下）。
 
 **Schema 演进（2026-08-07 起：Flyway 版本化迁移，见「Schema 演进与数据库完整性」）**：status 列默认值由 `@ColumnDefault("'PENDING'")` **单一通道**声明（配合 `@Column(length=20, nullable=false)` + 字段初始化器）——2026-08-05 曾因 columnDefinition 与 @ColumnDefault **双声明 DEFAULT** 报 "multiple default values specified"（修复 + 根因见「Schema 演进 → 事故根因」）；handledBy / handledAt 为可空列；遗留 `handled` 布尔列由实体字段映射兜底（@Deprecated + `@ColumnDefault("false")`，insert 恒写 false）。表结构变更（含新列/索引/约束）一律新增 `db/migration/V{n}` 迁移脚本，禁止依赖 ddl-auto 自动演进。
 
@@ -540,14 +550,14 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 **双防线（分层收口）**：
 
-1. **应用层 60s 冷却**（`VenueFeedbackService` 内嵌 Caffeine，与 VenueViewService / VenueShareService 同模式）：key = `venueId:type:identity`，identity 登录取 `u{userId}`、匿名取 `ip:{ClientIpResolver.resolve()}`——同身份对同场所同类型在窗口内重复提交抛 1006。尽力而为（多 IP 分布式刷无法拦截），与 view/share 频控同语义。
-2. **库内 PENDING 部分唯一索引**（`db/migration/V2__feedback_pending_dedup.sql`）：`UNIQUE (user_id, venue_id, type) WHERE user_id IS NOT NULL AND status = 'PENDING'`——登录用户对同一场所同一类型在"待处理"期间只允许一条（管理员处理后旧行移出索引，可再次上报）；匿名行不参与（NULL 无法身份归因）。并发/多实例竞争窗口内撞唯一键时，应用层 catch `DataIntegrityViolationException`（SQLState 23505，经 `DbConstraintViolations.isUniqueViolation`）幂等返回已有 PENDING 记录（与 StatusReportService 并发模式一致）。迁移先清理存量重复（保留每组最早一条）再建索引。
+1. **应用层 60s 冷却**（`VenueFeedbackService` 内嵌 Caffeine，与 VenueViewService / VenueShareService 同模式）：key = `venueId:type:field:identity`（**field 维度 2026-08-10 加入**——结构化纠错后语义单位 = (type, field)，用户报完"门票价格"紧接着报"联系电话"（不同字段）属正常连续纠错，不应被冷却误伤；同字段连点仍被压制），identity 登录取 `u{userId}`、匿名取 `ip:{ClientIpResolver.resolve()}`——同身份对同场所同类型同字段在窗口内重复提交抛 1006。尽力而为（多 IP 分布式刷无法拦截），与 view/share 频控同语义。
+2. **库内 PENDING 部分唯一索引**（`db/migration/V2__feedback_pending_dedup.sql` + `V8__feedback_correction_fields.sql` 拆分）：**去重单位（2026-08-10 升级）**——旧索引 `UNIQUE (user_id, venue_id, type) WHERE user_id IS NOT NULL AND status = 'PENDING'` 的去重单位是 type，与字段级纠错的语义单位 (type, field) 不匹配（同场所同类型报两个字段会被幂等吞掉）。V8 拆为两条部分唯一索引：① `UNIQUE (user_id, venue_id, type, field) WHERE user_id IS NOT NULL AND status = 'PENDING' AND field IS NOT NULL`——每字段一条 PENDING（同字段重复提交仍去重，跨字段互不阻塞）；② `UNIQUE (user_id, venue_id, type) WHERE user_id IS NOT NULL AND status = 'PENDING' AND field IS NULL`——非纠错场景（field 不填）保持 V2 原语义。管理员处理后旧行移出索引，可再次上报；匿名行不参与（NULL 无法身份归因）。并发/多实例竞争窗口内撞唯一键时，应用层 catch `DataIntegrityViolationException`（SQLState 23505，经 `DbConstraintViolations.isUniqueViolation`）**按去重单位回查**（纠错场景 `findByUserIdAndVenueIdAndTypeAndFieldAndStatus`，否则 `findByUserIdAndVenueIdAndTypeAndStatus`）幂等返回已有 PENDING 记录（与 StatusReportService 并发模式一致）。V2 迁移先清理存量重复（保留每组最早一条）再建索引；V8 拆分时存量行 field 均为 NULL 只落索引②，无需清理。
 
 ### 接口
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
-| POST | `/venues/{venueId}/feedbacks` | **匿名可提交** | 提交上报（type 必填 + note 可选），响应含 maintenanceHint + trackable（2026-08-06 匿名支持） |
+| POST | `/venues/{venueId}/feedbacks` | **匿名可提交** | 提交上报（type 必填 + note 可选 + **field/correctedValue 可选（2026-08-10：仅 INACCURATE 类型承载的结构化纠错载荷）**），响应含 maintenanceHint + trackable + field/fieldDisplay/correctedValue 回显 |
 | GET | `/venues/{venueId}/feedbacks/mine` | 需登录 | 我对**当前门店**的上报（详情页弹窗数据源，2026-08-06 新增） |
 | GET | `/feedbacks/mine?venueId=` | 需登录 | 我的上报（venueId 可选：缺省=跨场所全部=个人中心；传值=单门店，2026-08-06 新增，与上者同口径共用 service） |
 | GET | `/admin/reports` | ADMIN | 平台级列表（status/type 可选筛选，分页倒序，含 venueName / handleNote） |
@@ -562,7 +572,8 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 - **用户级** `GET /feedbacks/mine`（个人中心：全部场所、各维度上报一览）+ **场所级** `GET /venues/{venueId}/feedbacks/mine`（详情页弹窗：当前门店）——同一 service 方法 `listMyFeedbacks(venueId)` 两个入口，venueId null = 全部
 - 范围：**全部状态**（PENDING/RESOLVED/DISMISSED）均返回——异步审核流程每条记录都有消费价值（待处理 = 未反馈，已处理 = 展示处理结果）；与 status-report 的"已撤销不返回"语义不同（实时信号撤销 = 收回，异步上报无撤销概念）
-- 响应 `MyFeedbackResponse`：id/venueId/venueName/type/typeDisplay/note/status/statusDisplay/handleNote/handledAt/createdAt——处理结果随记录原样回传
+- 响应 `MyFeedbackResponse`：id/venueId/venueName/type/typeDisplay/note/**field/fieldDisplay/correctedValue（2026-08-10：结构化纠错载荷随「我的上报记录」回显用户）**/status/statusDisplay/handleNote/handledAt/createdAt——处理结果随记录原样回传
+- 管理端 `AdminReportResponse` 同步增加 field/fieldDisplay/correctedValue（2026-08-10）——`/admin/reports` 卡片展示「字段名 → 正确值」纠错建议，管理员按字段核对/跳转详情核实
 
 ### 文本防注入（2026-08-06）
 
@@ -575,6 +586,55 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 ### 维护承诺配置（maintenanceHint）
 
 提交响应携带 `maintenanceHint`（"已通知管理员，我们会在 X 日内维护好"），**X 来自配置 `app.reports.maintenance-days`（`config/ReportsProperties`，默认 3，缺失自动回退）**——前端 toast/空态直接展示，禁止硬编码承诺天数。调整承诺天数只改一处配置。
+
+---
+
+## 积分系统（points 模块，2026-08-10 V2）
+
+### 领域边界（第一约束：资产 ≠ 态度表达）
+
+积分是**资产模型**（账户 + 流水 ledger），与 Reaction（态度表达，每日一记）**完全分离**，只在展示层（独立区块，见前端 AGENTS.md）与排名层（热度公式输入项）交集。**禁止把积分做成 reaction_code 的特殊 code**——reaction 的领域不变量是"每日每 type 一次"，积分的领域不变量是"余额守恒（挣 = 赠 + 余）"，两者不可合并（根因分析见 `docs/积分系统-需求设计-V2-2026-08-10.md` 第三章）。
+
+### 数据模型（V9 迁移）
+
+- `qwt_points_accounts`：一用户一行（`user_id` 唯一），`balance` 读写快照 + `earned_total/spent_total` 冗余累计——高频读（详情/赠送校验）不 SUM；
+- `qwt_points_transactions`：**只追加、不可变**的流水，`balance_after` 快照支持日终对账（`SUM(delta)` vs `balance`）；挣取（delta>0）必带 `source_type + source_id`，部分唯一索引 `(user_id, source_type, source_id) WHERE delta > 0 AND source_id IS NOT NULL` 兜底并发（SQLState 23505 幂等返回已有流水）；赠送（delta<0）必带 `target_type + target_id`（`PointsTargetType`：VENUE/DANCER，可扩展）；
+- `qwt_daily_checkins`：`UNIQUE(user_id, checkin_date)` 保证"一天一次"业务语义，与流水唯一键（一次打卡只发一次分）职责分离；
+- **实体不继承 BaseEntity**（与 `qwt_venue_status_logs` 同模式）：账务/锚点记录无软删、流水无 updatedAt——建表与实体列必须逐列对齐（`ddl-auto=validate` 启动期即校验，2026-08-10 曾因实体继承 BaseEntity 而表无 deleted 列启动失败，见当日日志）。
+
+### 账务规则（防刷闭环）
+
+- **余额守恒**：`balance = earned_total - spent_total`；赠送扣减用**原子条件更新**（`PointsAccountRepository.deductBalance`：`UPDATE ... SET balance = balance - :amt WHERE user_id = :id AND balance >= :amt`，affected=0 即余额不足抛 1011）——无锁防并发超扣；
+- **只读事务禁写（2026-08-10 生产实证）**：`@Transactional(readOnly = true)` 的接口（概览/流水/统计）内**禁止任何可能写库的调用**——懒创建账户的写副作用只允许出现在可写事务（checkIn/gift/earn/adjust）；概览在无账户时返回零值而非创建（Postgres 对只读事务内 INSERT 报 "cannot execute INSERT in a read-only transaction"，且该契约错误仅真实请求首次触发时才暴露，见当日日志）；
+- **挣取幂等**：打卡（checkin_id）/ 采纳（feedback_id）/ 管理调整（ADMIN_ADJUST）三源各自唯一键；`earn()` 撞唯一键时清 entityManager 幂等返回已有流水 `balanceAfter`（本事务回滚，无副作用）；
+- **赠送防刷（V2）**：单次 ≤`app.points.gift.max-per-gift`（默认 10）、每日总额 ≤`max-per-day`（默认 20）、单目标每日 ≤`max-per-target-day`（默认 5）、**自赠检测**（`venue.claimedBy` / `dancer.createdBy` == 本人 → 抛 1015）、目标可见性（venue 未软删 / dancer NORMAL）；赠送成功后 **afterCommit 失效 venueHeat 缓存**（与 reaction toggle 同模式，2026-08-08 根因：提交前失效存在竞态窗口）；
+- **上报采纳奖励**：`VenueFeedbackService.adoptReport` 状态流转与发分**同一事务**（原子，杜绝"状态已采纳但积分未发"）；**reward 开关（2026-08-10）**——请求体 `reward` 缺省/true = 采纳并奖励（ADOPTED + 发分）；false = 采纳不奖励（ADOPTED_NO_REWARD，不发分）；匿名上报（userId null）采纳不发；**不设每日条数上限**（V2 决策：防刷由管理员采纳人工把关——奖励只发生在 ADOPTED，而 ADOPTED 是管理员逐条人工判定，垃圾上报不被采纳即拿不到分）；
+- **配置唯一事实源**：`config/PointsProperties`（`app.points.*`：check-in-reward=2 / feedback-reward=5 / heat-weight=2 / gift 上限）。**禁止业务硬编码任何积分参数**。
+
+### 错误码
+
+1011 余额不足 / 1012 单次超限 / 1013 今日赠送超限 / 1014 单目标超限 / 1015 自赠拒绝 / 1016 今日已打卡（幂等提示，未用则删）。
+
+### 排名接入与权重校准（V2 三阶段机制）
+
+- **venue**：热度公式加 `近30天收到积分 × app.points.heat-weight`——三处镜像（`VenueHeatService` + `VenueRepository.HEAT_SCORE` + `findHotVenueIds`）经 `VenueHeatWeights` 常量拼接 + `:pointsWeight` 参数注入（见「场所热度 → 热度公式 → 权重收敛」）；`countHeatCounters` 加 `pointsreceivedtotal/pointsreceived30d` 标量；`countDailyTrends` 加第五序列 `points`（`DailyTrendRow.getPoints()`）；
+- **dancer**：无热度公式，积分仅作**次级排序信号**（`findPublicPage`：近7天认可 DESC → 近30天收到积分 DESC → id DESC，tie-break 不影响认可主导口径）；是否升级为加权在 P2 按数据定；
+- **权重校准 SOP（禁止拍脑袋）**：① 初始保守值 heat-weight=2 → ② 上线约 2 周采集基线（各门店积分贡献占比 = 积分得分/热度总分 的中位数/P90）→ ③ 目标区间 [5%, 15%]：超 15% 降权（减半）或收紧发放；低于 5% 适度升权或提高采纳奖励。只改 `app.points.heat-weight` 一处，公式文案后端下发自动同步。
+
+### 接口
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| POST | `/points/check-in` | 登录 | 每日打卡（幂等：今日已打卡返回 checkedIn=false） |
+| GET | `/points/me` | 登录 | 概览（余额/今日挣赠/打卡态/规则文案 rules——合规文案后端唯一事实源） |
+| GET | `/points/transactions` | 登录 | 流水分页（type=ALL/EARN/GIFT） |
+| POST | `/points/gift` | 登录 | 赠送（targetType/targetId/amount，校验见上） |
+| POST | `/admin/points/adjust` | ADMIN | 人工调整（delta 可正可负，reason 必填，审计） |
+| POST | `/admin/reports/{id}/adopt` | ADMIN | 采纳上报（body `{"note", "reward"}`：reward 缺省/true → ADOPTED + 同事务发分；false → ADOPTED_NO_REWARD 不发分，见「统一用户上报」状态机） |
+
+### 合规红线（微信小程序审核）
+
+无充值入口（积分仅免费获得）/ 不可提现·转让·兑换 / 无邀请分享得积分（诱导分享违规）/ 无随机奖励（博彩）/ 文案禁「打赏·赞赏·小费」，统一「支持·感谢」。规则文案由后端 `PointsService.RULES_TEXT` 下发，前端只渲染。
 
 ---
 
@@ -623,14 +683,14 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 **与 venuefeedback 的边界**（重要）：
 
-- `venuefeedback.SUSPENDED` = "我不在场但认为状态信息有误"→ 异步管理员审核 → `ReportStatus` 状态机流转（RESOLVED/DISMISSED）
+- `venuefeedback.SUSPENDED` = "我不在场但认为状态信息有误"→ 异步管理员审核 → `ReportStatus` 状态机流转（各终态）
 - `venuestatusreport` = "我现在就在现场，刚确认关门"→ 实时 TTL 信号 → 自动过期，无需管理员介入
 
 两者共存，语义边界清晰：一个走异步审核，一个走实时众包。`venuefeedback` 不重复承担实时信号职责。
 
-### 独立信号层（不修改 Venue.status）
+### 独立信号层（用户上报不直接改 Venue.status；采纳是唯一联动通道）
 
-用户上报**不改变** `Venue.status` 字段。`Venue.status` 的变更权仍属管理员/认领人（`POST /venues/{id}/update`）。用户上报作为独立信号层，出现在热度接口中为"N人报告暂停"的众包标记。管理员可在管理后台查看活跃报告并决定是否据此手动更新 `Venue.status`（管理端接口后续约定）。
+用户上报**不改变** `Venue.status` 字段。`Venue.status` 的变更权仍属管理员/认领人（`POST /venues/{id}/update`）或**暂停报采纳联动**（`POST /admin/status-reports/{id}/adopt`，2026-08-10 新增——管理员核实暂停属实后，门店营业状态随之改为 SUSPENDED，见下「管理端可见性」）。用户上报作为独立信号层，出现在热度接口中为"N人报告暂停"的众包标记。管理员在管理后台查看活跃报告（`GET /admin/status-reports`）并处置：**采纳**（信号属实 → 改状态 + 奖励上报者积分 + 处理结果站内信，同事务）或**移除**（虚假信号清理，soft delete 公开视图即时消失）。
 
 ### TTL 语义（4 小时活跃窗口）
 
@@ -647,7 +707,9 @@ LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);  
 
 - `VenueRepository.countHeatCounters` 的 `reportcount` / `latestreporttime`（热度聚合，`reportSince` 参数）
 - `StatusReportRepository.countActiveAndLatestTime`（提交/撤销响应摘要）
+- `StatusReportRepository.findRecentByVenue`（门店暂停报列表，`since` 参数——2026-08-10 新增，见「门店暂停报列表」）
 - `VenuePostRepository.findDetailStats` 的 `hasmyreport` EXISTS（详情页个人已报告标记）——**历史实现只过滤 `deleted = false` 漏 TTL 过滤**，与热度聚合口径不一致：TTL 过期后 `activeReportCount` 归零但 `hasMyStatusReport` 恒真，详情页"已报告·补充"按钮永不还原（用户必须手动撤销）。此为修复根因，新增活跃判定查询时必须对照本清单。
+- `StatusReportRepository.findActiveReports` / `countActiveReports`（管理端列表/计数，`since` 参数，2026-08-10 新增，见「管理端可见性」）
 
 ### 接口
 
@@ -655,7 +717,31 @@ LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);  
 |------|------|------|------|
 | POST | `/venues/{venueId}/status-reports` | 需登录 | 上报暂停（body 可空=快速上报，或含 reason/occurredAt/note） |
 | POST | `/venues/{venueId}/status-reports/cancel` | 需登录 | 撤销我的上报（软删除） |
+| GET | `/venues/{venueId}/status-reports` | 公开 | 门店最近暂停报列表（TTL 窗口内所有用户，倒序，2026-08-10，见下「门店暂停报列表」） |
 | GET | `/status-reports/mine?venueId=` | 需登录 | 我的全部状态上报（用户级资源，顶层路径；venueId 可选，2026-08-06，见下「我的上报记录」） |
+| GET | `/admin/status-reports?page=&size=` | ADMIN | 活跃暂停报列表（跨场所分页倒序，2026-08-10，见下「管理端可见性」） |
+| POST | `/admin/status-reports/{id}/remove` | ADMIN | 移除暂停报（soft delete，公开视图即时消失，幂等） |
+| POST | `/admin/status-reports/{id}/adopt` | ADMIN | 采纳暂停报（门店状态→SUSPENDED + 奖励上报者积分 + 处理结果站内信，同事务，幂等） |
+
+### 管理端可见性（2026-08-10 新增，落实"管理员可在管理后台查看活跃报告"约定）
+
+**根因（用户反馈）**：暂停报是实时众包信号（公开 4h TTL），但管理端零可见性——`admin-reports` 页只查 venuefeedback，`pending-count` 只数 PENDING 反馈；用户上报暂停后管理员**收不到任何提醒、也看不到记录**（虚假信号无处置通道，只能等 TTL 过期）。设计早已预留管理端查看（「独立信号层」L693），"后续约定"一直未落地。
+
+- **列表 `GET /admin/status-reports`**：TTL 窗口内全部活跃报告，按时间倒序分页（PageRequest ≤100）。管理端上下文与公开列表的差异：① 上报者**真实昵称 + userId**（不脱敏——管理员需识别上报者）；② 携带 `note`（补充说明，审核安全约定"note 仅管理端可见"，公开响应禁止返回，见 L1897）；③ JOIN `qwt_venues` 取场所名。`findActiveReports` 原生 SQL + 投影接口（全小写别名），countQuery 与主查询同谓词
+- **移除 `POST /admin/status-reports/{id}/remove`**：soft delete（与用户自撤同软删语义，操作者是管理员）；移除后所有"活跃"查询立即过滤（公开视图即时消失，无需等 TTL）；同事务失效 `venueHeat` 缓存。幂等：已移除/不存在静默成功。语义 = **清理虚假/失效信号**（无副作用）
+- **采纳 `POST /admin/status-reports/{id}/adopt`**（2026-08-10 新增）：管理员核实**暂停属实**后的处置（区别于移除的虚假信号清理）。同一事务完成：① 门店营业状态随之改为 **SUSPENDED**（经 `VenueService.markSuspendedByReport`——写 `VenueStatusLog` 变迁日志 + 逐出 venue/hotVenueIds 缓存，与 updateVenue 同模式；门店已是 SUSPENDED 时幂等跳过不写冗余日志）；② 报告软删（不再作为活跃信号，退出管理列表/公开列表/热度计数）；③ **积分奖励**上报者（userId 非空，经 `PointsService.rewardStatusReport`，来源 `STATUS_REPORT_REWARD`，流水幂等键 (user, source_type, source_id) 兜底并发；匿名不发——与 feedback 采纳同一匿名边界）；④ **处理结果站内信**（`STATUS_REPORT_RESULT`，同事务、幂等、匿名不通知——落实「状态流转对用户有结果必须走站内信」长期约定）。已处置（软删）/不存在幂等返回。**无"已处理"状态机**——暂停报是实时信号，处置语义 = 采纳（属实）或移除（虚假）两动作，均为 soft delete 收尾（与 venuefeedback 的状态机流转不同，见「与 venuefeedback 的边界」）；状态回开走既有 `updateVenue`（认领人/管理员）
+- **计数 `countActiveReports`**：TTL 窗口内活跃报告总数；与 venuefeedback PENDING 计数经 `/admin/reports/pending-count` 合并为**管理端上报待办总数**（FAB「上报管理」红点数据源，2026-08-10 扩展口径——两类上报任一非空即亮；处置/过期后自然归零）
+- **移除不通知上报者**（2026-08-10 决策）：与用户自撤同语义（记录从「我的上报」消失，无回传通道）；误报清理属运营动作，若需"移除告知"后续按「处理结果站内信」约定补发。**采纳必须通知**（`STATUS_REPORT_RESULT` 站内信）——上报被核实采纳且用户获得积分，属「状态流转对用户有结果」范畴，与 feedback 采纳通知同一长期约定
+- **仅活跃报告入管理视图**：TTL 过期信号已自动从公开视图消失，无需管理处置（不展示历史/已过期列表）
+
+### 门店暂停报列表（GET /venues/{venueId}/status-reports，2026-08-10 新增）
+
+详情页「报告暂停营业」弹层的默认内容（公开读，无需登录）。**根因（需求 2026-08-10）**：报告是社区信号动作，用户报告前需要看到"已有多人报告"的明细才能建立信任——原实现只有聚合计数（`activeReportCount`）没有明细，前端系统弹窗只能承载纯文本确认、无法展示列表。本接口补齐"门店级暂停报的公开读路径"，与聚合计数共用同一 TTL 窗口（活跃判定口径契约，见上）。
+
+- **范围**：TTL 窗口内（`createdAt >= now - 4h`）全部用户的报告，按 `createdAt` 倒序，Service 层 `.limit(RECENT_REPORT_LIST_LIMIT=20)`（SQL 不写 LIMIT，窗口收敛数据量小，避免方言绑定）
+- **实现**：`StatusReportRepository.findRecentByVenue(venueId, since)` 原生 SQL LEFT JOIN `qwt_users` 取昵称（LEFT JOIN：用户异常态回退匿名，不因关联缺失丢行）；`mine` 标记由 `UserContext.getCurrentUserId()`（可空，未登录恒 false）对比行 `user_id` 得出
+- **隐私**：`reporterName` 脱敏（`maskNickname`：首字 + "**"，无昵称回退「舞友」）——保护用户身份隐私的同时保留"社区已有多人报告"的信任信号
+- **响应**：`StatusReportListItem`（id/reporterName/reason/reasonDisplay/createdAt/mine），reasonDisplay 取自 `ReportReason.getDisplayName()`（前端不再自持原因文案映射）
 
 ### 我的上报记录（GET /status-reports/mine，2026-08-05 新增，2026-08-06 收敛）
 
@@ -683,7 +769,7 @@ LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);  
 
 **根因（为什么不查 `findByUserIdAndVenueIdAndDeletedFalse`）**：UNIQUE 约束 `qwt_uk_status_report_user_venue` 在 `(userId, venueId)` 上，不含 `deleted` 列——软删记录仍占用唯一槽位。若仅查活跃记录，撤销后再次上报会走到 INSERT 分支，与软删记录冲突。`FavoriteService` 的 `findByUserIdAndVenueId`（含软删）+ 恢复模式是标准做法，此模块此前遗漏了此模式导致 `AssertionFailure` 崩溃。
 
-**`@CreationTimestamp` 仅 INSERT 时设值**：恢复软删记录时需手动 `setCreatedAt(now)` 刷新 TTL，否则旧 `createdAt` 可能已超过 4h TTL，恢复后立即"过期"。
+**`@CreationTimestamp` 属性不可变，TTL 续期必须经 JPQL 批量更新（2026-08-10 根因修复）**：`BaseEntity.createdAt` 标注 `@CreationTimestamp`，Hibernate 将其视为**不可变属性**——实体 setter（`report.setCreatedAt(now)`）在 UPDATE 时被静默忽略（WARN HHH000502，UPDATE 语句不含 `created_at` 列）。原实现"手动 setCreatedAt 刷新 TTL"从未生效：旧 `createdAt` 超出 4h TTL 窗口后，详情页 `hasMyStatusReport`（EXISTS 带 TTL 过滤）为 false、公开列表（TTL 过滤）查不到 → 用户"刚报告的记录消失"。**正确做法**：经 `StatusReportRepository.renewCreatedAt(id, now)`（`@Modifying(flushAutomatically=true, clearAutomatically=true)` 的 JPQL 批量更新）直写 `created_at` 列——批量更新不走实体生命周期，不受不可变约束；`flushAutomatically` 保证实体脏修改（deleted/reason 等）先落库再续期。**长期规则：`@CreationTimestamp` 字段禁止用实体 setter 改，需"续期"语义（如 TTL 刷新）时必须走批量更新**。
 
 **`DataIntegrityViolationException` catch 后必须 `entityManager.clear()`**：`save()` 失败后 Hibernate session 拋留 id=null 的脏实体，后续 JPQL 查询触发 auto-flush 时抛 `AssertionFailure: Entry for instance has a null identifier`。`entityManager.clear()` 清除脏实体后，`getActiveReportSummary` 的查询才能正常执行。
 
@@ -880,7 +966,7 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 
 ---
 
-## 舞伴生态体系（dancer 模块，2026-08-06 新增）
+## 舞伴生态体系（dancer 模块，2026-08-06 新增；2026-08-10 升级：本人编辑 + 相册与照片审核）
 
 ### 设计定位（根因）
 
@@ -902,7 +988,11 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 负面评价真实个人存在诽谤/骚扰风险且难以核验——负向体验走场所 feedback 等既有通道，
 舞伴标签字典**全部为正向信号**。
 
-### 数据模型（4 张新表，全部继承 BaseEntity，ddl-auto:update 自动建表）
+**来源分层（2026-08-10 修订，根因：早期"一刀切禁止照片"的约束未区分上传者身份）**：
+普通用户对舞伴唯一可写公开影响 = 认可 + 字典标签（禁传照片/禁编辑）；舞伴本人（createdBy 匹配）
+与管理员可编辑资料、上传相册照片（照片逐张 PENDING 审核后公开，见「相册与照片审核」）。
+
+### 数据模型（5 张表，全部继承 BaseEntity；2026-08-07 起 Flyway 迁移 + validate，禁 ddl-auto 演进）
 
 | 表 | 职责 | 关键约束 |
 |---|---|---|
@@ -910,10 +1000,37 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 | `qwt_dancer_venues` | 舞伴↔舞厅关系（多对多） | UNIQUE(dancerId, venueId, relation)；HOME 常驻 / APPEARANCE 出现 |
 | `qwt_dancer_recognitions` | 认可记录（每日一记模型） | UNIQUE(userId, dancerId, recognitionDate) |
 | `qwt_dancer_recognition_tags` | 认可携带的标签 | UNIQUE(recognitionId, tag)；dancerId/userId 冗余便于聚合 |
+| `qwt_dancer_photos` | 舞伴相册照片（V7 迁移，2026-08-10） | status 默认 `PENDING`（@ColumnDefault）；照片必须**逐张**审核，JSON 列无法表达逐张状态故独立成表 |
 
 - **不强绑定单一舞厅**：一个舞伴可在多个舞厅出现、随时间变化（HOME 可多个、APPEARANCE 随时间增删）。
   `Dancer.city` 仅作列表按城市筛选的冗余字段，不构成绑定。
 - **性别开放但可选**（业务需求决定）：`gender` 可空，null = 未声明，前端不展示。
+- **相册照片**（`DancerPhoto`）：dancerId / url(500) / status(PENDING→PUBLIC/REJECTED) / createdBy /
+  sortOrder（上传序；列表封面 = sortOrder 最小的一张 PUBLIC）。照片与资料可见性联动：
+  舞伴非 NORMAL 时主页不可见 → 照片天然不公开（详情先校验舞伴可见性）。
+
+### 本人编辑（2026-08-10 新增）
+
+- `PUT /dancers/{id}`（本人 canManage 或管理员）：请求体复用 `UpsertDancerRequest`
+  （原 CreateDancerRequest 更名，创建/编辑同一领域对象——与 venue 域 CreateVenueRequest
+  复用于 create/update 的模式一致）；全量覆盖 nickname/avatarUrl/bio/gender/city，
+  status/createdBy 不可由本接口变更。
+- **状态机**：编辑不重置公开状态（NORMAL 保持）；**REJECTED 编辑后自动 → PENDING 重新送审**
+  （兑现驳回通知"可修改资料后重新提交"的产品承诺，2026-08-10 补齐）。
+- **HOME 关系 = 完整替换语义**：homeVenueId null = 清除全部 HOME；传新值软删旧 HOME 并幂等建新 HOME
+  （编辑是"常驻舞厅变更"而非"追加"，防多次编辑累积多个"常去"）。
+- **权限判定**：`DancerService.canManage()`（本人或 ADMIN），编辑/传照/删照均先过此校验。
+
+### 相册与照片审核（2026-08-10 新增）
+
+- 接口：`POST /dancers/{id}/photos`（本人/管理员，body {urls}，插入即 PENDING，单次 ≤9）、
+  `DELETE /dancers/{id}/photos/{photoId}`（本人/管理员，软删）、
+  `GET /admin/dancers/photos?status=`（仅 ADMIN，按上传时间倒序）、
+  `PUT /admin/dancers/photos/{photoId}/status`（仅 ADMIN：PENDING→PUBLIC/REJECTED，reason 可选仅审计日志）。
+- 详情 `photos` 服务端按身份过滤（非本人仅 PUBLIC；本人/管理员全量含待审态，编辑页回显状态徽标）；
+  列表 `coverPhotoUrl`（`DancerPhotoRepository.findCoverUrlsByDancerIds` 批量 IN 查询，N+1 规避）。
+- 照片驳回**不新增站内信**（编辑页可见状态，本人自行删除重传；低风险 + 可自查，避免消息域扩散）。
+- `FileCategory` 新增 `DANCER_PHOTO` / `DANCER_AVATAR`（Supabase 直传凭证分类）。
 
 ### 认可模型（每日一记，复用 Reaction 的 anti-刷票设计）
 
@@ -942,23 +1059,30 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 | REJECTED（审核驳回，2026-08-08 新增） | ❌ | ✅ | ✅ |
 | HIDDEN（管理员下架） | ❌ | ✅ | ✅ |
 
-`DancerService.canView()` 是唯一判定点（Controller 无权限逻辑）；`getDetail` / `getTags` /
-`toggleRecognize` 均先过可见性校验。认可目标须对当前用户可见。
+`DancerService.canView()` 是读可见性唯一判定点（Controller 无权限逻辑）；`getDetail` / `getTags` /
+`toggleRecognize` 均先过可见性校验。认可目标须对当前用户可见。写操作（编辑/传照/删照）
+走 `canManage()`（本人或 ADMIN），与 canView 分层——普通用户对舞伴唯一可写公开影响 = 认可 + 标签。
 
 ### 接口
 
 | 接口 | 鉴权 | 说明 |
 |---|---|---|
-| GET /dancers | 软鉴权 | 列表（仅 NORMAL；city 可选；按 count7d 倒序分页；登录含 myRecognizedToday） |
+| GET /dancers | 软鉴权 | 列表（仅 NORMAL；city 可选；按 count7d 倒序分页；登录含 myRecognizedToday；含 coverPhotoUrl） |
+| GET /dancers/cities | 软鉴权 | 常驻城市词表（聚合真实数据，2026-08-10 激活列表页城市筛选） |
 | POST /dancers | 登录 | 舞伴主动注册 → PENDING；返回新建 ID |
-| GET /dancers/{id} | 软鉴权 | 详情（可见性校验；登录含 isMine + myRecognizedToday + 四窗口统计 + 近7日每日认可 + 标签云 + 常去/出现舞厅） |
+| GET /dancers/{id} | 软鉴权 | 详情（可见性校验；登录含 isMine + myRecognizedToday + 四窗口统计 + 近7日每日认可 + 标签云 + 常去/出现舞厅 + 相册 photos（按身份过滤）） |
+| PUT /dancers/{id} | 本人/管理员 | 编辑资料（全量覆盖；REJECTED → 自动 PENDING 重审；HOME 关系完整替换；返回更新后详情） |
 | GET /dancers/{id}/tags | 软鉴权 | 标签聚合（可见性校验） |
 | POST /dancers/{id}/recognitions | 登录 | 认可 toggle（body.tags 可选 0-3 字典标签；返回 RecognizeResponse{recognized, stats}） |
+| POST /dancers/{id}/photos | 本人/管理员 | 上传相册照片（body {urls}，插入即 PENDING，单次 ≤9） |
+| DELETE /dancers/{id}/photos/{photoId} | 本人/管理员 | 删除照片（软删） |
 | GET /users/me/dancer-recognitions | 登录 | 我的认可记录（同舞伴只取最近一条，按认可时间倒序） |
 | GET /users/me/dancers | 登录 | 我的舞伴主页（创建人视角，含 PENDING/HIDDEN/REJECTED + status） |
 | GET /admin/dancers | 管理员 | **审核列表**（含全部状态，status 可选筛选，按提交时间倒序；LEFT JOIN qwt_users 带注册人昵称/头像） |
 | POST /admin/dancers | 管理员 | 后台创建（可信来源直通 NORMAL） |
 | PUT /admin/dancers/{id}/status | 管理员 | 状态切换（PENDING→NORMAL 审核通过 / PENDING→REJECTED 驳回 / NORMAL↔HIDDEN 下架恢复；body.reason 可选操作说明，**状态变化即向创建人发送站内信**，2026-08-08 新增，见「站内信（消息中心）」） |
+| GET /admin/dancers/photos | 管理员 | 相册照片审核列表（status 可选，按上传时间倒序，2026-08-10） |
+| PUT /admin/dancers/photos/{id}/status | 管理员 | 照片审核（PENDING→PUBLIC/REJECTED；reason 可选仅审计日志，2026-08-10） |
 
 ### 聚合缓存（DancerAggregateService）
 
@@ -970,9 +1094,15 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 ### 批量查询约定（N+1 规避）
 
 - 列表页：单条分页 SQL 内联计数 → 一次 IN 查询（Top 标签）+ 一次 IN JOIN（常驻舞厅名）+
-  一次 IN 查询（我的今日认可态）——见 `DancerRepository.findPublicPage` / `fetchTopTags` /
-  `fetchHomeVenueNames` / `fetchMyTodayIds`
+  一次 IN 查询（我的今日认可态）+ 一次 IN 查询（封面照片 url）——见 `DancerRepository.findPublicPage` /
+  `fetchTopTags` / `fetchHomeVenueNames` / `fetchMyTodayIds` / `fetchCoverPhotoUrls`
 - 列表计数 SQL 用 `COUNT(*) FILTER (WHERE created_at >= ...)` 单遍聚合三个窗口
+- **Spring Data 派生查询参数类型必须与实体字段类型一致**（2026-08-10 线上修复固化）：
+  枚举字段（如 `DancerVenue.relation`）的派生查询方法签名必须用枚举参数（`DancerVenueRelation`），
+  禁止声明为 String——Spring Data 按字段类型校验绑定参数，String 会抛
+  "argument [HOME] is not assignable to DancerVenueRelation"（该缺陷在 createDancer 因前端
+  不传 homeVenueId 长期未被触发，updateDancer HOME 替换首次真实暴露；单测 mock 掩盖此类问题，
+  新增 Repository 方法后必须真实启动验证）。
 
 ### 与既有模块的关系
 
@@ -1012,19 +1142,22 @@ Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻
 
 ### 设计定位
 
-站内信是**通用消息基础设施**——承载平台对用户的**主动通知**（当前：舞伴主页审核结果，
-驳回附原因）。前端「消息中心」页面统一展示：站内信（本模块）+「我的上报」
-（venuefeedback / venuestatusreport 业务数据，管理员处理结果经原记录 handleNote 回传，
-**不复制为站内信**——数据源独立、页面统一）。
+站内信是**通用消息基础设施**——承载平台对用户的**主动通知**（舞伴主页审核结果
+驳回附原因；上报处理结果，2026-08-10 新增）。前端「消息中心」页面统一展示：
+站内信（本模块）+「我的上报」（venuefeedback / venuestatusreport 业务数据）。
+上报处理结果的回传通道（2026-08-10 决策，根因见「统一用户上报 → 处理结果站内信」）：
+① 原记录 handleNote（随「我的上报」展示，数据源独立）；② **处理结果站内信**
+（FEEDBACK_RESULT，状态实际流转时同事务发送，驱动「消息」未读红点）——两条通道
+并行、页面统一展示。
 
 ### 数据模型（qwt_messages，V4 迁移）
 
 | 列 | 说明 |
 |---|---|
 | user_id | 收件人（用户级资源，查询/已读一律按此过滤，越权返回空） |
-| type | MessageType 枚举：DANCER_REVIEW（审核结果）/ DANCER_STATUS（隐藏/恢复状态变更） |
+| type | MessageType 枚举：DANCER_REVIEW（审核结果）/ DANCER_STATUS（隐藏/恢复状态变更）/ FEEDBACK_RESULT（上报处理结果，2026-08-10 新增） |
 | title / content | 标题 / 正文（TextSanitizer 清洗入库，长度 ≤100 / ≤500 与列定义一致） |
-| related_type / related_id | 业务软关联（当前 DANCER → 舞伴详情页深链；可扩展 VENUE 等），可空 |
+| related_type / related_id | 业务软关联：DANCER → 舞伴详情页 / VENUE → 场所详情页，可空 |
 | read_at | 已读时间（null = 未读；未读数徽标依据） |
 
 ### 接口（MessageController，均需登录）
@@ -1039,10 +1172,15 @@ Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻
 ### 写入约定
 
 - **业务模块调 `MessageService.create(...)` 发送**（无发件人概念，平台即发件人）；
-  当前唯一调用点 = `DancerService.updateStatus`（审核/隐藏/恢复，**状态实际变化时**
-  才发送，与状态流转同事务——事务失败整体回滚，通知不丢失）
+  当前调用点：
+  1. `DancerService.updateStatus`（审核/隐藏/恢复，**状态实际变化时**才发送，与状态
+     流转同事务——事务失败整体回滚，通知不丢失）
+  2. `VenueFeedbackService.handleByAdmin`（上报处理结果，2026-08-10 新增：PENDING→
+     任一终态**实际流转时**发送，与状态流转同事务、幂等——终态重复操作不重复发信；
+     **匿名上报（userId null）不通知**，与积分奖励同一匿名边界）
 - **文案规则**：真实正式、只陈述事实（同前端「分享内容契约」）；驳回时 reason
-  经 TextSanitizer 清洗后拼入正文
+  经 TextSanitizer 清洗后拼入正文；上报处理结果按终态区分奖励语义（ADOPTED 已奖励
+  / ADOPTED_NO_REWARD 未奖励），奖励数额不在消息内硬编码（以积分流水为唯一事实源）
 - **新增消息类型** = 枚举加值 + 前端 `types/message.ts` 联合类型/文案同步（见前端
   AGENTS.md「消息中心」）；消息表结构无需变更（type 为 varchar 列）
 
@@ -1248,7 +1386,14 @@ public record ApiResponse<T>(int code, String message, T data) {
 
 - 成功：`code = 0`
 - 业务错误：`code` 使用自定义错误码（`1xxx` 客户端错误，`5xxx` 服务端错误）
-- HTTP 状态码：始终返回 `200`，错误信息通过 `code` 字段区分
+- HTTP 状态码约定（2026-08-10 修订，原"始终 200"已废弃——服务器错误以 200 返回会被
+  监控/代理/前端 5xx 重试完全掩盖，见「连接池与数据库抖动韧性」）：
+  - 业务错误（BusinessException / 参数校验）：HTTP `200` + code 区分（前端契约不变）
+  - 未登录：HTTP `401` + code 1002（前端据此清凭证触发登录）
+  - 路由不存在：HTTP `404` + code 1001
+  - 数据库连接类瞬时故障（连接池超时/连接中断/数据库不可达）：HTTP `503` + code 5003
+    （前端对幂等 GET 的 5xx 自动重试一次可自愈）
+  - 其余未预期异常：HTTP `500` + code 5000（兜底，日志打完整堆栈）
 
 ### 错误码登记表（新增错误码必须避开已占用值）
 
@@ -1263,9 +1408,10 @@ public record ApiResponse<T>(int code, String message, T data) {
 | 1007 | 无效的评分维度 / Reaction 类型 |
 | 1008 | 上报不存在 |
 | 1009 | 无效的排序方式（VenueSortMode.from） |
-| 5000 | 未知服务器错误（兜底） |
+| 5000 | 未知服务器错误（兜底），HTTP 500 |
 | 5001 | 微信接口响应异常（无响应 / 解析失败） |
 | 5002 | 文件保存失败（IO 异常） |
+| 5003 | 数据库连接类瞬时故障（服务暂时不可用），HTTP 503 |
 
 ---
 
@@ -1298,6 +1444,7 @@ public class Venue {
 
 - 主键统一用 `Long id`，策略 `IDENTITY`
 - 时间戳字段用 `LocalDateTime`，配合 `@CreationTimestamp` / `@UpdateTimestamp`
+- **`@CreationTimestamp` 属性不可变（2026-08-10 根因教训）**：Hibernate 视其为不可变属性，实体 setter 在 UPDATE 时被静默忽略（WARN HHH000502），UPDATE 语句不含该列——需要"更新 createdAt"的场景（如 TTL 续期）禁止用实体 setter，必须经 `@Modifying` JPQL 批量更新直写列（见 status-report 模块 `renewCreatedAt` 与根因注记）
 - 枚举映射用 `@Enumerated(EnumType.STRING)`，禁止 `ORDINAL`
 - 逻辑删除字段命名 `deleted`（`boolean`），不物理删除数据
 - 禁止在 Entity 中写业务方法
@@ -1607,7 +1754,7 @@ sudo bash deploy/deploy.sh --no-user --no-unit   # 仅重新打包+重启
 | `StartLimitBurst=5` / `StartLimitIntervalSec=120` | 2 分钟内最多重启 5 次 | 防止配置错误导致无限重启循环 |
 | `MemoryMax=950M` / `MemoryHigh=800M` | cgroup 硬/软限制 | JVM 逃逸时兜底（仍 < 物理 2GB 一半），OS 不被拖死 |
 
-**HikariCP 连接池**（`application-dev.yaml`）：maximumPoolSize=5, minimumIdle=2。低流量小程序 + 高延迟 DB（~150ms/往返）场景下 5 连接足够，减少内存占用。leak-detection-threshold=30s 用于排查连接泄漏。
+**HikariCP 连接池**：统一在 `application.yaml` 基础配置声明（2026-08-10 起，禁止在环境 yaml 重复——防漂移）：maximumPoolSize=5, minimumIdle=2, idle-timeout=5min, max-lifetime=15min, connection-timeout=10s, leak-detection-threshold=30s, **keepalive-time=60s + validation-timeout=3s**。低流量小程序 + 高延迟 DB（~150ms/往返）场景下 5 连接足够，减少内存占用；keepalive 探活是"数据库抖动不死连接"的关键（见「连接池与数据库抖动韧性」）。
 
 Cloudflare Tunnel 的 `config.yml` 中 ingress 指向 `http://localhost:8080`。
 
@@ -1617,13 +1764,44 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 
 | 接入点 | 端口 | 模式 | JDBC 要求 |
 |--------|------|------|-----------|
-| `aws-1-<region>.pooler.supabase.com` | 6543 | 事务池化 | URL **必须**附加 `prepareThreshold=0` |
+| `aws-1-<region>.pooler.supabase.com` | 6543 | 事务池化 | URL **必须**附加 `prepareThreshold=0` + `connectTimeout=5&socketTimeout=8&tcpKeepAlive=true`（2026-08-10 起，见「连接池与数据库抖动韧性」） |
 | `aws-1-<region>.pooler.supabase.com` | 5432 | 会话池化 | 无特殊要求 |
 | `db.<project-ref>.supabase.co` | 5432 | 直连 | 无特殊要求，用户名用 `postgres` |
 
 根因：PG JDBC 驱动默认启用服务端命名预编译语句（`prepareThreshold=5`，同一 SQL 执行 5 次后提升为命名语句 S_1/S_2…），而事务池化会在事务之间更换物理后端连接，命名语句的命名空间挂在物理后端上，多路复用必然冲突。`prepareThreshold=0` 禁用服务端命名预编译，是事务池化环境下的标准解法。
 
-新增/修改数据源配置时（含生产 `${DB_URL}`），若 URL 指向 6543 端口，必须检查 `prepareThreshold=0` 是否存在。
+新增/修改数据源配置时（含生产 `${DB_URL}`），若 URL 指向 6543 端口，必须检查 `prepareThreshold=0` 与三项超时/保活参数（`connectTimeout`/`socketTimeout`/`tcpKeepAlive`）是否存在——缺任一项即回归 2026-08-10 事故（见下节）。
+
+---
+
+## 连接池与数据库抖动韧性（2026-08-10 事故根因修复）
+
+### 事故还原（2026-08-10 22:57，本地 dev 实例实证）
+
+Supabase 事务池化（6543）抖动（用户确认：Supabase 当前不稳定为已知外部条件）→ 请求中途连接被对端关闭/网络中断（`SQLState 08006` / `EOFException`）→ 但应用表现出一串可预防的放大缺陷：
+
+1. **无 socket 超时**：JDBC URL 仅有 `sslmode=require&prepareThreshold=0`，驱动阻塞在 TCP 重传上 **19s 才报错**（远超前端 10s 超时），请求挂死（日志 `GET /points/me -> 200 cost=19187ms [SLOW]`）。
+2. **keepalive 关闭**：连接池无主动探活，死连接不会被提前剔除，直到被某请求拿到并失败（HikariCP 事后剔除可自愈，但用户已感知错误）。
+3. **生产调优从未生效**：systemd 以 `--spring.profiles.active=dev` 运行，生效的是 `application-dev.yaml`（无任何 HikariCP 配置 → Spring Boot 默认值：keepalive 关闭、max-lifetime 30min、connection-timeout 30s）；`application-prod.yaml` 里的调优（5 连接/15min/10s/leak 检测）从未生效。
+4. **错误被伪装成 200**：GlobalExceptionHandler 兜底异常未设置 HTTP 状态，服务器错误以 `HTTP 200 + code 5000` 返回——监控/代理不可见，前端 GET 重试无从触发。
+
+### 修复（五层，缺一不可）
+
+| 层 | 改动 | 效果 |
+|----|------|------|
+| JDBC URL | `connectTimeout=5&socketTimeout=8&tcpKeepAlive=true`（dev/prod 双配置） | 网络故障 **≤8s 快速失败**（< 前端 10s 超时），不再挂死 19s |
+| 连接池 | 基础配置 `application.yaml` 统一声明 hikari 块：`keepalive-time: 60000` + `validation-timeout: 3000` + 5/2/5min/15min/10s/leak30s | 每 60s 对空闲连接执行 `isValid` 探活（PG JDBC 42.7.11 的 isValid 是真实往返，已验证），死连接**借出前即被剔除**，socket 不被池化器/NAT 空闲回收 |
+| 异常响应 | `DataAccessResourceFailureException` → **HTTP 503 + code 5003**「服务暂时不可用，请稍后重试」；兜底 Exception → **HTTP 500**（不再 200） | 服务器错误语义正确；前端 5xx 重试可触发 |
+| 前端请求层 | 幂等 GET 遇到 HTTP 5xx 自动重试 1 次（300ms，与网络层失败同预算） | 数据库抖动瞬时故障**用户无感自愈**；POST 等非幂等不重试 |
+| 部署（待办） | 生产切换到 prod profile（需先给 systemd 注入 DB_URL/DB_USERNAME/DB_PASSWORD 等环境变量） | 消除"生产跑 dev 配置"隐患（show-sql 开启、密钥在 jar 内、logging 收敛未生效） |
+
+### 强制约定
+
+- **HikariCP 调优禁止在各环境 yaml 重复声明**——唯一事实源是 `application.yaml` 基础配置（dev/prod 全环境生效），防漂移。
+- 任何指向 6543 池化器的 JDBC URL（含 `${DB_URL}` 的值）必须含 `prepareThreshold=0&connectTimeout=5&socketTimeout=8&tcpKeepAlive=true`。
+- 兜底异常必须返回 5xx（HTTP 语义），禁止再以 200 伪装服务器错误。
+- 前端请求层：5xx 重试仅限幂等 GET；POST/PUT 等禁止。
+- 生产仍以 dev profile 运行为**已知技术债**（见上表"部署（待办）"），切换前必须先在 systemd 补齐环境变量并回归验证。
 
 ---
 
@@ -1652,6 +1830,8 @@ Supabase 提供三类接入点，JDBC 配置必须与池化模式匹配，否则
 3. **实体移除字段 ≠ 列被删除**：validate 不校验列级 NOT NULL、Flyway 迁移不自动删列。移除字段时必须保留实体映射兜底（@Deprecated 字段 + Java 默认值，insert 继续写该列避免违反遗留 NOT NULL），**禁止**只移除映射导致 insert 违反遗留 NOT NULL 列（历史 `liked` 事故模式，见下文「实体字段移除」小节）；确需删列时在迁移脚本中显式 `DROP COLUMN`（评估影响后）
 
 **索引演进**：实体 `@Index` 声明与迁移脚本中的 `CREATE [UNIQUE] INDEX` 一一对应；新增索引走 V{n} 脚本（`IF NOT EXISTS` 防御性幂等）。
+
+**枚举类列禁止 CHECK 约束（2026-08-10 确立，事故根因见 V10 迁移头注释）**：Flyway 管理的 schema（V1 baseline 起）一律**不声明、不维护**枚举列的 DB CHECK 约束——`@Enumerated(EnumType.STRING)` 的隐式 check 只在 Hibernate 生成 DDL 时出现（`ddl-auto:create/update` 时代产物），`ddl-auto=validate` **不校验约束表达式**，Flyway 迁移链不跟进。**扩枚举 = 改 Java 枚举即可，永远不需要 DB 迁移**；枚举值合法性由应用层（Jackson 反序列化 + 实体枚举映射）把关。Hibernate 遗留的 4 个存量约束（`qwt_venue_feedbacks_status_check` / `qwt_dancers_status_check` / `qwt_dancer_venues_relation_check` / `qwt_venue_shares_event_type_check`）已由 V10 清理；**禁止**在任何迁移脚本中新增同类 CHECK。
 
 **DDL 失败即启动失败**：`spring.jpa.properties.hibernate.hbm2ddl.halt_on_error: true` 保留（基础配置已统一）；Flyway 迁移失败同样默认拒绝启动——双重 fail-fast。
 

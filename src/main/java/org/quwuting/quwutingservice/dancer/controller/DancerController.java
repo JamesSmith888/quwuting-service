@@ -3,9 +3,11 @@ package org.quwuting.quwutingservice.dancer.controller;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
-import org.quwuting.quwutingservice.dancer.dto.request.CreateDancerRequest;
+import org.quwuting.quwutingservice.dancer.dto.request.AddDancerPhotosRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.RecognizeDancerRequest;
+import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerDetailResponse;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerPhotoResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerSummaryResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTagStat;
 import org.quwuting.quwutingservice.dancer.dto.response.RecognizeResponse;
@@ -20,11 +22,15 @@ import java.util.List;
  * 舞伴生态体系公开/用户接口（路由挂载在 /dancers 下）。
  * 接口集合与规范对应需求（见 AGENTS.md「舞伴生态体系」）：
  * <ul>
- *   <li>GET /dancers — 舞伴列表（公开，登录时含个人认可态）</li>
+ *   <li>GET /dancers — 舞伴列表（公开，登录时含个人认可态；city 可选筛选）</li>
+ *   <li>GET /dancers/cities — 常驻城市词表（列表页城市筛选；聚合真实数据）</li>
  *   <li>POST /dancers — 舞伴主动注册（登录，status=PENDING 待认证）</li>
  *   <li>GET /dancers/{id} — 舞伴详情（公开，可见性规则见 DancerService）</li>
+ *   <li>PUT /dancers/{id} — 编辑本人/管理舞伴资料（全量覆盖；REJECTED → 自动重审）</li>
  *   <li>GET /dancers/{id}/tags — 舞伴标签聚合（公开）</li>
  *   <li>POST /dancers/{id}/recognitions — 认可 toggle（登录）</li>
+ *   <li>POST /dancers/{id}/photos — 本人/管理员上传相册（插入即 PENDING 待审）</li>
+ *   <li>DELETE /dancers/{id}/photos/{photoId} — 本人/管理员删除照片</li>
  * </ul>
  * 认可体系语义（产品定位）：用户认可/支持/点赞，不含打赏、礼物、虚拟币等金钱/排行概念。
  */
@@ -52,9 +58,20 @@ public class DancerController {
      * 返回新建舞伴 ID（前端据此跳转详情页）。
      */
     @PostMapping
-    public ApiResponse<Long> create(@Valid @RequestBody CreateDancerRequest request) {
+    public ApiResponse<Long> create(@Valid @RequestBody UpsertDancerRequest request) {
         Long userId = UserContext.requireAuth();
         return ApiResponse.ok(dancerService.createDancer(userId, request, false));
+    }
+
+    /**
+     * 编辑舞伴资料（本人 createdBy 匹配 或 管理员）：全量覆盖可编辑字段；
+     * REJECTED 资料编辑后自动回到 PENDING（重新送审）。返回更新后详情。
+     */
+    @PutMapping("/{id}")
+    public ApiResponse<DancerDetailResponse> update(@PathVariable Long id,
+                                                    @Valid @RequestBody UpsertDancerRequest request) {
+        Long userId = UserContext.requireAuth();
+        return ApiResponse.ok(dancerService.updateDancer(userId, id, request, UserContext.getCurrentRole()));
     }
 
     /**
@@ -81,5 +98,33 @@ public class DancerController {
                                                     @Valid @RequestBody(required = false) RecognizeDancerRequest request) {
         Long userId = UserContext.requireAuth();
         return ApiResponse.ok(dancerService.toggleRecognize(userId, id, request, UserContext.getCurrentRole()));
+    }
+
+    /**
+     * 常驻城市词表（公开；列表页城市筛选数据源——聚合真实数据，新增城市自动出现，
+     * 与 venue 域 /venues/cities 同模式）。
+     */
+    @GetMapping("/cities")
+    public ApiResponse<List<String>> cities() {
+        return ApiResponse.ok(dancerService.listPublicCities());
+    }
+
+    /**
+     * 本人/管理员上传相册照片（需登录 + canManage）：插入即 PENDING（先审后发）。
+     * 返回本人视角全量照片（含刚上传的待审项，编辑页据此刷新）。
+     */
+    @PostMapping("/{id}/photos")
+    public ApiResponse<List<DancerPhotoResponse>> addPhotos(@PathVariable Long id,
+                                                            @Valid @RequestBody AddDancerPhotosRequest request) {
+        Long userId = UserContext.requireAuth();
+        return ApiResponse.ok(dancerService.addPhotos(userId, id, request.urls(), UserContext.getCurrentRole()));
+    }
+
+    /** 本人/管理员删除照片（软删；普通用户不可调用） */
+    @DeleteMapping("/{id}/photos/{photoId}")
+    public ApiResponse<Void> removePhoto(@PathVariable Long id, @PathVariable Long photoId) {
+        Long userId = UserContext.requireAuth();
+        dancerService.removePhoto(userId, id, photoId, UserContext.getCurrentRole());
+        return ApiResponse.ok(null);
     }
 }

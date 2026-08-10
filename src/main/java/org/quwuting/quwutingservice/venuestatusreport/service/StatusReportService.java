@@ -6,16 +6,26 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.text.TextSanitizer;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.message.enums.MessageType;
+import org.quwuting.quwutingservice.message.service.MessageService;
+import org.quwuting.quwutingservice.points.service.PointsService;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
+import org.quwuting.quwutingservice.venue.service.VenueService;
+import org.quwuting.quwutingservice.venuefeedback.service.VenueFeedbackService;
 import org.quwuting.quwutingservice.venuestatusreport.dto.request.SubmitReportRequest;
 import org.quwuting.quwutingservice.venuestatusreport.dto.response.ActiveReportSummary;
+import org.quwuting.quwutingservice.venuestatusreport.dto.response.AdminStatusReportResponse;
 import org.quwuting.quwutingservice.venuestatusreport.dto.response.MyStatusReportResponse;
+import org.quwuting.quwutingservice.venuestatusreport.dto.response.StatusReportListItem;
 import org.quwuting.quwutingservice.venuestatusreport.entity.VenueStatusReport;
 import org.quwuting.quwutingservice.venuestatusreport.enums.ReportReason;
 import org.quwuting.quwutingservice.venuestatusreport.repository.StatusReportRepository;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -47,9 +57,16 @@ public class StatusReportService {
     /** 全局频率限制：每用户每小时最多报告的不同场所数（滑动窗口） */
     private static final int MAX_REPORTS_PER_HOUR = 5;
 
+    /** 门店暂停报列表最大返回条数（TTL 窗口内倒序取最近 N 条，详情页弹层消费） */
+    private static final int RECENT_REPORT_LIST_LIMIT = 20;
+
     private final StatusReportRepository statusReportRepository;
     private final VenueRepository venueRepository;
     private final VenueHeatService venueHeatService;
+    /** 采纳联动：门店状态变更 + 状态变迁日志 + 场所/热门缓存逐出（见 {@link VenueService#markSuspendedByReport}） */
+    private final VenueService venueService;
+    private final PointsService pointsService;
+    private final MessageService messageService;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -82,9 +99,11 @@ public class StatusReportService {
             report.setOccurredAt(req.occurredAt());
             report.setNote(TextSanitizer.sanitize(req.note()));
             report.setDeleted(false);
-            // 刷新 createdAt 续期 TTL（@CreationTimestamp 仅在 INSERT 时设值，UPDATE 需手动设）
-            report.setCreatedAt(LocalDateTime.now());
             statusReportRepository.save(report);
+            // 续期 TTL：@CreationTimestamp 属性不可变，实体 setter 被静默忽略（HHH000502，
+            // UPDATE 不含 created_at 列）——必须经 JPQL 批量更新直写 created_at
+            // （见 StatusReportRepository.renewCreatedAt 根因注记）。
+            statusReportRepository.renewCreatedAt(report.getId(), LocalDateTime.now());
         } else {
             // 首次上报，检查频率限制
             checkRateLimit(userId);
@@ -142,6 +161,43 @@ public class StatusReportService {
         return new ActiveReportSummary(count, stats.getLatestTime());
     }
 
+    /**
+     * 某门店最近暂停报列表（公开读，无需登录）。
+     * <p>
+     * 详情页「报告暂停营业」弹层的默认内容：TTL 窗口内全部用户的暂停报，按时间倒序，
+     * 最多 {@value #RECENT_REPORT_LIST_LIMIT} 条。报告者昵称脱敏（首字 + "**"，无昵称
+     * 回退「舞友」）——保护用户身份隐私的同时保留"社区已有多人报告"的信任信号。
+     * <p>
+     * {@code mine} 标记当前登录用户的报告（未登录时 UserContext.getCurrentUserId() 为
+     * null，恒 false），供前端高亮"我"的上报行。
+     */
+    @Transactional(readOnly = true)
+    public List<StatusReportListItem> listRecentReports(Long venueId) {
+        Long currentUserId = UserContext.getCurrentUserId();
+        LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);
+        return statusReportRepository.findRecentByVenue(venueId, since).stream()
+                .limit(RECENT_REPORT_LIST_LIMIT)
+                .map(row -> {
+                    ReportReason reason = ReportReason.valueOf(row.getReason());
+                    return new StatusReportListItem(
+                            row.getId(),
+                            maskNickname(row.getNickname()),
+                            reason,
+                            reason.getDisplayName(),
+                            row.getCreatedat(),
+                            currentUserId != null && currentUserId.equals(row.getUserid()));
+                })
+                .toList();
+    }
+
+    /** 昵称脱敏：首字 + "**"；空昵称回退「舞友」（列表公开展示用，保护用户身份隐私） */
+    private String maskNickname(String nickname) {
+        if (nickname == null || nickname.isBlank()) {
+            return "舞友";
+        }
+        return nickname.charAt(0) + "**";
+    }
+
     /** 全局频率限制：滑动窗口内不同场所数 */
     private void checkRateLimit(Long userId) {
         LocalDateTime since = LocalDateTime.now().minusHours(1);
@@ -181,5 +237,135 @@ public class StatusReportService {
                         !row.getCreatedat().isBefore(since),
                         row.getCreatedat().plusHours(ACTIVE_REPORT_TTL_HOURS)))
                 .toList();
+    }
+
+    // ─── 管理端（需 ADMIN，2026-08-10 新增，落实 AGENTS.md「场所状态上报」管理端可见性约定） ───
+
+    /**
+     * 管理端活跃暂停报列表（需 ADMIN，跨场所分页倒序）。
+     * <p>
+     * 管理端「上报管理 → 暂停营业」tab 数据源：TTL 窗口内全部活跃报告，按时间倒序。
+     * 管理端上下文返回上报者真实昵称 + userId + note（note 仅管理端可见的审核安全约定），
+     * 不做公开列表的昵称脱敏。仅活跃报告需要管理处置（移除虚假信号）——TTL 过期后
+     * 信号已自动从公开视图消失，无需管理动作。
+     */
+    @Transactional(readOnly = true)
+    public Page<AdminStatusReportResponse> listAdminReports(int page, int size) {
+        UserContext.requireAdmin();
+        LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);
+        return statusReportRepository.findActiveReports(since,
+                        PageRequest.of(page, Math.min(Math.max(size, 1), 100)))
+                .map(row -> new AdminStatusReportResponse(
+                        row.getId(),
+                        row.getVenueid(),
+                        row.getVenuename(),
+                        row.getUserid(),
+                        row.getNickname() != null && !row.getNickname().isBlank()
+                                ? row.getNickname() : "舞友",
+                        ReportReason.valueOf(row.getReason()),
+                        ReportReason.valueOf(row.getReason()).getDisplayName(),
+                        row.getNote(),
+                        row.getOccurredat(),
+                        row.getCreatedat()));
+    }
+
+    /**
+     * 管理端活跃暂停报计数（需 ADMIN，跨场所全量）。
+     * <p>
+     * FAB「上报管理」红点聚合数据源之一（2026-08-10）：与 venuefeedback PENDING 计数
+     * 合并为「管理端上报待办总数」——管理员对"有新活跃暂停信号"有巡查可见性，
+     * 处置（移除）或 TTL 过期后计数自然归零，无独立已读语义。
+     */
+    @Transactional(readOnly = true)
+    public long countActiveReports() {
+        UserContext.requireAdmin();
+        LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);
+        return statusReportRepository.countActiveReports(since);
+    }
+
+    /**
+     * 管理端移除暂停报（需 ADMIN，幂等）。
+     * <p>
+     * 移除 = 平台清理虚假/失效信号：soft delete 后所有"活跃"查询（热度计数/公开列表/
+     * 管理端列表）立即过滤掉该报告——公开视图即时消失，无需等 TTL 过期。移除后
+     * 失效 venueHeat 缓存（活跃报告数是热度输出之一，与提交/撤销同模式）。
+     * <p>
+     * 与用户自撤（{@link #cancelReport}）的差异：操作者是管理员而非上报者本人；
+     * 两者同属 soft delete 语义（不删除物理行），已移除记录对上报者同样不再展示。
+     */
+    @Transactional
+    public void removeReport(Long id) {
+        UserContext.requireAdmin();
+        VenueStatusReport report = statusReportRepository.findById(id)
+                .orElseThrow(() -> new BusinessException(1008, "上报不存在"));
+        if (report.isDeleted()) {
+            return; // 幂等：已移除直接返回（不重复失效缓存）
+        }
+        report.setDeleted(true);
+        statusReportRepository.save(report);
+        venueHeatService.invalidate(report.getVenueId());
+    }
+
+    /**
+     * 管理端采纳暂停报（2026-08-10 新增，需 ADMIN，幂等）。
+     * <p>
+     * 采纳 = 管理员核实暂停属实（区别于移除：移除 = 清理虚假/失效信号，无副作用）。
+     * 采纳在<b>同一事务</b>内完成四件事（任一失败整体回滚，杜绝"状态已改但积分未发"等
+     * 半完成状态）：
+     * <ol>
+     *   <li><b>门店营业状态随之改为「暂停营业」</b>——经
+     *       {@link VenueService#markSuspendedByReport}（写状态变迁日志 + 场所/热门缓存逐出）；</li>
+     *   <li><b>报告软删</b>（deleted=true）——不再作为活跃信号，公开列表/管理端列表/
+     *       热度计数立即过滤（与移除同语义，见 {@link #removeReport}）；</li>
+     *   <li><b>积分奖励</b>——上报者（userId 非空）经
+     *       {@link PointsService#rewardStatusReport} 发放，流水幂等键
+     *       (user, STATUS_REPORT_REWARD, reportId) 兜底并发；</li>
+     *   <li><b>处理结果站内信</b>——经 {@link #notifyAdopted} 通知上报者（匿名不通知，
+     *       与积分同一匿名边界，见 {@link VenueFeedbackService}「处理结果站内信」约定）。</li>
+     * </ol>
+     * 已处置（软删）或不存在幂等返回：不重复改状态/发分/发信。
+     */
+    @Transactional
+    public void adoptReport(Long id) {
+        Long adminId = UserContext.requireAdmin();
+        VenueStatusReport report = statusReportRepository.findById(id)
+                .orElseThrow(() -> new BusinessException(1008, "上报不存在"));
+        if (report.isDeleted()) {
+            return; // 幂等：已处置（采纳/移除）直接返回
+        }
+        // 1. 门店营业状态随之改动（状态变迁日志 + 场所/热门缓存逐出，同事务）
+        venueService.markSuspendedByReport(report.getVenueId(), adminId);
+        // 2. 报告不再作为活跃信号
+        report.setDeleted(true);
+        statusReportRepository.save(report);
+        // 3. 积分奖励（同事务；匿名不发、流水幂等键兜底并发）
+        if (report.getUserId() != null) {
+            pointsService.rewardStatusReport(report.getUserId(), report.getId());
+        }
+        // 4. 处理结果站内信（同事务；匿名不通知）
+        notifyAdopted(report);
+        // 5. 热度缓存失效（活跃报告数是热度输出之一；门店已是 SUSPENDED 时
+        //    markSuspendedByReport 早退不失效，此处必须无条件失效——与提交/撤销/移除同模式）
+        venueHeatService.invalidate(report.getVenueId());
+    }
+
+    /**
+     * 采纳结果站内信（2026-08-10 新增）：采纳流转实际发生时向上报者发送
+     * STATUS_REPORT_RESULT，与采纳同事务（通知不丢失）。仅陈述事实：场所名 + 采纳结论
+     * + 门店已标记暂停营业 + 积分已发放——奖励数额不在消息内硬编码（以积分流水为唯一
+     * 事实源，同 {@link VenueFeedbackService#notifyHandled} 约定）；软关联 VENUE 深链。
+     * 匿名上报（userId null）无法归属，不通知（与积分奖励同一匿名边界）。
+     */
+    private void notifyAdopted(VenueStatusReport report) {
+        if (report.getUserId() == null) {
+            return;
+        }
+        String venueName = venueRepository.findByIdAndDeletedFalse(report.getVenueId())
+                .map(Venue::getName)
+                .orElse("已下架场所");
+        messageService.create(report.getUserId(), MessageType.STATUS_REPORT_RESULT,
+                "暂停报已采纳",
+                "「" + venueName + "」的暂停营业报告已被采纳，该门店已标记为暂停营业，奖励积分已发放。",
+                "VENUE", report.getVenueId());
     }
 }

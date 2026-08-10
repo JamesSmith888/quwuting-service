@@ -5,6 +5,7 @@ import lombok.Getter;
 import lombok.Setter;
 import org.hibernate.annotations.ColumnDefault;
 import org.quwuting.quwutingservice.base.BaseEntity;
+import org.quwuting.quwutingservice.venuefeedback.enums.FeedbackField;
 import org.quwuting.quwutingservice.venuefeedback.enums.FeedbackType;
 import org.quwuting.quwutingservice.venuefeedback.enums.ReportStatus;
 
@@ -62,6 +63,32 @@ public class VenueFeedback extends BaseEntity {
     /** 补充说明（可选，最多 500 字） */
     @Column(length = 500)
     private String note;
+
+    /**
+     * 纠错目标字段（2026-08-10 新增，可空 = 非纠错场景）。
+     * <p>
+     * INACCURATE（信息有误）类型的结构化载荷 = {@code field}（哪个字段有误）+
+     * {@code correctedValue}（用户认为正确的数据）——解决旧载荷只有自由文本
+     * {@code note}、把"哪里错了"与"正确值"混在一起的问题（根因见
+     * {@link FeedbackField} javadoc 与后端 AGENTS.md「统一用户上报」）。
+     * 其余上报类型（缺失/状态/其他）此列不填，由 note 承载说明。
+     * 可空列：V8 迁移直接 ADD COLUMN（无需默认值，见「Schema 演进」规则 2）。
+     * 入库前经 {@link org.quwuting.quwutingservice.common.text.TextSanitizer}
+     * 清洗（防注入分层约定见其 javadoc）。
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(length = 30)
+    private FeedbackField field;
+
+    /**
+     * 用户认为正确的数据（2026-08-10 新增，可空 = 仅指出有误、未提供纠正值）。
+     * <p>
+     * 与 {@code field} 配套：INACCURATE 纠错场景下管理员据此核对/更新（如
+     * "晚场 ¥30"、"138****0000"）。用户未提供纠正值时仍可上报（"门票价格有误"
+     * 本身也是有效信号，管理员自行核实）。入库前经 TextSanitizer 清洗。
+     */
+    @Column(length = 500)
+    private String correctedValue;
 
     /**
      * 处理状态（PENDING / RESOLVED / DISMISSED）。

@@ -4,19 +4,16 @@
 
 spring:
   datasource:
-    # Supabase 事务池化（6543），必须附加 prepareThreshold=0（见 AGENTS.md 连接池兼容性章节）
+    # Supabase 事务池化（6543），必须附加 prepareThreshold=0（见 AGENTS.md 连接池兼容性章节）。
+    # DB_URL 值内必须同时包含 connectTimeout=5&socketTimeout=8&tcpKeepAlive=true
+    # （2026-08-10 根因修复：数据库抖动时快速失败而非挂死，见 AGENTS.md「连接池与数据库抖动韧性」）。
+    # 注意：连接池调优统一在 application.yaml（基础配置）声明，禁止在本文件重复（防漂移）；
+    # 当前生产 systemd 实际以 dev profile 运行，本文件未生效——切换 prod profile 前
+    # 需先补齐 systemd Environment 注入 DB_URL/DB_USERNAME/DB_PASSWORD 等环境变量（见 AGENTS.md 部署章节）。
     url: ${DB_URL}
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
     driver-class-name: org.postgresql.Driver
-    hikari:
-      # 低流量小程序 + 高延迟 DB（~150ms/往返），5 连接足够且节省内存
-      maximum-pool-size: 5
-      minimum-idle: 2
-      idle-timeout: 300000        # 空闲连接 5min 回收（默认 10min）
-      max-lifetime: 900000        # 连接最长存活 15min（默认 30min，缩短减少泄漏窗口）
-      connection-timeout: 10000   # 获取连接超时 10s（默认 30s，快速失败）
-      leak-detection-threshold: 30000  # 连接持有超 30s 告警（排查未关闭连接）
   jpa:
     hibernate:
       # Schema 演进策略（2026-08-07 起）：与基础配置一致，Flyway 迁移 + validate 校验。

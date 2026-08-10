@@ -5,13 +5,18 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.quwuting.quwutingservice.dancer.dto.request.CreateDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.RecognizeDancerRequest;
+import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerDetailResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.RecognizeResponse;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
+import org.quwuting.quwutingservice.dancer.entity.DancerPhoto;
 import org.quwuting.quwutingservice.dancer.entity.DancerRecognition;
+import org.quwuting.quwutingservice.dancer.entity.DancerVenue;
+import org.quwuting.quwutingservice.dancer.enums.DancerPhotoStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
+import org.quwuting.quwutingservice.dancer.enums.DancerVenueRelation;
+import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionTagRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
@@ -36,7 +41,8 @@ import static org.mockito.Mockito.*;
  * DancerService 单元测试（Mockito，不依赖数据库）。
  * 覆盖：创建（PENDING/NORMAL/清洗/常驻舞厅关联）、可见性规则（NORMAL 公开 /
  * PENDING/HIDDEN/REJECTED 仅创建人+管理员）、认可每日一记 toggle（插入+标签 / 取消+级联删标签）、
- * 标签字典校验、认可目标可见性、管理端状态切换（通过/驳回/隐藏 → 站内信通知创建人）。
+ * 标签字典校验、认可目标可见性、管理端状态切换（通过/驳回/隐藏 → 站内信通知创建人）、
+ * 本人编辑（全量覆盖 / REJECTED 自动重审 / HOME 替换 / 权限）、相册上传删除与照片审核。
  */
 @ExtendWith(MockitoExtension.class)
 class DancerServiceTest {
@@ -50,11 +56,15 @@ class DancerServiceTest {
     @Mock
     private DancerRecognitionTagRepository recognitionTagRepository;
     @Mock
+    private DancerPhotoRepository photoRepository;
+    @Mock
     private DancerAggregateService aggregateService;
     @Mock
     private VenueLookupService venueLookupService;
     @Mock
     private MessageService messageService;
+    @Mock
+    private org.quwuting.quwutingservice.points.service.PointsService pointsService;
 
     private DancerService dancerService;
 
@@ -63,7 +73,8 @@ class DancerServiceTest {
     @BeforeEach
     void setUp() {
         dancerService = new DancerService(dancerRepository, dancerVenueRepository, recognitionRepository,
-                recognitionTagRepository, aggregateService, venueLookupService, messageService);
+                recognitionTagRepository, photoRepository, aggregateService, venueLookupService, messageService,
+                pointsService);
 
         dancer = new Dancer();
         dancer.setId(1L);
@@ -83,7 +94,7 @@ class DancerServiceTest {
         });
 
         Long id = dancerService.createDancer(2L,
-                new CreateDancerRequest("  小雅  ", null, " 舞姿优秀 ", null, "杭州", null), false);
+                new UpsertDancerRequest("  小雅  ", null, " 舞姿优秀 ", null, "杭州", null), false);
 
         assertEquals(10L, id);
         verify(dancerRepository).save(argThat(d ->
@@ -98,7 +109,7 @@ class DancerServiceTest {
     void createDancer_adminCreatesNormal() {
         when(dancerRepository.save(any(Dancer.class))).thenAnswer(inv -> inv.getArgument(0));
 
-        dancerService.createDancer(99L, new CreateDancerRequest("后台舞伴", null, null, null, null, null), true);
+        dancerService.createDancer(99L, new UpsertDancerRequest("后台舞伴", null, null, null, null, null), true);
 
         verify(dancerRepository).save(argThat(d ->
                 d.getStatus() == DancerStatus.NORMAL && d.getCreatedBy().equals(99L)));
@@ -107,7 +118,7 @@ class DancerServiceTest {
     @Test
     void createDancer_blankNickname_throws() {
         BusinessException ex = assertThrows(BusinessException.class,
-                () -> dancerService.createDancer(1L, new CreateDancerRequest("   ", null, null, null, null, null), false));
+                () -> dancerService.createDancer(1L, new UpsertDancerRequest("   ", null, null, null, null, null), false));
         assertEquals(1001, ex.getCode());
         verify(dancerRepository, never()).save(any());
     }
@@ -120,9 +131,9 @@ class DancerServiceTest {
             return d;
         });
         when(dancerVenueRepository.findByDancerIdAndVenueIdAndRelationAndDeletedFalse(
-                eq(7L), eq(5L), anyString())).thenReturn(Optional.empty());
+                eq(7L), eq(5L), any())).thenReturn(Optional.empty());
 
-        dancerService.createDancer(1L, new CreateDancerRequest("小雅", null, null, null, null, 5L), false);
+        dancerService.createDancer(1L, new UpsertDancerRequest("小雅", null, null, null, null, 5L), false);
 
         verify(venueLookupService).findById(5L); // 常驻舞厅存在性校验
         verify(dancerVenueRepository).save(argThat(dv ->
@@ -413,5 +424,220 @@ class DancerServiceTest {
         assertEquals("小雅", result.getContent().get(0).nickname());
         assertEquals("未知用户", result.getContent().get(0).creatorNickname(), "注册人已删时回退占位");
         assertEquals(DancerStatus.PENDING, result.getContent().get(0).status());
+    }
+
+    // ─── 本人编辑（2026-08-10 新增：全量覆盖 / REJECTED 重审 / HOME 替换 / 权限） ───
+
+    @Test
+    void updateDancer_owner_overwritesEditableFields_keepsStatus() {
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(dancerVenueRepository.findByDancerIdAndRelationAndDeletedFalse(1L, DancerVenueRelation.HOME))
+                .thenReturn(Collections.emptyList());
+        // updateDancer 末尾调用 getDetail 组装返回：补齐其依赖
+        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
+        when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(eq(1L), eq(1L), any()))
+                .thenReturn(Optional.empty());
+        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
+                .thenReturn(Collections.emptyList());
+
+        DancerDetailResponse resp = dancerService.updateDancer(1L, 1L,
+                new UpsertDancerRequest("小雅2", "https://cdn/x.jpg", "新简介", "FEMALE", "上海", null),
+                UserRole.USER);
+
+        assertEquals("小雅2", resp.nickname());
+        verify(dancerRepository).save(argThat(d ->
+                d.getNickname().equals("小雅2")
+                        && d.getBio().equals("新简介")
+                        && d.getCity().equals("上海")
+                        && d.getStatus() == DancerStatus.NORMAL));
+    }
+
+    @Test
+    void updateDancer_rejected_autoResubmitToPending() {
+        dancer.setStatus(DancerStatus.REJECTED);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(dancerVenueRepository.findByDancerIdAndRelationAndDeletedFalse(1L, DancerVenueRelation.HOME))
+                .thenReturn(Collections.emptyList());
+        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
+        when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(eq(1L), eq(1L), any()))
+                .thenReturn(Optional.empty());
+        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
+                .thenReturn(Collections.emptyList());
+
+        DancerDetailResponse resp = dancerService.updateDancer(1L, 1L,
+                new UpsertDancerRequest("小雅", null, null, null, null, null), UserRole.USER);
+
+        assertEquals(DancerStatus.PENDING, resp.status(), "驳回后本人编辑 → 自动回到审核中（重新送审）");
+    }
+
+    @Test
+    void updateDancer_replacesHomeVenue() {
+        DancerVenue oldHome = new DancerVenue();
+        oldHome.setDancerId(1L);
+        oldHome.setVenueId(5L);
+        oldHome.setRelation(DancerVenueRelation.HOME);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(dancerVenueRepository.findByDancerIdAndRelationAndDeletedFalse(1L, DancerVenueRelation.HOME))
+                .thenReturn(new java.util.ArrayList<>(List.of(oldHome)));
+        when(dancerVenueRepository.findByDancerIdAndVenueIdAndRelationAndDeletedFalse(1L, 9L, DancerVenueRelation.HOME))
+                .thenReturn(Optional.empty());
+        // getDetail 组装依赖
+        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
+        when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(eq(1L), eq(1L), any()))
+                .thenReturn(Optional.empty());
+        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
+                .thenReturn(Collections.emptyList());
+
+        dancerService.updateDancer(1L, 1L,
+                new UpsertDancerRequest("小雅", null, null, null, null, 9L), UserRole.USER);
+
+        verify(venueLookupService).findById(9L);                    // 新常驻舞厅存在性校验
+        verify(dancerVenueRepository).save(argThat(dv -> dv.isDeleted())); // 旧 HOME 软删（Lombok boolean → isDeleted）
+        verify(dancerVenueRepository).save(argThat(dv ->
+                dv.getVenueId().equals(9L) && dv.getRelation() == DancerVenueRelation.HOME)); // 新 HOME 建立
+    }
+
+    @Test
+    void updateDancer_nonOwner_throws() {
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> dancerService.updateDancer(99L, 1L,
+                        new UpsertDancerRequest("小雅", null, null, null, null, null), UserRole.USER));
+        assertEquals(1003, ex.getCode());
+        verify(dancerRepository, never()).save(any());
+    }
+
+    // ─── 相册（本人上传 → PENDING 审核；2026-08-10 新增） ──────────────────────
+
+    @Test
+    void addPhotos_owner_insertsPendingInUploadOrder() {
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
+                .thenReturn(Collections.emptyList()); // maxSortOrder = 0 → 新照片从 1 起
+        when(photoRepository.save(any(DancerPhoto.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        dancerService.addPhotos(1L, 1L, List.of("https://cdn/a.jpg", "https://cdn/b.jpg"), UserRole.USER);
+
+        verify(photoRepository, times(2)).save(argThat(p ->
+                p.getStatus() == DancerPhotoStatus.PENDING && p.getDancerId().equals(1L)));
+    }
+
+    @Test
+    void addPhotos_nonOwner_throws() {
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> dancerService.addPhotos(99L, 1L, List.of("https://cdn/a.jpg"), UserRole.USER));
+        assertEquals(1003, ex.getCode());
+        verify(photoRepository, never()).save(any());
+    }
+
+    @Test
+    void addPhotos_nonHttpUrl_throws() {
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> dancerService.addPhotos(1L, 1L, List.of("file:///etc/passwd"), UserRole.USER));
+        assertEquals(1001, ex.getCode());
+        verify(photoRepository, never()).save(any());
+    }
+
+    @Test
+    void removePhoto_owner_softDeletes() {
+        DancerPhoto photo = new DancerPhoto();
+        photo.setId(10L);
+        photo.setDancerId(1L);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(photoRepository.findByIdAndDeletedFalse(10L)).thenReturn(Optional.of(photo));
+
+        dancerService.removePhoto(1L, 1L, 10L, UserRole.USER);
+
+        verify(photoRepository).save(argThat(DancerPhoto::isDeleted)); // Lombok boolean → isDeleted
+    }
+
+    @Test
+    void updatePhotoStatus_approvePending_public() {
+        DancerPhoto photo = new DancerPhoto();
+        photo.setId(10L);
+        photo.setDancerId(1L);
+        photo.setStatus(DancerPhotoStatus.PENDING);
+        when(photoRepository.findByIdAndDeletedFalse(10L)).thenReturn(Optional.of(photo));
+
+        dancerService.updatePhotoStatus(99L, 10L, DancerPhotoStatus.PUBLIC, null);
+
+        verify(photoRepository).save(argThat(p -> p.getStatus() == DancerPhotoStatus.PUBLIC));
+    }
+
+    @Test
+    void updatePhotoStatus_alreadyReviewed_throws() {
+        DancerPhoto photo = new DancerPhoto();
+        photo.setId(10L);
+        photo.setDancerId(1L);
+        photo.setStatus(DancerPhotoStatus.PUBLIC); // 已公开照片不可再审（幂等仅限同状态）
+        when(photoRepository.findByIdAndDeletedFalse(10L)).thenReturn(Optional.of(photo));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> dancerService.updatePhotoStatus(99L, 10L, DancerPhotoStatus.REJECTED, null));
+        assertEquals(1003, ex.getCode());
+    }
+
+    @Test
+    void getDetail_publicOnlyReturnsPublicPhotos() {
+        DancerPhoto pending = new DancerPhoto();
+        pending.setId(1L);
+        pending.setDancerId(1L);
+        pending.setUrl("https://cdn/pending.jpg");
+        pending.setStatus(DancerPhotoStatus.PENDING);
+        DancerPhoto pub = new DancerPhoto();
+        pub.setId(2L);
+        pub.setDancerId(1L);
+        pub.setUrl("https://cdn/pub.jpg");
+        pub.setStatus(DancerPhotoStatus.PUBLIC);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
+        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
+                .thenReturn(List.of(pending, pub));
+
+        DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
+
+        assertEquals(1, resp.photos().size(), "公开视角仅 PUBLIC 照片");
+        assertEquals("https://cdn/pub.jpg", resp.photos().get(0).url());
+    }
+
+    @Test
+    void getDetail_ownerSeesAllPhotoStatuses() {
+        DancerPhoto pending = new DancerPhoto();
+        pending.setId(1L);
+        pending.setDancerId(1L);
+        pending.setUrl("https://cdn/pending.jpg");
+        pending.setStatus(DancerPhotoStatus.PENDING);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(eq(1L), eq(1L), any()))
+                .thenReturn(Optional.empty());
+        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
+        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
+                .thenReturn(List.of(pending));
+
+        DancerDetailResponse resp = dancerService.getDetail(1L, 1L, UserRole.USER);
+
+        assertTrue(resp.isMine());
+        assertEquals(1, resp.photos().size(), "本人视角含待审照片（编辑页回显状态）");
+        assertEquals(DancerPhotoStatus.PENDING, resp.photos().get(0).status());
     }
 }

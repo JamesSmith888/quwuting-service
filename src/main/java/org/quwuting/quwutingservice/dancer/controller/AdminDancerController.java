@@ -3,9 +3,12 @@ package org.quwuting.quwutingservice.dancer.controller;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
-import org.quwuting.quwutingservice.dancer.dto.request.CreateDancerRequest;
+import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
+import org.quwuting.quwutingservice.dancer.dto.request.UpdateDancerPhotoStatusRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpdateDancerStatusRequest;
+import org.quwuting.quwutingservice.dancer.dto.response.AdminDancerPhotoResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.AdminDancerResponse;
+import org.quwuting.quwutingservice.dancer.enums.DancerPhotoStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.service.DancerService;
 import org.quwuting.quwutingservice.security.UserContext;
@@ -21,10 +24,13 @@ import org.springframework.web.bind.annotation.*;
  *       PENDING→REJECTED / 下架恢复 NORMAL↔HIDDEN；body.reason 可选操作说明，
  *       随站内信通知创建人，2026-08-08 新增）</li>
  *   <li>GET /admin/dancers/statuses — 状态字典回显</li>
+ *   <li>GET /admin/dancers/photos — 相册照片审核列表（status 可选，按上传时间倒序）</li>
+ *   <li>PUT /admin/dancers/photos/{photoId}/status — 照片审核（PENDING → PUBLIC / REJECTED）</li>
  * </ul>
  * 认证是"先认证、后展示"隐私边界的管理员侧落点：舞伴主动注册的资料必须经本接口
  * 审核（PENDING → NORMAL / REJECTED）后才公开或明确驳回，审核结果经站内信
- * 通知创建人（见 AGENTS.md「舞伴审核与站内信」）。
+ * 通知创建人（见 AGENTS.md「舞伴审核与站内信」）；舞伴本人上传的相册照片同样
+ * 必须经本接口逐张审核（见 AGENTS.md「相册与照片审核」）。
  */
 @RestController
 @RequestMapping("/admin/dancers")
@@ -48,7 +54,7 @@ public class AdminDancerController {
 
     /** 后台创建舞伴资料（管理员，status=NORMAL 直接公开；createdBy = 管理员 ID） */
     @PostMapping
-    public ApiResponse<Long> create(@Valid @RequestBody CreateDancerRequest request) {
+    public ApiResponse<Long> create(@Valid @RequestBody UpsertDancerRequest request) {
         Long adminId = UserContext.requireAdmin();
         return ApiResponse.ok(dancerService.createDancer(adminId, request, true));
     }
@@ -67,5 +73,27 @@ public class AdminDancerController {
     public ApiResponse<DancerStatus[]> statuses() {
         UserContext.requireAdmin();
         return ApiResponse.ok(DancerStatus.values());
+    }
+
+    /**
+     * 相册照片审核列表（仅 ADMIN，分页倒序）。status 可选（PENDING / PUBLIC / REJECTED），
+     * 缺省返回全部——管理员从「待审核」筛选进入待办，可切换查看已处理历史。
+     */
+    @GetMapping("/photos")
+    public ApiResponse<Page<AdminDancerPhotoResponse>> listPhotos(
+            @RequestParam(required = false) DancerPhotoStatus status,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(dancerService.listAdminPhotos(status, page, size));
+    }
+
+    /** 照片审核（仅 ADMIN）：PENDING → PUBLIC（通过）/ REJECTED（驳回，reason 可选审计） */
+    @PutMapping("/photos/{photoId}/status")
+    public ApiResponse<Void> updatePhotoStatus(@PathVariable Long photoId,
+                                               @Valid @RequestBody UpdateDancerPhotoStatusRequest request) {
+        Long adminId = UserContext.requireAdmin();
+        dancerService.updatePhotoStatus(adminId, photoId, request.status(), request.reason());
+        return ApiResponse.ok(null);
     }
 }

@@ -58,6 +58,17 @@ public record VenueHeatResponse(
         /** 近30天负向 Reaction 数（仅 Polarity.NEGATIVE，不计入公式，供详情页展示负面信号） */
         long negativeReactionCount30d,
 
+        // ── 积分（2026-08-10 V2 新增：赠送影响排名，低权重可校准） ──
+        /** 收到积分总数（target_type='VENUE' 全量） */
+        long pointsReceivedTotal,
+        /** 近30天收到积分（热度公式积分输入项，× app.points.heat-weight） */
+        long pointsReceived30d,
+        /**
+         * 近30天每日收到积分趋势（「收到积分」统计图用），按日期升序已补零。
+         * 与其余趋势序列同构（date + count），口径一致（截至昨日、30 天）。
+         */
+        List<FavoriteTrendPoint> pointsTrend,
+
         // ── 满意度 ──
         /** 综合满意度（1-10，各维度等权均分），评价人数不足时为 null */
         Double satisfactionScore,
