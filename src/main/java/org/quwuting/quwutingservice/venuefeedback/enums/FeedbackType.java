@@ -16,16 +16,20 @@ public enum FeedbackType {
     CLOSED_DOWN("门店已关门/停业"),
     SUSPENDED("门店暂停营业"),
     /**
-     * 门店已恢复营业（2026-08-10 新增）：与 CLOSED_DOWN/SUSPENDED 相反的纠正信号。
+     * 门店已恢复营业（2026-08-10 新增，与 CLOSED_DOWN/SUSPENDED 相反的纠正信号；
+     * 2026-08-11 触发场景泛化）：与 CLOSED_DOWN/SUSPENDED 相反的纠正信号。
      * <p>
-     * 触发场景 = 门店存储态为「已停业」（CEASED）时，用户现场确认已重新开业——
-     * 详情页报告操作 chip 翻转为「报告恢复营业」，提交本类型走异步管理员审核，
-     * 管理员核实后可经 updateVenue 将状态改回 OPEN（恢复通道 = 既有 updateVenue，
-     * 与暂停报采纳 markSuspendedByReport 对称）。
+     * 触发场景 = 门店存储态**声称非营业**（RENOVATING/CLOSED/SUSPENDED/CEASED——
+     * 2026-08-11 根因修复：原文档只写「已停业」CEASED，实现亦只对 CEASED 翻转，
+     * 遗漏其余非营业态，暂停营业门店 chip 仍显示「报告暂停营业」）时，用户现场确认
+     * 已重新开业——详情页报告操作 chip 翻转为「报告恢复营业」，提交本类型走异步
+     * 管理员审核，管理员核实后可经 updateVenue 将状态改回 OPEN（恢复通道 = 既有
+     * updateVenue，与暂停报采纳 markSuspendedByReport 对称）。
      * <p>
      * 为什么走 venuefeedback 而非 venuestatusreport：纠正的是**存储态**
-     * （CEASED→OPEN），属异步审核职责；4h TTL 实时信号层对"已停业"门店无决策意义
-     * （详情见前端 AGENTS.md「场所状态上报交互规范 → 报告操作状态机」）。
+     * （非营业→OPEN），属异步审核职责；4h TTL 实时信号层对"已声称非营业"门店无
+     * 决策意义（venuestatusreport.submitReport 已按同一语义拒绝非营业门店的暂停报，
+     * 见 StatusReportService；详情见前端 AGENTS.md「报告操作状态机」）。
      */
     RESUMED("门店已恢复营业"),
     INACCURATE("信息有误"),

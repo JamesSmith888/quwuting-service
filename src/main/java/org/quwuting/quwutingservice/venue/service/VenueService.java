@@ -187,6 +187,40 @@ public class VenueService {
     }
 
     /**
+     * 报告采纳联动：将门店标记为「营业中」（2026-08-11 新增，与
+     * {@link #markSuspendedByReport} 对称）。
+     * <p>
+     * 供 {@link org.quwuting.quwutingservice.venuestatusreport.service.StatusReportService#adoptReport}
+     * 在采纳 RESUMED（恢复营业）类型时调用（REQUIRED 传播加入同一事务）——管理员核实
+     * 恢复属实后，门店营业状态随之改回 OPEN，与 markSuspendedByReport 同模式写状态变迁
+     * 日志 + 失效场所/热门缓存。
+     * <p>
+     * 幂等：门店已是 OPEN 时直接返回（不重复写变迁日志——状态未变，审计链不应产生
+     * 冗余记录）；缓存逐出经 {@link @Caching} 在方法返回后仍会执行（无害）。
+     */
+    @Transactional
+    @Caching(evict = {
+            @CacheEvict(value = CacheConfig.CACHE_VENUE, key = "#venueId"),
+            @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
+    })
+    public void reopenByReport(Long venueId, Long changedBy) {
+        Venue venue = venueRepository.findByIdAndDeletedFalse(venueId)
+                .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
+        if (venue.getStatus() == VenueStatus.OPEN) {
+            return; // 已是营业中：不重复写变迁日志（幂等，审计链无冗余）
+        }
+        VenueStatusLog statusLog = new VenueStatusLog();
+        statusLog.setVenueId(venue.getId());
+        statusLog.setFromStatus(venue.getStatus());
+        statusLog.setToStatus(VenueStatus.OPEN);
+        statusLog.setChangedBy(changedBy);
+        venueStatusLogRepository.save(statusLog);
+        venue.setStatus(VenueStatus.OPEN);
+        venueRepository.save(venue);
+        venueHeatService.invalidate(venueId);
+    }
+
+    /**
      * 场所详情（含管理权限判定与动态计数）。
      * <p>
      * canManage 基于软鉴权上下文计算：平台管理员或门店认领人为 true，匿名请求恒为 false。
@@ -208,12 +242,11 @@ public class VenueService {
                 id, UserContext.getCurrentUserId(), ReactionWindow.DAYS_7);
         VenueResponse base = venueResponseMapper.toResponse(venue, topReactions);
         // 「我是否已上报」必须与活跃计数同一 TTL 口径：hasmyreport 的活跃判定带
-        // created_at >= now-4h 过滤（TTL 常量唯一权威源 = StatusReportService，见
-        // VenuePostRepository.findDetailStats javadoc——历史实现漏过滤导致 TTL 过期后
-        // 详情页"已报告·补充"永不还原）
-        LocalDateTime reportSince = LocalDateTime.now().minusHours(StatusReportService.ACTIVE_REPORT_TTL_HOURS);
+        // expires_at > now 过滤（TTL 唯一事实源 = expires_at 列，2026-08-11 由
+        // created_at >= now-4h 迁移，见 VenuePostRepository.findDetailStats javadoc——
+        // 历史实现漏过滤导致 TTL 过期后详情页"已报告·补充"永不还原）
         VenuePostRepository.DetailStats detailStats =
-                venuePostRepository.findDetailStats(id, UserContext.getCurrentUserId(), reportSince);
+                venuePostRepository.findDetailStats(id, UserContext.getCurrentUserId(), LocalDateTime.now());
         boolean canManage = computeCanManage(venue);
         long postCount = detailStats.getPostcount() != null ? detailStats.getPostcount() : 0L;
         boolean hasMyStatusReport = Boolean.TRUE.equals(detailStats.getHasmyreport());

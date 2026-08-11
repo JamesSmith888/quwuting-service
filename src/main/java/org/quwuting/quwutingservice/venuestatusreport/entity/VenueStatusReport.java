@@ -3,26 +3,37 @@ package org.quwuting.quwutingservice.venuestatusreport.entity;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
+import org.hibernate.annotations.ColumnDefault;
 import org.quwuting.quwutingservice.base.BaseEntity;
-import org.quwuting.quwutingservice.venuestatusreport.enums.ReportReason;
+import org.quwuting.quwutingservice.venuestatusreport.enums.AdminAction;
+import org.quwuting.quwutingservice.venuestatusreport.enums.ReportType;
 
 import java.time.LocalDateTime;
 
 /**
- * 用户实时上报的场所暂停状态报告。
+ * 用户实时上报的门店突发事件（紧急公告）信号。
  * <p>
  * 与 {@link org.quwuting.quwutingservice.venuefeedback.entity.VenueFeedback} 的区别：
- * feedback 是异步纠错（管理员人工审核队列），status report 是实时众包信号（TTL 自动过期，
- * 直接影响详情页展示与 StatusConfidence）。两表独立，职责边界见 AGENTS.md。
+ * feedback 是异步纠错（管理员人工审核队列），status report 是实时众包信号
+ * （按类型 TTL 自动过期，直接影响详情页紧急公告区展示与 StatusConfidence）。
+ * 两表独立，职责边界见 AGENTS.md。
  * <p>
+ * 2026-08-11 泛化（V11）：原"暂停营业专用"泛化为 8 类突发事件（{@link ReportType}）。
+ * <ul>
+ *   <li>{@code type}：事件类型（替代原 reason 维度）；</li>
+ *   <li>{@code expiresAt}：按类型 TTL 计算的过期时刻（TTL 唯一事实源，所有"活跃"
+ *       判定统一判 {@code expiresAt > now()}）；</li>
+ *   <li>{@code adminAction}：管理端处置标记（ADOPTED/REMOVED），null = 活跃信号。</li>
+ * </ul>
  * 联合唯一约束 (userId, venueId)：同一用户对同一场所只保留一条活跃报告，
- * 再次报告为 upsert（覆盖更新 reason/occurredAt/note，刷新 updatedAt）。
+ * 再次报告为 upsert（覆盖更新 type/occurredAt/note，刷新 createdAt + expiresAt）。
  */
 @Getter
 @Setter
 @Entity
 @Table(name = "qwt_venue_status_reports", indexes = {
         @Index(name = "qwt_idx_status_reports_venue_created", columnList = "venueId, createdAt"),
+        @Index(name = "qwt_idx_status_reports_venue_expires", columnList = "venueId, expiresAt"),
         @Index(name = "qwt_idx_status_reports_user", columnList = "userId")
 }, uniqueConstraints = {
         @UniqueConstraint(name = "qwt_uk_status_report_user_venue", columnNames = {"userId", "venueId"})
@@ -37,10 +48,31 @@ public class VenueStatusReport extends BaseEntity {
     @Column(nullable = false)
     private Long userId;
 
-    /** 暂停原因（极速上报时默认 UNKNOWN） */
+    /** 突发事件类型（2026-08-11 泛化，替代原 reason；列默认值通道 = @ColumnDefault） */
     @Enumerated(EnumType.STRING)
     @Column(length = 20, nullable = false)
-    private ReportReason reason = ReportReason.UNKNOWN;
+    @ColumnDefault("'SUSPENDED'")
+    private ReportType type = ReportType.SUSPENDED;
+
+    /**
+     * 信号过期时刻（2026-08-11 新增，NOT NULL）：写入时 = 报告时刻 + {@code type} 的
+     * TTL。TTL 唯一事实源 = 本列——所有"活跃"判定（热度计数 / 公开列表 / 管理端
+     * 列表 / hasMyReport / 公告区聚合）统一判 {@code expiresAt > now()}，替代旧的
+     * {@code createdAt >= now - 4h} 单窗口（旧窗口无法表达按类型分级 TTL）。
+     * upsert 续期 = 覆盖写入 {@code createdAt} + {@code expiresAt}（经 JPQL 批量更新，
+     * 见 StatusReportRepository.renewReport 根因注记）。
+     */
+    @Column(nullable = false)
+    private LocalDateTime expiresAt;
+
+    /**
+     * 管理端处置标记（2026-08-11 新增，可空）：null = 活跃信号；ADOPTED = 已采纳
+     * （公告区保留展示至 TTL 过期，带"已核实"标记）；REMOVED = 已移除（公开视图
+     * 即时消失）。用户重新上报（upsert 恢复软删记录）时重置为 null。
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(length = 20)
+    private AdminAction adminAction;
 
     /**
      * 用户陈述的事件发生时间（可选）。
@@ -54,6 +86,8 @@ public class VenueStatusReport extends BaseEntity {
     /**
      * 补充说明（可选，最多 500 字）。
      * 仅管理端可见，前端不公开展示——规避用户自由文本的微信审核风险。
+     * 例外：SITUATION_UNCLEAR（情况不明）类型提交时必须携带（信息量最低，强制
+     * 说明约束），服务层校验。
      */
     @Column(length = 500)
     private String note;

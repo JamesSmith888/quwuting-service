@@ -545,7 +545,7 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 ### 类型与状态机
 
-- `FeedbackType`：CLOSED_DOWN（已关门/停业）/ SUSPENDED（暂停营业）/ **RESUMED（门店已恢复营业——2026-08-10 新增，与 CLOSED_DOWN/SUSPENDED 相反的纠正信号：门店存储态为「已停业」CEASED 时，详情页报告操作 chip 翻转为「报告恢复营业」，提交本类型走异步管理员审核；管理员核实后经 updateVenue 将状态改回 OPEN（恢复通道 = 既有 updateVenue，与暂停报采纳 markSuspendedByReport 对称）。为什么走 venuefeedback 而非 venuestatusreport：纠正的是存储态（CEASED→OPEN），属异步审核职责；4h TTL 实时信号层对"已停业"门店无决策意义，前端收敛逻辑见前端 AGENTS.md「报告操作状态机」）** / INACCURATE（信息有误）/ **MISSING_INFO（信息缺失——营业时间/联系方式/地址/简介/微信联系等字段缺失的上报入口，2026-08-06 新增，详情页"信息缺失？点此上报"统一使用，note 承载字段说明与用户补充数据）** / **PRICE（价格信息缺失或有误——门票/舞伴数据缺失空态的上报入口，2026-08-05 新增）** / OTHER（其他）
+- `FeedbackType`：CLOSED_DOWN（已关门/停业）/ SUSPENDED（暂停营业）/ **RESUMED（门店已恢复营业——2026-08-10 新增，与 CLOSED_DOWN/SUSPENDED 相反的纠正信号：门店存储态**声称非营业**（RENOVATING/CLOSED/SUSPENDED/CEASED，2026-08-11 泛化，原仅「已停业」CEASED——根因：前端 chip 旧实现把该语义塌缩为 `status === 'CEASED'` 单值特判，遗漏其余非营业态，暂停营业门店仍显示「报告暂停营业」）时，详情页报告操作 chip 翻转为「报告恢复营业」，提交本类型走异步管理员审核；管理员核实后经 updateVenue 将状态改回 OPEN（恢复通道 = 既有 updateVenue，与暂停报采纳 markSuspendedByReport 对称）。为什么走 venuefeedback 而非 venuestatusreport：纠正的是存储态（非营业→OPEN），属异步审核职责；4h TTL 实时信号层对"已声称非营业"门店无决策意义（`StatusReportService.submitReport` 已按同一语义拒绝非营业门店的暂停报，见「场所状态上报」），前端收敛逻辑见前端 AGENTS.md「报告操作状态机」）** / INACCURATE（信息有误）/ **MISSING_INFO（信息缺失——营业时间/联系方式/地址/简介/微信联系等字段缺失的上报入口，2026-08-06 新增，详情页"信息缺失？点此上报"统一使用，note 承载字段说明与用户补充数据）** / **PRICE（价格信息缺失或有误——门票/舞伴数据缺失空态的上报入口，2026-08-05 新增）** / OTHER（其他）
 - `ReportStatus` 状态机：PENDING（待处理）→ **ADOPTED（已采纳·奖励，2026-08-10 V2 新增）/ ADOPTED_NO_REWARD（已采纳·未奖励，2026-08-10 三动作定稿新增）/ RESOLVED（已处理，2026-08-10 起管理端无 UI 入口，保留兼容历史）/ DISMISSED（已忽略）**。**终态固定不可回退**——**ADOPTED** 表示管理员核实并**采纳**该上报（如按纠错内容更新门店数据/确认状态异常属实）→ **同一事务发放积分奖励**（仅登录用户，匿名采纳不发；幂等见「积分系统」章节）；**ADOPTED_NO_REWARD** 表示上报被采纳但管理员选择不发积分（采纳动作 `reward=false`，与 RESOLVED 的"核实后未采纳"语义区分，上报者可见「已采纳·未奖励」）；RESOLVED 表示管理员完成核实但信息无需采纳应用（**不发分**）；DISMISSED 判定为误报/无需处理（**不发分**）。布尔 handled 无法区分多种终态语义（历史 `handled` 列保留为实体兜底映射，见下文「Schema 演进」）。**「采纳」独立于「已处理」是 V2 核心决策：奖励资格取决于"上报是否真的被采用"而非"管理员有没有点过按钮"**（根因与决策记录见 `docs/积分系统-需求设计-V2-2026-08-10.md`）
 - **处理结果回传（2026-08-06 新增）**：管理员 resolve/dismiss 时可填写 `handleNote`（处理结果说明，≤500 字），随「我的上报记录」回传上报者——"管理员处理完成后反馈处理结果给用户"的载体。不填 = 仅流转状态，用户侧只见处理状态。终态幂等语义下重复处理不覆盖已有 handleNote
 - **处理结果站内信（2026-08-10 新增，替代原"不复制为站内信"决策）**：`VenueFeedbackService.handleByAdmin` 在 **PENDING → 任一终态实际流转时**向上报者（userId 非空）发送 `FEEDBACK_RESULT` 站内信（与状态流转**同事务**、幂等——终态重复操作不重复发信；**匿名上报（userId null）不通知**，与积分奖励同一匿名边界）。正文 = 场所名 + 上报类型 + 终态结论（ADOPTED 明确"已奖励积分" / ADOPTED_NO_REWARD 明确"未奖励积分" / RESOLVED "已处理" / DISMISSED "已忽略"）+ 可选 `handleNote`（"管理员说明："前缀回传）；软关联 `VENUE`（前端深链场所详情页）。**根因**：消息中心设计（2026-08-08）把站内信窄化为"平台主动通知（舞伴审核）"，处理结果被视为纯被动业务数据（只经 handleNote 回传、无已读语义）——早于 2026-08-10 FAB 红点"有新提醒"语义，上报者无法被主动提醒处理结果（曾被列为 P3 遗留"采纳站内信"）。**长期约定：凡是"状态流转对用户有结果"的通知都必须走站内信**（同事务、幂等、匿名边界），不得只落在业务记录上
@@ -696,67 +696,83 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 舞厅门店状态变更（警察检查、突然关门）发生频率远高于管理员手动更新 `Venue.status` 的能力——极端情况可能 30 分钟内多轮检查导致反复开关门。`venuefeedback` 模块是异步管理员审核流程（有 PENDING/RESOLVED/DISMISSED 状态机），无法满足实时性需求。此模块提供**实时众包信号层**：用户在现场一键报告"现在关门了"，信号对其他用户即时可见。
 
+**2026-08-11 泛化（紧急公告）**：原"仅暂停营业"泛化为 **8 类突发事件**（`ReportType` 枚举：突然检查/情况不明/暂停营业/舞池不开/突然清场/恢复营业/突然关门/禁龙），作为详情页「紧急公告」区数据源。每类携带展示文案/严重级（`Severity`：high/medium/low/recovery，前端色阶直接消费）/是否影响营业状态（`affectsStatus`，仅 SUSPENDED/RESUMED 为状态类）/TTL 小时数。**不新建表**（遵循「扩场景=扩枚举」约定），`ReportReason` 枚举删除（CHECK/UNKNOWN/CLEARED 并入新类型）。
+
 **与 venuefeedback 的边界**（重要）：
 
-- `venuefeedback.SUSPENDED` = "我不在场但认为状态信息有误"→ 异步管理员审核 → `ReportStatus` 状态机流转（各终态）
-- `venuestatusreport` = "我现在就在现场，刚确认关门"→ 实时 TTL 信号 → 自动过期，无需管理员介入
+- `venuefeedback.SUSPENDED/RESUMED` = "我不在场但认为状态信息有误"→ 异步管理员审核 → `ReportStatus` 状态机流转（各终态）
+- `venuestatusreport` = "我现在就在现场，刚确认发生X"→ 实时 TTL 信号 → 自动过期；管理员采纳（状态类联动门店状态）或移除
 
 两者共存，语义边界清晰：一个走异步审核，一个走实时众包。`venuefeedback` 不重复承担实时信号职责。
 
 ### 独立信号层（用户上报不直接改 Venue.status；采纳是唯一联动通道）
 
-用户上报**不改变** `Venue.status` 字段。`Venue.status` 的变更权仍属管理员/认领人（`POST /venues/{id}/update`）或**暂停报采纳联动**（`POST /admin/status-reports/{id}/adopt`，2026-08-10 新增——管理员核实暂停属实后，门店营业状态随之改为 SUSPENDED，见下「管理端可见性」）。用户上报作为独立信号层，出现在热度接口中为"N人报告暂停"的众包标记。管理员在管理后台查看活跃报告（`GET /admin/status-reports`）并处置：**采纳**（信号属实 → 改状态 + 奖励上报者积分 + 处理结果站内信，同事务）或**移除**（虚假信号清理，soft delete 公开视图即时消失）。
+用户上报**不改变** `Venue.status` 字段。`Venue.status` 的变更权仍属管理员/认领人（`POST /venues/{id}/update`）或**报告采纳联动**（`POST /admin/status-reports/{id}/adopt`，2026-08-10 新增，2026-08-11 泛化——管理员核实属实后，状态类（SUSPENDED/RESUMED）联动门店营业状态，见下「管理端可见性」）。用户上报作为独立信号层，出现在热度接口中为"N人报告X"的众包标记。管理员在管理后台查看活跃报告（`GET /admin/status-reports`）并处置：**采纳**（信号属实 → 状态类联动 + 奖励上报者积分 + 处理结果站内信，同事务）或**移除**（虚假信号清理，soft delete 公开视图即时消失）。
 
-### TTL 语义（4 小时活跃窗口）
+### TTL 语义（按类型分级，expires_at 列）
 
 ```java
-LocalDateTime since = LocalDateTime.now().minusHours(ACTIVE_REPORT_TTL_HOURS);  // 4h
+// 写入时：expiresAt = 报告时刻 + type.getTtlHours()
+// 活跃判定：expiresAt > now()
 ```
 
-活跃报告 = `createdAt >= now - 4h`。这是**实时窗口**，锚点为请求发生的"此刻"，与「统计口径：截至昨日」的 `windowEnd = today.atStartOfDay()`（排他上界，排除当天不完整数据）是两套不同的时间语义——一个是实时状态信号，一个是历史聚合完整性。两者互不矛盾：
+**2026-08-11 迁移**：TTL 唯一事实源从 Service 常量（`ACTIVE_REPORT_TTL_HOURS=4` 单窗口）迁移到 **`expires_at` 列**（写入时 = createdAt + 类型 TTL，如情况不明 2h / 暂停营业 4h / 恢复营业 24h）。所有"活跃"判定统一判 `expires_at > now()`——旧单窗口无法表达分级 TTL，是本次迁移根因。活跃判定点清单（全部已迁移到 `expires_at > :now`，`now` 由 Service 层传入，**SQL 层禁止自行定义时间窗**）：
 
-- 活跃报告数（`activeReportCount`）和最新报告时间（`latestReportTime`）是实时事实，不受"截至昨日"窗口约束
-- 与 `currentStatusDays`（当前状态持续天数）同理：都是"当前状态"这一实时事实，而非滚动窗口聚合
-
-**活跃判定口径契约（2026-08-05 修复，根因案例）**：所有"活跃报告"判定点必须经参数传入同一 TTL 窗口（`StatusReportService.ACTIVE_REPORT_TTL_HOURS` 为唯一常量权威源），**SQL 层禁止自行定义时间窗**。活跃判定点清单：
-
-- `VenueRepository.countHeatCounters` 的 `reportcount` / `latestreporttime`（热度聚合，`reportSince` 参数）
+- `VenueRepository.countHeatCounters` 的 `reportcount` / `latestreporttime`（热度聚合，`now` 参数）
 - `StatusReportRepository.countActiveAndLatestTime`（提交/撤销响应摘要）
-- `StatusReportRepository.findRecentByVenue`（门店暂停报列表，`since` 参数——2026-08-10 新增，见「门店暂停报列表」）
+- `StatusReportRepository.findRecentByVenue`（门店突发事件列表，`now` 参数）
+- `StatusReportRepository.findAnnouncementsByVenue`（详情页紧急公告区聚合，`now` 参数，2026-08-11）
 - `VenuePostRepository.findDetailStats` 的 `hasmyreport` EXISTS（详情页个人已报告标记）——**历史实现只过滤 `deleted = false` 漏 TTL 过滤**，与热度聚合口径不一致：TTL 过期后 `activeReportCount` 归零但 `hasMyStatusReport` 恒真，详情页"已报告·补充"按钮永不还原（用户必须手动撤销）。此为修复根因，新增活跃判定查询时必须对照本清单。
-- `StatusReportRepository.findActiveReports` / `countActiveReports`（管理端列表/计数，`since` 参数，2026-08-10 新增，见「管理端可见性」）
+- `StatusReportRepository.findActiveReports` / `countActiveReports`（管理端列表/计数，`now` 参数）
+- `StatusReportRepository.countClustersByVenueAndType`（同类型聚簇计数，`now` 参数，2026-08-11）
 
 ### 接口
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
-| POST | `/venues/{venueId}/status-reports` | 需登录 | 上报暂停（body 可空=快速上报，或含 reason/occurredAt/note） |
+| POST | `/venues/{venueId}/status-reports` | 需登录 | 上报突发事件（body 可空=快速上报默认 SUSPENDED，或含 type/occurredAt/note；**2026-08-11 守卫**：SUSPENDED 对非营业门店拒绝 1010、RESUMED 对营业中门店拒绝 1012、SITUATION_UNCLEAR 必填 note 拒绝 1011，事件类不受存储态约束，见下「提交守卫」） |
 | POST | `/venues/{venueId}/status-reports/cancel` | 需登录 | 撤销我的上报（软删除） |
-| GET | `/venues/{venueId}/status-reports` | 公开 | 门店最近暂停报列表（TTL 窗口内所有用户，倒序，2026-08-10，见下「门店暂停报列表」） |
-| GET | `/status-reports/mine?venueId=` | 需登录 | 我的全部状态上报（用户级资源，顶层路径；venueId 可选，2026-08-06，见下「我的上报记录」） |
-| GET | `/admin/status-reports?page=&size=` | ADMIN | 活跃暂停报列表（跨场所分页倒序，2026-08-10，见下「管理端可见性」） |
-| POST | `/admin/status-reports/{id}/remove` | ADMIN | 移除暂停报（soft delete，公开视图即时消失，幂等） |
-| POST | `/admin/status-reports/{id}/adopt` | ADMIN | 采纳暂停报（门店状态→SUSPENDED + 奖励上报者积分 + 处理结果站内信，同事务，幂等） |
+| GET | `/venues/{venueId}/status-reports` | 公开 | 门店最近突发事件列表（TTL 窗口内所有用户，倒序，2026-08-10，见下「门店突发事件列表」） |
+| GET | `/venues/{venueId}/status-reports/announcements` | 公开 | 详情页紧急公告区聚合（活跃 + 已采纳按类型聚簇，严重级降序，2026-08-11，见下「紧急公告区」） |
+| GET | `/status-reports/mine?venueId=` | 需登录 | 我的全部突发事件上报（用户级资源，顶层路径；venueId 可选，2026-08-06，见下「我的上报记录」） |
+| GET | `/admin/status-reports?page=&size=&type=` | ADMIN | 活跃突发事件列表（跨场所分页倒序，type 可选筛选，2026-08-10，见下「管理端可见性」） |
+| POST | `/admin/status-reports/{id}/remove` | ADMIN | 移除突发事件（soft delete + REMOVED 标记，公开视图即时消失，幂等） |
+| POST | `/admin/status-reports/{id}/adopt` | ADMIN | 采纳突发事件（状态类联动门店状态 + 奖励上报者积分（情况不明除外）+ 处理结果站内信，同事务，幂等） |
+
+**提交守卫（2026-08-11 泛化，状态类 vs 事件类）**：
+- **SUSPENDED**（暂停营业）仅对声称营业（OPEN）门店有决策意义——存储态声称非营业（RENOVATING/CLOSED/SUSPENDED/CEASED）时抛业务错误 1010（「该门店当前为X，无需报告暂停营业」），置于限频检查之前（无效请求快速失败，不消耗限频额度）。**根因**：前端报告操作状态机 2026-08-10 把同一语义塌缩为 `status === 'CEASED'` 单值特判，遗漏 SUSPENDED 等其余非营业态；本守卫保证 API 契约与前端 UI 语义一致（防绕过）。
+- **RESUMED**（恢复营业）与 SUSPENDED 对称——仅对声称非营业门店有意义，OPEN 门店报告恢复营业自相矛盾（业务错误 1012）。
+- **事件类**（突然检查/舞池不开/突然清场/突然关门/禁龙/情况不明）不受存储态约束（非营业门店同样可能突发检查/清场）。
+- **SITUATION_UNCLEAR**（情况不明）信息量最低、噪音高危：提交必须携带补充说明（业务错误 1011，`note` 非空）。
+
+**限频（2026-08-11 扩展）**：滑动窗口每用户每小时最多报告 5 个不同场所（`countDistinctVenuesByUserIdSince`）+ 每用户每日最多 10 条（`countReportsByUserSince`，当日 0 点起——批量刷同批门店由每日上限兜底）。
 
 ### 管理端可见性（2026-08-10 新增，落实"管理员可在管理后台查看活跃报告"约定）
 
 **根因（用户反馈）**：暂停报是实时众包信号（公开 4h TTL），但管理端零可见性——`admin-reports` 页只查 venuefeedback，`pending-count` 只数 PENDING 反馈；用户上报暂停后管理员**收不到任何提醒、也看不到记录**（虚假信号无处置通道，只能等 TTL 过期）。设计早已预留管理端查看（「独立信号层」L693），"后续约定"一直未落地。
 
-- **列表 `GET /admin/status-reports`**：TTL 窗口内全部活跃报告，按时间倒序分页（PageRequest ≤100）。管理端上下文与公开列表的差异：① 上报者**真实昵称 + userId**（不脱敏——管理员需识别上报者）；② 携带 `note`（补充说明，审核安全约定"note 仅管理端可见"，公开响应禁止返回，见 L1897）；③ JOIN `qwt_venues` 取场所名。`findActiveReports` 原生 SQL + 投影接口（全小写别名），countQuery 与主查询同谓词
-- **移除 `POST /admin/status-reports/{id}/remove`**：soft delete（与用户自撤同软删语义，操作者是管理员）；移除后所有"活跃"查询立即过滤（公开视图即时消失，无需等 TTL）；同事务失效 `venueHeat` 缓存。幂等：已移除/不存在静默成功。语义 = **清理虚假/失效信号**（无副作用）
-- **采纳 `POST /admin/status-reports/{id}/adopt`**（2026-08-10 新增）：管理员核实**暂停属实**后的处置（区别于移除的虚假信号清理）。同一事务完成：① 门店营业状态随之改为 **SUSPENDED**（经 `VenueService.markSuspendedByReport`——写 `VenueStatusLog` 变迁日志 + 逐出 venue/hotVenueIds 缓存，与 updateVenue 同模式；门店已是 SUSPENDED 时幂等跳过不写冗余日志）；② 报告软删（不再作为活跃信号，退出管理列表/公开列表/热度计数）；③ **积分奖励**上报者（userId 非空，经 `PointsService.rewardStatusReport`，来源 `STATUS_REPORT_REWARD`，流水幂等键 (user, source_type, source_id) 兜底并发；匿名不发——与 feedback 采纳同一匿名边界）；④ **处理结果站内信**（`STATUS_REPORT_RESULT`，同事务、幂等、匿名不通知——落实「状态流转对用户有结果必须走站内信」长期约定）。已处置（软删）/不存在幂等返回。**无"已处理"状态机**——暂停报是实时信号，处置语义 = 采纳（属实）或移除（虚假）两动作，均为 soft delete 收尾（与 venuefeedback 的状态机流转不同，见「与 venuefeedback 的边界」）；状态回开走既有 `updateVenue`（认领人/管理员）
+- **列表 `GET /admin/status-reports`**：TTL 窗口内全部活跃报告，按时间倒序分页（PageRequest ≤100），`type` 可选筛选（2026-08-11，服务端库内过滤）。管理端上下文与公开列表的差异：① 上报者**真实昵称 + userId**（不脱敏——管理员需识别上报者）；② 携带 `note`（补充说明，审核安全约定"note 仅管理端可见"，公开响应禁止返回，见 L1897）；③ JOIN `qwt_venues` 取场所名；④ `peerCount` = 同店同类型活跃信号数（`countClustersByVenueAndType` 聚簇，众报置信度，管理端「N人报」显示）。`findActiveReports` 原生 SQL + 投影接口（全小写别名），countQuery 与主查询同谓词
+- **移除 `POST /admin/status-reports/{id}/remove`**：soft delete + `adminAction=REMOVED`（与用户自撤同软删语义，操作者是管理员）；移除后所有"活跃"查询立即过滤（公开视图即时消失，无需等 TTL）；同事务失效 `venueHeat` 缓存。幂等：已处置/不存在静默成功。语义 = **清理虚假/失效信号**（无副作用）
+- **采纳 `POST /admin/status-reports/{id}/adopt`**（2026-08-10 新增，2026-08-11 泛化）：管理员核实**事件属实**后的处置（区别于移除的虚假信号清理）。同一事务完成：① **状态类联动门店营业状态**——SUSPENDED 经 `VenueService.markSuspendedByReport`、RESUMED 经对称的 `VenueService.reopenByReport`（写 `VenueStatusLog` 变迁日志 + 逐出 venue/hotVenueIds 缓存；目标态已一致时幂等跳过不写冗余日志）；**事件类不改状态**；② 报告处置（soft delete + `adminAction=ADOPTED`——**公告区保留展示至 TTL 过期并带"已核实"标记**，与移除的即时消失语义区分）；③ **积分奖励**上报者（userId 非空，经 `PointsService.rewardStatusReport`，来源 `STATUS_REPORT_REWARD`，流水幂等键兜底并发；匿名不发；**SITUATION_UNCLEAR 不设奖励**——信息量最低、噪音高危，防价值错配）；④ **处理结果站内信**（`STATUS_REPORT_RESULT`，同事务、幂等、匿名不通知，正文含类型 + 状态类结论）。已处置（软删）/不存在幂等返回。**无"已处理"状态机**——实时信号处置语义 = 采纳（属实）或移除（虚假）两动作，均为 soft delete 收尾；状态回开走既有 `updateVenue`（认领人/管理员）
 - **计数 `countActiveReports`**：TTL 窗口内活跃报告总数；与 venuefeedback PENDING 计数经 `/admin/reports/pending-count` 合并为**管理端上报待办总数**（FAB「上报管理」红点数据源，2026-08-10 扩展口径——两类上报任一非空即亮；处置/过期后自然归零）
 - **移除不通知上报者**（2026-08-10 决策）：与用户自撤同语义（记录从「我的上报」消失，无回传通道）；误报清理属运营动作，若需"移除告知"后续按「处理结果站内信」约定补发。**采纳必须通知**（`STATUS_REPORT_RESULT` 站内信）——上报被核实采纳且用户获得积分，属「状态流转对用户有结果」范畴，与 feedback 采纳通知同一长期约定
 - **仅活跃报告入管理视图**：TTL 过期信号已自动从公开视图消失，无需管理处置（不展示历史/已过期列表）
 
-### 门店暂停报列表（GET /venues/{venueId}/status-reports，2026-08-10 新增）
+### 门店突发事件列表（GET /venues/{venueId}/status-reports，2026-08-10 新增，2026-08-11 泛化）
 
-详情页「报告暂停营业」弹层的默认内容（公开读，无需登录）。**根因（需求 2026-08-10）**：报告是社区信号动作，用户报告前需要看到"已有多人报告"的明细才能建立信任——原实现只有聚合计数（`activeReportCount`）没有明细，前端系统弹窗只能承载纯文本确认、无法展示列表。本接口补齐"门店级暂停报的公开读路径"，与聚合计数共用同一 TTL 窗口（活跃判定口径契约，见上）。
+详情页「报告突发事件」弹层的默认内容（公开读，无需登录）。**根因（需求 2026-08-10）**：报告是社区信号动作，用户报告前需要看到"已有多人报告"的明细才能建立信任——原实现只有聚合计数（`activeReportCount`）没有明细，前端系统弹窗只能承载纯文本确认、无法展示列表。本接口补齐"门店级报告的公开读路径"，与聚合计数共用同一活跃判定（`expires_at > now`，活跃判定口径契约，见上）。
 
-- **范围**：TTL 窗口内（`createdAt >= now - 4h`）全部用户的报告，按 `createdAt` 倒序，Service 层 `.limit(RECENT_REPORT_LIST_LIMIT=20)`（SQL 不写 LIMIT，窗口收敛数据量小，避免方言绑定）
-- **实现**：`StatusReportRepository.findRecentByVenue(venueId, since)` 原生 SQL LEFT JOIN `qwt_users` 取昵称（LEFT JOIN：用户异常态回退匿名，不因关联缺失丢行）；`mine` 标记由 `UserContext.getCurrentUserId()`（可空，未登录恒 false）对比行 `user_id` 得出
+- **范围**：TTL 窗口内（`expires_at > now`）全部用户的报告，按 `createdAt` 倒序，Service 层 `.limit(RECENT_REPORT_LIST_LIMIT=20)`（SQL 不写 LIMIT，窗口收敛数据量小，避免方言绑定）
+- **实现**：`StatusReportRepository.findRecentByVenue(venueId, now)` 原生 SQL LEFT JOIN `qwt_users` 取昵称（LEFT JOIN：用户异常态回退匿名，不因关联缺失丢行）；`mine` 标记由 `UserContext.getCurrentUserId()`（可空，未登录恒 false）对比行 `user_id` 得出
 - **隐私**：`reporterName` 脱敏（`maskNickname`：首字 + "**"，无昵称回退「舞友」）——保护用户身份隐私的同时保留"社区已有多人报告"的信任信号
-- **响应**：`StatusReportListItem`（id/reporterName/reason/reasonDisplay/createdAt/mine），reasonDisplay 取自 `ReportReason.getDisplayName()`（前端不再自持原因文案映射）
+- **响应**：`StatusReportListItem`（id/reporterName/type/typeDisplay/severity/createdAt/mine），typeDisplay/severity 取自 `ReportType` 枚举（前端不再自持文案/色阶映射）
+
+### 紧急公告区（GET /venues/{venueId}/status-reports/announcements，2026-08-11 新增）
+
+详情页「紧急公告」卡数据源（公开读，无需登录）。展示 = **活跃信号（deleted=false）+ 已采纳信号（deleted=true 且 adminAction=ADOPTED，保留展示至 TTL 过期并带"已核实"标记）** 按类型聚簇摘要；移除（REMOVED）信号不展示。
+
+- **聚合**：`StatusReportRepository.findAnnouncementsByVenue` 按 `(venue_id, type)` 聚簇（COUNT / 已采纳数 / MAX(createdAt)），Service 层组摘要 `AnnouncementSummary`（type/typeDisplay/severity/count/adopted/latestAt），**按严重级降序**（HIGH→MEDIUM→LOW→RECOVERY，恢复营业语义上最后呈现）
+- **契约**：**不返回 note**（审核安全约定"note 仅管理端可见"，公开响应禁止携带——公告区不展示用户自由文本，规避微信审核风险）；`adopted` 驱动前端「已核实」标记；空结果 = 前端整卡隐藏
 
 ### 我的上报记录（GET /status-reports/mine，2026-08-05 新增，2026-08-06 收敛）
 

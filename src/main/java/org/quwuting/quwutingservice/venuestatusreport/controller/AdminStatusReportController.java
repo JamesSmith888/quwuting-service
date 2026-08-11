@@ -31,17 +31,19 @@ public class AdminStatusReportController {
     private final StatusReportService statusReportService;
 
     /**
-     * 活跃暂停报列表（需 ADMIN）。
-     * GET /admin/status-reports?page=0&size=20
+     * 活跃突发事件列表（需 ADMIN）。
+     * GET /admin/status-reports?page=0&size=20&type=SUSPENDED
      * 跨场所分页倒序（TTL 窗口内全部活跃报告）；返回上报者真实昵称 + userId + note
-     * （管理端上下文，note 仅管理端可见的审核安全约定）。
+     * （管理端上下文，note 仅管理端可见的审核安全约定）+ 同店同类型聚簇计数 peerCount。
+     * type 可选（2026-08-11 新增）：null/空 = 全部类型，传枚举值 = 按类型筛选。
      */
     @GetMapping
     public ApiResponse<Page<AdminStatusReportResponse>> listReports(
             @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false) String type
     ) {
-        return ApiResponse.ok(statusReportService.listAdminReports(page, size));
+        return ApiResponse.ok(statusReportService.listAdminReports(page, size, type));
     }
 
     /**

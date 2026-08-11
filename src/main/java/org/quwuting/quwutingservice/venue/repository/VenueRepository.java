@@ -410,7 +410,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * <ul>
      *   <li>viewSince/viewUntil：浏览按 view_date 过滤，[30天前的日期, 今天)，即「截至昨日」</li>
      *   <li>windowSince/windowUntil：其余滚动窗口按时间戳过滤，[30天前0点, 今天0点)，即「截至昨日」</li>
-     *   <li>reportSince：活跃上报为实时 TTL 窗口（now - 4h），不受「截至昨日」约束</li>
+     *   <li>now：活跃上报为实时 TTL 窗口（expires_at > now，TTL 唯一事实源 = 列，
+     *       2026-08-11 由 created_at >= reportSince 迁移）</li>
      *   <li>lateststatuslogtime：当前状态的实时事实，全量 MAX，无窗口约束</li>
      * </ul>
      * 收藏趋势（多行时间序列）与满意度（分组均值，依赖 raters 条件触发）形态不同，
@@ -451,9 +452,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
               (SELECT MAX(l.created_at) FROM qwt_venue_status_logs l
                 WHERE l.venue_id = :venueId) AS lateststatuslogtime,
               (SELECT COUNT(*) FROM qwt_venue_status_reports r
-                WHERE r.venue_id = :venueId AND r.deleted = false AND r.created_at >= :reportSince) AS reportcount,
+                WHERE r.venue_id = :venueId AND r.deleted = false AND r.expires_at > :now) AS reportcount,
               (SELECT MAX(r.created_at) FROM qwt_venue_status_reports r
-                WHERE r.venue_id = :venueId AND r.deleted = false AND r.created_at >= :reportSince) AS latestreporttime,
+                WHERE r.venue_id = :venueId AND r.deleted = false AND r.expires_at > :now) AS latestreporttime,
               (SELECT COALESCE(SUM(-pt.delta), 0) FROM qwt_points_transactions pt
                 WHERE pt.target_type = 'VENUE' AND pt.target_id = :venueId AND pt.delta < 0) AS pointsreceivedtotal,
               (SELECT COALESCE(SUM(-pt.delta), 0) FROM qwt_points_transactions pt
@@ -465,7 +466,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                    @Param("viewUntil") java.time.LocalDate viewUntil,
                                    @Param("windowSince") LocalDateTime windowSince,
                                    @Param("windowUntil") LocalDateTime windowUntil,
-                                   @Param("reportSince") LocalDateTime reportSince,
+                                   @Param("now") LocalDateTime now,
                                    @Param("positiveCodes") List<String> positiveCodes,
                                    @Param("negativeCodes") List<String> negativeCodes);
 

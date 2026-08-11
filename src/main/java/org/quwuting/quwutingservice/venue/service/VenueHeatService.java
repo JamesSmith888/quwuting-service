@@ -174,12 +174,13 @@ public class VenueHeatService {
         LocalDateTime windowEnd = today.atStartOfDay();
         LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
         LocalDate sinceDate30d = today.minusDays(WINDOW_DAYS);
-        // 活跃上报为实时 TTL 窗口（now - 4h），是实时事实，不受「截至昨日」约束
-        LocalDateTime reportSince = LocalDateTime.now().minusHours(StatusReportService.ACTIVE_REPORT_TTL_HOURS);
+        // 活跃上报为实时 TTL 窗口（expires_at > now，TTL 唯一事实源 = 列），是实时事实，
+        // 不受「截至昨日」约束；now 由调用方传入（2026-08-11 由 reportSince 常量窗口迁移）
+        LocalDateTime now = LocalDateTime.now();
 
         // ── 全部单值计数器：跨 6 张表合并为 1 次 DB 往返（标量子查询 mega-query） ──
         VenueRepository.HeatCounters counters = venueRepository.countHeatCounters(
-                venueId, sinceDate30d, today, since30d, windowEnd, reportSince,
+                venueId, sinceDate30d, today, since30d, windowEnd, now,
                 POSITIVE_REACTION_CODES, NEGATIVE_REACTION_CODES);
         long viewCount30d = orZero(counters.getPv());
         long viewUv30d = orZero(counters.getUv());
