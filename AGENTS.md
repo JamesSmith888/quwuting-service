@@ -244,6 +244,21 @@ jwt:
 
 `qwt_venues` 承载场所基础信息：名称、营业状态（`status`，`VenueStatus` 枚举）、城市/区县（标准行政区划名，与列表筛选共用同一词表精确匹配）、地址、坐标（`longitude`/`latitude`，导航用）、相册（`photos` JSON 数组字符串列）、简介、联系方式、标签（`tags` JSON 数组字符串列，仅存管理员自定义标签，`VenueDefaultsConfig` 合并系统默认标签）。
 
+### 坐标采集与批量补全（2026-08-11 新增）
+
+**坐标系约定**：全链路 gcj02（火星坐标）——`wx.chooseLocation` 采集、`wx.openLocation` 展示、后端地理编码回写均为 gcj02，混用 wgs84/bd09 会产生数百米偏移（前端见 `utils/geo.ts` 注释）。腾讯位置服务/高德地理编码输出即 gcj02；百度输出 bd09 需转换，故服务商限定腾讯/高德。
+
+**采集通道**：
+1. 新建/编辑门店：前端 `wx.chooseLocation` 人工地图选点（主通道）；
+2. 存量批量补齐：管理端「一键补齐」——`POST /admin/venues/geocode/backfill`（仅 ADMIN），内部串行调用腾讯位置服务地理编码（`GeocodeService`，个人版约 5QPS → 逐条 250ms 限速），幂等（只处理 latitude/longitude 为空的场所，可反复重试），失败项计入报告不影响其他项。待补数量入口：`GET /admin/venues/geocode/missing-count`。
+3. 一次性运维脚本：`scripts/backfill_geocode.py`（读库→调 API→回写，`--dry-run` 预检 / `--city` 单城市 / `--limit` 限量，环境变量 `QWT_DB_URL/QWT_DB_USER/QWT_DB_PASSWORD/QQMAP_KEY`）。
+
+**强制约定**：
+- 地理编码 key 只放后端配置（`app.geocode.key`，生产经 `QQMAP_KEY` 环境变量注入），**禁止落前端/入库/进 git**（合规要求）；
+- 地址拼接优先用 `address` 字段（可能已含省市区，避免 city+district+address 重复拼接）；
+- 回写前坐标粗校验中国境内区间（lat 18~54 / lng 73~135），越界拒绝写入并计入失败报告；
+- 批量回写**禁持跨批大事务**：`GeocodeService.backfillAll()` 非事务，逐条 `save` 各自提交（连接池仅 5 连接 + Supabase 抖动为已知外部条件，见「连接池与数据库抖动韧性」）；
+
 ### 营业时间（时段列表，2026-08-08 由固定列改造）
 
 **数据形状**：`business_hours`（`varchar(1000)`）JSON 数组字符串列，与 tickets/partnerFees 同模式：

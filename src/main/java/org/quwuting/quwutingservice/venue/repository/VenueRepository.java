@@ -19,8 +19,30 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
 
     Optional<Venue> findByIdAndDeletedFalse(Long id);
 
-    /** 批量按 ID 查询场所（消除 N+1：收藏列表等场景需一次性加载多个场所） */
+    /**
+     * 批量按 ID 查询场所（消除 N+1：收藏列表等场景需一次性加载多个场所） */
     List<Venue> findByIdInAndDeletedFalse(List<Long> ids);
+
+    /**
+     * 缺坐标场所（2026-08-11 批量补齐坐标用）：deleted=false 且 latitude/longitude
+     * 任一为空、且 address 非空（无地址无法地理编码，交由人工处理）。
+     */
+    @Query("""
+            SELECT v FROM Venue v
+            WHERE v.deleted = false
+              AND (v.latitude IS NULL OR v.longitude IS NULL)
+              AND v.address IS NOT NULL AND v.address <> ''
+            """)
+    List<Venue> findMissingCoordinates();
+
+    /** 缺坐标场所计数（轻量统计用，与 findMissingCoordinates 同口径）。 */
+    @Query("""
+            SELECT COUNT(v) FROM Venue v
+            WHERE v.deleted = false
+              AND (v.latitude IS NULL OR v.longitude IS NULL)
+              AND v.address IS NOT NULL AND v.address <> ''
+            """)
+    long countMissingCoordinates();
 
     /**
      * 列表筛选条件（全部排序变体共用）。
