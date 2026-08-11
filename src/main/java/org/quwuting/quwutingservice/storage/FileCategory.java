@@ -19,7 +19,9 @@ public enum FileCategory {
     /** 舞伴相册照片（本人上传，PENDING 审核后公开） */
     DANCER_PHOTO("dancer-photos"),
     /** 舞伴头像（本人编辑资料时上传） */
-    DANCER_AVATAR("dancer-avatars");
+    DANCER_AVATAR("dancer-avatars"),
+    /** 门店认领营业执照（2026-08-11 新增，认领申请材料，仅管理端审核可见） */
+    VENUE_CLAIM_LICENSE("claim-licenses");
 
     private final String pathPrefix;
 

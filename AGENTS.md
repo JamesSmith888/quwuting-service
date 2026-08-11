@@ -290,13 +290,42 @@ jwt:
 
 `Venue.claimedBy`（`Long`，可空）：认领人用户 ID，引用 `qwt_users.id`，`null` 表示未被认领。认领后该用户获得门店管理权（发布动态、编辑信息等），与平台管理员共享管理入口可见性。
 
+### 认领申请流程（2026-08-11 新增，venueclaim 模块）
+
+认领 = 门店工作人员申请成为管理方，**平台管理员审核通过后置 `Venue.claimedBy`**——
+不直接开放自助认领（审核制防止冒领）：
+
+- 申请表 `qwt_venue_claims`：venue_id / user_id（必填，认领必须登录）/ 申请材料
+  （real_name 必填、contact_phone 必填、contact_wechat 选填、license_urls JSON 数组
+  选填、note 选填）/ status（PENDING / APPROVED / REJECTED / WITHDRAWN）/ handled_by /
+  handled_at / handle_note
+- **状态机**：PENDING → APPROVED（置 claimedBy，申请人获得管理权）/ REJECTED（可再申请）；
+  PENDING → WITHDRAWN（申请人撤回）。终态固定
+- **防重复（A1：只能一人认领，先到先得）**：V12 部分唯一索引
+  `(user_id, venue_id) WHERE status='PENDING'`（同 V2/V8 上报去重模式）+ 提交时应用层
+  catch 23505 幂等返回 + 审核通过时**再次**校验门店未被认领（并发竞态兜底）
+- **缓存失效（关键）**：审核通过置 `claimed_by` 后必须失效 venue 实体缓存
+  （`CACHE_VENUE`，key = venueId，显式 `CacheManager.evict`——approveClaim 的 key 依赖
+  事务内查询结果，无法用 `@CacheEvict` SpEL 表达）。否则 60s TTL 内详情接口读到旧
+  claimedBy，认领人 `canManage` 仍为 false
+- **隐私（D1）**：申请材料仅存工单表，不写 `qwt_users`；用户侧响应不暴露材料，
+  仅管理端响应完整返回
+- 接口：`POST /venues/{venueId}/claims`（提交）、`GET /venues/claims/mine`（我的认领）、
+  `POST /venues/claims/{claimId}/withdraw`（撤回）、`GET /admin/venue-claims`（管理端列表）、
+  `POST /admin/venue-claims/{id}/approve` / `{id}/reject`（审核）
+
 ### 权限判定规则（canManage）
 
-详情接口 `GET /venues/{id}` 返回 `VenueDetailResponse(venue, canManage, postCount, hasMyStatusReport, statusUpdatedAt)`，其中 `canManage` 由后端基于软鉴权上下文计算：
+详情接口 `GET /venues/{id}` 返回 `VenueDetailResponse(venue, canManage, postCount, hasMyStatusReport, statusUpdatedAt, claimed, myClaimStatus)`，其中：
 
-1. 平台管理员（`UserRole.ADMIN`）→ 对所有门店为 `true`
-2. 门店认领人（`claimedBy` 等于当前用户 ID）→ 对该门店为 `true`
-3. 匿名用户 / 其他用户 → 恒为 `false`
+- `canManage` 由后端基于软鉴权上下文计算：
+  1. 平台管理员（`UserRole.ADMIN`）→ 对所有门店为 `true`
+  2. 门店认领人（`claimedBy` 等于当前用户 ID）→ 对该门店为 `true`
+  3. 匿名用户 / 其他用户 → 恒为 `false`
+- `claimed`（2026-08-11 新增）：门店是否已被认领（`claimedBy` 非空），全局归属事实，
+  驱动前端「认领舞厅」菜单项禁用态
+- `myClaimStatus`（2026-08-11 新增）：当前用户对该门店的认领申请状态（未登录恒 null），
+  驱动「认领舞厅」菜单项"审核中"禁用态
 
 `canManage` 仅驱动前端管理入口的**展示**，安全边界在后端各写操作接口的角色校验。
 
@@ -733,7 +762,7 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 | POST | `/venues/{venueId}/status-reports` | 需登录 | 上报突发事件（body 可空=快速上报默认 SUSPENDED，或含 type/occurredAt/note；**2026-08-11 守卫**：SUSPENDED 对非营业门店拒绝 1010、RESUMED 对营业中门店拒绝 1012、SITUATION_UNCLEAR 必填 note 拒绝 1011，事件类不受存储态约束，见下「提交守卫」） |
 | POST | `/venues/{venueId}/status-reports/cancel` | 需登录 | 撤销我的上报（软删除） |
 | GET | `/venues/{venueId}/status-reports` | 公开 | 门店最近突发事件列表（TTL 窗口内所有用户，倒序，2026-08-10，见下「门店突发事件列表」） |
-| GET | `/venues/{venueId}/status-reports/announcements` | 公开 | 详情页紧急公告区聚合（活跃 + 已采纳按类型聚簇，严重级降序，2026-08-11，见下「紧急公告区」） |
+| GET | `/venues/{venueId}/status-reports/announcements` | 公开 | 紧急公告聚合（活跃 + 已采纳按类型聚簇，严重级降序；详情页入口条 + 公告专属页列表共用，2026-08-11，见下「紧急公告区」） |
 | GET | `/status-reports/mine?venueId=` | 需登录 | 我的全部突发事件上报（用户级资源，顶层路径；venueId 可选，2026-08-06，见下「我的上报记录」） |
 | GET | `/admin/status-reports?page=&size=&type=` | ADMIN | 活跃突发事件列表（跨场所分页倒序，type 可选筛选，2026-08-10，见下「管理端可见性」） |
 | POST | `/admin/status-reports/{id}/remove` | ADMIN | 移除突发事件（soft delete + REMOVED 标记，公开视图即时消失，幂等） |
@@ -769,10 +798,10 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 ### 紧急公告区（GET /venues/{venueId}/status-reports/announcements，2026-08-11 新增）
 
-详情页「紧急公告」卡数据源（公开读，无需登录）。展示 = **活跃信号（deleted=false）+ 已采纳信号（deleted=true 且 adminAction=ADOPTED，保留展示至 TTL 过期并带"已核实"标记）** 按类型聚簇摘要；移除（REMOVED）信号不展示。
+详情页「紧急公告」入口条与公告专属页（`pages/venue-announcements`）列表数据源（公开读，无需登录）。展示 = **活跃信号（deleted=false）+ 已采纳信号（deleted=true 且 adminAction=ADOPTED，保留展示至 TTL 过期并带"已核实"标记）** 按类型聚簇摘要；移除（REMOVED）信号不展示。2026-08-11 前端拆页：同一聚合接口被两处消费——详情页取首条派生单行入口条（severity 色点 + 「紧急公告 · 最紧急类型摘要」），公告专属页全量渲染列表（列表层）+ 最近突发事件明细（详情层，`GET /venues/{id}/status-reports`）。
 
 - **聚合**：`StatusReportRepository.findAnnouncementsByVenue` 按 `(venue_id, type)` 聚簇（COUNT / 已采纳数 / MAX(createdAt)），Service 层组摘要 `AnnouncementSummary`（type/typeDisplay/severity/count/adopted/latestAt），**按严重级降序**（HIGH→MEDIUM→LOW→RECOVERY，恢复营业语义上最后呈现）
-- **契约**：**不返回 note**（审核安全约定"note 仅管理端可见"，公开响应禁止携带——公告区不展示用户自由文本，规避微信审核风险）；`adopted` 驱动前端「已核实」标记；空结果 = 前端整卡隐藏
+- **契约**：**不返回 note**（审核安全约定"note 仅管理端可见"，公开响应禁止携带——公告区不展示用户自由文本，规避微信审核风险）；`adopted` 驱动前端「已核实」标记；空结果 = 前端入口条/列表空态（详情页整行隐藏）
 
 ### 我的上报记录（GET /status-reports/mine，2026-08-05 新增，2026-08-06 收敛）
 

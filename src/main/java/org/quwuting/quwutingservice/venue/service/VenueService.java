@@ -26,6 +26,9 @@ import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
 import org.quwuting.quwutingservice.venuepost.repository.VenuePostRepository;
 import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportService;
+import org.quwuting.quwutingservice.venueclaim.entity.VenueClaim;
+import org.quwuting.quwutingservice.venueclaim.enums.ClaimStatus;
+import org.quwuting.quwutingservice.venueclaim.repository.VenueClaimRepository;
 import org.quwuting.quwutingservice.config.CacheConfig;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Caching;
@@ -65,6 +68,7 @@ public class VenueService {
     private final VenueLookupService venueLookupService;
     private final VenueDefaultsConfig defaultsConfig;
     private final org.quwuting.quwutingservice.config.PointsProperties pointsProperties;
+    private final VenueClaimRepository venueClaimRepository;
 
     @Transactional
     @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
@@ -253,8 +257,22 @@ public class VenueService {
         // 营业状态字段的最近一次变更时间（详情弹窗「营业状态更新」展示源）：
         // 取自状态日志表最新一条 createdAt，而非整个场所记录的 updatedAt——
         // 后者任意字段编辑都刷新，语义不匹配"营业状态何时更新的"
+        // 认领状态（2026-08-11，需求「认领舞厅」）：claimed = 门店全局归属事实
+        // （claimed_by 非空）；myClaimStatus = 当前用户对该门店的申请状态
+        // （未登录恒 null，驱动详情页「认领舞厅」菜单项禁用/审核中态，见
+        // VenueDetailResponse javadoc）
+        boolean claimed = venue.getClaimedBy() != null;
+        ClaimStatus myClaimStatus = null;
+        Long currentUserId = UserContext.getCurrentUserId();
+        if (currentUserId != null) {
+            myClaimStatus = venueClaimRepository
+                    .findFirstByUserIdAndVenueIdAndStatusOrderByCreatedAtDesc(
+                            currentUserId, id, ClaimStatus.PENDING)
+                    .map(VenueClaim::getStatus)
+                    .orElse(null);
+        }
         return new VenueDetailResponse(base, canManage, postCount, hasMyStatusReport,
-                venueStatusLogRepository.findLatestStatusChangeTime(id));
+                venueStatusLogRepository.findLatestStatusChangeTime(id), claimed, myClaimStatus);
     }
 
     /**
