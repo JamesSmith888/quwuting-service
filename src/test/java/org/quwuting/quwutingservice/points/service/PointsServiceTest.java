@@ -6,16 +6,22 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.quwuting.quwutingservice.config.PointsProperties;
+import org.quwuting.quwutingservice.dancer.entity.Dancer;
+import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
+import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.points.dto.CheckInResponse;
+import org.quwuting.quwutingservice.points.dto.GiftResponse;
 import org.quwuting.quwutingservice.points.dto.PointsSummaryResponse;
 import org.quwuting.quwutingservice.points.entity.DailyCheckin;
 import org.quwuting.quwutingservice.points.entity.PointsAccount;
 import org.quwuting.quwutingservice.points.entity.PointsTransaction;
 import org.quwuting.quwutingservice.points.enums.PointsSourceType;
+import org.quwuting.quwutingservice.points.enums.PointsTargetType;
 import org.quwuting.quwutingservice.points.repository.DailyCheckinRepository;
 import org.quwuting.quwutingservice.points.repository.PointsAccountRepository;
 import org.quwuting.quwutingservice.points.repository.PointsTransactionRepository;
+import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 
@@ -25,6 +31,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
@@ -58,7 +65,6 @@ class PointsServiceTest {
     private VenueHeatService venueHeatService;
 
     private PointsService pointsService;
-
     @BeforeEach
     void setUp() {
         pointsService = new PointsService(accountRepository, transactionRepository, checkinRepository,
@@ -150,5 +156,58 @@ class PointsServiceTest {
         assertEquals(true, resp.checkedIn(), "首次打卡应返回 checkedIn=true");
         assertEquals(2, resp.reward(), "奖励来自配置（2 分）");
         verify(transactionRepository).saveAndFlush(any());
+    }
+
+    // ─── 礼物赠送（2026-08-12 礼物化：载荷 giftCode，价格 GiftCatalog 权威） ───
+
+    /** 未知礼物 code → 1001 业务错误（不落流水、不扣余额） */
+    @Test
+    void gift_unknownCode_throwsBusinessExceptionWithoutDeducting() {
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> pointsService.gift(1L, PointsTargetType.DANCER, 2L, "UNKNOWN_GIFT"));
+
+        assertEquals(1001, ex.getCode(), "未知礼物应抛 1001（非 500）");
+        verify(transactionRepository, never()).save(any());
+        verify(accountRepository, never()).deductBalance(anyLong(), anyLong());
+    }
+
+    /**
+     * 赠送成功：按 GiftCatalog 权威价格扣减（HEART = 5 分），流水带 gift_code；
+     * 响应返回服务端权威余额 + 礼物 code/name。
+     */
+    @Test
+    void gift_success_deductsCatalogPriceAndPersistsGiftCode() {
+        when(pointsProperties.gift()).thenReturn(new PointsProperties.GiftLimits(10, 20, 5));
+        Dancer dancer = new Dancer();
+        dancer.setId(2L);
+        dancer.setCreatedBy(99L); // 非本人（赠送人 userId=1）
+        dancer.setStatus(DancerStatus.NORMAL);
+        when(dancerRepository.findByIdAndDeletedFalse(2L)).thenReturn(Optional.of(dancer));
+        when(transactionRepository.sumGiftedToday(anyLong(), any(), any())).thenReturn(0L);
+        when(transactionRepository.sumGiftedToTargetToday(anyLong(), any(), any(), any(), any())).thenReturn(0L);
+
+        PointsAccount account = new PointsAccount();
+        account.setUserId(1L);
+        account.setBalance(10L);
+        when(accountRepository.findByUserId(1L)).thenReturn(Optional.of(account));
+        when(accountRepository.deductBalance(1L, 5L)).thenReturn(1); // HEART price = 5
+
+        PointsTransaction saved = new PointsTransaction();
+        saved.setId(77L);
+        when(transactionRepository.save(any())).thenReturn(saved);
+
+        GiftResponse resp = pointsService.gift(1L, PointsTargetType.DANCER, 2L, "HEART");
+
+        assertEquals(5L, resp.balance(), "10 - 5(爱心价格) = 5");
+        assertEquals("HEART", resp.giftCode());
+        assertEquals("爱心", resp.giftName());
+        // 流水必须携带 gift_code（"送了什么"语义）
+        org.mockito.ArgumentCaptor<PointsTransaction> captor =
+                org.mockito.ArgumentCaptor.forClass(PointsTransaction.class);
+        verify(transactionRepository).save(captor.capture());
+        PointsTransaction tx = captor.getValue();
+        assertEquals(-5L, tx.getDelta(), "扣减 = -礼物价格");
+        assertEquals("HEART", tx.getGiftCode(), "流水必须记录礼物 code");
+        assertEquals(PointsTargetType.DANCER, tx.getTargetType());
     }
 }

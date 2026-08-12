@@ -1,6 +1,7 @@
 package org.quwuting.quwutingservice.message.repository;
 
 import org.quwuting.quwutingservice.message.entity.Message;
+import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -18,6 +19,13 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
 
     /** 未读消息数（个人中心 / 首页 FAB 未读徽标依据） */
     long countByUserIdAndReadAtIsNullAndDeletedFalse(Long userId);
+
+    /**
+     * 指定类型的未读消息（最新在前，取前 N 条）——首页「关注门店状态变化」提醒卡片
+     * 数据源（type = VENUE_STATUS_CHANGED，见 MessageController#statusAlerts）。
+     */
+    Page<Message> findByUserIdAndTypeAndReadAtIsNullAndDeletedFalseOrderByCreatedAtDesc(
+            Long userId, MessageType type, Pageable pageable);
 
     /** 按 ID 取本人消息（越权校验：非本人消息返回 empty） */
     Optional<Message> findByIdAndUserIdAndDeletedFalse(Long id, Long userId);

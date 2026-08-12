@@ -3,6 +3,7 @@ package org.quwuting.quwutingservice.user.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.storage.ImageContentValidator;
 import org.quwuting.quwutingservice.user.dto.request.UpdateProfileRequest;
 import org.quwuting.quwutingservice.user.dto.response.UserInfoResponse;
 import org.quwuting.quwutingservice.user.mapper.UserInfoMapper;
@@ -18,6 +19,8 @@ public class UserService {
 
     private final UserRepository userRepository;
     private final UserInfoMapper userInfoMapper;
+    /** 图片内容校验（2026-08-12 恶意文件防线：头像 URL 落库前做内容级校验） */
+    private final ImageContentValidator imageValidator;
 
     /** 获取用户最新信息（GET /user/me，前端静默刷新用户态用） */
     @Transactional(readOnly = true)
@@ -42,6 +45,7 @@ public class UserService {
             user.setNickname(nickname);
         }
         if (!isBlank(avatarUrl)) {
+            imageValidator.validate(avatarUrl);
             user.setAvatarUrl(avatarUrl);
         }
         userRepository.save(user);

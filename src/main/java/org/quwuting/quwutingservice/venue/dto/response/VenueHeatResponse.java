@@ -68,6 +68,11 @@ public record VenueHeatResponse(
          * 与其余趋势序列同构（date + count），口径一致（截至昨日、30 天）。
          */
         List<FavoriteTrendPoint> pointsTrend,
+        /**
+         * 收到礼物聚合（code → 件数，2026-08-12 礼物化：「收获的支持」礼物墙数据源）。
+         * 展示载体与 pointsReceived*（价值，热度输入项）同源不同维。
+         */
+        List<org.quwuting.quwutingservice.points.dto.GiftCountResponse> giftsReceived,
 
         // ── 满意度 ──
         /** 综合满意度（1-10，各维度等权均分），评价人数不足时为 null */

@@ -119,16 +119,25 @@ public class VenueHeatService {
     private final VenueRepository venueRepository;
     private final TagInteractionRepository tagInteractionRepository;
     private final org.quwuting.quwutingservice.config.PointsProperties pointsProperties;
+    /**
+     * 积分聚合查询入口（礼物墙数据源）。@Lazy 打破与 PointsService 的构造器循环
+     * 依赖（PointsService 依赖本服务做赠送后热度失效；本服务仅在 computeHeat 回源
+     * 时读积分聚合，延迟解析安全——循环依赖根因见后端 AGENTS.md「场所热度」）。
+     */
+    private final org.quwuting.quwutingservice.points.service.PointsService pointsService;
     private final LoadingCache<Long, VenueHeatResponse> heatCache;
 
     public VenueHeatService(VenueLookupService venueLookupService,
                             VenueRepository venueRepository,
                             TagInteractionRepository tagInteractionRepository,
-                            org.quwuting.quwutingservice.config.PointsProperties pointsProperties) {
+                            org.quwuting.quwutingservice.config.PointsProperties pointsProperties,
+                            @org.springframework.context.annotation.Lazy
+                            org.quwuting.quwutingservice.points.service.PointsService pointsService) {
         this.venueLookupService = venueLookupService;
         this.venueRepository = venueRepository;
         this.tagInteractionRepository = tagInteractionRepository;
         this.pointsProperties = pointsProperties;
+        this.pointsService = pointsService;
         // loader 为 computeHeat（实例方法引用）：字段必须先于缓存构建完成赋值。
         // 异步刷新默认运行在 ForkJoinPool.commonPool——热度计算不依赖请求上下文，安全。
         this.heatCache = Caffeine.newBuilder()
@@ -257,7 +266,7 @@ public class VenueHeatService {
                 + " + 动态总数(" + postCount + ")×" + VenueHeatWeights.POST
                 + " + 近30天评分数(" + ratingCount30d + ")×" + VenueHeatWeights.RATING
                 + " + 近30天正向反馈(" + positiveReactionCount30d + ")×" + VenueHeatWeights.REACTION
-                + " + 近30天收到积分(" + pointsReceived30d + ")×" + pointsWeight
+                + " + 近30天收到礼物价值(" + pointsReceived30d + ")×" + pointsWeight
                 + (satisfactionScore != null
                         ? String.format(" + 满意度偏移(%.1f)×20", satisfactionOffset)
                         : "")
@@ -275,13 +284,18 @@ public class VenueHeatService {
         StatusConfidenceResult confidence = computeStatusConfidence(
                 venue.getStatus(), suspensionCount30d, currentStatusDays, reportSummary.activeCount());
 
+        // ── 收到礼物聚合（2026-08-12 礼物化：「收获的支持」礼物墙数据源；
+        //     @Lazy 注入 PointsService 打破循环依赖，见构造器注释） ──
+        java.util.List<org.quwuting.quwutingservice.points.dto.GiftCountResponse> giftsReceived =
+                pointsService.receivedGifts(org.quwuting.quwutingservice.points.enums.PointsTargetType.VENUE, venueId);
+
         return new VenueHeatResponse(
                 heatScore,
                 viewCount30d, viewUv30d,
                 favoriteCount, newFavoriteCount30d, favoriteTrend, viewTrend, reactionTrend,
                 postCount, newPostCount30d,
                 ratingCount30d, positiveReactionCount30d, negativeReactionCount30d,
-                pointsReceivedTotal, pointsReceived30d, pointsTrend,
+                pointsReceivedTotal, pointsReceived30d, pointsTrend, giftsReceived,
                 satisfactionScore, ratingTotalCount,
                 suspensionCount30d, currentStatusDays,
                 venue.getStatus().name(), venue.getStatus().getDisplayName(),

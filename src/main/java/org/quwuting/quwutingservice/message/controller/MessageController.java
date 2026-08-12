@@ -8,6 +8,8 @@ import org.quwuting.quwutingservice.security.UserContext;
 import org.springframework.data.domain.Page;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
+
 /**
  * 站内信（消息中心）用户级接口（需登录，路由挂载在 /users/me/messages 下）。
  * <ul>
@@ -40,6 +42,18 @@ public class MessageController {
     public ApiResponse<Long> unreadCount() {
         Long userId = UserContext.requireAuth();
         return ApiResponse.ok(messageService.unreadCount(userId));
+    }
+
+    /**
+     * 未读的关注门店状态变化提醒（首页「关注状态变化」提醒卡片数据源，2026-08-12）：
+     * VENUE_STATUS_CHANGED 类型的未读消息最新前 N 条（默认 3），未读即提醒、
+     * 点击深链门店详情页 + 标记已读后从卡片消失（历史留在消息中心）。
+     */
+    @GetMapping("/status-alerts")
+    public ApiResponse<List<MessageResponse>> statusAlerts(
+            @RequestParam(defaultValue = "3") int limit) {
+        Long userId = UserContext.requireAuth();
+        return ApiResponse.ok(messageService.listStatusAlerts(userId, limit));
     }
 
     /** 单条标记已读（幂等；越权静默成功——消息已按收件人过滤） */

@@ -27,6 +27,8 @@ class UserServiceTest {
 
     @Mock
     private UserRepository userRepository;
+    @Mock
+    private org.quwuting.quwutingservice.storage.ImageContentValidator imageValidator;
 
     private UserService userService;
 
@@ -35,7 +37,7 @@ class UserServiceTest {
     @BeforeEach
     void setUp() {
         // UserInfoMapper 无依赖，直接用真实实例以覆盖映射逻辑
-        userService = new UserService(userRepository, new UserInfoMapper());
+        userService = new UserService(userRepository, new UserInfoMapper(), imageValidator);
 
         user = new User();
         user.setId(1L);

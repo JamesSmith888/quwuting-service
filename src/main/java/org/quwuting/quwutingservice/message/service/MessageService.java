@@ -80,6 +80,25 @@ public class MessageService {
         return messageRepository.countByUserIdAndReadAtIsNullAndDeletedFalse(userId);
     }
 
+    /**
+     * 未读的关注门店状态变化提醒（首页提醒卡片数据源，2026-08-12 新增）：
+     * 取类型为 {@link MessageType#VENUE_STATUS_CHANGED} 的最新未读消息前 N 条
+     * （不返回分页元数据——卡片是轻量聚合，见 MessageController#statusAlerts）。
+     * limit 收敛到 [1, 10]，默认由 Controller 决定。
+     */
+    @Transactional(readOnly = true)
+    public List<MessageResponse> listStatusAlerts(Long userId, int limit) {
+        int size = Math.min(Math.max(limit, 1), 10);
+        return messageRepository
+                .findByUserIdAndTypeAndReadAtIsNullAndDeletedFalseOrderByCreatedAtDesc(
+                        userId, MessageType.VENUE_STATUS_CHANGED, PageRequest.of(0, size))
+                .getContent().stream()
+                .map(m -> new MessageResponse(
+                        m.getId(), m.getType(), m.getTitle(), m.getContent(),
+                        m.getRelatedType(), m.getRelatedId(), m.getReadAt() != null, m.getCreatedAt()))
+                .toList();
+    }
+
     /** 单条标记已读（越权/重复已读幂等——影响行数为 0 时静默成功） */
     @Transactional
     public void markOneRead(Long userId, Long messageId) {

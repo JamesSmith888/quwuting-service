@@ -79,6 +79,8 @@ public class VenueClaimService {
     private final UserRepository userRepository;
     private final CacheManager cacheManager;
     private final tools.jackson.databind.ObjectMapper objectMapper;
+    /** 图片内容校验（2026-08-12 恶意文件防线：营业执照图片 URL 落库前做内容级校验） */
+    private final org.quwuting.quwutingservice.storage.ImageContentValidator imageValidator;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -108,6 +110,7 @@ public class VenueClaimService {
         claim.setRealName(TextSanitizer.sanitize(request.realName()));
         claim.setContactPhone(request.contactPhone());
         claim.setContactWechat(TextSanitizer.sanitize(request.contactWechat()));
+        imageValidator.validateAll(request.licenseUrls());
         claim.setLicenseUrls(serializeStringList(request.licenseUrls()));
         claim.setNote(TextSanitizer.sanitize(request.note()));
         claim.setStatus(ClaimStatus.PENDING);

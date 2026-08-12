@@ -46,7 +46,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
 
     /**
      * 列表筛选条件（全部排序变体共用）。
-     * 所有参数可空：null 表示不限制；keyword 需调用方预先包装为 %xx%。
+     * 所有参数可空：null 表示不限制；keyword / tag 需调用方预先包装为 %xx%。
      * <p>
      * {@code hotOnly} / {@code hotIds}（2026-08-08 新增「热门」快捷筛选）：
      * 热门筛选 = 仅保留热门场所（ID ∈ 城市内 top 20% 且 热度分 ≥ 门槛的集合，
@@ -55,6 +55,13 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * {@code hotOnly=true} 时按集合过滤，集合为空（无热门场所）则 IN 空集恒假——
      * 返回空列表而非报错，语义正确。使用本片段的查询方法必须声明这两个参数
      * （boolean + Set&lt;Long&gt;，禁 null，Service 层保证）。
+     * <p>
+     * {@code tag}（2026-08-12 新增「龙女」快捷筛选）：tags 为 JSON 数组字符串列，
+     * 谓词为<b>元素子串匹配</b>（LIKE，无索引，数据规模数百级无压力）。口径：
+     * tag=龙女 命中 ["龙女可进"] 与 ["龙女"]（允许进入的门店），不命中 ["禁龙"]
+     * （反向标签无"龙女"子串）；JSON 元素引号天然规避跨标签误匹配（"舞女"不含
+     * "龙女"子串）。<b>已知边界</b>：未来若出现"禁龙女"类反向词会被误命中——
+     * 当前标签规范无此类（见后端 AGENTS.md「标签筛选」），新增反向标签需同步本谓词。
      */
     String LIST_FILTERS = """
             WHERE v.deleted = false
@@ -65,6 +72,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                    OR v.name LIKE :keyword
                    OR v.address LIKE :keyword
                    OR v.description LIKE :keyword)
+              AND (:tag IS NULL OR v.tags LIKE :tag)
               AND (:hotOnly = false OR v.id IN :hotIds)
             """;
 
@@ -196,6 +204,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                              @Param("district") String district,
                              @Param("status") VenueStatus status,
                              @Param("keyword") String keyword,
+                             @Param("tag") String tag,
                              @Param("latitude") double latitude,
                              @Param("longitude") double longitude,
                              @Param("radiusKm") Double radiusKm,
@@ -220,6 +229,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                        @Param("district") String district,
                                        @Param("status") VenueStatus status,
                                        @Param("keyword") String keyword,
+                                       @Param("tag") String tag,
                                        @Param("positiveCodes") List<String> positiveCodes,
                                        @Param("pointsWeight") int pointsWeight,
                                        @Param("hotOnly") boolean hotOnly,
@@ -248,6 +258,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                               @Param("district") String district,
                               @Param("status") VenueStatus status,
                               @Param("keyword") String keyword,
+                              @Param("tag") String tag,
                               @Param("latitude") double latitude,
                               @Param("longitude") double longitude,
                               @Param("radiusKm") Double radiusKm,
@@ -270,6 +281,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                            @Param("district") String district,
                            @Param("status") VenueStatus status,
                            @Param("keyword") String keyword,
+                           @Param("tag") String tag,
                            @Param("positiveCodes") List<String> positiveCodes,
                            @Param("pointsWeight") int pointsWeight,
                            @Param("hotOnly") boolean hotOnly,
@@ -292,6 +304,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                        @Param("district") String district,
                                        @Param("status") VenueStatus status,
                                        @Param("keyword") String keyword,
+                                       @Param("tag") String tag,
                                        @Param("latitude") double latitude,
                                        @Param("longitude") double longitude,
                                        @Param("radiusKm") Double radiusKm,
@@ -314,6 +327,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                              @Param("district") String district,
                              @Param("status") VenueStatus status,
                              @Param("keyword") String keyword,
+                             @Param("tag") String tag,
                              @Param("hotOnly") boolean hotOnly,
                              @Param("hotIds") Set<Long> hotIds,
                              Pageable pageable);
@@ -332,6 +346,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                          @Param("district") String district,
                                          @Param("status") VenueStatus status,
                                          @Param("keyword") String keyword,
+                                         @Param("tag") String tag,
                                          @Param("latitude") double latitude,
                                          @Param("longitude") double longitude,
                                          @Param("radiusKm") Double radiusKm,

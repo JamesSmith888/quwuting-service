@@ -30,9 +30,29 @@ import java.util.List;
  * ① 去掉具体年龄数字（避免未成年人风险），② 配合前端去掉"15岁"等具体年龄文案。
  * 字典总数 16 → 18。
  * <p>
+ * <b>2026-08-12 字典瘦身（18 → 14，用户驱动）</b>：
+ * ① 删除 GOOD_VIBE / GOOD_MUSIC / NORMAL / CROWDED——"氛围/音乐"与"人气旺"重叠且
+ * 用户无感（来舞厅的动机是舞伴不是音乐）；NORMAL 是零信息默认态；CROWDED 是 HOT
+ * （人多=加分）的负面镜像，同一事实正负互搏（见前端 AGENTS.md「Reaction 快速反馈系统」）。
+ * ② VALUE 语义纠偏：✌ 原按"性价比高"（20元/曲）作为 POSITIVE 收录——实为圈内黑话
+ * 「剪刀手」（10 元场有舞伴临时加价至 20 元时比 V 手势），是负面标签。为不得罪人，
+ * 不明示"剪刀手"字样（emoji 保留 ✌ 作圈内暗号），code 改名 PRICE_HIKE、极性改
+ * NEGATIVE（退出热度公式，进负面信号单独计数）、label 改「舞伴加价」。
+ * 历史数据迁移见 V15__reaction_dictionary_trim.sql。
+ * <p>
+ * <b>2026-08-12 晚 第二轮瘦身（14 → 10，用户驱动）</b>：
+ * 删除 FAIR_PRICE（🍺 消费合理）/ WAITING（⏳ 排队太久）/ HIGH_COST（💰 消费较高）/
+ * CLEAN（✨ 干净整洁）——价格/排队/清洁维度用户实际使用率低，字典收敛到
+ * "人气/舞伴风格/服务/环境"等核心信号（来舞厅的动机是舞伴，辅助维度从简）。
+ * 与第一轮不同：**历史数据物理清理**（V16__reaction_prune_codes.sql，DELETE
+ * qwt_venue_reactions 中这 4 个 code 的记录，只删表情数据不动其他表）——
+ * 避免前端长期携带"字典外 code 过滤"兼容逻辑（第二轮起不再保留孤儿 code）。
+ * 已删 4 code 第一轮（GOOD_VIBE/GOOD_MUSIC/NORMAL/CROWDED）历史数据仍按 V15
+ * 策略保留（前端过滤），两轮策略差异见 V16 migration 注释。
+ * <p>
  * 字段约束：
  * <ul>
- *   <li>{@code reactionCode} 字段为 varchar(30)（见 V1 baseline），4 个新 code 名长度均 &lt; 20，</li>
+ *   <li>{@code reactionCode} 字段为 varchar(30)（见 V1 baseline），code 名长度均 &lt; 20，</li>
  *   <li>emoji 字符与 src（前端字典）一一对应——emoji 是后端契约也是图片加载失败时的兜底，</li>
  *   <li>极性是热度公式的唯一事实源（POSITIVE 计入公式，NEGATIVE 单独计数），前端展示全量。</li>
  * </ul>
@@ -43,15 +63,15 @@ import java.util.List;
  */
 public enum ReactionCode {
     HOT("🔥", "人气旺", Polarity.POSITIVE),
-    GOOD_VIBE("💃", "氛围好", Polarity.POSITIVE),
-    GOOD_MUSIC("🎵", "音乐棒", Polarity.POSITIVE),
     RECOMMEND("👍", "值得推荐", Polarity.POSITIVE),
     /**
-     * 2026-08-08 新增（替代原 FAIR_PRICE 之外的"价格维度"）：20元/曲级别的高性价比。
-     * 与 FAIR_PRICE（消费合理，覆盖中端）语义不重叠——VALUE 偏年轻/打卡语境，
-     * 强调"小钱办大事"，是首次覆盖"舞伴按曲计费"场景下的低价信号。
+     * 2026-08-12 由 VALUE（"✌ 性价比高"）改名纠偏：✌ 实为圈内黑话「剪刀手」——
+     * 10 元场有舞伴临时加价至 20 元时比 V 手势，是负面标签而非性价比。为不得罪人
+     * 不明示"剪刀手"字样（emoji 保留 ✌ 作圈内暗号，label 落中性行为描述「舞伴加价」），
+     * 极性 POSITIVE → NEGATIVE（退出热度公式、进负面信号单独计数），历史数据
+     * 经 V15 migration 重映射（VALUE → PRICE_HIKE）。
      */
-    VALUE("✌", "性价比高", Polarity.POSITIVE),
+    PRICE_HIKE("✌", "舞伴加价", Polarity.NEGATIVE),
     /**
      * 2026-08-08 新增（替代 YOUNG_PARTNER）：18+有活力的舞伴类型。
      * 风格化词汇替代"15岁"等具体年龄——Q 版虚拟头像 + 18+ 描述规避未成年人风险。
@@ -66,14 +86,8 @@ public enum ReactionCode {
      * 2026-08-08 新增（替代 OLD_PARTNER）：35+成熟风舞伴类型。
      */
     MATURE_PARTNER("💋", "舞伴成熟风", Polarity.POSITIVE),
-    FAIR_PRICE("🍺", "消费合理", Polarity.POSITIVE),
-    CLEAN("✨", "干净整洁", Polarity.POSITIVE),
     GOOD_SERVICE("💁", "服务贴心", Polarity.POSITIVE),
-    NORMAL("😐", "普通", Polarity.NEUTRAL),
-    CROWDED("👥", "人多拥挤", Polarity.NEGATIVE),
-    WAITING("⏳", "排队太久", Polarity.NEGATIVE),
     QUIET("🪑", "人气冷清", Polarity.NEGATIVE),
-    HIGH_COST("💰", "消费较高", Polarity.NEGATIVE),
     BAD_ENV("😕", "环境一般", Polarity.NEGATIVE),
     SERVICE_ISSUE("😡", "服务问题", Polarity.NEGATIVE);
 

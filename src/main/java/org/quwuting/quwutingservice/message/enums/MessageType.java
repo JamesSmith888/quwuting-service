@@ -24,5 +24,13 @@ public enum MessageType {
      * 匿名上报不通知。移除（虚假信号）不通知上报者（与用户自撤同语义，见 AGENTS.md
      * 「场所状态上报 · 管理端处置」）。软关联 VENUE（深链场所详情页）。
      */
-    STATUS_REPORT_RESULT
+    STATUS_REPORT_RESULT,
+    /**
+     * 关注门店营业状态变化（2026-08-12 新增，见 AGENTS.md「关注门店营业状态通知」）：
+     * 门店营业状态实际变更（updateVenue / 采纳暂停/恢复报告）时发送给该店关注者
+     * （qwt_venue_status_watchers），同事务、幂等（一次状态变更一条消息）。
+     * 驱动首页「关注状态变化」提醒卡片（未读即提醒，点击深链门店详情页 + 标记已读）。
+     * 软关联 VENUE（深链场所详情页）。
+     */
+    VENUE_STATUS_CHANGED
 }

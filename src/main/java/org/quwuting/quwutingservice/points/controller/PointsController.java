@@ -47,10 +47,10 @@ public class PointsController {
         return ApiResponse.ok(pointsService.listTransactions(UserContext.requireAuth(), type, page, size));
     }
 
-    /** 赠送积分（门店/舞伴双目标，校验见 PointsService.gift） */
+    /** 赠送礼物（门店/舞伴双目标，2026-08-12 礼物化：载荷 = giftCode，价格后端权威校验） */
     @PostMapping("/gift")
     public ApiResponse<GiftResponse> gift(@Valid @RequestBody GiftRequest request) {
         return ApiResponse.ok(pointsService.gift(
-                UserContext.requireAuth(), request.targetType(), request.targetId(), request.amount()));
+                UserContext.requireAuth(), request.targetType(), request.targetId(), request.giftCode()));
     }
 }

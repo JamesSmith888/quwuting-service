@@ -50,6 +50,13 @@ public record VenueResponse(
          */
         List<ReactionBadge> topReactions,
         Integer sortWeight,
+        /**
+         * 累计浏览量（全量历史口径，2026-08-12 新增）：qwt_venue_views 行数（按天去重
+         * PV 口径，与 VenueHeatResponse.viewCount30d 同源同口径的全量版，见
+         * VenueResponseMapper 四参重载 javadoc）。驱动列表卡片底部「👁 浏览数」展示。
+         * 卡片展示场景（列表/收藏/详情）传真实值；无展示语义场景（创建/编辑表单回显）为 0。
+         */
+        long viewCount,
         /** 是否为城市内热门场所（城市内热度排名前 20% 且热度分 ≥ 配置门槛，
          *  见 AGENTS.md「热门场所标记」），驱动列表/收藏卡片视觉高亮 */
         boolean isHot,

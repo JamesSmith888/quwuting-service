@@ -160,8 +160,9 @@ storage/        ← 文件存储模块（前端直传 Supabase Storage，后端�
   StorageController  ← GET /storage/upload-token（需登录，签发上传凭证）
   StorageService     ← 校验文件类型/大小、生成唯一路径、返回凭证
   StorageProperties  ← @ConfigurationProperties(prefix = "supabase.storage")
-  FileCategory       ← 文件分类枚举（VENUE_COVER / VENUE_PHOTO / VENUE_QR）
+  FileCategory       ← 文件分类枚举（VENUE_COVER / VENUE_PHOTO / VENUE_QR / USER_AVATAR / DANCER_PHOTO / DANCER_AVATAR / VENUE_CLAIM_LICENSE）
   UploadTokenResponse ← 凭证 DTO（projectUrl / anonKey / bucket / uploadPath / publicUrl）
+  ImageContentValidator ← 图片内容校验器（2026-08-12 恶意文件防线：业务提交时下载 URL 验 magic bytes / 尺寸 / 大小，Caffeine 缓存）
 ```
 
 每个功能模块内部遵循分层：`controller → service → repository → entity`。  
@@ -219,7 +220,7 @@ jwt:
 
 ### 产品定位（根因）
 
-本应用是**黄页工具**，不涉及社交——用户资料仅含昵称，**无头像**等社交属性。`UserInfoResponse` 不含 avatarUrl 字段。数据库 `qwt_users.avatar_url` 列为历史遗留（不再读写），后续迁移时清理。文件上传仅服务于场所图片（封面、相册、二维码），不涉及用户社交属性。
+本应用是**黄页工具**，用户资料以昵称为主，**头像为选填**社交属性（2026-08-12 修正：此前文档误记「无头像」——`UserInfoResponse` 已含 avatarUrl，`qwt_users.avatar_url` 由 `POST /user/profile` 正常读写，微信 `chooseAvatar` 选图后直传 Supabase 落库）。文件上传分类已扩展至用户头像 / 舞伴照片 / 认领营业执照（见 FileCategory），不再仅限场所图片。
 
 ### 资料来源（平台约束）
 
@@ -642,7 +643,7 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 ### 数据模型（V9 迁移）
 
 - `qwt_points_accounts`：一用户一行（`user_id` 唯一），`balance` 读写快照 + `earned_total/spent_total` 冗余累计——高频读（详情/赠送校验）不 SUM；
-- `qwt_points_transactions`：**只追加、不可变**的流水，`balance_after` 快照支持日终对账（`SUM(delta)` vs `balance`）；挣取（delta>0）必带 `source_type + source_id`，部分唯一索引 `(user_id, source_type, source_id) WHERE delta > 0 AND source_id IS NOT NULL` 兜底并发（SQLState 23505 幂等返回已有流水）；赠送（delta<0）必带 `target_type + target_id`（`PointsTargetType`：VENUE/DANCER，可扩展）；
+- `qwt_points_transactions`：**只追加、不可变**的流水，`balance_after` 快照支持日终对账（`SUM(delta)` vs `balance`）；挣取（delta>0）必带 `source_type + source_id`，部分唯一索引 `(user_id, source_type, source_id) WHERE delta > 0 AND source_id IS NOT NULL` 兜底并发（SQLState 23505 幂等返回已有流水）；赠送（delta<0）必带 `target_type + target_id`（`PointsTargetType`：VENUE/DANCER，可扩展）+ **`gift_code`（V13 新增，2026-08-12 礼物化：记录"送了什么"，GiftCatalog 枚举名，仅赠送流水非空；存量 V2 积分赠送为 NULL）**；
 - `qwt_daily_checkins`：`UNIQUE(user_id, checkin_date)` 保证"一天一次"业务语义，与流水唯一键（一次打卡只发一次分）职责分离；
 - **实体不继承 BaseEntity**（与 `qwt_venue_status_logs` 同模式）：账务/锚点记录无软删、流水无 updatedAt——建表与实体列必须逐列对齐（`ddl-auto=validate` 启动期即校验，2026-08-10 曾因实体继承 BaseEntity 而表无 deleted 列启动失败，见当日日志）。
 
@@ -651,9 +652,19 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 - **余额守恒**：`balance = earned_total - spent_total`；赠送扣减用**原子条件更新**（`PointsAccountRepository.deductBalance`：`UPDATE ... SET balance = balance - :amt WHERE user_id = :id AND balance >= :amt`，affected=0 即余额不足抛 1011）——无锁防并发超扣；
 - **只读事务禁写（2026-08-10 生产实证）**：`@Transactional(readOnly = true)` 的接口（概览/流水/统计）内**禁止任何可能写库的调用**——懒创建账户的写副作用只允许出现在可写事务（checkIn/gift/earn/adjust）；概览在无账户时返回零值而非创建（Postgres 对只读事务内 INSERT 报 "cannot execute INSERT in a read-only transaction"，且该契约错误仅真实请求首次触发时才暴露，见当日日志）；
 - **挣取幂等**：打卡（checkin_id）/ 采纳（feedback_id）/ 管理调整（ADMIN_ADJUST）三源各自唯一键；`earn()` 撞唯一键时清 entityManager 幂等返回已有流水 `balanceAfter`（本事务回滚，无副作用）；
-- **赠送防刷（V2）**：单次 ≤`app.points.gift.max-per-gift`（默认 10）、每日总额 ≤`max-per-day`（默认 20）、单目标每日 ≤`max-per-target-day`（默认 5）、**自赠检测**（`venue.claimedBy` / `dancer.createdBy` == 本人 → 抛 1015）、目标可见性（venue 未软删 / dancer NORMAL）；赠送成功后 **afterCommit 失效 venueHeat 缓存**（与 reaction toggle 同模式，2026-08-08 根因：提交前失效存在竞态窗口）；
+- **赠送防刷（V2，2026-08-12 礼物化后口径不变）**：上限按礼物价格折算积分价值——单次 ≤`app.points.gift.max-per-gift`（默认 10，单礼最贵 5 防御性保留）、每日总额 ≤`max-per-day`（默认 20）、单目标每日 ≤`max-per-target-day`（默认 5）、**自赠检测**（`venue.claimedBy` / `dancer.createdBy` == 本人 → 抛 1015）、目标可见性（venue 未软删 / dancer NORMAL）；赠送成功后 **afterCommit 失效 venueHeat 缓存**（与 reaction toggle 同模式，2026-08-08 根因：提交前失效存在竞态窗口）；
 - **上报采纳奖励**：`VenueFeedbackService.adoptReport` 状态流转与发分**同一事务**（原子，杜绝"状态已采纳但积分未发"）；**reward 开关（2026-08-10）**——请求体 `reward` 缺省/true = 采纳并奖励（ADOPTED + 发分）；false = 采纳不奖励（ADOPTED_NO_REWARD，不发分）；匿名上报（userId null）采纳不发；**不设每日条数上限**（V2 决策：防刷由管理员采纳人工把关——奖励只发生在 ADOPTED，而 ADOPTED 是管理员逐条人工判定，垃圾上报不被采纳即拿不到分）；
 - **配置唯一事实源**：`config/PointsProperties`（`app.points.*`：check-in-reward=2 / feedback-reward=5 / heat-weight=2 / gift 上限）。**禁止业务硬编码任何积分参数**。
+
+### 礼物赠送（2026-08-12 礼物化，根因驱动）
+
+**根因**：直接赠送积分 = 资产转移语义（delta<0 从 A 到 B），① 触碰"可流转准货币"合规红线（小程序虚拟货币流通监管）；② 收礼方只见数字、无情感载体，不符"表达支持"产品定位；③ 流水只记"送了多少"不记"送了什么"，跨页无法聚合展示礼物。系统性方案：积分退化为"获取礼物的代币"，赠送 = **购买礼物并一次性送出**（礼物不可回收、不可再流转——彻底切断资产转移链条）。
+
+- **礼物字典唯一事实源 = `GiftCatalog` 枚举**（`code/emoji/displayName/price` 四元组，`points/enums`）：**价格放枚举而非配置**——价格需与前端镜像同步展示，放配置会造成"展示价 ≠ 实扣价"不一致（前端镜像 `constants/gifts.ts` 与后端枚举同步，改礼物走与 Reaction 字典同款三处同步流程：后端枚举 + 前端镜像 + `scripts/fetch-gift-assets.py` 补 png 资源）；`fromCode()` 解析未知 code 返回 empty 抛 1001（禁直接 `valueOf` 抛 500）；
+- **载荷**：`POST /points/gift` body `{targetType, targetId, giftCode}`（替代 amount）；`GiftResponse` = `{balance, giftId, giftCode, giftName}`（giftName 后端权威下发，前端 toast 零映射）；
+- **聚合（礼物墙）**：`receivedGifts()` 按 `gift_code` GROUP BY 件数降序（部分索引 `qwt_idx_pts_tx_target_gift`），下发 `List<GiftCountResponse>`（code+count，前端查镜像字典渲染图片）——挂 `VenueHeatResponse.giftsReceived` / `DancerDetailResponse.giftsReceived`；与 `receivedTotal/receivedSince`（价值，热度输入项）**同源不同维**；
+- **循环依赖（VenueHeatService → PointsService）**：PointsService 依赖 VenueHeatService（赠送后失效缓存），VenueHeatService 回源需读礼物聚合——构造器注入 PointsService 用 **`@Lazy` 打破**（热度为缓存回源场景，延迟解析安全）；
+- **存量数据**：V2 直接积分赠送流水 `gift_code` 为 NULL——聚合天然排除（展示口径=礼物时代数据），价值口径（SUM(delta)）不受影响（热度公式输入保持）。
 
 ### 错误码
 
@@ -672,7 +683,7 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 | POST | `/points/check-in` | 登录 | 每日打卡（幂等：今日已打卡返回 checkedIn=false） |
 | GET | `/points/me` | 登录 | 概览（余额/今日挣赠/打卡态/规则文案 rules——合规文案后端唯一事实源） |
 | GET | `/points/transactions` | 登录 | 流水分页（type=ALL/EARN/GIFT） |
-| POST | `/points/gift` | 登录 | 赠送（targetType/targetId/amount，校验见上） |
+| POST | `/points/gift` | 登录 | 赠送礼物（body `{"targetType","targetId","giftCode"}`，2026-08-12 礼物化；价格 GiftCatalog 权威，上限/自赠校验见上） |
 | POST | `/admin/points/adjust` | ADMIN | 人工调整（delta 可正可负，reason 必填，审计） |
 | POST | `/admin/reports/{id}/adopt` | ADMIN | 采纳上报（body `{"note", "reward"}`：reward 缺省/true → ADOPTED + 同事务发分；false → ADOPTED_NO_REWARD 不发分，见「统一用户上报」状态机） |
 
@@ -931,23 +942,17 @@ Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对�
 | 代码 | Emoji | 说明 |
 |------|-------|------|
 | HOT | 🔥 | 人气旺 |
-| GOOD_VIBE | 💃 | 氛围好 |
-| GOOD_MUSIC | 🎵 | 音乐棒 |
 | RECOMMEND | 👍 | 值得推荐 |
-| VALUE | ✌ | 性价比高 |
+| PRICE_HIKE | ✌ | 舞伴加价（负面；原 VALUE「性价比高」纠偏，见下「2026-08-12 字典瘦身」） |
 | VIBRANT_PARTNER | ⭐ | 舞伴有活力 |
 | SWEET_PARTNER | 🌸 | 舞伴甜美 |
 | MATURE_PARTNER | 💋 | 舞伴成熟 |
-| FAIR_PRICE | 🍺 | 消费合理 |
-| CLEAN | ✨ | 干净整洁 |
 | GOOD_SERVICE | 💁 | 服务贴心 |
-| NORMAL | 😐 | 普通 |
-| CROWDED | 👥 | 人多拥挤 |
-| WAITING | ⏳ | 排队太久 |
 | QUIET | 🪑 | 人气冷清 |
-| HIGH_COST | 💰 | 消费较高 |
 | BAD_ENV | 😕 | 环境一般 |
 | SERVICE_ISSUE | 😡 | 服务问题 |
+
+（2026-08-12 字典瘦身 18 → 10：第一轮删 GOOD_VIBE / GOOD_MUSIC / NORMAL / CROWDED + VALUE → PRICE_HIKE 改负面；第二轮删 FAIR_PRICE / WAITING / HIGH_COST / CLEAN，见下。）
 
 **2026-08-08 视觉升级扩版**（用户驱动 + 根因分析先行）：
 
@@ -969,6 +974,23 @@ Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对�
    - VIBRANT_PARTNER / VALUE 历史上不存在，无需迁移
    - `DO $$ ... RAISE WARNING` 验证剩余 0 行（防御性，应用启动后可 grep 警告日志）
    - **V3 已进 Flyway 链（target/classes 确认编译）**——正常重启自动跑；**但重置开发库后重新执行 `seed-dev.sql` 会再次引入旧 code**（seed 曾含 YOUNG_PARTNER 数据，已修正为 SWEET_PARTNER）——残留时手动执行下方 UPDATE 兜底
+
+**2026-08-12 字典瘦身（用户驱动，18 → 14）**：
+
+1. **根因**：
+   - "人气/氛围/音乐"三维度重叠——GOOD_VIBE（💃 氛围好）与 HOT（🔥 人气旺）讲的都是"现场热闹"，GOOD_MUSIC（🎵 音乐棒）用户无感（来舞厅的动机是舞伴不是音乐）
+   - NORMAL（😐 普通）是零信息默认态；CROWDED（👥 人多拥挤）是 HOT 的**负面镜像**——同一事实（人多）正反各一个表情，正负信号互搏
+2. **变更**：删除 `GOOD_VIBE` / `GOOD_MUSIC` / `NORMAL` / `CROWDED`；`VALUE` → **`PRICE_HIKE`** 语义纠偏
+   - **VALUE 纠偏（✌ 黑话「剪刀手」）**：✌ 实为圈内黑话——10 元场有舞伴临时加价至 20 元时比 V 手势，是**负面标签**而非"性价比高"。处理三原则（用户定调）：**① 不算正面表情** → 极性 POSITIVE→**NEGATIVE**（退出热度公式、进负面信号单独计数）；**② 不明示"剪刀手"** → label「舞伴加价」落中性行为描述、emoji 保留 ✌ 作圈内暗号（不落文字即不得罪人）；**③ 不误伤正常 20 元场** → description 不写数字
+   - **迁移**：`V15__reaction_dictionary_trim.sql`——`VALUE` → `PRICE_HIKE` 重映射（V3 同款 `DO $$ RAISE WARNING` 验证）；已删 4 code 历史数据**保留不删**（无最接近承接 code，强行映射会扭曲信号），前端展示层统一过滤字典外 code（后端聚合查询返回旧 code 时沿用「枚举外 code 防御」规则优雅跳过）
+   - **热度公式**：删 4 均不在 POSITIVE（GOOD_VIBE/GOOD_MUSIC 删除后经 positiveCodeNames() 自动退出），唯一公式变化 = VALUE 退出正向（历史 VALUE 记录的正向加权消失，属语义修正）；PRICE_HIKE 进 negativeCodeNames() 单独计数
+
+**2026-08-12 晚 第二轮瘦身（用户驱动，14 → 10）**：
+
+1. **根因**：价格（FAIR_PRICE/HIGH_COST）/ 排队（WAITING）/ 清洁（CLEAN）维度用户实际使用率低——字典收敛到"人气/舞伴风格/服务/环境"核心信号（来舞厅的动机是舞伴，辅助维度从简）
+2. **变更**：删除 `FAIR_PRICE` / `WAITING` / `HIGH_COST` / `CLEAN`
+3. **与第一轮不同的历史数据策略（用户明确要求）**：**物理清理**——`V16__reaction_prune_codes.sql` `DELETE FROM qwt_venue_reactions WHERE reaction_code IN (...)`，**只删表情数据**（qwt_venue_reactions 无外键引用、reaction_code 无 FK/CHECK，无级联风险；其他表一律不动）。理由：本轮起不再保留孤儿 code，前端无需长期携带"字典外 code 过滤"兼容逻辑（第一轮 4 code 历史数据仍保留 + 前端过滤，两轮策略差异见 V16 注释）
+4. **前端联动**：见前端 AGENTS.md「Reaction 快速反馈系统 → 静态字典」章节的"2026-08-12 晚 第二轮瘦身"纪要（Picker 4×3 变 4×2 末行 2 个居中 nth-child(n+9)）
 
 6. **枚举外 code 防御（2026-08-08 线上 500 事故教训）**：`GET /venues/{id}` 因 `VenueReactionService.buildTopBadgesFromCounts` 裸 `ReactionCode.valueOf(e.getKey())` 抛 `IllegalArgumentException`（库中残留 `YOUNG_PARTNER`，枚举已删除）→ 详情页 500。**长期规则**：**从聚合/查询结果按 code 转枚举时，必须先过滤或安全转换（`ReactionCode.isValid(code)` filter 或 `valueOfSafe`），禁止裸 `Enum.valueOf`**——枚举删除/改名后，库中旧 code 仍可能被聚合查询返回，必须优雅跳过（与 `getStats` 用 `ReactionCode.values()` 遍历 + filter、`VenueHeatService` 用 `values()` 流的行为对齐）；枚举内 code 是唯一事实源，库中残留 code 是脏数据，跳过而非让接口崩溃
 
@@ -1218,7 +1240,7 @@ Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻
 | 列 | 说明 |
 |---|---|
 | user_id | 收件人（用户级资源，查询/已读一律按此过滤，越权返回空） |
-| type | MessageType 枚举：DANCER_REVIEW（审核结果）/ DANCER_STATUS（隐藏/恢复状态变更）/ FEEDBACK_RESULT（上报处理结果，2026-08-10 新增） |
+| type | MessageType 枚举：DANCER_REVIEW（审核结果）/ DANCER_STATUS（隐藏/恢复状态变更）/ FEEDBACK_RESULT（上报处理结果，2026-08-10 新增）/ STATUS_REPORT_RESULT（突发事件采纳结果，2026-08-10）/ VENUE_STATUS_CHANGED（关注门店状态变化，2026-08-12） |
 | title / content | 标题 / 正文（TextSanitizer 清洗入库，长度 ≤100 / ≤500 与列定义一致） |
 | related_type / related_id | 业务软关联：DANCER → 舞伴详情页 / VENUE → 场所详情页，可空 |
 | read_at | 已读时间（null = 未读；未读数徽标依据） |
@@ -1229,6 +1251,7 @@ Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻
 |---|---|
 | GET /users/me/messages | 我的站内信（分页倒序，read 派生布尔） |
 | GET /users/me/messages/unread-count | 未读数（个人中心 / 首页 FAB 未读徽标） |
+| GET /users/me/messages/status-alerts | 未读的关注门店状态变化提醒（首页提醒卡片数据源；最新 N 条，默认 3） |
 | POST /users/me/messages/{id}/read | 单条标记已读（越权/已读幂等） |
 | POST /users/me/messages/read-all | 全部标记已读（前端打开消息中心即调用——标准通知中心范式） |
 
@@ -1252,6 +1275,61 @@ Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻
 `qwt_messages` 由 `db/migration/V4__messages.sql` 创建（Flyway 版本化迁移，见
 「Schema 演进与数据库完整性」）；`DancerStatus` 新增 `REJECTED` 为纯枚举变更
 （status 列为 varchar，无 DDL）。
+
+---
+
+## 关注门店营业状态（venuestatuswatcher 模块，2026-08-12 新增）
+
+### 设计定位
+
+用户可在门店详情页开启「营业状态变化通知」——该店营业状态**每次实际变更**时，
+关注者收到站内信（MessageType.VENUE_STATUS_CHANGED）+ 首页「关注状态变化」提醒
+卡片（未读即提醒，点击深链门店详情页并标记已读）。**决策：不依赖微信订阅消息**
+（一次性订阅"一次授权一条"体验受限、长期订阅类目受限），纯应用内站内信通知——
+复用既有消息基础设施，零外部依赖/零成本/零合规风险（与「状态流转对用户有结果的
+通知必须走站内信」长期约定一致）。
+
+**与收藏（qwt_favorites）解耦**：关注 = 只盯营业状态变化，不收藏也能开通知
+（如"这家暂停营业了，等它恢复"），语义独立。
+
+### 数据模型（qwt_venue_status_watchers，V14 迁移）
+
+| 列 | 说明 |
+|---|---|
+| user_id | 关注者（用户级资源，开关/查询一律按当前登录用户过滤） |
+| venue_id | 被关注门店 |
+| UNIQUE(user_id, venue_id) | 同一用户对同一门店只关注一次（重复开启幂等） |
+| deleted | 软删列沿用 BaseEntity 约定；**取消关注 = 物理删除**（无审计价值，与 reaction 取消同语义） |
+
+### 接口（VenueStatusWatcherController，均需登录）
+
+| 接口 | 说明 |
+|---|---|
+| PUT /venues/{id}/status-watch | 开启关注（幂等：已关注直接成功；门店不存在抛 1001） |
+| DELETE /venues/{id}/status-watch | 关闭关注（幂等：未关注静默成功） |
+| GET /venues/{id}/status-watch | 我的关注态（{ watching: boolean }） |
+
+### 触发挂点（唯一入口 = VenueService 三个状态变更事实源）
+
+`VenueStatusWatcherService.notifyStatusChanged(venueId, from, to)`（REQUIRED 传播
+加入调用方事务）——查门店名 + 全部关注者，逐用户 `MessageService.create(...)`
+发 VENUE_STATUS_CHANGED（软关联 VENUE）。**幂等 = 一次状态变更一次调用一条消息**，
+调用方保证仅在状态实际变更后调用：
+
+1. `VenueService.updateVenue`：`newStatus != oldStatus` 分支内（状态未变不发）
+2. `VenueService.markSuspendedByReport`：采纳暂停报（幂等早退"已是 SUSPENDED"已拦截）
+3. `VenueService.reopenByReport`：采纳恢复报（幂等早退"已是 OPEN"已拦截）
+
+**通知正文**（`composeContent`，仅陈述事实）：「XX舞厅」已恢复营业（原暂停营业）——
+to=OPEN 用「已恢复营业」，其余用 to 的 displayName，from 非空时附「（原X）」。
+门店已软删 / 无关注者时不发消息（空通知短路）。
+
+### 首页提醒卡片数据源
+
+复用站内信本身（不新增表）：`GET /users/me/messages/status-alerts` = type 为
+VENUE_STATUS_CHANGED 的**未读**消息最新 N 条（`MessageRepository` 按
+userId+type+readAt IS NULL 查询）。未读即提醒；点击深链详情页 + 单条标记已读后
+从卡片消失（历史留在消息中心）。
 
 ---
 
@@ -1320,18 +1398,26 @@ supabase:
     allowed-extensions: .jpg,.jpeg,.png,.webp
 ```
 
-### 安全模型
+### 安全模型（2026-08-12 修订，恶意文件防线）
 
-- `anonKey` 是 Supabase 的公开密钥，安全性由 Storage RLS 策略保障（bucket 设为 public read，upload 需有效 JWT）
+- `anonKey` 是 Supabase 的公开密钥（嵌于小程序包，人人可提取），**不构成安全边界**——
+  前端直传必须放行 anon 写，token 接口对扩展名/大小的校验可被伪造参数整体绕过
+- **真正的防线 = `ImageContentValidator`**：业务提交（图片 URL 落库）时下载文件做内容级校验——
+  URL 必须为本应用公开桶前缀（防外部图床/SSRF）、内容大小 ≤ maxFileSize、
+  magic bytes 命中 JPEG/PNG/WebP（拒 exe/HTML/脚本改名伪造）、JPEG/PNG 解析宽高限尺寸（防解压炸弹）
+- 挂载点：venue 创建/更新（imageUrl/photos/wechatQr）、dancer 创建/更新（avatarUrl）与相册（photos）、
+  user 头像（avatarUrl）、claim 营业执照（licenseUrls）——**新增图片 URL 落库字段必须挂载校验**
+- 校验结果按 URL 缓存（Caffeine 10min），编辑全量覆盖旧图不重复下载
 - `serviceRoleKey` 绝不下发前端（本模块不使用）
-- 后端在签发凭证前已完成文件类型/大小校验，前端直传时 Supabase RLS 为第二道防线
+- 后端在签发凭证前完成文件类型/大小校验（第一道，可绕过），内容校验在业务提交时兜底（第二道，不可绕过）
 
 ### 约束
 
-- 文件上传仅服务于**场所图片**（封面、相册、二维码），不涉及用户头像等社交属性
+- 文件分类：场所图片（封面/相册/二维码）、用户头像、舞伴照片/头像、认领营业执照（见 FileCategory）
 - 新增文件分类只需扩展 `FileCategory` 枚举 + 前端 `FileCategory` 类型
 - 禁止后端接收 MultipartFile 中转上传（前端直传，后端零文件流）
 - 禁止在凭证响应中暴露 serviceRoleKey
+- 图片 URL 落库前必须经 `ImageContentValidator` 校验（见「安全模型」挂载点）
 
 ---
 
@@ -1376,6 +1462,14 @@ Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(
 2. **多层子查询的列透传契约**：外层 WHERE/ORDER BY 引用的派生列（如 `heat_score`）必须在**每一层中间子查询的投影中出现**——"本层可引用下层列"不等于"外层可引用"，别名作用域逐层收窄，这是本次事故的机械根因；
 3. 单元测试继续 mock repository（SQL 正确性不归单测），但**接线契约**（参数流转、布尔传播）必须有单测锁死（见 `VenueLookupServiceTest` / `FavoriteServiceTest`）。
 
+### 标签筛选（tag，2026-08-12 新增「龙女」快捷筛选）
+
+`GET /venues` 新增可选参数 `tag`：仅返回 `tags` 含该标签**子串**的场所。实现 = `VenueRepository.LIST_FILTERS` 追加 `AND (:tag IS NULL OR v.tags LIKE :tag)`（Service 层包装为 `%xx%`，同 keyword 模式），6 个排序变体查询自动共享（`searchRanked` / `searchRankedNoLocation` / `searchNearest` / `searchHeat(+WithinRadius)` / `searchNewest(+WithinRadius)` 均新增 `@Param tag`）；与城市/状态/热门/距离筛选正交可叠加。
+
+**标签语义（行业黑话）**：舞厅行业以标签声明对「龙女」（聋哑人舞伴群体的行业黑话）的接待政策——「龙女可进」/「龙女」= 允许（线上库实测 91 家，含 11 家冗余同带两标签）、「禁龙」= 禁止（2 家，反向标签）。「龙女」chip 勾选 = 只看允许的店（前端传 `tag=龙女`）。
+
+**匹配口径与已知边界**：`tags` 为 JSON 数组字符串列，子串 LIKE 命中「龙女可进」与「龙女」，**不命中**「禁龙」（无"龙女"子串）；JSON 元素引号天然规避跨标签误匹配（「舞女」不含"龙女"子串）。**已知边界**：未来若新增「禁龙女」类反向标签会被本谓词误命中（元素含"龙女"子串）——新增反向标签须同步本谓词（如排除 `NOT LIKE '%禁%'`）或改用精确元素匹配。LIKE 无索引，数据规模数百级无性能压力。
+
 ### 城市词表与筛选
 
 城市 / 区县按标准行政区划名（前端 `picker mode="region"` 产出，如"绍兴市"）**精确匹配**，写入与查询共用同一词表。禁止模糊匹配兜底——会掩盖写入端数据质量问题。存量脏数据走一次性清洗 SQL，不改查询逻辑。
@@ -1400,6 +1494,19 @@ Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(
   - 其余场景（创建/编辑表单回显、详情页基础响应）isHot 无展示语义，恒 false。
 - **热门筛选的查询实现**：谓词挂在共享 `LIST_FILTERS` 片段（全部 7 个列表排序变体共用，含 count 查询自动继承——分页 totalElements 正确）；`hotOnly=false` 时短路恒真（默认口径=不做隐式过滤），`hotOnly=true` 且集合为空（无热门场所）时 `IN 空集` 恒假返回空页而非报错。JPQL 语法层由 `VenueListQueryHqlSyntaxTest`（ANTLR 语法解析，普通 `mvn test` 执行）守卫；参数绑定语义层由 `VenueHotVenueIdsSqlTest` 的 DB 门禁用例覆盖。
 - **VenueResponseMapper 三参重载**：`toResponse(Venue, List<ReactionBadge> topReactions, boolean isHot)` ——**任何渲染 venue-card 卡片的列表场景必须走本重载**；双参/单参重载默认 `isHot=false`，仅限"热门标记无展示语义"的场景（javadoc 已显式标注，防止再次踩双参重载的静默默认值陷阱）。
+
+### 累计浏览量（VenueResponse.viewCount，2026-08-12）
+
+`VenueResponse` 新增 `viewCount` 字段（long，全量历史口径），驱动列表卡片底部「👁 浏览数」不起眼展示（前端 `formatViewCount` 格式化 10/100/1.2K/10K）。
+
+- **口径**：`qwt_venue_views` 全量行数（按天去重 PV，含匿名）——与热度页 `viewCount30d`（`VenueHeatService` / `VenueRepository.HEAT_SCORE`）**同源同口径的全量版**，仅去掉 30 天窗口。不加累计计数器列、不加迁移：视图表本身即全量事实源。
+- **查询实现**：`VenueViewRepository.countByVenueIds(List<Long>)`（`IN :ids + GROUP BY venue_id` 一次覆盖整页，返回 `(venueId, count)` 二元组；空集合防御——`IN ()` 语法错误，参照 `batchGetBadges` 判空模式）+ 单店 `countByVenueId`（详情页基础响应用，命中 `(venue_id, view_date)` 索引毫秒级）。
+- **消费方（2026-08-12 新增，语义同 isHot 教训——禁止消费场景传默认 0）**：
+  - 城市列表 `VenueService.listVenues`：批量查后走 Mapper **四参重载**传真实值；
+  - 收藏列表 `FavoriteService.getFavoriteVenues`：同口径批量查后传真实值（**历史缺陷预防**：同 isHot 双参重载静默陷阱——三参重载默认 `viewCount=0`，收藏列表若漏传将"城市列表有浏览数、收藏列表恒 0"）；
+  - 详情 `VenueService.getVenueDetail`：单店 COUNT 传真实值（viewCount 是事实字段，详情 base 响应同样带真实值，避免"同一字段两种语义"）；
+  - 其余场景（创建/编辑表单回显）恒 0，无展示语义。
+- **VenueResponseMapper 四参重载**：`toResponse(Venue, List<ReactionBadge>, boolean isHot, long viewCount)` ——卡片展示场景（列表/收藏/详情）的**唯一正确入口**；三参/双参/单参重载默认 `viewCount=0`，仅限无展示语义场景（javadoc 已显式标注）。
 
 ---
 

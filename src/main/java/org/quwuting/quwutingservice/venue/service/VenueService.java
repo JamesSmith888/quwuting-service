@@ -24,12 +24,15 @@ import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
+import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
 import org.quwuting.quwutingservice.venuepost.repository.VenuePostRepository;
 import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportService;
+import org.quwuting.quwutingservice.venuestatuswatcher.service.VenueStatusWatcherService;
 import org.quwuting.quwutingservice.venueclaim.entity.VenueClaim;
 import org.quwuting.quwutingservice.venueclaim.enums.ClaimStatus;
 import org.quwuting.quwutingservice.venueclaim.repository.VenueClaimRepository;
 import org.quwuting.quwutingservice.config.CacheConfig;
+import org.quwuting.quwutingservice.storage.ImageContentValidator;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Caching;
 import org.springframework.data.domain.Page;
@@ -44,6 +47,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -61,6 +65,8 @@ public class VenueService {
     private final VenueRepository venueRepository;
     private final VenuePostRepository venuePostRepository;
     private final VenueStatusLogRepository venueStatusLogRepository;
+    /** 浏览记录（列表/详情响应组装累计浏览量 viewCount 用，2026-08-12 新增） */
+    private final VenueViewRepository venueViewRepository;
     private final VenueResponseMapper venueResponseMapper;
     private final VenueReactionService venueReactionService;
     private final VenueHeatService venueHeatService;
@@ -69,11 +75,18 @@ public class VenueService {
     private final VenueDefaultsConfig defaultsConfig;
     private final org.quwuting.quwutingservice.config.PointsProperties pointsProperties;
     private final VenueClaimRepository venueClaimRepository;
+    /** 关注门店营业状态（状态变更挂点：向关注者发 VENUE_STATUS_CHANGED 站内信） */
+    private final VenueStatusWatcherService venueStatusWatcherService;
+    /** 图片内容校验（2026-08-12 恶意文件防线：业务提交时对图片 URL 做内容级校验） */
+    private final ImageContentValidator imageValidator;
 
     @Transactional
     @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
     public VenueResponse createVenue(CreateVenueRequest req) {
         validateTickets(req.tickets());
+        imageValidator.validate(req.imageUrl());
+        imageValidator.validateAll(req.photos());
+        imageValidator.validate(req.wechatQr());
         Venue venue = new Venue();
         venue.setName(req.name());
         venue.setStatus(req.status() != null ? req.status() : VenueStatus.OPEN);
@@ -121,6 +134,9 @@ public class VenueService {
                 .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
         UserContext.requireManageOrAdmin(venue.getClaimedBy());
         validateTickets(req.tickets());
+        imageValidator.validate(req.imageUrl());
+        imageValidator.validateAll(req.photos());
+        imageValidator.validate(req.wechatQr());
 
         venue.setName(req.name());
         // 状态变更检测：写入变迁日志（热度统计"暂停营业次数"的数据源）
@@ -132,6 +148,10 @@ public class VenueService {
             statusLog.setToStatus(newStatus);
             statusLog.setChangedBy(UserContext.getCurrentUserId());
             venueStatusLogRepository.save(statusLog);
+            // 关注者通知（2026-08-12 新增，见 AGENTS.md「关注门店营业状态通知」）：
+            // 营业状态实际变更时同事务发站内信（幂等——状态未变不进本分支，不发）
+            venueStatusWatcherService.notifyStatusChanged(
+                    venue.getId(), venue.getStatus(), newStatus);
         }
         venue.setStatus(newStatus);
         venue.setImageUrl(req.imageUrl());
@@ -177,14 +197,18 @@ public class VenueService {
         if (venue.getStatus() == VenueStatus.SUSPENDED) {
             return; // 已是暂停营业：不重复写变迁日志（幂等，审计链无冗余）
         }
+        VenueStatus fromStatus = venue.getStatus();
         VenueStatusLog statusLog = new VenueStatusLog();
         statusLog.setVenueId(venue.getId());
-        statusLog.setFromStatus(venue.getStatus());
+        statusLog.setFromStatus(fromStatus);
         statusLog.setToStatus(VenueStatus.SUSPENDED);
         statusLog.setChangedBy(changedBy);
         venueStatusLogRepository.save(statusLog);
         venue.setStatus(VenueStatus.SUSPENDED);
         venueRepository.save(venue);
+        // 关注者通知（同事务；幂等早退已拦截"已是 SUSPENDED"场景，此处必为实际变更）
+        venueStatusWatcherService.notifyStatusChanged(
+                venue.getId(), fromStatus, VenueStatus.SUSPENDED);
         // 热度失效：status 是热度响应输出（currentStatus / currentStatusDays）的组成部分，
         // 与 updateVenue 的显式逐出同模式（venueHeat 为服务内嵌 LoadingCache，不走 @CacheEvict）
         venueHeatService.invalidate(venueId);
@@ -213,14 +237,18 @@ public class VenueService {
         if (venue.getStatus() == VenueStatus.OPEN) {
             return; // 已是营业中：不重复写变迁日志（幂等，审计链无冗余）
         }
+        VenueStatus fromStatus = venue.getStatus();
         VenueStatusLog statusLog = new VenueStatusLog();
         statusLog.setVenueId(venue.getId());
-        statusLog.setFromStatus(venue.getStatus());
+        statusLog.setFromStatus(fromStatus);
         statusLog.setToStatus(VenueStatus.OPEN);
         statusLog.setChangedBy(changedBy);
         venueStatusLogRepository.save(statusLog);
         venue.setStatus(VenueStatus.OPEN);
         venueRepository.save(venue);
+        // 关注者通知（同事务；幂等早退已拦截"已是 OPEN"场景，此处必为实际变更）
+        venueStatusWatcherService.notifyStatusChanged(
+                venue.getId(), fromStatus, VenueStatus.OPEN);
         venueHeatService.invalidate(venueId);
     }
 
@@ -244,7 +272,10 @@ public class VenueService {
         // （四窗口全量），本字段仅承载列表快照/兜底展示，不参与详情页 Reaction UI 主流程
         List<ReactionBadge> topReactions = venueReactionService.getBadges(
                 id, UserContext.getCurrentUserId(), ReactionWindow.DAYS_7);
-        VenueResponse base = venueResponseMapper.toResponse(venue, topReactions);
+        // 累计浏览量（全量历史口径，单店 COUNT 命中 (venue_id, view_date) 索引，毫秒级）：
+        // viewCount 是 VenueResponse 事实字段，详情基础响应同样传真实值（见 Mapper 四参重载 javadoc）
+        long viewCount = venueViewRepository.countByVenueId(id);
+        VenueResponse base = venueResponseMapper.toResponse(venue, topReactions, false, viewCount);
         // 「我是否已上报」必须与活跃计数同一 TTL 口径：hasmyreport 的活跃判定带
         // expires_at > now 过滤（TTL 唯一事实源 = expires_at 列，2026-08-11 由
         // created_at >= now-4h 迁移，见 VenuePostRepository.findDetailStats javadoc——
@@ -312,15 +343,20 @@ public class VenueService {
      * ID ∈ {@link VenueLookupService#getHotVenueIds()}（城市内 top 20% 且 热度分 ≥ 门槛，
      * 5min 缓存）。与城市/状态/距离等筛选正交可叠加；默认不传 = 不过滤（默认口径不做隐式过滤）。
      * 热门集合同时用于响应 isHot 标记，一次获取两处复用。
+     * <p>
+     * {@code tag}（可选，2026-08-12 新增「龙女」快捷筛选）：仅返回 tags 含该标签子串的
+     * 场所（Service 层包装为 %xx% 后按 LIKE 匹配，口径见 {@link VenueRepository#LIST_FILTERS}）。
+     * 与城市/状态/热门/距离等筛选正交可叠加；默认不传 = 不过滤。
      */
     @Transactional(readOnly = true)
     public Page<VenueResponse> listVenues(String city, String district,
                                           VenueStatus status, String keyword,
                                           Double latitude, Double longitude,
                                           String window, String sort, Double radiusKm,
-                                          Boolean hot,
+                                          Boolean hot, String tag,
                                           int page, int size) {
         String keywordPattern = StringUtils.hasText(keyword) ? "%" + keyword.trim() + "%" : null;
+        String tagPattern = StringUtils.hasText(tag) ? "%" + tag.trim() + "%" : null;
         page = Math.max(0, page);
         size = Math.min(Math.max(1, size), MAX_PAGE_SIZE);
         PageRequest pageable = PageRequest.of(page, size);
@@ -333,7 +369,7 @@ public class VenueService {
         Set<Long> hotVenueIds = venueLookupService.getHotVenueIds();
         boolean hotOnly = Boolean.TRUE.equals(hot);
         Page<Venue> result = dispatchListQuery(sortMode, blankToNull(city), blankToNull(district),
-                status, keywordPattern, hasCoords, latitude, longitude, radius,
+                status, keywordPattern, tagPattern, hasCoords, latitude, longitude, radius,
                 POSITIVE_REACTION_CODES, pointsProperties.heatWeight(),
                 hotOnly, hotVenueIds, pageable);
         // 批量查询整页场所的 Top Reaction 徽标，避免逐条查询造成的 N+1（见 VenueReactionService#batchGetBadges）
@@ -341,9 +377,18 @@ public class VenueService {
         Map<Long, List<ReactionBadge>> reactionsByVenue =
                 venueReactionService.batchGetBadges(venueIds, UserContext.getCurrentUserId(),
                         ReactionWindow.from(window));
+        // 批量累计浏览量（2026-08-12 列表卡片「👁 浏览数」数据源）：一次 IN + GROUP BY
+        // 覆盖整页，避免逐条 COUNT 的 N+1；口径 = qwt_venue_views 全量行数（按天去重 PV 含匿名，
+        // 与 viewCount30d 同源同口径的全量版，见 VenueViewRepository#countByVenueIds javadoc）
+        Map<Long, Long> viewCounts = venueIds.isEmpty() ? Collections.emptyMap()
+                : venueViewRepository.countByVenueIds(venueIds).stream()
+                        .collect(Collectors.toMap(
+                                row -> (Long) row[0],
+                                row -> ((Number) row[1]).longValue()));
         return result.map(v -> venueResponseMapper.toResponse(
                 v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
-                hotVenueIds.contains(v.getId())));
+                hotVenueIds.contains(v.getId()),
+                viewCounts.getOrDefault(v.getId(), 0L)));
     }
 
     /**
@@ -352,31 +397,31 @@ public class VenueService {
      * {@code hotOnly}/{@code hotIds} 透传给全部变体（热门筛选与排序正交，见 LIST_FILTERS 注释）。
      */
     private Page<Venue> dispatchListQuery(VenueSortMode sortMode, String city, String district,
-                                          VenueStatus status, String keywordPattern,
+                                          VenueStatus status, String keywordPattern, String tagPattern,
                                           boolean hasCoords, Double latitude, Double longitude,
                                           Double radius, List<String> positiveCodes, int pointsWeight,
                                           boolean hotOnly, Set<Long> hotIds, PageRequest pageable) {
         return switch (sortMode) {
             case RECOMMENDED -> hasCoords
-                    ? venueRepository.searchRanked(city, district, status, keywordPattern,
+                    ? venueRepository.searchRanked(city, district, status, keywordPattern, tagPattern,
                             latitude, longitude, radius, positiveCodes, pointsWeight, hotOnly, hotIds, pageable)
-                    : venueRepository.searchRankedNoLocation(city, district, status, keywordPattern,
+                    : venueRepository.searchRankedNoLocation(city, district, status, keywordPattern, tagPattern,
                             positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
             case DISTANCE -> hasCoords
-                    ? venueRepository.searchNearest(city, district, status, keywordPattern,
+                    ? venueRepository.searchNearest(city, district, status, keywordPattern, tagPattern,
                             latitude, longitude, radius, hotOnly, hotIds, pageable)
                     // 无定位无法按距离排序：防御性降级为推荐排序（而非空列表/报错）
-                    : venueRepository.searchRankedNoLocation(city, district, status, keywordPattern,
+                    : venueRepository.searchRankedNoLocation(city, district, status, keywordPattern, tagPattern,
                             positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
             case HEAT -> hasCoords && radius != null
-                    ? venueRepository.searchHeatWithinRadius(city, district, status, keywordPattern,
+                    ? venueRepository.searchHeatWithinRadius(city, district, status, keywordPattern, tagPattern,
                             latitude, longitude, radius, positiveCodes, pointsWeight, hotOnly, hotIds, pageable)
-                    : venueRepository.searchHeat(city, district, status, keywordPattern,
+                    : venueRepository.searchHeat(city, district, status, keywordPattern, tagPattern,
                             positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
             case NEWEST -> hasCoords && radius != null
-                    ? venueRepository.searchNewestWithinRadius(city, district, status, keywordPattern,
+                    ? venueRepository.searchNewestWithinRadius(city, district, status, keywordPattern, tagPattern,
                             latitude, longitude, radius, hotOnly, hotIds, pageable)
-                    : venueRepository.searchNewest(city, district, status, keywordPattern,
+                    : venueRepository.searchNewest(city, district, status, keywordPattern, tagPattern,
                             hotOnly, hotIds, pageable);
         };
     }

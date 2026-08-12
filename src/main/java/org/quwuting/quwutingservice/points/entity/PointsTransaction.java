@@ -66,6 +66,13 @@ public class PointsTransaction {
     /** 赠送目标 ID（仅赠送流水非空） */
     private Long targetId;
 
+    /**
+     * 赠送的礼物 code（GiftCatalog 枚举名，2026-08-12 V13 新增——仅赠送流水非空；
+     * 存量 V2 积分赠送流水为 NULL）。聚合维度："目标收到什么礼物"（礼物墙展示）。
+     */
+    @Column(length = 30)
+    private String giftCode;
+
     /** 备注（管理调整理由等） */
     @Column(length = 200)
     private String remark;

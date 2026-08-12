@@ -8,6 +8,7 @@ import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.List;
 
 public interface VenueViewRepository extends JpaRepository<VenueView, Long> {
 
@@ -29,4 +30,25 @@ public interface VenueViewRepository extends JpaRepository<VenueView, Long> {
                     @Param("userId") Long userId,
                     @Param("viewDate") LocalDate viewDate,
                     @Param("createdAt") LocalDateTime createdAt);
+
+    /**
+     * 单场所累计浏览量（全量历史口径）：qwt_venue_views 行数（按天去重 PV，含匿名，
+     * 与 VenueHeatService 的 viewCount30d 同源同口径的全量版，仅去掉 30 天窗口）。
+     * 供详情页基础响应组装（单店 COUNT，命中 (venue_id, view_date) 索引，毫秒级）。
+     */
+    @Query("SELECT COUNT(vv) FROM VenueView vv WHERE vv.venueId = :venueId")
+    long countByVenueId(@Param("venueId") Long venueId);
+
+    /**
+     * 批量累计浏览量（列表页/收藏页整页一次 IN 覆盖，避免 N+1）：
+     * 返回 (venueId, count) 二元组数组，按 venueId 分组聚合全量历史行数。
+     * 与 {@link #countByVenueId} 同口径；调用方判空（venueIds 为空时 IN () 会
+     * 触发 SQL 语法错误，参照 batchGetBadges 的空集合防御模式）。
+     */
+    @Query("""
+            SELECT vv.venueId, COUNT(vv) FROM VenueView vv
+            WHERE vv.venueId IN :venueIds
+            GROUP BY vv.venueId
+            """)
+    List<Object[]> countByVenueIds(@Param("venueIds") List<Long> venueIds);
 }

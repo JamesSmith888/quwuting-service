@@ -84,4 +84,20 @@ public interface PointsTransactionRepository extends JpaRepository<PointsTransac
             """)
     List<Object[]> sumReceivedByDay(@Param("targetType") PointsTargetType targetType, @Param("targetId") Long targetId,
                                     @Param("since") LocalDateTime since, @Param("until") LocalDateTime until);
+
+    /**
+     * 目标收到礼物聚合（"收获的支持"礼物墙，2026-08-12 礼物化）。
+     * 口径：delta &lt; 0（赠送）且 gift_code 非空（V13 之后的新流水；存量 V2
+     * 积分赠送无载体，天然排除）；按 code → 件数聚合，count 降序、同数按 code
+     * 声明序（GiftCatalog 枚举序，后端排序稳定、前端零逻辑）。
+     */
+    @Query("""
+            SELECT pt.giftCode AS giftCode, COUNT(pt) AS cnt
+            FROM PointsTransaction pt
+            WHERE pt.targetType = :targetType AND pt.targetId = :targetId
+              AND pt.delta < 0 AND pt.giftCode IS NOT NULL
+            GROUP BY pt.giftCode
+            ORDER BY COUNT(pt) DESC, pt.giftCode ASC
+            """)
+    List<Object[]> sumGiftsReceived(@Param("targetType") PointsTargetType targetType, @Param("targetId") Long targetId);
 }

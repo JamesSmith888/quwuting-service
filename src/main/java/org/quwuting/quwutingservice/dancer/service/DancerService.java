@@ -25,7 +25,9 @@ import org.quwuting.quwutingservice.dancer.repository.DancerVenueRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.message.service.MessageService;
+import org.quwuting.quwutingservice.points.dto.GiftCountResponse;
 import org.quwuting.quwutingservice.points.enums.PointsTargetType;
+import org.quwuting.quwutingservice.storage.ImageContentValidator;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -84,6 +86,8 @@ public class DancerService {
     private final VenueLookupService venueLookupService;
     private final MessageService messageService;
     private final org.quwuting.quwutingservice.points.service.PointsService pointsService;
+    /** 图片内容校验（2026-08-12 恶意文件防线：业务提交时对图片 URL 做内容级校验） */
+    private final ImageContentValidator imageValidator;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -104,7 +108,9 @@ public class DancerService {
         }
         Dancer dancer = new Dancer();
         dancer.setNickname(nickname);
-        dancer.setAvatarUrl(TextSanitizer.sanitize(request.avatarUrl(), 500));
+        String avatarUrl = TextSanitizer.sanitize(request.avatarUrl(), 500);
+        imageValidator.validate(avatarUrl);
+        dancer.setAvatarUrl(avatarUrl);
         dancer.setBio(TextSanitizer.sanitize(request.bio(), 300));
         dancer.setGender(TextSanitizer.sanitize(request.gender(), 20));
         dancer.setCity(TextSanitizer.sanitize(request.city(), 50));
@@ -159,7 +165,9 @@ public class DancerService {
             throw new BusinessException(1001, "昵称不能为空");
         }
         dancer.setNickname(nickname);
-        dancer.setAvatarUrl(TextSanitizer.sanitize(request.avatarUrl(), 500));
+        String avatarUrl = TextSanitizer.sanitize(request.avatarUrl(), 500);
+        imageValidator.validate(avatarUrl);
+        dancer.setAvatarUrl(avatarUrl);
         dancer.setBio(TextSanitizer.sanitize(request.bio(), 300));
         dancer.setGender(TextSanitizer.sanitize(request.gender(), 20));
         dancer.setCity(TextSanitizer.sanitize(request.city(), 50));
@@ -259,11 +267,13 @@ public class DancerService {
         LocalDateTime windowEnd = LocalDate.now().atStartOfDay();
         long pointsReceivedTotal = pointsService.receivedTotal(PointsTargetType.DANCER, dancerId);
         long pointsReceived30d = pointsService.receivedSince(PointsTargetType.DANCER, dancerId, windowStart, windowEnd);
+        // 收到礼物聚合（2026-08-12 礼物化：「收获的支持」礼物墙数据源）
+        List<GiftCountResponse> giftsReceived = pointsService.receivedGifts(PointsTargetType.DANCER, dancerId);
         return new DancerDetailResponse(
                 dancer.getId(), dancer.getNickname(), dancer.getAvatarUrl(), dancer.getBio(),
                 dancer.getGender(), dancer.getCity(), dancer.getStatus(),
                 isMine, myToday, buildStats(dancerId),
-                pointsReceivedTotal, pointsReceived30d,
+                pointsReceivedTotal, pointsReceived30d, giftsReceived,
                 fetchPhotos(dancerId, showAllPhotos),
                 fetchAllTags(dancerId), fetchVenues(dancerId));
     }
@@ -449,6 +459,7 @@ public class DancerService {
             if (clean.isEmpty() || !clean.startsWith("http")) {
                 throw new BusinessException(1001, "照片地址不合法");
             }
+            imageValidator.validate(clean);
             DancerPhoto photo = new DancerPhoto();
             photo.setDancerId(dancerId);
             photo.setUrl(clean);

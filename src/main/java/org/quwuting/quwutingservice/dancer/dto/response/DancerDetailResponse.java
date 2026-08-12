@@ -32,6 +32,8 @@ public record DancerDetailResponse(
         long pointsReceivedTotal,
         /** 近30天收到积分（驱动舞伴列表次级排序信号） */
         long pointsReceived30d,
+        /** 收到礼物聚合（code → 件数，2026-08-12 礼物化：「收获的支持」礼物墙） */
+        List<org.quwuting.quwutingservice.points.dto.GiftCountResponse> giftsReceived,
         /** 相册照片（服务层已按可见性过滤：非本人仅 PUBLIC；本人/管理员全量含待审态） */
         List<DancerPhotoResponse> photos,
         List<DancerTagStat> tags,

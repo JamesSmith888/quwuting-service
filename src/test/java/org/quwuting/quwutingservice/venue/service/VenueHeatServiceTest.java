@@ -50,6 +50,9 @@ class VenueHeatServiceTest {
     private org.quwuting.quwutingservice.config.PointsProperties pointsProperties;
     @Mock
     private VenueRepository.HeatCounters counters;
+    /** 2026-08-12 礼物化：VenueHeatService 构造器新增 @Lazy PointsService（礼物墙数据源） */
+    @Mock
+    private org.quwuting.quwutingservice.points.service.PointsService pointsService;
 
     private VenueHeatService heatService;
 
@@ -58,7 +61,7 @@ class VenueHeatServiceTest {
     @BeforeEach
     void setUp() {
         heatService = new VenueHeatService(venueLookupService, venueRepository,
-                tagInteractionRepository, pointsProperties);
+                tagInteractionRepository, pointsProperties, pointsService);
         venue = new Venue();
         venue.setId(1L);
         venue.setStatus(VenueStatus.OPEN);

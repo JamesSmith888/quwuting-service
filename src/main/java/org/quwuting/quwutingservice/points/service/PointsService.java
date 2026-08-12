@@ -14,6 +14,7 @@ import org.quwuting.quwutingservice.points.dto.*;
 import org.quwuting.quwutingservice.points.entity.DailyCheckin;
 import org.quwuting.quwutingservice.points.entity.PointsAccount;
 import org.quwuting.quwutingservice.points.entity.PointsTransaction;
+import org.quwuting.quwutingservice.points.enums.GiftCatalog;
 import org.quwuting.quwutingservice.points.enums.PointsSourceType;
 import org.quwuting.quwutingservice.points.enums.PointsTargetType;
 import org.quwuting.quwutingservice.points.repository.DailyCheckinRepository;
@@ -29,6 +30,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 积分核心服务（资产模型：账户 + 流水 ledger）。
@@ -61,11 +63,13 @@ public class PointsService {
         };
     }
 
-    /** 合规规则文案（后端下发唯一事实源，前端直接渲染——禁前端硬编码） */
+    /** 合规规则文案（后端下发唯一事实源，前端直接渲染——禁前端硬编码）。
+     *  2026-08-12 礼物化：积分退化为"获取礼物的代币"，赠送语义 = 购买礼物并送出
+     *  （一次性表达，不可回收、不可再流转——彻底消除资产转移语义，见 AGENTS.md）。 */
     private static final String RULES_TEXT =
-            "积分为社区贡献值，仅用于表达对门店/舞伴的支持，不具备任何货币属性，"
-                    + "不可提现、不可转让、不可兑换任何实物或服务。"
-                    + "积分可通过每日打卡、提交信息反馈（经管理员采纳）等免费获得。";
+            "积分为社区贡献值，可通过每日打卡、提交信息反馈（经管理员采纳）等免费获得；"
+                    + "积分用于购买礼物送给门店/舞伴，表达支持。"
+                    + "礼物不具备任何货币属性，不可提现、不可转让、不可兑换任何实物或服务。";
 
     private final PointsAccountRepository accountRepository;
     private final PointsTransactionRepository transactionRepository;
@@ -168,6 +172,7 @@ public class PointsService {
     }
 
     private PointsTransactionResponse toResponse(PointsTransaction tx) {
+        GiftCatalog gift = tx.getGiftCode() != null ? GiftCatalog.fromCode(tx.getGiftCode()).orElse(null) : null;
         return new PointsTransactionResponse(
                 tx.getId(),
                 tx.getDelta(),
@@ -176,37 +181,42 @@ public class PointsService {
                 sourceTypeDisplay(tx.getSourceType()),
                 tx.getTargetType() != null ? tx.getTargetType().name() : null,
                 tx.getTargetId(),
+                tx.getGiftCode(),
+                gift != null ? gift.displayName() : null,
                 tx.getRemark(),
                 tx.getBalanceAfter(),
                 tx.getCreatedAt());
     }
 
-    // ─── 赠送（消费） ───────────────────────────────────────────────────────
+    // ─── 赠送（消费：购买礼物并送出，2026-08-12 礼物化） ───────────────────────
 
     /**
-     * 赠送积分（V2：门店/舞伴双目标）。
-     * 校验链：目标存在可见 → 自赠检测 → 单次/每日/单目标每日上限 → 原子扣减 →
-     * 写赠送流水（同事务）。任一失败整体回滚。
+     * 赠送礼物（V2 升级：载荷从积分数量改为礼物 code——积分赠送 = 资产转移语义，
+     * 触碰"可流转准货币"合规红线且无情感载体；礼物 = 一次性表达，见 AGENTS.md
+     * 「积分系统 · 礼物赠送」根因）。
+     * 校验链：礼物 code 合法 → 目标存在可见 → 自赠检测 → 单次/每日/单目标每日
+     * （按礼物价格折算积分价值）→ 原子扣减 → 写赠送流水（同事务，gift_code 记录
+     * "送了什么"）。任一失败整体回滚。
      */
     @Transactional
-    public GiftResponse gift(Long userId, PointsTargetType targetType, Long targetId, Integer amount) {
+    public GiftResponse gift(Long userId, PointsTargetType targetType, Long targetId, String giftCode) {
+        GiftCatalog gift = GiftCatalog.fromCode(giftCode)
+                .orElseThrow(() -> new BusinessException(1001, "礼物不存在"));
+        int amount = gift.price();
         PointsProperties.GiftLimits limits = pointsProperties.gift();
-        if (amount == null || amount < 1) {
-            throw new BusinessException(1012, "赠送数量至少 1 分");
-        }
         if (amount > limits.maxPerGift()) {
-            throw new BusinessException(1012, "单次最多赠送 " + limits.maxPerGift() + " 分");
+            throw new BusinessException(1012, "单次最多赠送 " + limits.maxPerGift() + " 积分价值的礼物");
         }
         validateTarget(targetType, targetId, userId);
 
         LocalDateTime dayStart = LocalDate.now().atStartOfDay();
         LocalDateTime dayEnd = dayStart.plusDays(1);
         if (transactionRepository.sumGiftedToday(userId, dayStart, dayEnd) + amount > limits.maxPerDay()) {
-            throw new BusinessException(1013, "今日赠送已达上限（" + limits.maxPerDay() + " 分）");
+            throw new BusinessException(1013, "今日赠送已达上限（" + limits.maxPerDay() + " 积分价值）");
         }
         if (transactionRepository.sumGiftedToTargetToday(userId, targetType, targetId, dayStart, dayEnd)
                 + amount > limits.maxPerTargetDay()) {
-            throw new BusinessException(1014, "该目标今日已达赠送上限（" + limits.maxPerTargetDay() + " 分）");
+            throw new BusinessException(1014, "该目标今日已达赠送上限（" + limits.maxPerTargetDay() + " 积分价值）");
         }
 
         PointsAccount account = getOrCreateAccount(userId);
@@ -218,8 +228,8 @@ public class PointsService {
             throw new BusinessException(1011, "积分余额不足");
         }
         long newBalance = account.getBalance() - amount;
-        // 赠送流水：source_type=GIFT（消费动作，见 PointsSourceType），必带 target，
-        // 不进挣取幂等唯一键（该键 WHERE delta > 0），source_id 留空
+        // 赠送流水：source_type=GIFT（消费动作，见 PointsSourceType），必带 target +
+        // gift_code（"送了什么"），不进挣取幂等唯一键（该键 WHERE delta > 0）
         PointsTransaction tx = new PointsTransaction();
         tx.setUserId(userId);
         tx.setDelta(-amount);
@@ -227,7 +237,8 @@ public class PointsService {
         tx.setSourceType(PointsSourceType.GIFT);
         tx.setTargetType(targetType);
         tx.setTargetId(targetId);
-        transactionRepository.save(tx);
+        tx.setGiftCode(gift.name());
+        PointsTransaction savedTx = transactionRepository.save(tx);
         // 热度缓存失效延后到事务提交后（与 reaction toggle 同模式，2026-08-08 根因修复）：
         // 提交前失效存在竞态窗口——另一线程读到 cache miss → 回源重算 → 读不到本事务
         // 未提交数据 → 缓存陈旧值。afterCommit 回调在提交完成后执行，回源必读到已提交数据。
@@ -240,7 +251,7 @@ public class PointsService {
                         }
                     });
         }
-        return new GiftResponse(newBalance, tx.getId());
+        return new GiftResponse(newBalance, savedTx.getId(), gift.name(), gift.displayName());
     }
 
     /** 目标存在性 + 可见性 + 自赠检测（venue.claimedBy / dancer.createdBy == 本人 → 拒绝） */
@@ -248,14 +259,14 @@ public class PointsService {
         if (targetType == PointsTargetType.VENUE) {
             Venue venue = venueLookupService.findById(targetId); // 不存在 → 1001
             if (venue.getClaimedBy() != null && venue.getClaimedBy().equals(userId)) {
-                throw new BusinessException(1015, "不能给自己管理的门店赠送积分");
+                throw new BusinessException(1015, "不能给自己管理的门店赠送礼物");
             }
             return;
         }
         Dancer dancer = dancerRepository.findByIdAndDeletedFalse(targetId)
                 .orElseThrow(() -> new BusinessException(1001, "舞伴不存在"));
         if (dancer.getCreatedBy().equals(userId)) {
-            throw new BusinessException(1015, "不能给自己的舞伴主页赠送积分");
+            throw new BusinessException(1015, "不能给自己的舞伴主页赠送礼物");
         }
         if (dancer.getStatus() != DancerStatus.NORMAL) {
             throw new BusinessException(1001, "该舞伴资料暂不可见");
@@ -375,6 +386,20 @@ public class PointsService {
         tx.setRemark(reason);
         PointsTransaction saved = transactionRepository.save(tx);
         log.info("管理员 {} 调整用户 {} 积分 {}（调整单 {}，原因：{}）", adminId, targetUserId, delta, saved.getId(), reason);
+    }
+
+    // ─── 目标收到礼物（"收获的支持"礼物墙，2026-08-12 礼物化） ────────────────
+
+    /**
+     * 目标收到礼物聚合（code → 件数，count 降序）——供 venue/dancer 详情
+     * 「收获的支持」礼物墙展示。与 receivedTotal/receivedSince（收到积分价值，
+     * 热度公式输入项）同源不同维：前者记录"送了什么"（载体），后者统计价值。
+     */
+    @Transactional(readOnly = true)
+    public List<GiftCountResponse> receivedGifts(PointsTargetType targetType, Long targetId) {
+        return transactionRepository.sumGiftsReceived(targetType, targetId).stream()
+                .map(row -> new GiftCountResponse((String) row[0], (Long) row[1]))
+                .toList();
     }
 
     // ─── 目标收到积分（热度公式 / 详情展示 / 趋势同源口径） ───────────────────

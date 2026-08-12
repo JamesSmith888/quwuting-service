@@ -7,6 +7,7 @@ import org.quwuting.quwutingservice.favorite.repository.FavoriteRepository;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
+import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
@@ -20,6 +21,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -31,6 +33,8 @@ public class FavoriteService {
     private final VenueReactionService venueReactionService;
     private final VenueLookupService venueLookupService;
     private final VenueHeatService venueHeatService;
+    /** 浏览记录（收藏列表响应组装累计浏览量 viewCount 用，2026-08-12 新增） */
+    private final VenueViewRepository venueViewRepository;
 
     /**
      * 获取用户收藏的场所列表（按收藏时间倒序）。
@@ -58,10 +62,19 @@ public class FavoriteService {
         // 热门 ID 集合为全局缓存（5min TTL），收藏列表跨城市展示同样按"城市内
         // top 20% + 绝对门槛"标记——与城市列表同口径（见 VenueLookupService#getHotVenueIds）
         Set<Long> hotVenueIds = venueLookupService.getHotVenueIds();
+        // 批量累计浏览量（2026-08-12 收藏卡片「👁 浏览数」数据源，同列表页口径：
+        // qwt_venue_views 全量行数，一次 IN + GROUP BY 避免 N+1，见 VenueViewRepository#countByVenueIds）
+        List<Long> venueIds = venues.stream().map(Venue::getId).toList();
+        Map<Long, Long> viewCounts = venueIds.isEmpty() ? Collections.emptyMap()
+                : venueViewRepository.countByVenueIds(venueIds).stream()
+                        .collect(Collectors.toMap(
+                                row -> (Long) row[0],
+                                row -> ((Number) row[1]).longValue()));
         return venues.stream()
                 .map(v -> venueResponseMapper.toResponse(
                         v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
-                        hotVenueIds.contains(v.getId())))
+                        hotVenueIds.contains(v.getId()),
+                        viewCounts.getOrDefault(v.getId(), 0L)))
                 .toList();
     }
 

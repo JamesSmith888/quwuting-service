@@ -65,6 +65,8 @@ class DancerServiceTest {
     private MessageService messageService;
     @Mock
     private org.quwuting.quwutingservice.points.service.PointsService pointsService;
+    @Mock
+    private org.quwuting.quwutingservice.storage.ImageContentValidator imageValidator;
 
     private DancerService dancerService;
 
@@ -74,7 +76,7 @@ class DancerServiceTest {
     void setUp() {
         dancerService = new DancerService(dancerRepository, dancerVenueRepository, recognitionRepository,
                 recognitionTagRepository, photoRepository, aggregateService, venueLookupService, messageService,
-                pointsService);
+                pointsService, imageValidator);
 
         dancer = new Dancer();
         dancer.setId(1L);
