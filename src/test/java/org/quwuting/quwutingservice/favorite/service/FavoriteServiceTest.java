@@ -10,6 +10,7 @@ import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
+import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
@@ -25,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -39,7 +41,7 @@ import static org.mockito.Mockito.when;
  *       热门标签，但在用户收藏列表却不展示。根因：本服务误用
  *       {@link VenueResponseMapper} 双参重载（默认 isHot=false），从未查询热门 ID
  *       集合。修复后必须经 {@link VenueLookupService#getHotVenueIds()} 取热门集合、
- *       走三参重载传入真实 isHot（本测试断言三参调用 + 布尔值正确，防回退双参）；</li>
+ *       走三参/四参重载传入真实 isHot（本测试断言四参调用 + 布尔值正确，防回退双参）；</li>
  *   <li>热门判定与城市列表同口径（同一 getHotVenueIds 缓存源）。</li>
  * </ol>
  */
@@ -56,13 +58,16 @@ class FavoriteServiceTest {
     private VenueLookupService venueLookupService;
     @Mock
     private VenueHeatService venueHeatService;
+    @Mock
+    private VenueViewRepository venueViewRepository;
 
     private FavoriteService service;
 
     @BeforeEach
     void setUp() {
         service = new FavoriteService(favoriteRepository, venueResponseMapper,
-                venueReactionService, venueLookupService, venueHeatService);
+                venueReactionService, venueLookupService, venueHeatService,
+                venueViewRepository);
     }
 
     private static Venue venue(Long id) {
@@ -72,7 +77,7 @@ class FavoriteServiceTest {
         return v;
     }
 
-    /** 按映射器入参 isHot 回显构造响应（isHot 三参重载契约的观测点） */
+    /** 按映射器入参 isHot 回显构造响应（isHot 四参重载契约的观测点） */
     private static VenueResponse response(Long id, boolean isHot) {
         return new VenueResponse(
                 id, "舞厅" + id, VenueStatus.OPEN, "营业中", null,
@@ -80,7 +85,7 @@ class FavoriteServiceTest {
                 null, null, Collections.emptyList(), Collections.emptyList(),
                 Collections.emptyList(), null, null, Collections.emptyList(),
                 Collections.emptyList(), Collections.emptyList(), 0,
-                isHot, null, null);
+                0L, isHot, null, null);
     }
 
     /**
@@ -96,7 +101,7 @@ class FavoriteServiceTest {
         when(venueReactionService.batchGetBadges(anyList(), eq(42L), eq(ReactionWindow.DAYS_7)))
                 .thenReturn(Collections.emptyMap());
         when(venueLookupService.getHotVenueIds()).thenReturn(Set.of(1L));
-        when(venueResponseMapper.toResponse(any(Venue.class), anyList(), anyBoolean()))
+        when(venueResponseMapper.toResponse(any(Venue.class), anyList(), anyBoolean(), anyLong()))
                 .thenAnswer(inv -> response(
                         ((Venue) inv.getArgument(0)).getId(), inv.getArgument(2)));
 
@@ -105,9 +110,9 @@ class FavoriteServiceTest {
         assertEquals(2, result.size());
         assertTrue(result.get(0).isHot(), "热门集合内的场所收藏列表必须展示热门标记");
         assertFalse(result.get(1).isHot(), "非热门集合内的场所不得误标热门");
-        // 防回归：必须走三参重载（双参重载 isHot 恒 false 是本缺陷根因）
-        verify(venueResponseMapper).toResponse(hot, Collections.emptyList(), true);
-        verify(venueResponseMapper).toResponse(cold, Collections.emptyList(), false);
+        // 防回归：必须走四参重载（双参重载 isHot 恒 false 是本缺陷根因）
+        verify(venueResponseMapper).toResponse(hot, Collections.emptyList(), true, 0L);
+        verify(venueResponseMapper).toResponse(cold, Collections.emptyList(), false, 0L);
     }
 
     /** 收藏列表为空时短路返回，不触发热门集合查询（无意义往返） */

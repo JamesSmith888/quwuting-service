@@ -23,6 +23,15 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
     List<Dancer> findByCreatedByAndDeletedFalseOrderByUpdatedAtDesc(Long createdBy);
 
     /**
+     * 用户公开主页的舞伴列表（2026-08-12：TA 创建的**公开**舞伴）。
+     * 隐私边界与列表页同：仅 status=NORMAL 才公开；最近创建在前（id 降序）。
+     */
+    @Query("SELECT d FROM Dancer d WHERE d.createdBy = :createdBy " +
+            "AND d.status = 'NORMAL' AND d.deleted = false " +
+            "ORDER BY d.id DESC")
+    List<Dancer> findPublicByCreatedBy(@Param("createdBy") Long createdBy);
+
+    /**
      * 公开舞伴的常驻城市列表（列表页城市筛选词表，升序去重）。
      * 与 venue 域 /venues/cities 同模式：聚合真实数据而非静态词表（新增城市自动出现）。
      */
