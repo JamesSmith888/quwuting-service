@@ -89,33 +89,43 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
     /**
      * 某门店最近突发事件列表（公开读，供详情页「报告突发事件」弹层默认内容）。
      * <p>
-     * 范围：TTL 窗口内（expires_at > now）全部用户的报告，按时间倒序；窗口判定
-     * 由 Service 层传入 now（TTL 唯一事实源 = expires_at 列，SQL 不自行定义时间窗）。
+     * 范围：未撤销（deleted=false）的全部用户报告，按时间倒序；展示窗口 =
+     * 报告行为时间 {@code created_at >= :cutoff}（cutoff 由 Service 层按
+     * {@code app.status-report.recent-history-hours} 计算传入——SQL 层禁止自行
+     * 定义时间窗）。窗口内报告<b>含已过期（TTL 外）</b>：TTL 过期只代表信号失效
+     * （不计入活跃计数/公告区），不代表报告事实消失——过期标注由 Service 层按
+     * {@code expires_at} 列判定（TTL 唯一事实源 = 列），本查询投影该列供其消费
+     * （2026-08-12 根因修复：旧实现把活跃判定 {@code expires_at > :now} 硬套在
+     * 明细列表上，TTL 过期后列表空无上下文，且与「我的上报记录」含过期记录的
+     * 既有契约口径不一致，见 AGENTS.md「门店突发事件列表」）。
+     * <p>
+     * 已撤销/已处置（deleted=true）记录不进"最近报告"明细（撤销是用户主动收回，
+     * 处置含采纳/移除均属内部语义，公告区聚合单独消费，见 {@link #findAnnouncementsByVenue}）。
      * 取报告者脱敏昵称需要 JOIN qwt_users（LEFT JOIN：用户被删等异常态回退匿名，
-     * 不因关联缺失丢行）。仅活跃信号（deleted=false）——已采纳/已移除的处置记录
-     * 不进"最近报告"明细（公告区聚合单独消费，见 {@link #findAnnouncementsByVenue}）。
+     * 不因关联缺失丢行）。
      * <p>
      * 原生 SQL + 投影接口，别名必须全小写（PG 折叠未引用标识符，见
      * {@link #findMyReportsByUserId} 注释的既定模式）。LIMIT 由 Service 层
      * {@code .limit()} 施加（列表页仅需最近 N 条，避免大结果集全量传输）。
      */
     @Query(value = "SELECT r.id AS id, r.venue_id AS venueid, r.user_id AS userid, " +
-                   "       r.type AS type, r.created_at AS createdat, " +
+                   "       r.type AS type, r.created_at AS createdat, r.expires_at AS expiresat, " +
                    "       u.nickname AS nickname " +
                    "FROM qwt_venue_status_reports r " +
                    "LEFT JOIN qwt_users u ON u.id = r.user_id " +
-                   "WHERE r.venue_id = :venueId AND r.deleted = false AND r.expires_at > :now " +
+                   "WHERE r.venue_id = :venueId AND r.deleted = false AND r.created_at >= :cutoff " +
                    "ORDER BY r.created_at DESC", nativeQuery = true)
     List<VenueReportRow> findRecentByVenue(@Param("venueId") Long venueId,
-                                           @Param("now") LocalDateTime now);
+                                           @Param("cutoff") LocalDateTime cutoff);
 
-    /** 投影接口：门店最近突发事件行（含报告者昵称，供 GET /venues/{id}/status-reports 使用） */
+    /** 投影接口：门店最近突发事件行（含报告者昵称与过期时刻，供 GET /venues/{id}/status-reports 使用） */
     interface VenueReportRow {
         Long getId();
         Long getVenueid();
         Long getUserid();
         String getType();
         LocalDateTime getCreatedat();
+        LocalDateTime getExpiresat();
         String getNickname();
     }
 

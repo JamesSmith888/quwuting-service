@@ -5,6 +5,7 @@ import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.text.TextSanitizer;
+import org.quwuting.quwutingservice.config.StatusReportProperties;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.message.service.MessageService;
@@ -69,7 +70,7 @@ public class StatusReportService {
     /** 每日上报上限：每用户每日报告总次数（2026-08-11 新增，与滑动窗口互补兜底批量刷） */
     private static final int MAX_REPORTS_PER_DAY = 10;
 
-    /** 门店突发事件列表最大返回条数（TTL 窗口内倒序取最近 N 条，详情页弹层消费） */
+    /** 门店突发事件列表最大返回条数（展示窗口内倒序取最近 N 条，详情页弹层消费） */
     private static final int RECENT_REPORT_LIST_LIMIT = 20;
 
     private final StatusReportRepository statusReportRepository;
@@ -79,6 +80,8 @@ public class StatusReportService {
     private final VenueService venueService;
     private final PointsService pointsService;
     private final MessageService messageService;
+    /** 展示窗口配置（门店「最近突发事件」列表的 created_at 裁剪窗口，禁业务硬编码） */
+    private final StatusReportProperties statusReportProperties;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -207,9 +210,16 @@ public class StatusReportService {
     /**
      * 某门店最近突发事件列表（公开读，无需登录）。
      * <p>
-     * 详情页「报告突发事件」弹层的默认内容：TTL 窗口内全部用户的报告，按时间倒序，
-     * 最多 {@value #RECENT_REPORT_LIST_LIMIT} 条。报告者昵称脱敏（首字 + "**"，无昵称
-     * 回退「舞友」）——保护用户身份隐私的同时保留"社区已有多人报告"的信任信号。
+     * 详情页「报告突发事件」弹层的默认内容：展示窗口（报告行为时间
+     * {@code created_at >= now - recentHistoryHours}，配置键
+     * {@code app.status-report.recent-history-hours}）内全部用户的报告，按时间倒序，
+     * 最多 {@value #RECENT_REPORT_LIST_LIMIT} 条——<b>含已过期（TTL 外）报告</b>，
+     * 由 {@code expired} 标注（2026-08-12 根因修复：TTL 过期只代表信号失效，不代表
+     * 报告事实消失；旧实现把活跃判定 {@code expires_at > now} 硬套在本列表上，过期后
+     * 列表空无上下文，用户无法回看"之前已有人（含我）报告过"的社区信号）。活跃/过期
+     * 判定由本方法按 {@code expires_at} 列与 now 比较（TTL 唯一事实源 = 列，SQL 不
+     * 自行定义时间窗）。报告者昵称脱敏（首字 + "**"，无昵称回退「舞友」）——保护
+     * 用户身份隐私的同时保留"社区已有多人报告"的信任信号。
      * <p>
      * {@code mine} 标记当前登录用户的报告（未登录时 UserContext.getCurrentUserId() 为
      * null，恒 false），供前端高亮"我"的上报行。
@@ -217,10 +227,14 @@ public class StatusReportService {
     @Transactional(readOnly = true)
     public List<StatusReportListItem> listRecentReports(Long venueId) {
         Long currentUserId = UserContext.getCurrentUserId();
-        return statusReportRepository.findRecentByVenue(venueId, LocalDateTime.now()).stream()
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime cutoff = now.minusHours(statusReportProperties.recentHistoryHours());
+        return statusReportRepository.findRecentByVenue(venueId, cutoff).stream()
                 .limit(RECENT_REPORT_LIST_LIMIT)
                 .map(row -> {
                     ReportType type = ReportType.valueOf(row.getType());
+                    // 活跃判定全局口径：expires_at > now 为活跃，否则视为已过期（含边界相等）
+                    boolean expired = !row.getExpiresat().isAfter(now);
                     return new StatusReportListItem(
                             row.getId(),
                             maskNickname(row.getNickname()),
@@ -228,6 +242,7 @@ public class StatusReportService {
                             type.getDisplayName(),
                             type.getSeverity().getCode(),
                             row.getCreatedat(),
+                            expired,
                             currentUserId != null && currentUserId.equals(row.getUserid()));
                 })
                 .toList();

@@ -749,11 +749,12 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 - `VenueRepository.countHeatCounters` 的 `reportcount` / `latestreporttime`（热度聚合，`now` 参数）
 - `StatusReportRepository.countActiveAndLatestTime`（提交/撤销响应摘要）
-- `StatusReportRepository.findRecentByVenue`（门店突发事件列表，`now` 参数）
 - `StatusReportRepository.findAnnouncementsByVenue`（详情页紧急公告区聚合，`now` 参数，2026-08-11）
 - `VenuePostRepository.findDetailStats` 的 `hasmyreport` EXISTS（详情页个人已报告标记）——**历史实现只过滤 `deleted = false` 漏 TTL 过滤**，与热度聚合口径不一致：TTL 过期后 `activeReportCount` 归零但 `hasMyStatusReport` 恒真，详情页"已报告·补充"按钮永不还原（用户必须手动撤销）。此为修复根因，新增活跃判定查询时必须对照本清单。
 - `StatusReportRepository.findActiveReports` / `countActiveReports`（管理端列表/计数，`now` 参数）
 - `StatusReportRepository.countClustersByVenueAndType`（同类型聚簇计数，`now` 参数，2026-08-11）
+
+**例外（2026-08-12 明确）**：`StatusReportRepository.findRecentByVenue`（门店突发事件列表）**不在此清单**——它是"事实明细"而非"活跃信号"视图：过期报告仍需展示（`expired` 标注），过滤条件为展示窗口 `created_at >= cutoff`（cutoff 按 `app.status-report.recent-history-hours` 由 Service 层传入），过期判定（`!expires_at.isAfter(now)`）在 Service 层逐行完成。凡新增"活跃视图"查询对照本清单，凡"明细/历史视图"查询不得套用活跃判定（详见「门店突发事件列表」根因）。
 
 ### 接口
 
@@ -761,7 +762,7 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 |------|------|------|------|
 | POST | `/venues/{venueId}/status-reports` | 需登录 | 上报突发事件（body 可空=快速上报默认 SUSPENDED，或含 type/occurredAt/note；**2026-08-11 守卫**：SUSPENDED 对非营业门店拒绝 1010、RESUMED 对营业中门店拒绝 1012、SITUATION_UNCLEAR 必填 note 拒绝 1011，事件类不受存储态约束，见下「提交守卫」） |
 | POST | `/venues/{venueId}/status-reports/cancel` | 需登录 | 撤销我的上报（软删除） |
-| GET | `/venues/{venueId}/status-reports` | 公开 | 门店最近突发事件列表（TTL 窗口内所有用户，倒序，2026-08-10，见下「门店突发事件列表」） |
+| GET | `/venues/{venueId}/status-reports` | 公开 | 门店最近突发事件列表（展示窗口内所有用户报告，含已过期带 `expired` 标注，倒序，2026-08-10，见下「门店突发事件列表」） |
 | GET | `/venues/{venueId}/status-reports/announcements` | 公开 | 紧急公告聚合（活跃 + 已采纳按类型聚簇，严重级降序；详情页入口条 + 公告专属页列表共用，2026-08-11，见下「紧急公告区」） |
 | GET | `/status-reports/mine?venueId=` | 需登录 | 我的全部突发事件上报（用户级资源，顶层路径；venueId 可选，2026-08-06，见下「我的上报记录」） |
 | GET | `/admin/status-reports?page=&size=&type=` | ADMIN | 活跃突发事件列表（跨场所分页倒序，type 可选筛选，2026-08-10，见下「管理端可见性」） |
@@ -789,12 +790,14 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 ### 门店突发事件列表（GET /venues/{venueId}/status-reports，2026-08-10 新增，2026-08-11 泛化）
 
-详情页「报告突发事件」弹层的默认内容（公开读，无需登录）。**根因（需求 2026-08-10）**：报告是社区信号动作，用户报告前需要看到"已有多人报告"的明细才能建立信任——原实现只有聚合计数（`activeReportCount`）没有明细，前端系统弹窗只能承载纯文本确认、无法展示列表。本接口补齐"门店级报告的公开读路径"，与聚合计数共用同一活跃判定（`expires_at > now`，活跃判定口径契约，见上）。
+详情页「报告突发事件」弹层的默认内容（公开读，无需登录）。**根因（需求 2026-08-10）**：报告是社区信号动作，用户报告前需要看到"已有多人报告"的明细才能建立信任——原实现只有聚合计数（`activeReportCount`）没有明细，前端系统弹窗只能承载纯文本确认、无法展示列表。本接口补齐"门店级报告的公开读路径"。
 
-- **范围**：TTL 窗口内（`expires_at > now`）全部用户的报告，按 `createdAt` 倒序，Service 层 `.limit(RECENT_REPORT_LIST_LIMIT=20)`（SQL 不写 LIMIT，窗口收敛数据量小，避免方言绑定）
-- **实现**：`StatusReportRepository.findRecentByVenue(venueId, now)` 原生 SQL LEFT JOIN `qwt_users` 取昵称（LEFT JOIN：用户异常态回退匿名，不因关联缺失丢行）；`mine` 标记由 `UserContext.getCurrentUserId()`（可空，未登录恒 false）对比行 `user_id` 得出
+**根因（2026-08-12 修复）**：旧实现把**活跃判定**（`expires_at > now`，TTL 语义）错误复用于**事实明细列表**——TTL 过期只代表信号失效（不计入活跃计数/公告区聚合），不代表报告事实消失。硬套活跃判定后，报告 4h 过期即从列表消失，用户回看时看到空列表：无法区分「从未有人报」与「报过但已过期」，社区信任信号丢失；且与「我的上报记录」（含已过期 + `active` 标注）的既有契约口径不一致——两处对"过期报告是否可见"的决策不同，属 2026-08-11 泛化重构时遗漏的不一致。**修复：列表展示 = 未撤销的报告事实（活跃 + 近期过期），过期由 `expired` 字段标注；活跃/过期判定仍在 Service 层按 `expires_at` 列完成（TTL 唯一事实源 = 列）。**
+
+- **范围**：展示窗口 = 报告行为时间 `created_at >= now - app.status-report.recent-history-hours`（`config/StatusReportProperties`，默认 48h，窗口必须 ≥ 最大类型 TTL 24h，否则最长 TTL 信号一过期即脱窗，"过期仍可见"语义落空）内全部用户的报告，按 `createdAt` 倒序，Service 层 `.limit(RECENT_REPORT_LIST_LIMIT=20)`（SQL 不写 LIMIT，窗口收敛数据量小，避免方言绑定）；**含已过期（TTL 外）报告**——`expired = !expires_at.isAfter(now)`（活跃判定全局口径：`expires_at > now` 为活跃，边界相等视为过期），前端灰显 + 「已过期」徽标。已撤销/已处置（`deleted=true`）记录不进列表（撤销是用户主动收回、处置属内部语义，公告区聚合单独消费）
+- **实现**：`StatusReportRepository.findRecentByVenue(venueId, cutoff)` 原生 SQL LEFT JOIN `qwt_users` 取昵称（LEFT JOIN：用户异常态回退匿名，不因关联缺失丢行），投影含 `expires_at`（供 Service 判过期；cutoff 由 Service 层按配置计算传入，SQL 层禁止自行定义时间窗）；`mine` 标记由 `UserContext.getCurrentUserId()`（可空，未登录恒 false）对比行 `user_id` 得出
 - **隐私**：`reporterName` 脱敏（`maskNickname`：首字 + "**"，无昵称回退「舞友」）——保护用户身份隐私的同时保留"社区已有多人报告"的信任信号
-- **响应**：`StatusReportListItem`（id/reporterName/type/typeDisplay/severity/createdAt/mine），typeDisplay/severity 取自 `ReportType` 枚举（前端不再自持文案/色阶映射）
+- **响应**：`StatusReportListItem`（id/reporterName/type/typeDisplay/severity/createdAt/**expired**/mine），typeDisplay/severity 取自 `ReportType` 枚举（前端不再自持文案/色阶映射）
 
 ### 紧急公告区（GET /venues/{venueId}/status-reports/announcements，2026-08-11 新增）
 

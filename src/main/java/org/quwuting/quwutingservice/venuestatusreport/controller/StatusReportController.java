@@ -46,9 +46,11 @@ public class StatusReportController {
      * 某门店最近突发事件列表（公开读，无需登录）。
      * GET /venues/{venueId}/status-reports
      * <p>
-     * 详情页「报告突发事件」弹层默认内容：TTL 窗口内全部用户对该门店的报告，
-     * 按时间倒序（最多 20 条），报告者昵称脱敏；mine 标记当前登录用户的上报。
-     * 未登录访问同样可用（社区信号公开可见，与活跃报告计数口径一致）。
+     * 公告页「最近的突发事件」明细：展示窗口（报告行为时间，配置
+     * {@code app.status-report.recent-history-hours}）内全部用户对该门店的报告，
+     * 按时间倒序（最多 20 条），<b>含已过期报告</b>（{@code expired} 标注，2026-08-12
+     * 根因修复：TTL 过期只代表信号失效，不代表报告事实消失），报告者昵称脱敏；
+     * mine 标记当前登录用户的上报。未登录访问同样可用（社区信号公开可见）。
      */
     @GetMapping
     public ApiResponse<List<StatusReportListItem>> listRecentReports(@PathVariable Long venueId) {
