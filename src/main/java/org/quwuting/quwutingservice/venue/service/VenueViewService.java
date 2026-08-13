@@ -4,6 +4,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.web.ClientIpResolver;
+import org.quwuting.quwutingservice.venue.enums.ViewSource;
 import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -49,17 +50,26 @@ public class VenueViewService {
 
     /**
      * 记录一次浏览（匿名用户最多 60s 一条，已登录用户由 upsert 按天去重，恒 1 次 DB 往返）。
+     * <p>
+     * 来源防御：source 为 null / 非枚举值（旧版本客户端未上报 / 脏数据）一律兜底为 OTHER，
+     * 枚举类列不加 CHECK 约束（项目约定），非法值在本层收敛。
      *
      * @param venueId 场所 ID
      * @param userId  用户 ID，匿名时为 null（匿名记录参与 IP 频控，不参与按天去重）
+     * @param source  浏览来源（LIST/SHARE/OTHER），null 或未知值兜底 OTHER
      */
     @Transactional
-    public void recordView(Long venueId, Long userId) {
+    public void recordView(Long venueId, Long userId, ViewSource source) {
         if (userId == null && isRateLimited(venueId)) {
             return; // 匿名频控命中：跳过写入（尽力而为，防止脚本连点放大 PV）
         }
         LocalDate today = LocalDate.now();
-        venueViewRepository.upsertView(venueId, userId, today, LocalDateTime.now());
+        venueViewRepository.upsertView(venueId, userId, today, normalizeSource(source).name(), LocalDateTime.now());
+    }
+
+    /** 来源规范化：null / 非法值（含旧客户端未上报）→ OTHER，防御脏数据入库 */
+    private ViewSource normalizeSource(ViewSource source) {
+        return source != null ? source : ViewSource.OTHER;
     }
 
     /**

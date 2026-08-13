@@ -415,6 +415,12 @@ SQL 侧镜像一致性由 `VenueHeatServiceTest` 公式测试 + 本 AGENTS.md �
 
 **浏览记录（`qwt_venue_views`）**：已登录用户按 `(venueId, userId, viewDate)` 联合唯一约束去重（同一天仅一条）；匿名用户 `userId=null`，无法按身份去重，2026-08 起叠加 **60s 简单频控**（`VenueViewService` 内嵌 Caffeine，key = `venueId:客户端IP`，X-Forwarded-For 第一个地址，取不到时降级为固定 key 的场所级防抖）——压制脚本连点/自动刷新放大 PV。频控尽力而为，多 IP 分布式刷无法拦截；已登录用户由 upsert 按天去重，无需频控。前端进入详情页时 fire-and-forget 调用 `POST /venues/{id}/view`，失败静默。
 
+**浏览来源（`qwt_venue_views.source`，2026-08-13 新增「浏览来源」统计图）**：`source` 列（varchar(16) 非空，默认 `'OTHER'`，V17 迁移）承载来源枚举 `ViewSource`：`LIST`=列表页进入、`SHARE`=分享卡片打开、`OTHER`=其他（搜索/收藏/深链/历史兜底）。语义约定：
+- **首次来源**：已登录用户按天去重，upsert `ON CONFLICT DO NOTHING` 保留首次来源（先列表进入后分享打开，当天记 LIST）——归因语义上首次进入路径最有分析价值；
+- **匿名不去重**：每次访问均按当次来源记录（60s 频控兜底）；
+- **兼容旧客户端**：`POST /venues/{id}/view` 的 body `{source}` 可空，`VenueController` 对 null/非法值兜底 `OTHER`（`VenueViewService.normalizeSource` 第二道防线）——旧版本不传 source 也正常工作；
+- **历史局限**：V17 上线前的存量行全部 `OTHER`，来源图数据自上线日起积累，前端文档已注明。
+
 **状态变迁日志（`qwt_venue_status_logs`）**：每次 `Venue.status` 字段变更时由 `VenueService` 自动写入（含创建时的初始记录 `fromStatus=null`）。记录 `fromStatus`、`toStatus`、`changedBy`、`createdAt`。用于统计"近 N 天暂停营业次数"和"当前状态持续天数"。
 
 ### 满意度计算
@@ -442,17 +448,18 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 - **例外**：`VenueStatusLogRepository.countSuspensionsAndLatestTime` 的 `latestcreatedat`（当前状态持续天数的依据）代表"当前状态"这一实时事实，不是滚动窗口聚合，不受该上界约束，保持全量 `MAX`
 - `VenueHeatResponse.statsAsOfDate`（`yyyy-MM-dd`，即昨天）随接口返回，**前端必须在热度 Tab 醒目展示**（当前实现：Tab 顶部 accent 底色横幅 + 底部数据说明重复提示），不得让用户在不知情的情况下把"含当天不完整数据"的口径当作完整统计解读
 
-### 趋势（favoriteTrend / viewTrend / reactionTrend，2026-08-08 重构）
+### 趋势（favoriteTrend / viewTrend / viewSourceTrend / reactionTrend，2026-08-08 重构 / 2026-08-13 浏览来源）
 
-`GET /venues/{id}/heat` 附带三组近 30 天每日时间序列，供前端三张趋势图（收藏/浏览/反馈）渲染：
+`GET /venues/{id}/heat` 附带四组近 30 天每日时间序列，供前端趋势图（收藏/浏览/浏览来源/反馈）渲染：
 
 - `favoriteTrend: List<FavoriteTrendPoint(date, count)>`——每日新增收藏数
 - `viewTrend: List<FavoriteTrendPoint(date, count)>`——每日浏览数（含匿名，与 `viewCount30d` 同源同口径；结构与收藏趋势相同，复用 `FavoriteTrendPoint`）
+- `viewSourceTrend: List<ViewSourceTrendPoint(date, list, share, other)>`——每日浏览来源分列（2026-08-13 新增「浏览来源」双折线图数据源）：`list`=列表进入、`share`=分享打开、`other`=其他；**`list + share + other = 当日 viewTrend` 同源可交叉验证**；`other` 由 SQL 减法派生（全量 − list − share，省一次扫描），前端图上只画 list/share 两条折线
 - `reactionTrend: List<ReactionTrendPoint(date, positive, negative)>`——每日正/负向反馈分列（分极性语义直接服务 2026-08 确立的「负向不计入热度」规则，正负并排呈现让用户一瞥看出口碑走势）
 
 **窗口 30 天（2026-08-08 由 14 天扩展）**：与其余滚动指标一致。根因：前端时间范围刷选控件（略缩图）需要足够长的全量窗口才有"缩放"意义——全量 = 趋势窗口，默认选中最近 14 天，用户可放大到全量或缩小到 7 天；14 天全量无法表达"拉近看 7 天"。常量 `VenueHeatService.TREND_WINDOW_DAYS`（= `WINDOW_DAYS`）。
 
-**统一取数（趋势 mega-query）**：三组序列由 `VenueRepository.countDailyTrends` **一条 SQL** 返回——`generate_series` 生成连续日期骨架（服务端补零天然达成，替代 Java 侧逐日填充），favorites / views / reactions（正负向各自子查询）四个 GROUP BY 子查询 LEFT JOIN 到骨架。根因：各趋势图一条查询会把热度接口往返从 2~4 次膨胀到 5~7 次（见「查询性能优化」第三轮）。
+**统一取数（趋势 mega-query）**：全部序列由 `VenueRepository.countDailyTrends` **一条 SQL** 返回——`generate_series` 生成连续日期骨架（服务端补零天然达成，替代 Java 侧逐日填充），favorites / views / view-sources（LIST/SHARE 两个来源子查询）/ reactions（正负向各自子查询）五个 GROUP BY 子查询 LEFT JOIN 到骨架。根因：各趋势图一条查询会把热度接口往返从 2~4 次膨胀到 5~7 次（见「查询性能优化」第三轮）。2026-08-13 来源分列同样以两个子查询 JOIN 进同一骨架——不新增往返。投影 `DailyTrendRow` 对应新增 `getViewlistcount()` / `getViewsharecount()`。
 
 **时区链缺陷（2026-08-08 实机复现：统计图全空但互动卡片有数）**：`generate_series(date, date, interval)` 的 date 参数被 PG 解析到 **timestamptz 重载**（datetime 类别 preferred type）——骨架列是带时区的时刻，与源表 DATE 列比较时 PG 按 session timezone 提升 DATE，骨架又受 session/JVM 时区链影响，非 UTC 时区下 LEFT JOIN **恒失配**（计数全 0，且骨架日期整体偏移一天）。**标准修复：骨架显式 `CAST(:sinceDate AS timestamp)` 走 timestamp 无时区重载 + 整体 `::date` 收口为纯 date 比较域**——与 session/JVM 时区完全无关（UTC / Asia/Shanghai / America/Los_Angeles 三时区实测窗口与计数一致）。**长期规则：涉及 generate_series 日期骨架的 SQL，参数必须显式 `CAST(... AS timestamp)`（禁裸 `:param::cast`——Hibernate 会把 `::` 吞进参数名报 No parameter named），输出统一 `::date`，禁依赖 PG 隐式重载解析；勿用 `date = timestamptz` 跨类型比较。**
 
@@ -991,6 +998,14 @@ Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对�
 2. **变更**：删除 `FAIR_PRICE` / `WAITING` / `HIGH_COST` / `CLEAN`
 3. **与第一轮不同的历史数据策略（用户明确要求）**：**物理清理**——`V16__reaction_prune_codes.sql` `DELETE FROM qwt_venue_reactions WHERE reaction_code IN (...)`，**只删表情数据**（qwt_venue_reactions 无外键引用、reaction_code 无 FK/CHECK，无级联风险；其他表一律不动）。理由：本轮起不再保留孤儿 code，前端无需长期携带"字典外 code 过滤"兼容逻辑（第一轮 4 code 历史数据仍保留 + 前端过滤，两轮策略差异见 V16 注释）
 4. **前端联动**：见前端 AGENTS.md「Reaction 快速反馈系统 → 静态字典」章节的"2026-08-12 晚 第二轮瘦身"纪要（Picker 4×3 变 4×2 末行 2 个居中 nth-child(n+9)）
+
+**2026-08-13 字典优化（用户驱动，10 → 12；产品原则「平台裁决事实，不裁决人品；负面聚合可见，个体免于点名；被指涉方有申辩权」——即"陈述事实、不攻击别人"）**：
+
+1. **新增 2 code**：`PARTNER_ABUNDANT`（💃 舞伴充足，POSITIVE——与 HOT 区分：可跳舞伴多 ≠ 场面热闹）；`MISMATCH`（😬 现场不符，NEGATIVE——"到店后发现和照片/介绍不一样"的避坑信号，信息准确性类负面）
+2. **label 去判断化**：PRICE_HIKE「舞伴加价」→「舞伴临时加价」（精确行为描述）；QUIET「人气冷清」→「人气偏少」；SERVICE_ISSUE「服务问题」→「服务欠佳」
+3. **无 migration**：新增 code 无历史数据（reaction_code varchar(30) 无 FK/CHECK 枚举约束）；label/emoji 是枚举内文案不落库（由 stats 接口下发）——与 V15/V16 不同，本轮无 code 改名/删除
+4. **热度公式自动适配**：PARTNER_ABUNDANT 经 `positiveCodeNames()` 自动计入、MISMATCH 经 `negativeCodeNames()` 自动单独计数（极性唯一事实源机制免手工维护）
+5. **前端联动**：见前端 AGENTS.md「Reaction 快速反馈系统 → 静态字典」的"2026-08-13 字典优化"纪要（描述重写原则、详情页「近期风险」区块 = 纯前端负面聚合，后端零改动）
 
 6. **枚举外 code 防御（2026-08-08 线上 500 事故教训）**：`GET /venues/{id}` 因 `VenueReactionService.buildTopBadgesFromCounts` 裸 `ReactionCode.valueOf(e.getKey())` 抛 `IllegalArgumentException`（库中残留 `YOUNG_PARTNER`，枚举已删除）→ 详情页 500。**长期规则**：**从聚合/查询结果按 code 转枚举时，必须先过滤或安全转换（`ReactionCode.isValid(code)` filter 或 `valueOfSafe`），禁止裸 `Enum.valueOf`**——枚举删除/改名后，库中旧 code 仍可能被聚合查询返回，必须优雅跳过（与 `getStats` 用 `ReactionCode.values()` 遍历 + filter、`VenueHeatService` 用 `values()` 流的行为对齐）；枚举内 code 是唯一事实源，库中残留 code 是脏数据，跳过而非让接口崩溃
 

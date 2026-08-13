@@ -5,11 +5,13 @@ import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.venue.dto.request.CreateVenueRequest;
+import org.quwuting.quwutingservice.venue.dto.request.RecordViewRequest;
 import org.quwuting.quwutingservice.venue.dto.response.CityStatsResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueDetailResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueHeatResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
+import org.quwuting.quwutingservice.venue.enums.ViewSource;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueService;
 import org.quwuting.quwutingservice.venue.service.VenueViewService;
@@ -111,12 +113,23 @@ public class VenueController {
     }
 
     /**
-     * 记录场所详情页浏览（软鉴权：未登录时 userId 为 null，匿名���录不去重）
+     * 记录场所详情页浏览（软鉴权：未登录时 userId 为 null，匿名访问不去重）。
+     * body.source 为浏览来源（LIST/SHARE/OTHER），可空——旧客户端不传时兜底 OTHER。
      * POST /venues/{id}/view
      */
     @PostMapping("/{id}/view")
-    public ApiResponse<Void> recordView(@PathVariable Long id) {
-        venueViewService.recordView(id, UserContext.getCurrentUserId());
+    public ApiResponse<Void> recordView(@PathVariable Long id,
+                                        @RequestBody(required = false) RecordViewRequest request) {
+        ViewSource source = null;
+        if (request != null && request.source() != null) {
+            try {
+                source = ViewSource.valueOf(request.source());
+            } catch (IllegalArgumentException e) {
+                // 非法来源值兜底 OTHER（应用层防御，枚举列无 CHECK 约束）
+                source = ViewSource.OTHER;
+            }
+        }
+        venueViewService.recordView(id, UserContext.getCurrentUserId(), source);
         return ApiResponse.ok(null);
     }
 }

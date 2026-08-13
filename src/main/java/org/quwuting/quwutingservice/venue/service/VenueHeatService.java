@@ -209,10 +209,12 @@ public class VenueHeatService {
                 (int) orZero(counters.getReportcount()),
                 counters.getLatestreporttime());
 
-        // ── 趋势（多行时间序列，独立 1 次往返：收藏/浏览/正负向 Reaction/收到积分
-        //    五序列合一，近30天每日、截至昨天、缺失日补零——见 VenueRepository.countDailyTrends） ──
+        // ── 趋势（多行时间序列，独立 1 次往返：收藏/浏览（含来源分列）/正负向 Reaction/
+        //    收到积分六序列合一，近30天每日、截至昨天、缺失日补零——见 VenueRepository.countDailyTrends） ──
         List<FavoriteTrendPoint> favoriteTrend = new ArrayList<>(TREND_WINDOW_DAYS);
         List<FavoriteTrendPoint> viewTrend = new ArrayList<>(TREND_WINDOW_DAYS);
+        List<org.quwuting.quwutingservice.venue.dto.response.ViewSourceTrendPoint> viewSourceTrend =
+                new ArrayList<>(TREND_WINDOW_DAYS);
         List<ReactionTrendPoint> reactionTrend = new ArrayList<>(TREND_WINDOW_DAYS);
         List<FavoriteTrendPoint> pointsTrend = new ArrayList<>(TREND_WINDOW_DAYS);
         for (VenueRepository.DailyTrendRow row : venueRepository.countDailyTrends(
@@ -221,6 +223,10 @@ public class VenueHeatService {
             String day = row.getDay().toString();
             favoriteTrend.add(new FavoriteTrendPoint(day, orZero(row.getFavcount())));
             viewTrend.add(new FavoriteTrendPoint(day, orZero(row.getViewcount())));
+            viewSourceTrend.add(new org.quwuting.quwutingservice.venue.dto.response.ViewSourceTrendPoint(
+                    day, orZero(row.getViewlistcount()), orZero(row.getViewsharecount()),
+                    // other = 全量 - list - share（同源口径交叉校验；直接 COUNT 亦可，减法省一次扫描）
+                    Math.max(0L, orZero(row.getViewcount()) - orZero(row.getViewlistcount()) - orZero(row.getViewsharecount()))));
             reactionTrend.add(new ReactionTrendPoint(day, orZero(row.getPosreaction()), orZero(row.getNegreaction())));
             pointsTrend.add(new FavoriteTrendPoint(day, orZero(row.getPoints())));
         }
@@ -292,7 +298,7 @@ public class VenueHeatService {
         return new VenueHeatResponse(
                 heatScore,
                 viewCount30d, viewUv30d,
-                favoriteCount, newFavoriteCount30d, favoriteTrend, viewTrend, reactionTrend,
+                favoriteCount, newFavoriteCount30d, favoriteTrend, viewTrend, viewSourceTrend, reactionTrend,
                 postCount, newPostCount30d,
                 ratingCount30d, positiveReactionCount30d, negativeReactionCount30d,
                 pointsReceivedTotal, pointsReceived30d, pointsTrend, giftsReceived,

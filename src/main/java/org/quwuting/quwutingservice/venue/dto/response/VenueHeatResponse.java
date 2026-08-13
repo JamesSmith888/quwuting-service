@@ -39,6 +39,14 @@ public record VenueHeatResponse(
          */
         List<FavoriteTrendPoint> viewTrend,
         /**
+         * 近30天每日浏览来源趋势（「浏览来源」双折线图用，date + list/share/other 分列）。
+         * 2026-08-13 新增：list=列表页进入、share=分享卡片打开、other=其他（含历史兜底）。
+         * list + share + other = 当日 viewTrend 值（同源可交叉验证）；图上前端只画
+         * list/share 两条折线。历史数据（source 列上线前）全部归 other——新图数据自
+         * 版本上线日起积累，属已知局限（见前端 AGENTS.md「浏览来源统计」）。
+         */
+        List<ViewSourceTrendPoint> viewSourceTrend,
+        /**
          * 近30天每日 Reaction 趋势（反馈趋势图用，正/负向分列），按日期升序已补零。
          * 分极性数据直接服务 2026-08 确立的「负向不计入热度」语义——负向单独呈现。
          */

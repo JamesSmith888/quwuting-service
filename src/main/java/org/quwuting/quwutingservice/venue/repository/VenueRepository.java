@@ -502,8 +502,12 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
         java.time.LocalDate getDay();
         /** 当日新增收藏数 */
         Long getFavcount();
-        /** 当日浏览数（含匿名，按日计数） */
+        /** 当日浏览数（含匿名，按日计数，全来源合计） */
         Long getViewcount();
+        /** 当日来源=LIST 浏览数（「浏览来源」图主序列，2026-08-13 新增） */
+        Long getViewlistcount();
+        /** 当日来源=SHARE 浏览数（「浏览来源」图次序列，2026-08-13 新增） */
+        Long getViewsharecount();
         /** 当日正向反馈数 */
         Long getPosreaction();
         /** 当日负向反馈数 */
@@ -513,12 +517,15 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     }
 
     /**
-     * 热度趋势 mega-query：一条 DB 往返取回 收藏/浏览/正负 Reaction 四组按天时间序列。
+     * 热度趋势 mega-query：一条 DB 往返取回 收藏/浏览（含来源分列）/正负 Reaction/收到积分
+     * 六组按天时间序列。
      * <p>
-     * 根因（两层）：热度页三张趋势图若各自一条查询（favorites / views / reactions 各
-     * GROUP BY day），热度接口往返从 2~4 次膨胀到 5~7 次——违反「最少往返」第一约束。
-     * 四组序列都是"以 venueId 为键、按天分组的单值聚合"，收敛为一条 SELECT：
-     * generate_series 生成连续日期骨架（天然补零），四张源表 GROUP BY day 后 LEFT JOIN 骨架。
+     * 根因（两层）：热度页多张趋势图若各自一条查询（favorites / views / reactions /
+     * view sources 各 GROUP BY day），热度接口往返从 2~4 次膨胀到 5~7 次——违反
+     * 「最少往返」第一约束。各序列都是"以 venueId 为键、按天分组的单值聚合"，收敛为
+     * 一条 SELECT：generate_series 生成连续日期骨架（天然补零），各源表 GROUP BY day
+     * 后 LEFT JOIN 骨架。2026-08-13 浏览来源分列（viewlistcount/viewsharecount）同样
+     * 以两个子查询 JOIN 进同一骨架——不新增往返。
      * <p>
      * <b>时区链缺陷（2026-08-08 实机复现，用户反馈"统计图全空但互动卡片有数"）</b>：
      * generate_series(date, date, interval) 的 date 参数会被 PG 解析到 <b>timestamptz 重载</b>
@@ -534,13 +541,15 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * <ul>
      *   <li>day 骨架 = [sinceDate, asOfDate]（即 [今天-30, 昨天]，共 30 天）</li>
      *   <li>favorites / reactions 按 created_at 过滤 [windowSince, windowUntil)（今天0点为排他上界）</li>
-     *   <li>views 按 view_date（DATE 列）过滤 [viewSince, viewUntil)</li>
+     *   <li>views（含来源分列）按 view_date（DATE 列）过滤 [viewSince, viewUntil)</li>
      * </ul>
      */
     @Query(value = """
             SELECT d.day,
                    COALESCE(f.cnt, 0) AS favcount,
                    COALESCE(v.cnt, 0) AS viewcount,
+                   COALESCE(vl.cnt, 0) AS viewlistcount,
+                   COALESCE(vs.cnt, 0) AS viewsharecount,
                    COALESCE(pr.cnt, 0) AS posreaction,
                    COALESCE(nr.cnt, 0) AS negreaction,
                    COALESCE(pt.cnt, 0) AS points
@@ -555,6 +564,18 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                        WHERE venue_id = :venueId
                          AND view_date >= :viewSince AND view_date < :viewUntil
                        GROUP BY 1) v ON v.day = d.day
+            LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
+                       FROM qwt_venue_views
+                       WHERE venue_id = :venueId
+                         AND source = 'LIST'
+                         AND view_date >= :viewSince AND view_date < :viewUntil
+                       GROUP BY 1) vl ON vl.day = d.day
+            LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
+                       FROM qwt_venue_views
+                       WHERE venue_id = :venueId
+                         AND source = 'SHARE'
+                         AND view_date >= :viewSince AND view_date < :viewUntil
+                       GROUP BY 1) vs ON vs.day = d.day
             LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS cnt
                        FROM qwt_venue_reactions
                        WHERE venue_id = :venueId AND deleted = false

@@ -50,6 +50,19 @@ import java.util.List;
  * 已删 4 code 第一轮（GOOD_VIBE/GOOD_MUSIC/NORMAL/CROWDED）历史数据仍按 V15
  * 策略保留（前端过滤），两轮策略差异见 V16 migration 注释。
  * <p>
+ * <b>2026-08-13 字典优化（10 → 12，用户驱动，产品原则「陈述事实、不攻击别人」）</b>：
+ * ① 新增 PARTNER_ABUNDANT（💃 舞伴充足，POSITIVE）——决策链"有没有人"的核心信号，
+ *    与 HOT（整个店热闹）区分：可跳舞伴多 ≠ 场面热闹；新增 MISMATCH（😬 现场不符，
+ *    NEGATIVE）——"到店后发现和照片/介绍不一样"的避坑信号，信息准确性类负面。
+ * ② label 去判断化：PRICE_HIKE「舞伴加价」→「舞伴临时加价」（精确行为描述）、
+ *    QUIET「人气冷清」→「人气偏少」（"冷清"是情绪判断，"偏少"是程度事实）、
+ *    SERVICE_ISSUE「服务问题」→「服务欠佳」（"问题"偏定性）。
+ * ③ description（前端展示文案）全量重写为"事实陈述式"：负面描述一律用"遇到过"
+ *    句式（个人经历陈述，平台不裁决），不用"有舞伴会/这家店就是"句式（平台定性）；
+ *    不写具体价格数字、不指名个体——见前端 constants/reactions.ts 注释。
+ * 展示序调整：正向 7 项全部在前（HOT→GOOD_SERVICE），负向 5 项收尾
+ * （PRICE_HIKE→MISMATCH），Picker 12 项 = 4×3 满行。
+ * <p>
  * 字段约束：
  * <ul>
  *   <li>{@code reactionCode} 字段为 varchar(30)（见 V1 baseline），code 名长度均 &lt; 20，</li>
@@ -65,14 +78,6 @@ public enum ReactionCode {
     HOT("🔥", "人气旺", Polarity.POSITIVE),
     RECOMMEND("👍", "值得推荐", Polarity.POSITIVE),
     /**
-     * 2026-08-12 由 VALUE（"✌ 性价比高"）改名纠偏：✌ 实为圈内黑话「剪刀手」——
-     * 10 元场有舞伴临时加价至 20 元时比 V 手势，是负面标签而非性价比。为不得罪人
-     * 不明示"剪刀手"字样（emoji 保留 ✌ 作圈内暗号，label 落中性行为描述「舞伴加价」），
-     * 极性 POSITIVE → NEGATIVE（退出热度公式、进负面信号单独计数），历史数据
-     * 经 V15 migration 重映射（VALUE → PRICE_HIKE）。
-     */
-    PRICE_HIKE("✌", "舞伴加价", Polarity.NEGATIVE),
-    /**
      * 2026-08-08 新增（替代 YOUNG_PARTNER）：18+有活力的舞伴类型。
      * 风格化词汇替代"15岁"等具体年龄——Q 版虚拟头像 + 18+ 描述规避未成年人风险。
      */
@@ -86,10 +91,39 @@ public enum ReactionCode {
      * 2026-08-08 新增（替代 OLD_PARTNER）：35+成熟风舞伴类型。
      */
     MATURE_PARTNER("💋", "舞伴成熟风", Polarity.POSITIVE),
+    /**
+     * 2026-08-13 新增：决策链"有没有人"的核心信号。与 HOT 区分——HOT 是
+     * "整个店热闹/人多"，本项是"可跳舞伴数量充足"，不愁找不到人跳。
+     */
+    PARTNER_ABUNDANT("💃", "舞伴充足", Polarity.POSITIVE),
     GOOD_SERVICE("💁", "服务贴心", Polarity.POSITIVE),
-    QUIET("🪑", "人气冷清", Polarity.NEGATIVE),
+    /**
+     * 2026-08-12 由 VALUE（"✌ 性价比高"）改名纠偏：✌ 实为圈内黑话「剪刀手」——
+     * 10 元场有舞伴临时加价至 20 元时比 V 手势，是负面标签而非性价比。为不得罪人
+     * 不明示"剪刀手"字样（emoji 保留 ✌ 作圈内暗号，label 落中性行为描述），
+     * 极性 POSITIVE → NEGATIVE（退出热度公式、进负面信号单独计数），历史数据
+     * 经 V15 migration 重映射（VALUE → PRICE_HIKE）。
+     * 2026-08-13 label「舞伴加价」→「舞伴临时加价」：精确描述行为本身（中途临时
+     * 加价），不写具体数字、不指名个体——"陈述事实、不攻击别人"原则（见类注释）。
+     */
+    PRICE_HIKE("✌", "舞伴临时加价", Polarity.NEGATIVE),
+    /**
+     * 2026-08-13 label「人气冷清」→「人气偏少」："冷清"是情绪判断，"偏少"是
+     * 程度事实——负面描述去判断化（见类注释 2026-08-13 条目）。
+     */
+    QUIET("🪑", "人气偏少", Polarity.NEGATIVE),
     BAD_ENV("😕", "环境一般", Polarity.NEGATIVE),
-    SERVICE_ISSUE("😡", "服务问题", Polarity.NEGATIVE);
+    /**
+     * 2026-08-13 label「服务问题」→「服务欠佳」："问题"偏定性、"欠佳"偏程度
+     * 描述——负面描述去判断化（见类注释 2026-08-13 条目）。
+     */
+    SERVICE_ISSUE("😡", "服务欠佳", Polarity.NEGATIVE),
+    /**
+     * 2026-08-13 新增：信息准确性类负面避坑信号——"到店后发现和照片、介绍不一样"。
+     * 事实陈述式描述（前端），不指名个体、不评价人品；走 NEGATIVE 单独计数、
+     * 前端「近期风险」聚合展示（见前端 AGENTS.md「负面信号聚合」）。
+     */
+    MISMATCH("😬", "现场不符", Polarity.NEGATIVE);
 
     /** Reaction 极性：热度公式只计入 POSITIVE；NEGATIVE 单独计数展示、不参与公式 */
     public enum Polarity {
