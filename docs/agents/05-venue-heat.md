@@ -49,13 +49,15 @@ SQL 侧镜像一致性由 `VenueHeatServiceTest` 公式测试 + 本 AGENTS.md �
 
 ### 数据采集层
 
-**浏览记录（`qwt_venue_views`）**：已登录用户按 `(venueId, userId, viewDate)` 联合唯一约束去重（同一天仅一条）；匿名用户 `userId=null`，无法按身份去重，2026-08 起叠加 **60s 简单频控**（`VenueViewService` 内嵌 Caffeine，key = `venueId:客户端IP`，X-Forwarded-For 第一个地址，取不到时降级为固定 key 的场所级防抖）——压制脚本连点/自动刷新放大 PV。频控尽力而为，多 IP 分布式刷无法拦截；已登录用户由 upsert 按天去重，无需频控。前端进入详情页时 fire-and-forget 调用 `POST /venues/{id}/view`，失败静默。
+**浏览记录（`qwt_venue_views`）**：已登录用户按 `(venueId, userId, viewDate, source)` 联合唯一索引去重（同一天同一来源仅一条；**V21 起含 source，多渠道独立计数**——2026-08-13 晚产品决策"搜索/列表是不同流量，搜索进入必计 SEARCH"）；匿名用户 `userId=null`，无法按身份去重，2026-08 起叠加 **60s 简单频控**（`VenueViewService` 内嵌 Caffeine，key = `venueId:客户端IP`，X-Forwarded-For 第一个地址，取不到时降级为固定 key 的场所级防抖）——压制脚本连点/自动刷新放大 PV。频控尽力而为，多 IP 分布式刷无法拦截；已登录用户由 upsert 按来源去重（一天内单一来源最多 1 条、全来源合计最多 4 条），无需频控。前端进入详情页时 fire-and-forget 调用 `POST /venues/{id}/view`，失败静默。
 
 **浏览来源（`qwt_venue_views.source`，2026-08-13 新增「浏览来源」统计图；2026-08-13 晚新增 `SEARCH`）**：`source` 列（varchar(16) 非空，默认 `'OTHER'`，V18 迁移）承载来源枚举 `ViewSource`：`LIST`=列表页进入、`SHARE`=分享卡片打开、`SEARCH`=列表页搜索结果进入（2026-08-13 晚，来源图第三折线）、`OTHER`=其他（收藏/深链/历史兜底）。枚举类列不加 CHECK 约束（项目约定），**新增枚举值无需迁移**（V18 历史文件不改动，避免 Flyway checksum 失配）。语义约定：
-- **首次来源**：已登录用户按天去重，upsert `ON CONFLICT DO NOTHING` 保留首次来源（先列表进入后分享打开，当天记 LIST）——归因语义上首次进入路径最有分析价值；
-- **匿名不去重**：每次访问均按当次来源记录（60s 频控兜底）；
+- **按来源按天去重（V21，2026-08-13 晚产品决策）**：唯一键 = `(venueId, userId, viewDate, source)`——同一用户同一天经不同来源进入各自计数、互不覆盖，**搜索进入必计 SEARCH**（用户明确："搜索和列表进去的是不一样的流量"）。防刷上限仍在：单一来源一天一条、全来源合计最多 4 条/人/天；匿名不去重（60s 频控兜底）；
+- **口径自洽**：viewcount = 行数 = list + share + search + other 恒成立（每行有且仅有一个来源）；UV（`COUNT(DISTINCT user_id)`）不受影响；
 - **兼容旧客户端**：`POST /venues/{id}/view` 的 body `{source}` 可空，`VenueController` 对 null/非法值兜底 `OTHER`（`VenueViewService.normalizeSource` 第二道防线）——旧版本不传 source 也正常工作；
-- **历史局限**：V18 上线前的存量行全部 `OTHER`，来源图数据自上线日起积累，前端文档已注明。
+- **历史局限**：V18 上线前的存量行全部 `OTHER`，来源图数据自上线日起积累，前端文档已注明；
+- **写路径缓存失效（2026-08-13 修复根因「浏览来源-搜索结果折线恒 0」）**：浏览数是热度响应（viewTrend / viewSourceTrend / viewCount30d）的输入，`VenueViewService.recordView` 真实插入（upsert 受影响行数 > 0）后必须失效 `venueHeatService` 缓存——此前缺失导致详情页 onLoad 并发发起 fetchHeat 与 recordVenueView 时，缓存先填充"无新记录"版本，热度页在 60s refresh 窗口内看不到刚记录的来源。实现遵循「失效时机约束」：afterCommit 注册（见下「写路径缓存逐出」矩阵）；受影响行数 = 0（同一来源当天已存在，DO NOTHING）时统计不变，不失效（与 FavoriteService「幂等无写入分支不逐出」同约定）；
+- **ON CONFLICT 兼容性（V21 潜在历史根因）**：upsert 冲突目标必须用列清单推断（`ON CONFLICT (venue_id, user_id, view_date, source)`），禁止 `ON CONFLICT ON CONSTRAINT`——V1 基线创建的是 CREATE UNIQUE INDEX（唯一索引，非约束），ON CONSTRAINT 只匹配约束、不匹配索引，生产库若保持索引形态则浏览写入每次抛错且被 fire-and-forget 静默吞掉（浏览折线全 0 的潜在根因，与缓存失效缺失叠加）。
 
 **状态变迁日志（`qwt_venue_status_logs`）**：每次 `Venue.status` 字段变更时由 `VenueService` 自动写入（含创建时的初始记录 `fromStatus=null`）。记录 `fromStatus`、`toStatus`、`changedBy`、`createdAt`。用于统计"近 N 天暂停营业次数"和"当前状态持续天数"。
 
@@ -187,6 +189,7 @@ LocalDate viewUntil = today.plusDays(1);                      // views 按 DATE 
 | score（TagInteractionService） | `tagAggregateStatsService.invalidate` + `venueHeatService.invalidate` |
 | toggle（VenueReactionService） | `venueReactionAggregateService.invalidate` + `venueHeatService.invalidate`（**2026-08-08 起经 `TransactionSynchronization.afterCommit` 延后到事务提交后执行**，见下「失效时机约束」） |
 | addFavorite / removeFavorite（FavoriteService） | `venueHeatService.invalidate`（收藏数是热度输入；幂等无写入分支不逐出） |
+| recordView（VenueViewService，2026-08-13 新增） | `venueHeatService.invalidate`（浏览数是热度输入 viewTrend/viewSourceTrend/viewCount30d；**仅真实插入 affected>0 时注册**，同来源冲突 DO NOTHING 不逐出；经 afterCommit 延后到事务提交后，见「失效时机约束」） |
 | submitReport / cancelReport（StatusReportService） | `venueHeatService.invalidate`（活跃报告数是热度输出） |
 | createPost（VenuePostService） | `venueHeatService.invalidate` + `@CacheEvict(hotVenueIds, allEntries)`（动态数参与热度与热门排序） |
 | updateVenue（VenueService） | `@Caching` 逐出 venueCache + hotVenueIds + `tagAggregateStatsService.invalidate`（tags 是聚合组装依据）+ `venueHeatService.invalidate`（status/状态日志是热度输出） |

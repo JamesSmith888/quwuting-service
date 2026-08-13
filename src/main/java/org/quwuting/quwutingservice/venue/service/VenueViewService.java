@@ -8,6 +8,8 @@ import org.quwuting.quwutingservice.venue.enums.ViewSource;
 import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -16,7 +18,8 @@ import java.util.concurrent.TimeUnit;
 /**
  * 场所浏览记录服务。
  * <p>
- * 已登录用户按 (venueId, userId, viewDate) 去重（同一天仅记一条）；
+ * 已登录用户按 (venueId, userId, viewDate, source) 去重（同一天同一来源仅记一条；
+ * 多渠道独立计数——2026-08-13 晚产品决策：搜索/列表是不同流量，搜索进入必计 SEARCH）；
  * 匿名用户 userId 为 null，无法按身份去重——2026-08 起增加 <b>60s 简单频控</b>
  * （同场所同客户端 IP 60 秒内只记一条），压制脚本连点/自动刷新放大 PV 的漏洞。
  * 频控是尽力而为（多 IP 分布式刷无法拦截），key 取 X-Forwarded-For 第一个 IP；
@@ -49,13 +52,30 @@ public class VenueViewService {
     private final VenueViewRepository venueViewRepository;
 
     /**
-     * 记录一次浏览（匿名用户最多 60s 一条，已登录用户由 upsert 按天去重，恒 1 次 DB 往返）。
+     * 热度缓存失效入口。浏览数是热度响应（viewTrend / viewSourceTrend / viewCount30d）的
+     * 组成部分——真实写入后必须失效，否则 refresh-ahead 缓存（60s）会让热度页在窗口内
+     * 看不到刚记录的浏览与来源分列（2026-08-13 根因修复，见 {@link #recordView}）。
+     */
+    private final VenueHeatService venueHeatService;
+
+    /**
+     * 记录一次浏览（匿名用户最多 60s 一条，已登录用户由 upsert 按天按来源去重，恒 1 次 DB 往返）。
      * <p>
      * 来源防御：source 为 null / 非枚举值（旧版本客户端未上报 / 脏数据）一律兜底为 OTHER，
      * 枚举类列不加 CHECK 约束（项目约定），非法值在本层收敛。
+     * <p>
+     * 热度缓存失效（2026-08-13 修复根因）：
+     * <ul>
+     *   <li>仅真实插入（upsert 受影响行数 &gt; 0）时失效——冲突（同一用户同一天同一来源
+     *       已存在，DO NOTHING）不改变任何浏览统计，不触发无谓缓存逐出（与 FavoriteService
+     *       「幂等无写入分支不逐出」同约定）；</li>
+     *   <li>失效必须延后到事务提交后（项目「失效时机约束」，示范实现 = VenueReactionService.toggle）：
+     *       提交前失效存在竞态窗口——另一线程读到 cache miss → 回源重算 → 读不到本事务
+     *       未提交数据 → 缓存陈旧值。afterCommit 注册的回调在提交完成后执行，回源必读到已提交数据。</li>
+     * </ul>
      *
      * @param venueId 场所 ID
-     * @param userId  用户 ID，匿名时为 null（匿名记录参与 IP 频控，不参与按天去重）
+     * @param userId  用户 ID，匿名时为 null（匿名记录参与 IP 频控，不参与按来源去重）
      * @param source  浏览来源（LIST/SHARE/SEARCH/OTHER），null 或未知值兜底 OTHER
      */
     @Transactional
@@ -64,7 +84,16 @@ public class VenueViewService {
             return; // 匿名频控命中：跳过写入（尽力而为，防止脚本连点放大 PV）
         }
         LocalDate today = LocalDate.now();
-        venueViewRepository.upsertView(venueId, userId, today, normalizeSource(source).name(), LocalDateTime.now());
+        int inserted = venueViewRepository.upsertView(
+                venueId, userId, today, normalizeSource(source).name(), LocalDateTime.now());
+        if (inserted > 0) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    venueHeatService.invalidate(venueId);
+                }
+            });
+        }
     }
 
     /** 来源规范化：null / 非法值（含旧客户端未上报）→ OTHER，防御脏数据入库 */

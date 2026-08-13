@@ -114,7 +114,7 @@ public class VenueController {
 
     /**
      * 记录场所详情页浏览（软鉴权：未登录时 userId 为 null，匿名访问不去重）。
-     * body.source 为浏览来源（LIST/SHARE/OTHER），可空——旧客户端不传时兜底 OTHER。
+     * body.source 为浏览来源（LIST/SHARE/SEARCH/OTHER），可空——旧客户端不传时兜底 OTHER。
      * POST /venues/{id}/view
      */
     @PostMapping("/{id}/view")

@@ -443,7 +443,7 @@ public class VenueService {
                 venueReactionService.batchGetBadges(venueIds, UserContext.getCurrentUserId(),
                         ReactionWindow.from(window));
         // 批量累计浏览量（2026-08-12 列表卡片「👁 浏览数」数据源）：一次 IN + GROUP BY
-        // 覆盖整页，避免逐条 COUNT 的 N+1；口径 = qwt_venue_views 全量行数（按天去重 PV 含匿名，
+        // 覆盖整页，避免逐条 COUNT 的 N+1；口径 = qwt_venue_views 全量行数（按天按来源去重 PV 含匿名，
         // 与 viewCount30d 同源同口径的全量版，见 VenueViewRepository#countByVenueIds javadoc）
         Map<Long, Long> viewCounts = venueIds.isEmpty() ? Collections.emptyMap()
                 : venueViewRepository.countByVenueIds(venueIds).stream()

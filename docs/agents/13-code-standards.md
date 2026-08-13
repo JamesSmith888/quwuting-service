@@ -208,15 +208,17 @@ public class GlobalExceptionHandler {
 
 有唯一约束的写入分两类，处理方式不同：
 
-**① 纯幂等插入（不需要已有行状态）→ `ON CONFLICT DO NOTHING` upsert，首选**。单次 DB 往返完成"不存在则插入、存在则忽略"，去重与并发竞态全部由库内唯一约束兜底，无并发窗口：
+**① 纯幂等插入（不需要已有行状态）→ `ON CONFLICT DO NOTHING` upsert，首选**。单次 DB 往返完成"不存在则插入、存在则忽略"，去重与并发竞态全部由库内唯一索引/约束兜底，无并发窗口：
 
 ```java
-@Query(value = "INSERT INTO ... VALUES (...) ON CONFLICT ON CONSTRAINT <约束名> DO NOTHING",
+@Query(value = "INSERT INTO ... VALUES (...) ON CONFLICT (<唯一键列清单>) DO NOTHING",
        nativeQuery = true)
 void upsertXxx(...);
 ```
 
-实例：`VenueViewService.recordView`（浏览记录按天去重）。早期实现为 check-then-act（先 SELECT 存在性再 INSERT），多一次跨洲往返且 SELECT 与 INSERT 之间存在并发窗口——upsert 同时消除两者。
+**冲突目标必须用列清单推断（`ON CONFLICT (col1, col2, ...)`），禁止 `ON CONFLICT ON CONSTRAINT`**：后者只匹配 UNIQUE/EXCLUDE **约束**，不匹配 `CREATE UNIQUE INDEX` 创建的唯一**索引**——V1 基线 qwt_venue_views 用唯一索引形态，旧 upsert 的 ON CONSTRAINT 写法在生产库每次抛错且被 fire-and-forget 静默吞掉（浏览来源折线全 0 的潜在根因，V21 修复）。列推断按列集合匹配，对索引/约束两种形态均健壮（2026-08-13 教训沉淀）。
+
+实例：`VenueViewService.recordView`（浏览记录按天按来源去重，唯一键 = venue_id, user_id, view_date, source）。早期实现为 check-then-act（先 SELECT 存在性再 INSERT），多一次跨洲往返且 SELECT 与 INSERT 之间存在并发窗口——upsert 同时消除两者。
 
 **② 需要依据已有行状态分支（恢复软删 / toggle / 频率限制）→ find-then-modify + 唯一约束 catch 兜底**。此类场景 SELECT 是"必要读"（要拿到已有行才能决定更新/恢复/切换），不属于冗余往返；check-then-act 的并发窗口由 catch 收口：
 

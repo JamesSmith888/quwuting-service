@@ -11,10 +11,11 @@ package org.quwuting.quwutingservice.venue.enums;
  *       解析到 from=search 参数为判据——2026-08-13 晚新增，来源图第三折线）</li>
  *   <li>OTHER — 其他来源（收藏页无快照直进、深链、旧版本客户端未上报等，兜底默认）</li>
  * </ul>
- * 语义约定：
+ * 语义约定（V21 起）：
  * <ul>
- *   <li>已登录用户按 (venue_id, user_id, view_date) 按天去重，upsert 保留「首次来源」——
- *       归因语义上首次进入路径最有分析价值（先列表后分享，当天记 LIST）；</li>
+ *   <li>已登录用户按 (venue_id, user_id, view_date, source) 按天按来源去重——多渠道独立
+ *       计数、互不覆盖，搜索进入必计 SEARCH（2026-08-13 晚产品决策：搜索/列表是不同流量）；
+ *       单一来源一天一条、全来源合计最多 4 条/人/天的防刷上限不变；</li>
  *   <li>匿名用户不去重，每次访问均按当次来源记录（60s IP 频控兜底）；</li>
  *   <li>枚举类列不加 CHECK 约束（项目约定），非法值由应用层防御（见
  *       {@link org.quwuting.quwutingservice.venue.service.VenueViewService}）。</li>

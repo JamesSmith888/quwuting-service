@@ -71,7 +71,7 @@ public class VenueResponseMapper {
      *
      * @param topReactions Top Reaction 徽标列表
      * @param isHot        是否为城市内热门场所（城市内 top 20% 且热度分 ≥ 门槛）
-     * @param viewCount    累计浏览量（全量历史口径 = qwt_venue_views 行数，按天去重 PV
+     * @param viewCount    累计浏览量（全量历史口径 = qwt_venue_views 行数，按天按来源去重 PV
      *                     含匿名，与 VenueHeatResponse.viewCount30d 同源同口径的全量版）。
      *                     语义边界：这是「该门店浏览量」的事实字段——列表/收藏/详情
      *                     等任何消费场景传真实值（批量查询见

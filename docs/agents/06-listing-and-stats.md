@@ -83,7 +83,7 @@ Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(
 
 `VenueResponse` 新增 `viewCount` 字段（long，全量历史口径），驱动列表卡片底部「👁 浏览数」不起眼展示（前端 `formatViewCount` 格式化 10/100/1.2K/10K）。
 
-- **口径**：`qwt_venue_views` 全量行数（按天去重 PV，含匿名）——与热度页 `viewCount30d`（`VenueHeatService` / `VenueRepository.HEAT_SCORE`）**同源同口径的全量版**，仅去掉 30 天窗口。不加累计计数器列、不加迁移：视图表本身即全量事实源。
+- **口径**：`qwt_venue_views` 全量行数（按天按来源去重 PV，含匿名；V21 起唯一键含 source，多渠道各自计数）——与热度页 `viewCount30d`（`VenueHeatService` / `VenueRepository.HEAT_SCORE`）**同源同口径的全量版**，仅去掉 30 天窗口。不加累计计数器列、不加迁移：视图表本身即全量事实源。
 - **查询实现**：`VenueViewRepository.countByVenueIds(List<Long>)`（`IN :ids + GROUP BY venue_id` 一次覆盖整页，返回 `(venueId, count)` 二元组；空集合防御——`IN ()` 语法错误，参照 `batchGetBadges` 判空模式）+ 单店 `countByVenueId`（详情页基础响应用，命中 `(venue_id, view_date)` 索引毫秒级）。
 - **消费方（2026-08-12 新增，语义同 isHot 教训——禁止消费场景传默认 0）**：
   - 城市列表 `VenueService.listVenues`：批量查后走 Mapper **四参重载**传真实值；
