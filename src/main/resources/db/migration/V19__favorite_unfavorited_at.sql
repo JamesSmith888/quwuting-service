@@ -1,0 +1,21 @@
+-- ── V19：取消收藏时刻（qwt_favorites.unfavorited_at，2026-08-13 新增） ──────
+-- 需求（用户）：收藏趋势统计图需新增「取消收藏」折线，与「新增收藏」并排对比，
+-- 使"净收藏变化"可被趋势图验证（顶部收藏总数 vs 近30天趋势的口径鸿沟根因之一）。
+--
+-- 根因：qwt_favorites 取消收藏是软删除（deleted=true，行保留），但没有任何列
+-- 记录"取消动作发生在哪一刻"——收藏趋势只能按 created_at 统计新增，取消行为
+-- 在时间轴上完全不可见，趋势图与顶部收藏总数（全量历史累计）必然对不上。
+--
+-- 设计要点：
+-- 1. unfavorited_at（timestamp(6)，可空）承载"最近一次取消收藏"的时刻：
+--    - NULL = 当前处于收藏态（或从未收藏后未取消过）；
+--    - 有值 = 最近一次取消收藏的时刻（该行当前 deleted=true 或之后被重新收藏）；
+-- 2. 语义为"动作时刻"而非"状态时刻"：取消收藏时写入 now；重新收藏（restore，
+--    deleted=false）时清空为 NULL——避免把"已恢复的收藏"误计为一次取消；
+-- 3. 与 created_at（首次收藏时刻，restore 不刷新）配合：同一用户/门店的行保留
+--    整条收藏生命周期，新增/取消两个序列可独立按日分组统计；
+-- 4. 可空列 + 应用层写入（FavoriteService 是唯一写方），无默认值、无迁移回填
+--    （历史取消动作无法回溯，取消趋势数据自本版本上线日起积累，属已知局限）；
+-- 5. 热度趋势 mega-query（VenueRepository.countDailyTrends）新增按
+--    unfavorited_at 分组的子查询，走现有索引即可（无新增索引必要）。
+ALTER TABLE qwt_favorites ADD COLUMN unfavorited_at timestamp(6);

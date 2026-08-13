@@ -56,7 +56,7 @@ public class VenueViewService {
      *
      * @param venueId 场所 ID
      * @param userId  用户 ID，匿名时为 null（匿名记录参与 IP 频控，不参与按天去重）
-     * @param source  浏览来源（LIST/SHARE/OTHER），null 或未知值兜底 OTHER
+     * @param source  浏览来源（LIST/SHARE/SEARCH/OTHER），null 或未知值兜底 OTHER
      */
     @Transactional
     public void recordView(Long venueId, Long userId, ViewSource source) {

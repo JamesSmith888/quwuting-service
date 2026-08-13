@@ -100,6 +100,8 @@ public class VenueHeatService {
      * 根因：时间范围刷选控件（略缩图）需要足够长的全量窗口才有"缩放"意义——
      * 全量=趋势窗口，默认选中最近 14 天，用户可放大到全量或缩小到 7 天；
      * 14 天全量无法表达"拉近看 7 天"的语义。
+     * 2026-08-13 实时化：骨架 = [今天-30, 今天] 共 31 个自然日（含今日），
+     * 该常量语义为"近30天 + 今日"，数值不变（窗口起点仍往前推 30 天）。
      */
     private static final int TREND_WINDOW_DAYS = 30;
 
@@ -173,23 +175,28 @@ public class VenueHeatService {
     private VenueHeatResponse computeHeat(Long venueId) {
         Venue venue = venueLookupService.findById(venueId);
 
-        // 统计口径统一锚定在「昨天」：所有滚动窗口（近30天/近14天）的排他上界固定为
-        // 今天 0 点（即只统计到昨天 24 点），不掺入当天尚未走完的部分。
-        // 根因：当天数据是"半天"，与其余"整天"数据混在同一窗口聚合/对比（尤其是逐日趋势图）
-        // 会系统性地把最新一天拉低，造成"数据在往下掉"的错觉；改为固定日期边界后，同一天内
-        // 多次请求的统计结果也保持稳定，不再随请求时刻漂移。
+        // 统计口径（2026-08-13 由「截至昨日」改为实时）：所有滚动窗口（近30天）的排他
+        // 上界统一为请求时刻 now——含今日已发生的数据（用户需求：统计图实时）。
+        // 根因与权衡：旧口径锚定「昨天 24 点」是防"当天半天数据与整天数据混在同一窗口
+        // 聚合对比造成最新一天被系统性拉低"（2026-07-31 确立）；实时化后今日数据为
+        // "未走完的一天"，同一日内多次请求统计结果会随请求时刻漂移，这是实时性的
+        // 必然代价，由前端 banner「数据实时更新 · 含今日」显性承担口径说明。
+        // 骨架锚点仍按自然日对齐：窗口起始 = 今天 0 点 - 30 天（与 [今天-30, 今天]
+        // 的 31 天骨架严格对应），上界 = now（今天已发生的部分计入今日）。
         LocalDate today = LocalDate.now();
-        LocalDate statsAsOfDate = today.minusDays(1);
-        LocalDateTime windowEnd = today.atStartOfDay();
-        LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
-        LocalDate sinceDate30d = today.minusDays(WINDOW_DAYS);
-        // 活跃上报为实时 TTL 窗口（expires_at > now，TTL 唯一事实源 = 列），是实时事实，
-        // 不受「截至昨日」约束；now 由调用方传入（2026-08-11 由 reportSince 常量窗口迁移）
         LocalDateTime now = LocalDateTime.now();
+        LocalDate statsAsOfDate = today;
+        LocalDateTime windowSince = today.atStartOfDay().minusDays(WINDOW_DAYS);
+        LocalDateTime windowUntil = now;
+        LocalDate sinceDate30d = today.minusDays(WINDOW_DAYS);
+        // views 按 view_date（DATE 列）过滤：上界 = 明天 0 点，覆盖今日全天
+        LocalDate viewUntil = today.plusDays(1);
+        // 活跃上报为实时 TTL 窗口（expires_at > now，TTL 唯一事实源 = 列），是实时事实，
+        // 不受滚动窗口约束
 
         // ── 全部单值计数器：跨 6 张表合并为 1 次 DB 往返（标量子查询 mega-query） ──
         VenueRepository.HeatCounters counters = venueRepository.countHeatCounters(
-                venueId, sinceDate30d, today, since30d, windowEnd, now,
+                venueId, sinceDate30d, viewUntil, windowSince, windowUntil, now,
                 POSITIVE_REACTION_CODES, NEGATIVE_REACTION_CODES);
         long viewCount30d = orZero(counters.getPv());
         long viewUv30d = orZero(counters.getUv());
@@ -209,30 +216,37 @@ public class VenueHeatService {
                 (int) orZero(counters.getReportcount()),
                 counters.getLatestreporttime());
 
-        // ── 趋势（多行时间序列，独立 1 次往返：收藏/浏览（含来源分列）/正负向 Reaction/
-        //    收到积分六序列合一，近30天每日、截至昨天、缺失日补零——见 VenueRepository.countDailyTrends） ──
-        List<FavoriteTrendPoint> favoriteTrend = new ArrayList<>(TREND_WINDOW_DAYS);
-        List<FavoriteTrendPoint> viewTrend = new ArrayList<>(TREND_WINDOW_DAYS);
+        // ── 趋势（多行时间序列，独立 1 次往返：收藏（含取消收藏）/浏览（含来源分列）/
+        //    正负向 Reaction/收到积分八序列合一，近30天+今日、缺失日补零——
+        //    见 VenueRepository.countDailyTrends） ──
+        List<FavoriteTrendPoint> favoriteTrend = new ArrayList<>(TREND_WINDOW_DAYS + 1);
+        List<FavoriteTrendPoint> unfavoriteTrend = new ArrayList<>(TREND_WINDOW_DAYS + 1);
+        List<FavoriteTrendPoint> viewTrend = new ArrayList<>(TREND_WINDOW_DAYS + 1);
         List<org.quwuting.quwutingservice.venue.dto.response.ViewSourceTrendPoint> viewSourceTrend =
-                new ArrayList<>(TREND_WINDOW_DAYS);
-        List<ReactionTrendPoint> reactionTrend = new ArrayList<>(TREND_WINDOW_DAYS);
-        List<FavoriteTrendPoint> pointsTrend = new ArrayList<>(TREND_WINDOW_DAYS);
+                new ArrayList<>(TREND_WINDOW_DAYS + 1);
+        List<ReactionTrendPoint> reactionTrend = new ArrayList<>(TREND_WINDOW_DAYS + 1);
+        List<FavoriteTrendPoint> pointsTrend = new ArrayList<>(TREND_WINDOW_DAYS + 1);
         for (VenueRepository.DailyTrendRow row : venueRepository.countDailyTrends(
-                venueId, sinceDate30d, statsAsOfDate, sinceDate30d, today,
-                since30d, windowEnd, POSITIVE_REACTION_CODES, NEGATIVE_REACTION_CODES)) {
+                venueId, sinceDate30d, statsAsOfDate, sinceDate30d, viewUntil,
+                windowSince, windowUntil, POSITIVE_REACTION_CODES, NEGATIVE_REACTION_CODES)) {
             String day = row.getDay().toString();
             favoriteTrend.add(new FavoriteTrendPoint(day, orZero(row.getFavcount())));
+            // 取消收藏趋势（V19：unfavorited_at 非空行按日分组；与新增收藏同骨架同窗口）
+            unfavoriteTrend.add(new FavoriteTrendPoint(day, orZero(row.getUnfavcount())));
             viewTrend.add(new FavoriteTrendPoint(day, orZero(row.getViewcount())));
             viewSourceTrend.add(new org.quwuting.quwutingservice.venue.dto.response.ViewSourceTrendPoint(
                     day, orZero(row.getViewlistcount()), orZero(row.getViewsharecount()),
-                    // other = 全量 - list - share（同源口径交叉校验；直接 COUNT 亦可，减法省一次扫描）
-                    Math.max(0L, orZero(row.getViewcount()) - orZero(row.getViewlistcount()) - orZero(row.getViewsharecount()))));
+                    // search = 列表页搜索结果进入（2026-08-13 晚新增第三折线）
+                    orZero(row.getViewsearchcount()),
+                    // other = 全量 - list - share - search（同源口径交叉校验；直接 COUNT 亦可，减法省一次扫描）
+                    Math.max(0L, orZero(row.getViewcount()) - orZero(row.getViewlistcount())
+                            - orZero(row.getViewsharecount()) - orZero(row.getViewsearchcount()))));
             reactionTrend.add(new ReactionTrendPoint(day, orZero(row.getPosreaction()), orZero(row.getNegreaction())));
             pointsTrend.add(new FavoriteTrendPoint(day, orZero(row.getPoints())));
         }
 
         // ── 满意度（各维度等权均分，近30天窗口；raters 不足样本量时直接跳过查询） ──
-        Double satisfactionScore = computeSatisfaction(venueId, since30d, windowEnd, ratingTotalCount);
+        Double satisfactionScore = computeSatisfaction(venueId, windowSince, windowUntil, ratingTotalCount);
 
         // ── 综合热度指数（满意度为中性偏移：(分−6)×20，低于 6 分扣分；
         //    积分权重来自 PointsProperties——运营可调，V2 三阶段校准机制） ──
@@ -266,7 +280,7 @@ public class VenueHeatService {
                 + " + " + positiveReactionCount30d + "×" + VenueHeatWeights.REACTION
                 + " + " + pointsReceived30d + "×" + pointsWeight
                 + satisfactionTerm + clampSuffix;
-        String formulaDetail = "热度公式：浏览量(" + viewCount30d + ")×" + VenueHeatWeights.VIEW + " + 收藏总数("
+        String formulaDetail = "站内热度公式：浏览量(" + viewCount30d + ")×" + VenueHeatWeights.VIEW + " + 收藏总数("
                 + favoriteCount + ")×" + VenueHeatWeights.FAVORITE
                 + " + 近30天新增收藏(" + newFavoriteCount30d + ")×" + VenueHeatWeights.NEW_FAVORITE
                 + " + 动态总数(" + postCount + ")×" + VenueHeatWeights.POST
@@ -280,10 +294,10 @@ public class VenueHeatService {
                 + (satisfactionScore != null
                         ? "当前满意度" + satisfactionScore + "分。"
                         : "当前评价人数不足3人，满意度不参与计算。")
-                + "负向反馈（如服务问题、排队太久）不计入热度，单独展示。"
+                + "负向反馈（如服务问题、排队太久）不计入站内热度，单独展示。"
                 + "积分权重为运营可调参数（当前×" + pointsWeight + "），按数据分布校准。"
                 + (heatClamped
-                        ? "满意度负偏移使总分低于0，热度指数按0计（不出现负热度）。"
+                        ? "满意度负偏移使总分低于0，站内热度按0计（不出现负热度）。"
                         : "");
 
         // ── 状态可信度（三维判定：状态类型 × 稳定性 × 持续天数；活跃报告 override） ──
@@ -298,7 +312,7 @@ public class VenueHeatService {
         return new VenueHeatResponse(
                 heatScore,
                 viewCount30d, viewUv30d,
-                favoriteCount, newFavoriteCount30d, favoriteTrend, viewTrend, viewSourceTrend, reactionTrend,
+                favoriteCount, newFavoriteCount30d, favoriteTrend, unfavoriteTrend, viewTrend, viewSourceTrend, reactionTrend,
                 postCount, newPostCount30d,
                 ratingCount30d, positiveReactionCount30d, negativeReactionCount30d,
                 pointsReceivedTotal, pointsReceived30d, pointsTrend, giftsReceived,

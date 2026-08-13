@@ -96,6 +96,9 @@ public class FavoriteService {
                 return; // 已收藏，幂等（无写入，不需逐出缓存）
             }
             fav.setDeleted(false); // 重新收藏（恢复逻辑删除的记录）
+            // 清空取消时刻：该行恢复为收藏态，unfavorited_at 不能再被计为一次取消
+            // （取消趋势按 unfavorited_at 分组——残留旧值会让"已恢复的收藏"误计取消）
+            fav.setUnfavoritedAt(null);
             favoriteRepository.save(fav);
             venueHeatService.invalidate(venueId);
             return;
@@ -113,13 +116,18 @@ public class FavoriteService {
         venueHeatService.invalidate(venueId);
     }
 
-    /** 取消收藏（幂等：未收藏则忽略），同步失效热度缓存（理由同 {@link #addFavorite}） */
+    /**
+     * 取消收藏（幂等：未收藏则忽略），同步失效热度缓存（理由同 {@link #addFavorite}）。
+     * 取消时刻写入 unfavoritedAt（V19）——「收藏趋势 · 取消收藏」折线按此列按日分组，
+     * 使"新增 − 取消"的净变化可被趋势图验证（见 V19 迁移注释与后端 AGENTS.md「趋势」）。
+     */
     @Transactional
     public void removeFavorite(Long userId, Long venueId) {
         favoriteRepository.findByUserIdAndVenueId(userId, venueId)
                 .filter(fav -> !fav.isDeleted())
                 .ifPresent(fav -> {
                     fav.setDeleted(true);
+                    fav.setUnfavoritedAt(java.time.LocalDateTime.now());
                     favoriteRepository.save(fav);
                     venueHeatService.invalidate(venueId);
                 });

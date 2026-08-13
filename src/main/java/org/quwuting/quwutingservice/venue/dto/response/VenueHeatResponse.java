@@ -28,14 +28,27 @@ public record VenueHeatResponse(
         /** 近30天新增收藏 */
         long newFavoriteCount30d,
         /**
-         * 近30天每日新增收藏趋势（收藏趋势图用），按日期升序，无收藏的日期已补零。
+         * 近30天每日新增收藏趋势（收藏趋势图「新增收藏」折线用），按日期升序，无收藏的日期已补零。
          * 窗口与其余滚动指标一致为 30 天（2026-08-08 由 14 天扩展——时间范围刷选
-         * 控件需要足够长的全量窗口才能"缩放"，见 AGENTS.md「时间范围刷选控件」）。
+         * 控件需要足够长的全量窗口才能"缩放"，见 AGENTS.md「时间范围刷选控件」）；
+         * 2026-08-13 实时化后含今日（骨架 31 天，与 viewTrend 等序列同构）。
+         * 注意：本序列是"近30天新增"窗口口径，与 favoriteCount（全量历史累计）不同——
+         * 顶部收藏数 > 0 但近30天无新增收藏时本序列恒 0，属正常口径差异（前端空图
+         * 恒渲染 + 提示行承接，见前端 AGENTS.md「小程序内联图表渲染规范」）。
          */
         List<FavoriteTrendPoint> favoriteTrend,
         /**
+         * 近30天每日取消收藏趋势（收藏趋势图「取消收藏」折线用，2026-08-13 V19 新增），
+         * 与 favoriteTrend 同骨架同窗口（date + count），按日期升序已补零。
+         * 数据源 = qwt_favorites.unfavorited_at（取消动作时刻，FavoriteService 唯一写方）：
+         * 取消收藏写入、重新收藏清空——本序列计"取消动作"，与「新增收藏」并排呈现后，
+         * "新增 − 取消 = 净变化"可被趋势图验证（顶部收藏总数 = 历史新增 − 历史取消的
+         * 理论恒等式）。历史取消动作无时间戳可回溯，数据自 V19 上线日起积累（已知局限）。
+         */
+        List<FavoriteTrendPoint> unfavoriteTrend,
+        /**
          * 近30天每日浏览数趋势（浏览趋势图用），结构与收藏趋势一致（date + count）。
-         * 浏览记录按日去重计数，含匿名（与 viewCount30d 同源同口径，截至昨日）。
+         * 浏览记录按日去重计数，含匿名（与 viewCount30d 同源同口径，含今日实时）。
          */
         List<FavoriteTrendPoint> viewTrend,
         /**
@@ -73,7 +86,7 @@ public record VenueHeatResponse(
         long pointsReceived30d,
         /**
          * 近30天每日收到积分趋势（「收到积分」统计图用），按日期升序已补零。
-         * 与其余趋势序列同构（date + count），口径一致（截至昨日、30 天）。
+         * 与其余趋势序列同构（date + count），口径一致（含今日实时、31 天骨架）。
          */
         List<FavoriteTrendPoint> pointsTrend,
         /**
@@ -140,10 +153,12 @@ public record VenueHeatResponse(
         String formulaDetail,
 
         /**
-         * 滚动窗口统计口径的截止日期（yyyy-MM-dd，即"昨天"）。
-         * 除 currentStatusDays/currentStatus/activeReportCount/latestReportTime 外的所有统计字段
-         * 均只统计到该日期 24 点为止，不含当天尚未走完的数据。
-         * 前端必须在页面醒目展示该字段，避免用户误将"半天数据"当作完整趋势解读。
+         * 滚动窗口统计口径的截止日期（yyyy-MM-dd，2026-08-13 实时化后 = 今天）。
+         * 所有统计字段（除 currentStatusDays/currentStatus/activeReportCount/
+         * latestReportTime 外）均统计到请求时刻（含今日已发生的数据），同一天内多次
+         * 请求结果随请求时刻漂移——实时口径的必然代价，前端 banner「数据实时更新 ·
+         * 含今日」显性承担口径说明（由「截至昨日」口径迁移，见后端 AGENTS.md
+         * 「统计口径」章节）。
          */
         String statsAsOfDate
 ) {}
