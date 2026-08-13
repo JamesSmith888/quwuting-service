@@ -415,11 +415,11 @@ SQL 侧镜像一致性由 `VenueHeatServiceTest` 公式测试 + 本 AGENTS.md �
 
 **浏览记录（`qwt_venue_views`）**：已登录用户按 `(venueId, userId, viewDate)` 联合唯一约束去重（同一天仅一条）；匿名用户 `userId=null`，无法按身份去重，2026-08 起叠加 **60s 简单频控**（`VenueViewService` 内嵌 Caffeine，key = `venueId:客户端IP`，X-Forwarded-For 第一个地址，取不到时降级为固定 key 的场所级防抖）——压制脚本连点/自动刷新放大 PV。频控尽力而为，多 IP 分布式刷无法拦截；已登录用户由 upsert 按天去重，无需频控。前端进入详情页时 fire-and-forget 调用 `POST /venues/{id}/view`，失败静默。
 
-**浏览来源（`qwt_venue_views.source`，2026-08-13 新增「浏览来源」统计图）**：`source` 列（varchar(16) 非空，默认 `'OTHER'`，V17 迁移）承载来源枚举 `ViewSource`：`LIST`=列表页进入、`SHARE`=分享卡片打开、`OTHER`=其他（搜索/收藏/深链/历史兜底）。语义约定：
+**浏览来源（`qwt_venue_views.source`，2026-08-13 新增「浏览来源」统计图）**：`source` 列（varchar(16) 非空，默认 `'OTHER'`，V18 迁移）承载来源枚举 `ViewSource`：`LIST`=列表页进入、`SHARE`=分享卡片打开、`OTHER`=其他（搜索/收藏/深链/历史兜底）。语义约定：
 - **首次来源**：已登录用户按天去重，upsert `ON CONFLICT DO NOTHING` 保留首次来源（先列表进入后分享打开，当天记 LIST）——归因语义上首次进入路径最有分析价值；
 - **匿名不去重**：每次访问均按当次来源记录（60s 频控兜底）；
 - **兼容旧客户端**：`POST /venues/{id}/view` 的 body `{source}` 可空，`VenueController` 对 null/非法值兜底 `OTHER`（`VenueViewService.normalizeSource` 第二道防线）——旧版本不传 source 也正常工作；
-- **历史局限**：V17 上线前的存量行全部 `OTHER`，来源图数据自上线日起积累，前端文档已注明。
+- **历史局限**：V18 上线前的存量行全部 `OTHER`，来源图数据自上线日起积累，前端文档已注明。
 
 **状态变迁日志（`qwt_venue_status_logs`）**：每次 `Venue.status` 字段变更时由 `VenueService` 自动写入（含创建时的初始记录 `fromStatus=null`）。记录 `fromStatus`、`toStatus`、`changedBy`、`createdAt`。用于统计"近 N 天暂停营业次数"和"当前状态持续天数"。
 
