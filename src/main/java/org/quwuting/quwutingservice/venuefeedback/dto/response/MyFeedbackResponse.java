@@ -60,6 +60,13 @@ public record MyFeedbackResponse(
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
         LocalDateTime handledAt,
 
+        /**
+         * 该条上报实际到账积分（2026-08-12 新增，闭环展示「已采纳 +N 到账」）。
+         * 仅终态 ADOPTED（采纳并奖励）非空——同事务发分 + 流水幂等保证已到账；
+         * ADOPTED_NO_REWARD / RESOLVED / DISMISSED / PENDING 均为 null。
+         */
+        Integer rewardEarned,
+
         /** 上报时间 */
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
         LocalDateTime createdAt

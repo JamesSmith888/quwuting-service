@@ -71,6 +71,26 @@ public class PointsService {
                     + "积分用于购买礼物送给门店/舞伴，表达支持。"
                     + "礼物不具备任何货币属性，不可提现、不可转让、不可兑换任何实物或服务。";
 
+    /**
+     * 采纳奖励整句激励文案（2026-08-12 上报激励三触点，文案唯一事实源在本服务）。
+     * 金额来自配置 app.points.feedback-reward；整句后端拼接——VenueFeedbackService
+     * 提交响应与公开接口 GET /points/reward-hint 同源消费，前端零硬编码零拼接。
+     */
+    public String rewardHintText() {
+        int reward = pointsProperties.feedbackReward();
+        return "上报被采纳后可获得 " + reward + " 积分，积分可兑换礼物赠送给舞厅/舞伴";
+    }
+
+    /**
+     * 上报采纳奖励提示（2026-08-12 新增，公开只读：详情页入口徽标/反馈面板激励条/
+     * 提交成功提示消费）。<b>匿名可调</b>——激励对匿名用户同样有意义（登录引导场景：
+     * "登录后上报，被采纳可获得 N 积分"），全局配置无隐私，不强求登录。
+     */
+    @Transactional(readOnly = true)
+    public RewardHintResponse rewardHint() {
+        return new RewardHintResponse(pointsProperties.feedbackReward(), rewardHintText());
+    }
+
     private final PointsAccountRepository accountRepository;
     private final PointsTransactionRepository transactionRepository;
     private final DailyCheckinRepository checkinRepository;
@@ -400,6 +420,39 @@ public class PointsService {
         return transactionRepository.sumGiftsReceived(targetType, targetId).stream()
                 .map(row -> new GiftCountResponse((String) row[0], (Long) row[1]))
                 .toList();
+    }
+
+    /**
+     * 某礼物的赠送者列表（礼物墙点击弹层/详情页，2026-08-12——公开只读社交信号）。
+     * 目标可见性：venue 未软删（venueLookupService.findById 兜底 1001）/
+     * dancer NORMAL；与详情页礼物墙同口径，不做登录/自赠校验（查看"谁送了"非资金操作）。
+     */
+    @Transactional(readOnly = true)
+    public List<GifterResponse> gifters(PointsTargetType targetType, Long targetId, String giftCode) {
+        GiftCatalog gift = GiftCatalog.fromCode(giftCode)
+                .orElseThrow(() -> new BusinessException(1001, "礼物不存在"));
+        validateTargetVisible(targetType, targetId);
+        return transactionRepository.findGifters(targetType, targetId, gift.name()).stream()
+                .map(row -> new GifterResponse(
+                        (Long) row[0],
+                        row[1] == null || ((String) row[1]).isBlank() ? "舞友" : (String) row[1],
+                        (String) row[2],
+                        (Long) row[3],
+                        (LocalDateTime) row[4]))
+                .toList();
+    }
+
+    /** 目标存在性 + 可见性校验（只读场景；自赠检测仅限赠送动作，见 gift()） */
+    private void validateTargetVisible(PointsTargetType targetType, Long targetId) {
+        if (targetType == PointsTargetType.VENUE) {
+            venueLookupService.findById(targetId); // 不存在 → 1001
+            return;
+        }
+        Dancer dancer = dancerRepository.findByIdAndDeletedFalse(targetId)
+                .orElseThrow(() -> new BusinessException(1001, "舞伴不存在"));
+        if (dancer.getStatus() != DancerStatus.NORMAL) {
+            throw new BusinessException(1001, "该舞伴资料暂不可见");
+        }
     }
 
     // ─── 目标收到积分（热度公式 / 详情展示 / 趋势同源口径） ───────────────────

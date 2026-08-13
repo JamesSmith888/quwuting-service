@@ -100,4 +100,32 @@ public interface PointsTransactionRepository extends JpaRepository<PointsTransac
             ORDER BY COUNT(pt) DESC, pt.giftCode ASC
             """)
     List<Object[]> sumGiftsReceived(@Param("targetType") PointsTargetType targetType, @Param("targetId") Long targetId);
+
+    /**
+     * 某礼物的赠送者列表（礼物墙点击弹层/详情页，2026-08-12）。
+     * 口径：delta &lt; 0（赠送）且 gift_code = 指定礼物；按 user 聚合件数 + 最近赠送
+     * 时间，再 JOIN 用户表取公开资料（昵称/头像），软删用户排除；
+     * 件数降序、最近赠送降序、用户 id 升序兜底（后端稳定排序，前端零逻辑）。
+     * <p>
+     * 性能（2026-08-12 V17 优化）：<b>先按 user_id 聚合再 JOIN 用户</b>——
+     * 热路径（索引扫描 + GROUP BY user_id，走 qwt_idx_pts_tx_target_gift_code
+     * 部分索引精确匹配 gift_code）不触碰用户表；用户 JOIN 只发生在聚合后的小结果集
+     * 上（而非每条流水先 JOIN 用户再聚合）。返回 Object[]：
+     * {user_id, nickname, avatar_url, count, last_gifted_at}。
+     */
+    @Query("""
+            SELECT u.id, u.nickname, u.avatarUrl, g.cnt, g.lastGiftedAt
+            FROM (
+                SELECT pt.userId AS userId, COUNT(pt) AS cnt, MAX(pt.createdAt) AS lastGiftedAt
+                FROM PointsTransaction pt
+                WHERE pt.targetType = :targetType AND pt.targetId = :targetId
+                  AND pt.delta < 0 AND pt.giftCode = :giftCode
+                GROUP BY pt.userId
+            ) g
+            JOIN User u ON u.id = g.userId AND u.deleted = false
+            ORDER BY g.cnt DESC, g.lastGiftedAt DESC, u.id ASC
+            """)
+    List<Object[]> findGifters(@Param("targetType") PointsTargetType targetType,
+                               @Param("targetId") Long targetId,
+                               @Param("giftCode") String giftCode);
 }

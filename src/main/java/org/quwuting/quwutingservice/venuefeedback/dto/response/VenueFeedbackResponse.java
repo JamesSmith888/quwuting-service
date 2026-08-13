@@ -19,6 +19,12 @@ import java.time.LocalDateTime;
  * <p>
  * 结构化纠错载荷回显（2026-08-10 新增）：field/fieldDisplay/correctedValue
  * 随提交响应原样回传（前端确认提交内容，与 type/typeDisplay 同模式）。
+ * <p>
+ * 上报激励（2026-08-12 新增）：rewardAmount / rewardHint 随提交响应下发——
+ * 前端在入口/面板/成功提示三处透出"采纳可得积分"激励（根因见 AGENTS.md
+ * 「统一用户上报 → 上报激励三触点」）。金额来自配置 app.points.feedback-reward
+ * （唯一事实源），文案由后端整句拼接，前端零硬编码零拼接；匿名上报同样下发
+ * （登录引导场景复用），是否真能领到由 trackable 决定。
  */
 public record VenueFeedbackResponse(
         Long id,
@@ -38,5 +44,9 @@ public record VenueFeedbackResponse(
         String maintenanceHint,
         /** 是否可追踪（userId 落库 = true；匿名上报 = false），驱动"登录后可查看处理结果"提示 */
         boolean trackable,
+        /** 该上报被采纳后可获得的积分（后端配置下发，前端禁止硬编码；匿名同样下发用于登录引导） */
+        int rewardAmount,
+        /** 采纳奖励整句激励文案（后端拼接，如"上报被采纳后可获得 5 积分，积分可兑换礼物赠送"） */
+        String rewardHint,
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime createdAt
 ) {}

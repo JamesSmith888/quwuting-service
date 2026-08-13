@@ -11,6 +11,7 @@ import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.points.dto.CheckInResponse;
+import org.quwuting.quwutingservice.points.dto.GifterResponse;
 import org.quwuting.quwutingservice.points.dto.GiftResponse;
 import org.quwuting.quwutingservice.points.dto.PointsSummaryResponse;
 import org.quwuting.quwutingservice.points.entity.DailyCheckin;
@@ -27,6 +28,7 @@ import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -209,5 +211,52 @@ class PointsServiceTest {
         assertEquals(-5L, tx.getDelta(), "扣减 = -礼物价格");
         assertEquals("HEART", tx.getGiftCode(), "流水必须记录礼物 code");
         assertEquals(PointsTargetType.DANCER, tx.getTargetType());
+    }
+
+    // ─── 礼物赠送者列表（2026-08-12 礼物墙点击弹层） ─────────────────────────
+
+    /** 正常返回：按赠送者聚合映射（昵称/头像/件数/最近赠送时间），无昵称用户回退"舞友"占位 */
+    @Test
+    void gifters_returnsMappedListWithNicknameFallback() {
+        Dancer dancer = new Dancer();
+        dancer.setId(7L);
+        dancer.setCreatedBy(99L);
+        dancer.setStatus(DancerStatus.NORMAL);
+        when(dancerRepository.findByIdAndDeletedFalse(7L)).thenReturn(Optional.of(dancer));
+        LocalDateTime giftedAt = LocalDateTime.of(2026, 8, 12, 14, 30, 0);
+        when(transactionRepository.findGifters(PointsTargetType.DANCER, 7L, "ROSE"))
+                .thenReturn(List.of(
+                        new Object[]{3L, "小美", "http://avatar/3", 2L, giftedAt},
+                        new Object[]{5L, null, null, 1L, giftedAt.minusDays(1)}));
+
+        List<GifterResponse> resp = pointsService.gifters(PointsTargetType.DANCER, 7L, "ROSE");
+
+        assertEquals(2, resp.size(), "按 user 聚合逐行映射");
+        assertEquals(3L, resp.get(0).userId());
+        assertEquals("小美", resp.get(0).nickname());
+        assertEquals("http://avatar/3", resp.get(0).avatarUrl());
+        assertEquals(2L, resp.get(0).count());
+        assertEquals(giftedAt, resp.get(0).lastGiftedAt(), "最近赠送时间原样下发（前端派生今天/昨天/具体时间）");
+        assertEquals("舞友", resp.get(1).nickname(), "无昵称用户回退占位");
+        assertEquals(1L, resp.get(1).count());
+    }
+
+    /** 未知礼物 code：拒绝（GiftCatalog.fromCode empty → 1001，禁直接 valueOf 抛 500） */
+    @Test
+    void gifters_unknownGiftCode_throws() {
+        assertThrows(BusinessException.class,
+                () -> pointsService.gifters(PointsTargetType.VENUE, 1L, "NOT_A_GIFT"));
+    }
+
+    /** 目标不可见（PENDING 舞伴）：拒绝——与详情页礼物墙同可见性口径 */
+    @Test
+    void gifters_invisibleDancer_throws() {
+        Dancer dancer = new Dancer();
+        dancer.setId(7L);
+        dancer.setStatus(DancerStatus.PENDING);
+        when(dancerRepository.findByIdAndDeletedFalse(7L)).thenReturn(Optional.of(dancer));
+
+        assertThrows(BusinessException.class,
+                () -> pointsService.gifters(PointsTargetType.DANCER, 7L, "ROSE"));
     }
 }

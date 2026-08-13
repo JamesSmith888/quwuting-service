@@ -624,7 +624,15 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 - **用户级** `GET /feedbacks/mine`（个人中心：全部场所、各维度上报一览）+ **场所级** `GET /venues/{venueId}/feedbacks/mine`（详情页弹窗：当前门店）——同一 service 方法 `listMyFeedbacks(venueId)` 两个入口，venueId null = 全部
 - 范围：**全部状态**（PENDING/RESOLVED/DISMISSED）均返回——异步审核流程每条记录都有消费价值（待处理 = 未反馈，已处理 = 展示处理结果）；与 status-report 的"已撤销不返回"语义不同（实时信号撤销 = 收回，异步上报无撤销概念）
-- 响应 `MyFeedbackResponse`：id/venueId/venueName/type/typeDisplay/note/**field/fieldDisplay/correctedValue（2026-08-10：结构化纠错载荷随「我的上报记录」回显用户）**/status/statusDisplay/handleNote/handledAt/createdAt——处理结果随记录原样回传
+- 响应 `MyFeedbackResponse`：id/venueId/venueName/type/typeDisplay/note/**field/fieldDisplay/correctedValue（2026-08-10：结构化纠错载荷随「我的上报记录」回显用户）**/status/statusDisplay/handleNote/handledAt/**rewardEarned（2026-08-12 新增：该条上报实际到账积分，仅 ADOPTED 非空——「我的上报记录」闭环展示"+N 积分已到账"）**/createdAt——处理结果随记录原样回传
+
+### 上报激励下发（2026-08-12 新增，根因见前端 AGENTS.md「上报激励三触点」）
+
+采纳发分（`rewardFeedback`，匿名不发/幂等）早已存在，但用户全程不知情、上报无动机。本次把"采纳可得积分（积分可兑换礼物赠送）"按三触点透出，**金额/文案唯一事实源在后端，前端零硬编码零拼接**：
+
+- **公开只读接口 `GET /points/reward-hint`**（PointsController 中与其他 /points 接口"均需登录"的**唯一例外**——全局配置无隐私，激励对匿名同样有意义，登录引导复用）：返回 `RewardHintResponse`（`rewardAmount` = 配置 `app.points.feedback-reward` + `rewardHint` = 整句激励文案）。文案由 `PointsService.rewardHintText()` 拼接（**唯一事实源**），详情页 onLoad 经 `getRewardHint()` 拉取缓存，失败静默降级
+- **`VenueFeedbackResponse` 增 `rewardAmount` + `rewardHint`**（提交响应下发，成功 toast 消费；匿名同样下发用于登录引导，能否真领由 `trackable` 决定）——与 reward-hint 接口**同源消费** `rewardHintText()`，禁止两处各自拼接
+- **`MyFeedbackResponse` 增 `rewardEarned`**（仅终态 ADOPTED 非空——同事务发分 + 流水幂等保证已到账，按 status 派生，不查流水）
 - 管理端 `AdminReportResponse` 同步增加 field/fieldDisplay/correctedValue（2026-08-10）——`/admin/reports` 卡片展示「字段名 → 正确值」纠错建议，管理员按字段核对/跳转详情核实
 
 ### 文本防注入（2026-08-06）
@@ -669,7 +677,8 @@ LocalDateTime since30d = windowEnd.minusDays(WINDOW_DAYS);
 
 - **礼物字典唯一事实源 = `GiftCatalog` 枚举**（`code/emoji/displayName/price` 四元组，`points/enums`）：**价格放枚举而非配置**——价格需与前端镜像同步展示，放配置会造成"展示价 ≠ 实扣价"不一致（前端镜像 `constants/gifts.ts` 与后端枚举同步，改礼物走与 Reaction 字典同款三处同步流程：后端枚举 + 前端镜像 + `scripts/fetch-gift-assets.py` 补 png 资源）；`fromCode()` 解析未知 code 返回 empty 抛 1001（禁直接 `valueOf` 抛 500）；
 - **载荷**：`POST /points/gift` body `{targetType, targetId, giftCode}`（替代 amount）；`GiftResponse` = `{balance, giftId, giftCode, giftName}`（giftName 后端权威下发，前端 toast 零映射）；
-- **聚合（礼物墙）**：`receivedGifts()` 按 `gift_code` GROUP BY 件数降序（部分索引 `qwt_idx_pts_tx_target_gift`），下发 `List<GiftCountResponse>`（code+count，前端查镜像字典渲染图片）——挂 `VenueHeatResponse.giftsReceived` / `DancerDetailResponse.giftsReceived`；与 `receivedTotal/receivedSince`（价值，热度输入项）**同源不同维**；
+- **聚合（礼物墙）**：`receivedGifts()` 按 `gift_code` GROUP BY 件数降序（部分索引 `qwt_idx_pts_tx_target_gift_code`，V17 由 `(target_type, target_id)` 升级为含 `gift_code` 前置列），下发 `List<GiftCountResponse>`（code+count，前端查镜像字典渲染图片）——挂 `VenueHeatResponse.giftsReceived` / `DancerDetailResponse.giftsReceived`；与 `receivedTotal/receivedSince`（价值，热度输入项）**同源不同维**；
+- **赠送者列表（2026-08-12 V17 性能优化）**：`GET /points/gifters`（礼物墙点击弹层/详情页）按 `(target_type, target_id, gift_code)` 精确过滤并按 `user_id` 聚合——查询**先按 user_id 聚合再 JOIN 用户表**（热路径索引扫描 + 聚合不触碰用户表，JOIN 只发生在聚合后小结果集上），走 `qwt_idx_pts_tx_target_gift_code` 部分索引（旧 `qwt_idx_pts_tx_target_gift` 是其严格前缀子集，V17 直接替换防写放大）；
 - **循环依赖（VenueHeatService → PointsService）**：PointsService 依赖 VenueHeatService（赠送后失效缓存），VenueHeatService 回源需读礼物聚合——构造器注入 PointsService 用 **`@Lazy` 打破**（热度为缓存回源场景，延迟解析安全）；
 - **存量数据**：V2 直接积分赠送流水 `gift_code` 为 NULL——聚合天然排除（展示口径=礼物时代数据），价值口径（SUM(delta)）不受影响（热度公式输入保持）。
 

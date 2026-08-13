@@ -9,6 +9,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.db.DbConstraintViolations;
 import org.quwuting.quwutingservice.common.text.TextSanitizer;
 import org.quwuting.quwutingservice.common.web.ClientIpResolver;
+import org.quwuting.quwutingservice.config.PointsProperties;
 import org.quwuting.quwutingservice.config.ReportsProperties;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.enums.MessageType;
@@ -96,6 +97,7 @@ public class VenueFeedbackService {
     private final VenueFeedbackRepository venueFeedbackRepository;
     private final VenueRepository venueRepository;
     private final ReportsProperties reportsProperties;
+    private final PointsProperties pointsProperties;
     private final org.quwuting.quwutingservice.points.service.PointsService pointsService;
     private final org.quwuting.quwutingservice.message.service.MessageService messageService;
 
@@ -381,6 +383,16 @@ public class VenueFeedbackService {
         return "已通知管理员，我们会在 " + reportsProperties.maintenanceDays() + " 日内维护好";
     }
 
+    /**
+     * 采纳奖励激励文案（2026-08-12 新增，上报激励三触点）。
+     * 文案唯一事实源在 PointsService.rewardHintText()（金额来自配置
+     * app.points.feedback-reward）——提交响应与公开接口 GET /points/reward-hint 同源，
+     * 前端零硬编码零拼接。
+     */
+    private String rewardHint() {
+        return pointsService.rewardHintText();
+    }
+
     private VenueFeedbackResponse toResponse(VenueFeedback feedback, String maintenanceHint) {
         return new VenueFeedbackResponse(
                 feedback.getId(),
@@ -395,6 +407,8 @@ public class VenueFeedbackService {
                 feedback.getStatus().getDisplayName(),
                 maintenanceHint,
                 feedback.getUserId() != null,
+                pointsProperties.feedbackReward(),
+                rewardHint(),
                 feedback.getCreatedAt()
         );
     }
@@ -414,6 +428,8 @@ public class VenueFeedbackService {
                 feedback.getStatus().getDisplayName(),
                 feedback.getHandleNote(),
                 feedback.getHandledAt(),
+                // 仅「采纳并奖励」（ADOPTED）到账非空：同事务发分 + 流水幂等保证已发放
+                feedback.getStatus() == ReportStatus.ADOPTED ? pointsProperties.feedbackReward() : null,
                 feedback.getCreatedAt()
         );
     }
