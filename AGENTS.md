@@ -475,6 +475,8 @@ LocalDate viewUntil = today.plusDays(1);                      // views 按 DATE 
 - **口径差异（收藏趋势 vs 顶部收藏数）**：`favoriteCount` = 全量历史累计收藏（`deleted=false` 全量 COUNT），`favoriteTrend` = 近30天新增窗口——顶部有值但近30天无新增时趋势恒 0 属正常口径（2026-08-13 用户反馈根因；前端空图恒渲染 + 提示行承接，勿把两口径强行对齐）
 - 旧 `FavoriteRepository.countDailyFavoritesSince` 已删除（唯一调用方迁至趋势 mega-query）
 
+**收藏/取消收藏写操作频控（2026-08-13 防刷）**：`FavoriteService` 对**真实状态切换写入**（首次收藏 / 恢复收藏 / 取消收藏）做 60s 窗口阈值频控（内存 Caffeine，key = `user:venue`，窗口内放行 `TOGGLE_RATE_LIMIT_PER_WINDOW=3` 次，超出幂等忽略）。根因：「新增收藏」只在首次收藏时计（restore 不新增行、created_at 不变），天然防膨胀；但「取消收藏」每次真实取消都写 `unfavorited_at` 新时刻——恶意"收藏→取消"循环会把取消折线刷高（新增 +1、取消 +N 口径不对称）。频控后循环被压制成窗口内最多 3 次真实写入（正常用户 1 分钟 toggle 极少超 3 次，覆盖"收藏→取消→再收藏"），取消折线最多每分钟 +2，与真实操作语义一致。**幂等路径（已收藏再收藏等无写入）不计数不频控**——正常误点无害。与既有频控同族（VenueViewService 匿名浏览 60s、feedback 60s）；前端 `venue-detail.onToggleFavorite` 另有 in-flight 守卫防连点（请求完成前忽略重复点击）。
+
 ### 营业稳定性
 
 - "暂停营业次数" = 近 30 天内（截至昨日）`toStatus = SUSPENDED` 的状态变迁记录数

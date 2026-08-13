@@ -1,5 +1,7 @@
 package org.quwuting.quwutingservice.favorite.service;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.favorite.entity.Favorite;
@@ -21,6 +23,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -35,6 +38,46 @@ public class FavoriteService {
     private final VenueHeatService venueHeatService;
     /** 浏览记录（收藏列表响应组装累计浏览量 viewCount 用，2026-08-12 新增） */
     private final VenueViewRepository venueViewRepository;
+
+    // ── 收藏/取消收藏写操作频控（2026-08-13 防刷） ──────────────────────────
+    // 根因（用户反馈："频繁/恶意点击取消收藏、收藏，统计图怎么表现才合理"）：
+    // 「新增收藏」只在首次收藏时计（restore 不新增行、created_at 不变），天然防膨胀；
+    // 但「取消收藏」每次真实取消都写 unfavorited_at（新时刻）→ 恶意"收藏→取消"循环
+    // 会把取消折线刷高（新增只 +1、取消却 +N，口径不对称）。
+    // 方案：同 user+venue 的**真实状态切换写入**（新增/恢复/取消）做 60s 窗口阈值频控
+    // ——窗口内放行 TOGGLE_RATE_LIMIT_PER_WINDOW 次（正常用户 1 分钟内 toggle 极少
+    // 超过 3 次，覆盖"收藏→取消→再收藏"；脚本连点被压制成窗口内最多 3 次真实写入，
+    // 取消折线最多每分钟 +2，与真实操作语义一致）。
+    // 与既有频控同族（VenueViewService 匿名浏览 60s、feedback 60s），内存 Caffeine
+    // 单机近似（多实例下窗口放大，仍能压制脚本连点）；幂等路径（已收藏再收藏等
+    // 无写入）不计数不频控——正常用户误点无害。
+    private static final int TOGGLE_RATE_LIMIT_PER_WINDOW = 3;
+    private static final long TOGGLE_RATE_LIMIT_SECONDS = 60;
+
+    private final Cache<String, Integer> favoriteToggleLimiter = Caffeine.newBuilder()
+            .maximumSize(10_000)
+            .expireAfterWrite(TOGGLE_RATE_LIMIT_SECONDS, TimeUnit.SECONDS)
+            .build();
+
+    /** 频控 key：user:venue（同一用户对同一场所的 toggle 行为） */
+    private static String toggleKey(Long userId, Long venueId) {
+        return userId + ":" + venueId;
+    }
+
+    /**
+     * 写频控判定（**仅在确认会发生真实写入时调用**，调用即计数）：
+     * 窗口内已达阈值 → 返回 true（本次写入幂等忽略）；否则计数 +1 并返回 false。
+     */
+    private boolean isToggleLimited(Long userId, Long venueId) {
+        String key = toggleKey(userId, venueId);
+        Integer count = favoriteToggleLimiter.getIfPresent(key);
+        if (count != null && count >= TOGGLE_RATE_LIMIT_PER_WINDOW) {
+            log.debug("favorite toggle 频控忽略: userId={}, venueId={}", userId, venueId);
+            return true;
+        }
+        favoriteToggleLimiter.put(key, (count != null ? count : 0) + 1);
+        return false;
+    }
 
     /**
      * 获取用户收藏的场所列表（按收藏时间倒序）。
@@ -93,9 +136,13 @@ public class FavoriteService {
         if (existing.isPresent()) {
             Favorite fav = existing.get();
             if (!fav.isDeleted()) {
-                return; // 已收藏，幂等（无写入，不需逐出缓存）
+                return; // 已收藏，幂等（无写入，不需逐出缓存、不计数频控）
             }
-            fav.setDeleted(false); // 重新收藏（恢复逻辑删除的记录）
+            // 重新收藏（恢复逻辑删除的记录）：真实写入，先过频控（窗口内超阈值则幂等忽略）
+            if (isToggleLimited(userId, venueId)) {
+                return;
+            }
+            fav.setDeleted(false);
             // 清空取消时刻：该行恢复为收藏态，unfavorited_at 不能再被计为一次取消
             // （取消趋势按 unfavorited_at 分组——残留旧值会让"已恢复的收藏"误计取消）
             fav.setUnfavoritedAt(null);
@@ -104,6 +151,10 @@ public class FavoriteService {
             return;
         }
 
+        // 首次收藏：真实写入，先过频控
+        if (isToggleLimited(userId, venueId)) {
+            return;
+        }
         Favorite fav = new Favorite();
         fav.setUserId(userId);
         fav.setVenueId(venueId);
@@ -120,12 +171,17 @@ public class FavoriteService {
      * 取消收藏（幂等：未收藏则忽略），同步失效热度缓存（理由同 {@link #addFavorite}）。
      * 取消时刻写入 unfavoritedAt（V19）——「收藏趋势 · 取消收藏」折线按此列按日分组，
      * 使"新增 − 取消"的净变化可被趋势图验证（见 V19 迁移注释与后端 AGENTS.md「趋势」）。
+     * 真实取消写入前过频控（防频繁/恶意 toggle 刷取消折线，见类注释）。
      */
     @Transactional
     public void removeFavorite(Long userId, Long venueId) {
         favoriteRepository.findByUserIdAndVenueId(userId, venueId)
                 .filter(fav -> !fav.isDeleted())
                 .ifPresent(fav -> {
+                    // 真实取消：先过频控（窗口内超阈值则幂等忽略，不写取消时刻）
+                    if (isToggleLimited(userId, venueId)) {
+                        return;
+                    }
                     fav.setDeleted(true);
                     fav.setUnfavoritedAt(java.time.LocalDateTime.now());
                     favoriteRepository.save(fav);
