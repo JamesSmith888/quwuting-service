@@ -1,5 +1,7 @@
 package org.quwuting.quwutingservice.venue.service;
 
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.exception.BusinessException;
@@ -47,6 +49,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -79,6 +82,36 @@ public class VenueService {
     private final VenueStatusWatcherService venueStatusWatcherService;
     /** 图片内容校验（2026-08-12 恶意文件防线：业务提交时对图片 URL 做内容级校验） */
     private final ImageContentValidator imageValidator;
+
+    /**
+     * 详情接口「公共部分」缓存（2026-08-13 新增，性能优化：详情接口 DB 往返 5→2 次）。
+     * <p>
+     * 根因：getVenueDetail 每次请求都执行 5 次 DB 往返（venue 实体 / badges 聚合 /
+     * viewCount COUNT / detailStats / claim / statusLog）——其中 venue、badges 已有缓存，
+     * 但 viewCount COUNT、statusLog、claimed 属于「与请求用户无关的全局事实」，30s 内
+     * 不变，却每次全查。Supabase 跨洲单次往返 300~500ms，省 2 次即省 600ms~1s 详情延迟。
+     * <p>
+     * 语义边界（与 VenueHeatService 同模式，服务内嵌 Caffeine LoadingCache）：
+     * <ul>
+     *   <li>只缓存<b>公共部分</b>（VenueResponse base + 状态更新时间 + 认领事实）——
+     *       用户相关字段（canManage / hasMyStatusReport / myClaimStatus）永远实时查询；
+     *       canManage 由 venue 实体内存计算（零查询），detailStats 合并单查询，
+     *       claim 仅登录时查（匿名恒 null）；</li>
+     *   <li>refresh-ahead 30s + 硬过期 10min + 单飞：活跃场所不吃同步冷加载，
+     *       与 heat / tagStats / reaction 聚合缓存同族语义；</li>
+     *   <li>新鲜度主保障 = 写路径显式 {@link #invalidateDetailPublic}：场所编辑、
+     *       状态变更（采纳暂停/恢复）、认领审批后立即失效，refresh 仅兜底；</li>
+     *   <li>base.topReactions（默认窗口徽标）内嵌了聚合缓存快照，Reaction toggle 写路径
+     *       只失效聚合缓存、不失效本缓存——30s 内徽标短暂滞后可接受（详情页 Reaction UI
+     *       主流程走 /reactions/stats 独立接口，不依赖 base.topReactions；后者仅承载
+     *       列表快照/兜底展示）。</li>
+     * </ul>
+     */
+    private final LoadingCache<Long, VenueDetailPublic> venueDetailPublicCache = Caffeine.newBuilder()
+            .maximumSize(500)
+            .refreshAfterWrite(30, TimeUnit.SECONDS)
+            .expireAfterWrite(10, TimeUnit.MINUTES)
+            .build(this::computeVenueDetailPublic);
 
     @Transactional
     @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
@@ -173,6 +206,9 @@ public class VenueService {
         // 场所编辑影响热度响应的输出（status/状态日志 → currentStatus / currentStatusDays）——
         // 显式逐出，与其余写路径一致
         venueHeatService.invalidate(id);
+        // 详情公共部分缓存失效：字段/状态变更后 base 响应（含 photos/tickets/status/
+        // statusUpdatedAt/claimed 快照）必须立即重算（2026-08-13 新增）
+        invalidateDetailPublic(id);
         return response;
     }
 
@@ -212,6 +248,8 @@ public class VenueService {
         // 热度失效：status 是热度响应输出（currentStatus / currentStatusDays）的组成部分，
         // 与 updateVenue 的显式逐出同模式（venueHeat 为服务内嵌 LoadingCache，不走 @CacheEvict）
         venueHeatService.invalidate(venueId);
+        // 详情公共部分缓存失效：status 与 statusUpdatedAt（新增状态日志）均属公共事实
+        invalidateDetailPublic(venueId);
     }
 
     /**
@@ -250,6 +288,8 @@ public class VenueService {
         venueStatusWatcherService.notifyStatusChanged(
                 venue.getId(), fromStatus, VenueStatus.OPEN);
         venueHeatService.invalidate(venueId);
+        // 详情公共部分缓存失效：status 与 statusUpdatedAt（新增状态日志）均属公共事实
+        invalidateDetailPublic(venueId);
     }
 
     /**
@@ -258,41 +298,33 @@ public class VenueService {
      * canManage 基于软鉴权上下文计算：平台管理员或门店认领人为 true，匿名请求恒为 false。
      * 该字段仅驱动前端管理入口的展示，安全边界在后端各写操作接口的角色校验。
      * <p>
-     * DB 往返压缩：场所实体经 {@link VenueLookupService#findById} 缓存；Top Reaction 徽标复用
-     * {@link org.quwuting.quwutingservice.venuereaction.service.VenueReactionAggregateService}
-     * 的聚合缓存（与 /reactions/stats 端点共享同一 venueId key，详情页并发请求单飞回源），
-     * 个人参与状态单独实时查询；动态总数与"我是否已上报"合并为单条标量子查询
-     * （{@link VenuePostRepository#findDetailStats}，个人状态实时计算不缓存）。
-     * 缓存全命中时仅 2 次往返，冷启动最多 4 次。
+     * DB 往返压缩（2026-08-13 公共部分缓存后）：
+     * <ul>
+     *   <li><b>公共部分</b>（与请求用户无关）：venue 实体 + 默认窗口 Top Reaction 徽标 +
+     *       累计浏览量 + 状态更新时间 + 认领事实 → 内嵌 Caffeine 缓存
+     *       （{@link #venueDetailPublicCache}，refresh-ahead 30s），命中时零 DB 往返；</li>
+     *   <li><b>用户相关部分</b>（永远实时）：动态总数 + 个人上报标记合并单查询
+     *       （{@link VenuePostRepository#findDetailStats}，匿名 userId=null 时
+     *       hasMyStatusReport 恒 false）；认领申请状态仅登录时查（匿名恒 null）；
+     *       canManage 由 venue 实体（缓存命中）内存计算，零查询。</li>
+     * </ul>
+     * 缓存全命中 + 匿名时仅 1 次 DB 往返（detailStats）；登录命中 2 次（detailStats + claim）。
+     * 冷启动（公共部分回源）最多 4~5 次，回源后其余请求单飞共享。
      */
     @Transactional(readOnly = true)
     public VenueDetailResponse getVenueDetail(Long id) {
-        Venue venue = venueLookupService.findById(id);
-        // 详情基础响应的徽标固定取默认窗口（近7天）——详情页 Reaction 完整统计走 /reactions/stats
-        // （四窗口全量），本字段仅承载列表快照/兜底展示，不参与详情页 Reaction UI 主流程
-        List<ReactionBadge> topReactions = venueReactionService.getBadges(
-                id, UserContext.getCurrentUserId(), ReactionWindow.DAYS_7);
-        // 累计浏览量（全量历史口径，单店 COUNT 命中 (venue_id, view_date) 索引，毫秒级）：
-        // viewCount 是 VenueResponse 事实字段，详情基础响应同样传真实值（见 Mapper 四参重载 javadoc）
-        long viewCount = venueViewRepository.countByVenueId(id);
-        VenueResponse base = venueResponseMapper.toResponse(venue, topReactions, false, viewCount);
-        // 「我是否已上报」必须与活跃计数同一 TTL 口径：hasmyreport 的活跃判定带
-        // expires_at > now 过滤（TTL 唯一事实源 = expires_at 列，2026-08-11 由
-        // created_at >= now-4h 迁移，见 VenuePostRepository.findDetailStats javadoc——
-        // 历史实现漏过滤导致 TTL 过期后详情页"已报告·补充"永不还原）
+        // 公共部分：base 响应 + 状态更新时间 + 认领事实（缓存，见字段注释）
+        VenueDetailPublic pub = venueDetailPublicCache.get(id);
+        // 用户相关部分实时：动态总数 + "我是否已上报"合并单查询（TTL 口径
+        // expires_at > now，匿名 userId=null 时 EXISTS 恒不命中自然返回 false）
         VenuePostRepository.DetailStats detailStats =
                 venuePostRepository.findDetailStats(id, UserContext.getCurrentUserId(), LocalDateTime.now());
-        boolean canManage = computeCanManage(venue);
         long postCount = detailStats.getPostcount() != null ? detailStats.getPostcount() : 0L;
         boolean hasMyStatusReport = Boolean.TRUE.equals(detailStats.getHasmyreport());
-        // 营业状态字段的最近一次变更时间（详情弹窗「营业状态更新」展示源）：
-        // 取自状态日志表最新一条 createdAt，而非整个场所记录的 updatedAt——
-        // 后者任意字段编辑都刷新，语义不匹配"营业状态何时更新的"
-        // 认领状态（2026-08-11，需求「认领舞厅」）：claimed = 门店全局归属事实
-        // （claimed_by 非空）；myClaimStatus = 当前用户对该门店的申请状态
-        // （未登录恒 null，驱动详情页「认领舞厅」菜单项禁用/审核中态，见
-        // VenueDetailResponse javadoc）
-        boolean claimed = venue.getClaimedBy() != null;
+        // canManage：venue 实体（缓存命中）内存计算，零查询
+        boolean canManage = computeCanManage(venueLookupService.findById(id));
+        // 认领申请状态（2026-08-11）：未登录恒 null，登录才查（驱动「认领舞厅」
+        // 菜单项禁用/审核中态，见 VenueDetailResponse javadoc）
         ClaimStatus myClaimStatus = null;
         Long currentUserId = UserContext.getCurrentUserId();
         if (currentUserId != null) {
@@ -302,9 +334,42 @@ public class VenueService {
                     .map(VenueClaim::getStatus)
                     .orElse(null);
         }
-        return new VenueDetailResponse(base, canManage, postCount, hasMyStatusReport,
-                venueStatusLogRepository.findLatestStatusChangeTime(id), claimed, myClaimStatus);
+        return new VenueDetailResponse(pub.base(), canManage, postCount, hasMyStatusReport,
+                pub.statusUpdatedAt(), pub.claimed(), myClaimStatus);
     }
+
+    /**
+     * 详情接口公共部分计算（缓存 loader，勿直接调用——经 {@link #venueDetailPublicCache}）。
+     * 与请求用户无关：默认窗口（近7天）徽标 + 累计浏览量 + 状态最近变更时间 + 认领事实。
+     * 注意 getBadges 传 userId=null（公共聚合不含个人参与态——个人态在 /reactions/stats
+     * 实时返回；base.topReactions 仅承载列表快照/兜底展示）。
+     */
+    private VenueDetailPublic computeVenueDetailPublic(Long id) {
+        Venue venue = venueLookupService.findById(id);
+        List<ReactionBadge> topReactions = venueReactionService.getBadges(
+                id, null, ReactionWindow.DAYS_7);
+        // 累计浏览量（全量历史口径，单店 COUNT 命中 (venue_id, view_date) 索引，毫秒级）：
+        // viewCount 是 VenueResponse 事实字段，详情基础响应同样传真实值（见 Mapper 四参重载 javadoc）
+        long viewCount = venueViewRepository.countByVenueId(id);
+        VenueResponse base = venueResponseMapper.toResponse(venue, topReactions, false, viewCount);
+        return new VenueDetailPublic(base,
+                venueStatusLogRepository.findLatestStatusChangeTime(id),
+                venue.getClaimedBy() != null);
+    }
+
+    /**
+     * 详情公共部分缓存显式失效（写路径调用：场所编辑 / 状态变更 / 认领审批）。
+     * 与 {@link VenueHeatService#invalidate} 同模式——内嵌 LoadingCache 不走
+     * Spring CacheManager，@CacheEvict 无法表达，必须显式调用。
+     */
+    public void invalidateDetailPublic(Long venueId) {
+        venueDetailPublicCache.invalidate(venueId);
+    }
+
+    /**
+     * 详情接口「公共部分」值对象（与请求用户无关，见 {@link #venueDetailPublicCache} 注释）。
+     */
+    private record VenueDetailPublic(VenueResponse base, LocalDateTime statusUpdatedAt, boolean claimed) {}
 
     /**
      * 场所列表：筛选 + 排序 + 距离半径 + 分页。

@@ -13,6 +13,7 @@ import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
+import org.quwuting.quwutingservice.venue.service.VenueService;
 import org.quwuting.quwutingservice.venueclaim.dto.request.CreateVenueClaimRequest;
 import org.quwuting.quwutingservice.venueclaim.dto.response.AdminVenueClaimResponse;
 import org.quwuting.quwutingservice.venueclaim.dto.response.VenueClaimResponse;
@@ -79,6 +80,9 @@ public class VenueClaimService {
     private final UserRepository userRepository;
     private final CacheManager cacheManager;
     private final tools.jackson.databind.ObjectMapper objectMapper;
+    /** 详情公共部分缓存失效（2026-08-13：认领审批后 claimed 快照立即重算；无循环依赖——
+     *  VenueService 依赖本模块的 repository 而非本 service） */
+    private final VenueService venueService;
     /** 图片内容校验（2026-08-12 恶意文件防线：营业执照图片 URL 落库前做内容级校验） */
     private final org.quwuting.quwutingservice.storage.ImageContentValidator imageValidator;
 
@@ -242,6 +246,9 @@ public class VenueClaimService {
         if (cache != null) {
             cache.evict(claim.getVenueId());
         }
+        // 详情公共部分缓存失效（claimed 快照，2026-08-13）：认领审批后
+        // 「认领舞厅」菜单项禁用态需立即生效（30s refresh 兜底太慢，显式失效）
+        venueService.invalidateDetailPublic(claim.getVenueId());
         log.info("venue claim approved: claimId={}, venueId={}, newClaimedBy={}, adminId={}",
                 claimId, claim.getVenueId(), claim.getUserId(), adminId);
     }

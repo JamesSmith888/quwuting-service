@@ -1,0 +1,96 @@
+# 列表排序与城市统计
+
+> **渐进式披露详情文档** —— 由 [AGENTS.md](../../AGENTS.md) 主题索引引用。
+> 维护纪律：本文件只承载单一主题的详细设计；新增细节写到这里，**禁止写回 AGENTS.md**；本文件膨胀超过 ~300 行时，请拆出子主题另建文档，并同步登记到 AGENTS.md 索引表。
+
+---
+
+## 列表排序与城市统计
+
+### 复合评分排序与排序方式（2026-08-06 扩展）
+
+`GET /venues` 支持可选 `latitude` / `longitude`（用户定位，gcj02），列表按服务端复合评分排序（分页正确性要求排序必须在库内完成）。2026-08-06 起支持 `sort`（`VenueSortMode` 枚举：recommended/distance/heat/newest，默认 recommended）与 `radiusKm`（可选，km，距离半径筛选）：
+
+```
+recommended（默认，复合评分）score = sortWeight（运营权重）
+      + 收藏数 × 20 + 动态数 × 10（热度）
+      + 100 / (1 + 距离km)（Haversine 邻近加成，无坐标时为 0）
+distance  = 纯距离升序（Haversine），仅展示有坐标的场所（v.latitude/longitude IS NOT NULL 显式排除），id 兜底 tie-break
+heat      = sortWeight + 收藏数 × 20 + 动态数 × 10（不含距离项，与「热门场所标记」同口径——热度是场所属性，不随请求者位置变化），id 兜底
+newest    = created_at DESC, id DESC
+```
+
+距离项使本地场所在全国列表中自然置顶，跨城市时衰减至可忽略（100km 外加成 ≈ 1），由热度与运营权重决定顺序。产品意图：默认展示全国列表但"本地化感知"，不自动按城市过滤（早期数据稀疏，自动过滤到无数据城市 = 首屏空白）。
+
+**radiusKm 语义**：>0 生效（≤0/null 视为不限，Service 层归一）；与排序方式正交，仅叠加在"含坐标"的查询上（距离计算需要请求者位置为圆心）。无坐标请求携带 radiusKm 时忽略（前端仅在有定位缓存时附带坐标与半径，后端忽略仅作防御）。谓词写法：`AND (:radiusKm IS NULL OR 距离km <= :radiusKm)`——无坐标场所的距离表达式为 NULL，`NULL <= 半径` 为 NULL 自然被排除（"未知距离的场所不承诺在半径内"）。
+
+**distance 排序无定位降级**：前端/用户无定位时无法按距离排序，Service 防御性降级为 recommended 查询（而非空列表/报错）——`VenueService.dispatchListQuery` 的 switch 分流矩阵：recommended（有坐标/无坐标两查询）、distance（仅坐标查询 + 无坐标降级）、heat / newest（仅在有坐标且有半径时才进入 WithRadius 变体，其余走无坐标变体）。
+
+### 双查询拆分（Postgres 平台坑位，重要）
+
+排序拆为多个 JPQL 变体（`searchRanked` 带坐标 / `searchRankedNoLocation` 无坐标 / `searchNearest` / `searchHeat(+WithinRadius)` / `searchNewest(+WithinRadius)`），Service 按"坐标有无 × 排序方式 × 半径有无"显式分流（`dispatchListQuery`），**不要合并为"坐标可空的单查询"**：
+
+Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(:latitude)` 在坐标为 null 时报 `function radians(bytea) does not exist`；SQL 层 `cast(? as float8)` 也救不了（`cannot cast type bytea to double precision`）。唯一干净的解法是让数学函数参数永远非 null——拆查询、Service 分流、含距离数学的查询（`searchRanked` / `searchNearest` / `*WithinRadius`）用原生 `double` 形参（编译期排除 null）。筛选条件由 `VenueRepository.LIST_FILTERS` 编译期常量共享，距离表达式由 `DISTANCE_KM` 常量共享、热度分由 `HEAT_SCORE` 常量共享、半径谓词由 `RADIUS_PREDICATE` 常量共享，避免重复。
+
+**JPQL 文本块拼接约束**：`""" + 常量 + """` 的**开定界符必须后跟换行**（Java 文本块语法：开定界符后只允许空白 + 换行），禁止写成 `""" + X + """ DESC` 之类同行拼接（编译报 "illegal text block open delimiter"）——常量的拼接处必须把后续内容折到下一行。
+
+**JPQL 共享片段（HEAT_SCORE 等）的 HQL 语法约束**（2026-08-08 启动失败根因，已修复）：
+- **根实体必须用实体名 + Java 属性名**：JPQL/HQL（`@Query` 非 native）里 `FROM` 的根实体写数据库表名（`qwt_venue_views` 等）会在启动期查询校验抛 `UnknownEntityException: Could not resolve root entity 'qwt_venue_views'`；列引用也必须用 camelCase 属性名（`vv.venueId` / `vv.viewDate`），不是 snake_case 列名。nativeQuery 查询（`findHotVenueIds` / `countHeatCounters` / `countDailyTrends` 等）不受此约束，仍写表名——两者混在同一文件，改片段前先确认查询是 JPQL 还是 native。
+- **HQL 时间量减法必须带单位后缀**：`CURRENT_DATE - 30` 会被 Hibernate 7 报 `SemanticException: Operand of - is of type 'java.lang.Integer' which is not a temporal amount`，必须写 `CURRENT_DATE - 30 day`。PostgreSQL 原生 SQL 里 `CURRENT_DATE - 30` 合法（日期减整数），nativeQuery 不受影响。
+- 启动期失败先看 `Caused by` 链，Spring Data 对每个 repository 的 @Query 在 bean 创建时逐一校验，修好一个可能暴露下一个（本次连续暴露两处：实体名 → 时间量）。
+
+**native SQL 验证（2026-08-08 线上事故教训，重要）**：`nativeQuery=true` 的查询（`findHotVenueIds` / `countHeatCounters` / `countDailyTrends` 等）**不在启动期校验**——Spring Data 对 repository @Query 的启动校验只覆盖 JPQL（HQL 解析），原生 SQL 是首次调用时懒创建、由**数据库在执行期**解析；Hibernate 7 已移除 `hibernate.query.validate_native_queries`，`hibernate.query.startup_check` 只覆盖注册到 SessionFactory 的命名查询，对 Spring Data repository 原生查询无效。叠加 Mockito 单测 mock 掉 repository，**SQL 文本错误（列引用、别名作用域、时区/类型陷阱）必然漏到运行期**（实例：`findHotVenueIds` 三层子查询重写时中间层漏投影 `heat_score`，外层 WHERE 引用不可见列 → 首请求报 `ERROR: column "heat_score" does not exist`，Position 指向外层引用处）。
+
+**长期规则**：
+1. **改写/新增 native SQL 后必须对真实数据库执行验证**——自动化载体 = `VenueHotVenueIdsSqlTest`（`@Tag("db")` + `@EnabledIfSystemProperty(run.db.tests=true)`，默认跳过不加载上下文）：`./mvnw test -Drun.db.tests=true`（需配置与启动服务相同的数据库/环境变量）；
+2. **多层子查询的列透传契约**：外层 WHERE/ORDER BY 引用的派生列（如 `heat_score`）必须在**每一层中间子查询的投影中出现**——"本层可引用下层列"不等于"外层可引用"，别名作用域逐层收窄，这是本次事故的机械根因；
+3. 单元测试继续 mock repository（SQL 正确性不归单测），但**接线契约**（参数流转、布尔传播）必须有单测锁死（见 `VenueLookupServiceTest` / `FavoriteServiceTest`）。
+
+### 标签筛选（tag，2026-08-12 新增「龙女」快捷筛选）
+
+`GET /venues` 新增可选参数 `tag`：仅返回 `tags` 含该标签**子串**的场所。实现 = `VenueRepository.LIST_FILTERS` 追加 `AND (:tag IS NULL OR v.tags LIKE :tag)`（Service 层包装为 `%xx%`，同 keyword 模式），6 个排序变体查询自动共享（`searchRanked` / `searchRankedNoLocation` / `searchNearest` / `searchHeat(+WithinRadius)` / `searchNewest(+WithinRadius)` 均新增 `@Param tag`）；与城市/状态/热门/距离筛选正交可叠加。
+
+**标签语义（行业黑话）**：舞厅行业以标签声明对「龙女」（聋哑人舞伴群体的行业黑话）的接待政策——「龙女可进」/「龙女」= 允许（线上库实测 91 家，含 11 家冗余同带两标签）、「禁龙」= 禁止（2 家，反向标签）。「龙女」chip 勾选 = 只看允许的店（前端传 `tag=龙女`）。
+
+**匹配口径与已知边界**：`tags` 为 JSON 数组字符串列，子串 LIKE 命中「龙女可进」与「龙女」，**不命中**「禁龙」（无"龙女"子串）；JSON 元素引号天然规避跨标签误匹配（「舞女」不含"龙女"子串）。**已知边界**：未来若新增「禁龙女」类反向标签会被本谓词误命中（元素含"龙女"子串）——新增反向标签须同步本谓词（如排除 `NOT LIKE '%禁%'`）或改用精确元素匹配。LIKE 无索引，数据规模数百级无性能压力。
+
+### 城市词表与筛选
+
+城市 / 区县按标准行政区划名（前端 `picker mode="region"` 产出，如"绍兴市"）**精确匹配**，写入与查询共用同一词表。禁止模糊匹配兜底——会掩盖写入端数据质量问题。存量脏数据走一次性清洗 SQL，不改查询逻辑。
+
+### 城市统计接口
+
+`GET /venues/cities` → `List<CityStatsResponse(city, venueCount)>`，按场所数倒序，供前端"热门城市"数据驱动展示。注意路由：字面量 `/venues/cities` 与路径变量 `/venues/{id}` 共存时 Spring 优先匹配字面量，无需特殊处理。
+
+### 热门场所标记（VenueResponse.isHot）
+
+`VenueResponse` 新增 `isHot` 字段（boolean），标记该场所在同城市中属于热门场所。
+
+- **双条件判定（2026-08-08 确立，修复"热度指数 2 也有热门标签"的伪热门缺陷）**：
+  1. **城市内相对排名**：按行为热度（`VenueRepository.HEAT_SCORE` 镜像，见「场所热度」章节）在同城市场所中取 top 20%（CEIL 向上取整）。即"热门"首先是相对同城市其他场所而言——避免跨城市基数差异（上海普通场所的收藏量可能 > 小城市最热门场所）；
+  2. **绝对行为热度门槛**：**行为热度**（完整热度分扣除运营权重 sortWeight，SQL 内 `heat_score - sort_weight`）≥ `venue.hot.min-heat-score`（配置，唯一事实源 = `VenueHotProperties`，**默认 70** ≈ 近30天 7 次收藏 / 70 次浏览 / 14 条动态）。没有实质用户活跃的场所（纯浏览/冷启动）即使城市内排名第一也不得标记热门。
+  - **旧实现缺陷（根因）**：仅相对排名 + `GREATEST(1, CEIL(city_total×0.2))`"至少 1 家/城市"兜底——每城市第一名恒被标记热门，近30天仅 2 次浏览（热度分 2）的冷门店也带热门标签。"热门"退化为"小池塘里最不冷"。兜底已移除，排名与门槛是**与**关系。
+  - **门槛作用范围（2026-08-08 用户反馈二次修复）**：作用于**行为热度部分**（不含运营权重 sortWeight）。sortWeight 仍参与城市内排名（top 20%）与列表排序——运营推广提升曝光属其本职；但**不得伪造热门资格**：历史实现把门槛放在含 sortWeight 的完整分上，运营加权门店（sortWeight=68 等）即使行为热度仅 2（近30天 2 次浏览）也被抬过门槛，出现"详情页热度指数 2 却有热门标签"的自相矛盾（生产实证：南充市 venue 90，sortWeight 20 + 行为 2 = 22 ≥ 20 命中）。门槛移到行为部分后：热门 ⟺ 行为热度 ≥ 门槛，与详情页热度 chip 的核心行为项口径一致。满意度偏移（评分纠偏小项，需 ≥3 评价人才参与计算）不参与热门判定——热门回答"去的人多不多"（行为热度），满意度回答"口碑好不好"（热度指数展示），两语义解耦。
+- **查询实现**：`VenueRepository.findHotVenueIds()` 使用 PostgreSQL 窗口函数（`ROW_NUMBER() OVER (PARTITION BY city ORDER BY heat_score DESC, id)`）在库内完成城市内排名，避免在 Java 侧逐城市遍历。三层子查询结构：最内层 `scored` 一次性计算热度分与 `sort_weight`（公式唯一出现点，避免 SQL 内重复书写导致镜像漂移）→ 中间层窗口排名（**必须同时投影 `heat_score` 与 `sort_weight`**——外层门槛 `heat_score - sort_weight >= :minHotScore` 引用两派生列，漏投影即报 `column ... does not exist`，见「列透传契约」）→ 最外层施加"排名 ≤ top20% 且 行为热度 ≥ 门槛"双条件。排序口径为 `sortWeight + 近30天浏览×1 + 收藏×10 + 新增收藏×15 + 动态×5 + 评分×8 + 正向反馈×3`（与 `HEAT_SCORE` 一致，不含距离项——距离是用户维度，场所热度排名不应因请求者位置变化）。Service 层通过 `VenueLookupService.getHotVenueIds()`（`@Cacheable(CACHE_HOT_VENUE_IDS)`，5min TTL，门槛参数经此注入 SQL——禁止在 SQL/调用方硬编码）获取热门 ID 集合，缓存命中时 <1ms，未命中时执行全表窗口函数查询。场所创建/更新/动态发布时通过 `@CacheEvict(allEntries=true)` 即时失效（收藏增删**不**逐出——5min TTL 的滞后是接受的权衡，见「写路径缓存逐出」矩阵）
+- **消费方（2026-08-08 修复收藏列表缺热门标签；同日新增「热门」快捷筛选）**：
+  - 城市列表 `VenueService.listVenues`：`result.map()` 中传 `hotVenueIds.contains(v.getId())`；同时**支持 `hot=true` 筛选参数**（2026-08-08 新增，供前端「热门」快捷标签）——`hotOnly=true` 时经 `LIST_FILTERS` 的 `AND (:hotOnly = false OR v.id IN :hotIds)` 谓词按同一集合过滤，与城市/状态/距离/排序**正交可叠加**；热门集合在列表查询前一次获取（5min 缓存），筛选参数与 isHot 标记双职责复用；
+  - 收藏列表 `FavoriteService.getFavoriteVenues`：**同口径下发**——历史缺陷：误用 `VenueResponseMapper` 双参重载（默认 `isHot=false`），热门舞厅在"全部城市"正常展示、收藏列表却不展示。修复后与城市列表一样经 `getHotVenueIds()` 取集合后走三参重载（收藏 Tab 无筛选栏，不提供 hot 参数）；
+  - 其余场景（创建/编辑表单回显、详情页基础响应）isHot 无展示语义，恒 false。
+- **热门筛选的查询实现**：谓词挂在共享 `LIST_FILTERS` 片段（全部 7 个列表排序变体共用，含 count 查询自动继承——分页 totalElements 正确）；`hotOnly=false` 时短路恒真（默认口径=不做隐式过滤），`hotOnly=true` 且集合为空（无热门场所）时 `IN 空集` 恒假返回空页而非报错。JPQL 语法层由 `VenueListQueryHqlSyntaxTest`（ANTLR 语法解析，普通 `mvn test` 执行）守卫；参数绑定语义层由 `VenueHotVenueIdsSqlTest` 的 DB 门禁用例覆盖。
+- **VenueResponseMapper 三参重载**：`toResponse(Venue, List<ReactionBadge> topReactions, boolean isHot)` ——**任何渲染 venue-card 卡片的列表场景必须走本重载**；双参/单参重载默认 `isHot=false`，仅限"热门标记无展示语义"的场景（javadoc 已显式标注，防止再次踩双参重载的静默默认值陷阱）。
+
+### 累计浏览量（VenueResponse.viewCount，2026-08-12）
+
+`VenueResponse` 新增 `viewCount` 字段（long，全量历史口径），驱动列表卡片底部「👁 浏览数」不起眼展示（前端 `formatViewCount` 格式化 10/100/1.2K/10K）。
+
+- **口径**：`qwt_venue_views` 全量行数（按天去重 PV，含匿名）——与热度页 `viewCount30d`（`VenueHeatService` / `VenueRepository.HEAT_SCORE`）**同源同口径的全量版**，仅去掉 30 天窗口。不加累计计数器列、不加迁移：视图表本身即全量事实源。
+- **查询实现**：`VenueViewRepository.countByVenueIds(List<Long>)`（`IN :ids + GROUP BY venue_id` 一次覆盖整页，返回 `(venueId, count)` 二元组；空集合防御——`IN ()` 语法错误，参照 `batchGetBadges` 判空模式）+ 单店 `countByVenueId`（详情页基础响应用，命中 `(venue_id, view_date)` 索引毫秒级）。
+- **消费方（2026-08-12 新增，语义同 isHot 教训——禁止消费场景传默认 0）**：
+  - 城市列表 `VenueService.listVenues`：批量查后走 Mapper **四参重载**传真实值；
+  - 收藏列表 `FavoriteService.getFavoriteVenues`：同口径批量查后传真实值（**历史缺陷预防**：同 isHot 双参重载静默陷阱——三参重载默认 `viewCount=0`，收藏列表若漏传将"城市列表有浏览数、收藏列表恒 0"）；
+  - 详情 `VenueService.getVenueDetail`：单店 COUNT 传真实值（viewCount 是事实字段，详情 base 响应同样带真实值，避免"同一字段两种语义"）；
+  - 其余场景（创建/编辑表单回显）恒 0，无展示语义。
+- **VenueResponseMapper 四参重载**：`toResponse(Venue, List<ReactionBadge>, boolean isHot, long viewCount)` ——卡片展示场景（列表/收藏/详情）的**唯一正确入口**；三参/双参/单参重载默认 `viewCount=0`，仅限无展示语义场景（javadoc 已显式标注）。
+
+---
+
