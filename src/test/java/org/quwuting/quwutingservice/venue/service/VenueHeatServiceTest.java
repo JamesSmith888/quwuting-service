@@ -172,6 +172,8 @@ class VenueHeatServiceTest {
                     @Override public LocalDate getDay() { return d1; }
                     @Override public Long getFavcount() { return 1L; }
                     @Override public Long getViewcount() { return 10L; }
+                    @Override public Long getViewlistcount() { return 7L; }
+                    @Override public Long getViewsharecount() { return 2L; }
                     @Override public Long getPosreaction() { return 3L; }
                     @Override public Long getNegreaction() { return 2L; }
                     @Override public Long getPoints() { return 0L; }
@@ -180,6 +182,8 @@ class VenueHeatServiceTest {
                     @Override public LocalDate getDay() { return d2; }
                     @Override public Long getFavcount() { return 0L; }
                     @Override public Long getViewcount() { return 5L; }
+                    @Override public Long getViewlistcount() { return 0L; }
+                    @Override public Long getViewsharecount() { return 0L; }
                     @Override public Long getPosreaction() { return 0L; }
                     @Override public Long getNegreaction() { return 1L; }
                     @Override public Long getPoints() { return 0L; }
@@ -197,6 +201,12 @@ class VenueHeatServiceTest {
         assertEquals(d1.toString(), resp.favoriteTrend().get(0).date(), "日期应为 yyyy-MM-dd");
         assertEquals(2, resp.pointsTrend().size(), "收到积分趋势应含全部骨架行");
         assertEquals(0L, resp.pointsTrend().get(0).count(), "无积分日应补零");
+        // 浏览来源趋势（2026-08-13）：list/share 回填当日分列值；other = 全量 − list − share
+        assertEquals(2, resp.viewSourceTrend().size(), "浏览来源趋势应含全部骨架行");
+        assertEquals(7L, resp.viewSourceTrend().get(0).list(), "浏览来源应回填列表进入数");
+        assertEquals(2L, resp.viewSourceTrend().get(0).share(), "浏览来源应回填分享打开数");
+        assertEquals(1L, resp.viewSourceTrend().get(0).other(), "other = 全量 10 − list 7 − share 2");
+        assertEquals(5L, resp.viewSourceTrend().get(1).other(), "全来源 0 时 other = 全量 5");
     }
 
     // ── 状态可信度（2026-08-08 三维矩阵：状态类型 × 稳定性 × 持续天数） ────────────

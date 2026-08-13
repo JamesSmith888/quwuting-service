@@ -70,31 +70,33 @@ class VenueReactionServiceTest {
 
     /**
      * 完整展示契约（2026-08-09 需求定稿）：venue 3 有 5 个 count>0 的 code（含窗口计数仅 1 的
-     * GOOD_MUSIC）。断言 5 个**全部返回**、按窗口计数降序——不做任何截断，用户已参与的低计数
+     * BAD_ENV）。断言 5 个**全部返回**、按窗口计数降序——不做任何截断，用户已参与的低计数
      * code 同样包含（个人状态不参与集合构成，reactedByMe 仅标注）。
      */
     @Test
     void batchGetBadges_returnsAllCodesWithCountAboveZero() {
+        // 2026-08-13 字典瘦身同步：mock 改用当前 ReactionCode 字典合法 code
+        //（旧 FAIR_PRICE/HIGH_COST/GOOD_MUSIC 已删除，batchGetBadges 按字典过滤后数量失真）
         when(venueReactionRepository.countByVenueIdsGroupByCode(any(), any(LocalDateTime.class), any(LocalDateTime.class)))
                 .thenReturn(List.<Object[]>of(
-                        row(3L, "FAIR_PRICE", 2L),
-                        row(3L, "HIGH_COST", 2L),
                         row(3L, "HOT", 2L),
+                        row(3L, "RECOMMEND", 2L),
                         row(3L, "SWEET_PARTNER", 2L),
-                        row(3L, "GOOD_MUSIC", 1L)));
+                        row(3L, "QUIET", 2L),
+                        row(3L, "BAD_ENV", 1L)));
         when(venueReactionRepository.findTodayCodesByUserAndVenueIds(eq(2L), any(), any(LocalDate.class)))
-                .thenReturn(List.<Object[]>of(myRow(3L, "GOOD_MUSIC")));
+                .thenReturn(List.<Object[]>of(myRow(3L, "BAD_ENV")));
 
         Map<Long, List<ReactionBadge>> result =
                 service.batchGetBadges(List.of(3L), 2L, ReactionWindow.DAYS_7);
 
         List<ReactionBadge> badges = result.get(3L);
         assertEquals(5, badges.size(), "全部 count>0 的 code 均返回，不做任何截断");
-        ReactionBadge goodMusic = badges.stream()
-                .filter(b -> b.code().equals("GOOD_MUSIC")).findFirst().orElse(null);
-        assertTrue(goodMusic != null, "窗口计数较低的 code 同样包含（无截断）");
-        assertEquals(1L, goodMusic.count7d());
-        assertTrue(goodMusic.reactedByMe(), "用户参与的 code 必须携带参与态标注");
+        ReactionBadge badEnv = badges.stream()
+                .filter(b -> b.code().equals("BAD_ENV")).findFirst().orElse(null);
+        assertTrue(badEnv != null, "窗口计数较低的 code 同样包含（无截断）");
+        assertEquals(1L, badEnv.count7d());
+        assertTrue(badEnv.reactedByMe(), "用户参与的 code 必须携带参与态标注");
         // 降序：前 4 个计数 2，最后 1 个计数 1
         assertEquals(4, badges.stream().filter(b -> b.count7d() == 2).count());
         assertEquals(1, badges.stream().filter(b -> b.count7d() == 1).count());
@@ -106,7 +108,7 @@ class VenueReactionServiceTest {
         when(venueReactionRepository.countByVenueIdsGroupByCode(any(), any(LocalDateTime.class), any(LocalDateTime.class)))
                 .thenReturn(List.<Object[]>of(
                         row(3L, "HOT", 2L),
-                        row(3L, "FAIR_PRICE", 1L)));
+                        row(3L, "QUIET", 1L)));
 
         Map<Long, List<ReactionBadge>> result =
                 service.batchGetBadges(List.of(3L), 2L, ReactionWindow.DAYS_7);
@@ -121,11 +123,11 @@ class VenueReactionServiceTest {
     void batchGetBadges_anonymousReturnsAllCodesWithoutReactedByMe() {
         when(venueReactionRepository.countByVenueIdsGroupByCode(any(), any(LocalDateTime.class), any(LocalDateTime.class)))
                 .thenReturn(List.<Object[]>of(
-                        row(3L, "FAIR_PRICE", 2L),
-                        row(3L, "HIGH_COST", 2L),
                         row(3L, "HOT", 2L),
+                        row(3L, "RECOMMEND", 2L),
                         row(3L, "SWEET_PARTNER", 2L),
-                        row(3L, "GOOD_MUSIC", 1L)));
+                        row(3L, "QUIET", 2L),
+                        row(3L, "BAD_ENV", 1L)));
 
         Map<Long, List<ReactionBadge>> result =
                 service.batchGetBadges(List.of(3L), null, ReactionWindow.DAYS_7);
@@ -140,26 +142,26 @@ class VenueReactionServiceTest {
     void batchGetBadges_isolatesPerVenue() {
         when(venueReactionRepository.countByVenueIdsGroupByCode(any(), any(LocalDateTime.class), any(LocalDateTime.class)))
                 .thenReturn(List.<Object[]>of(
-                        row(3L, "FAIR_PRICE", 2L),
-                        row(3L, "HIGH_COST", 2L),
                         row(3L, "HOT", 2L),
+                        row(3L, "RECOMMEND", 2L),
                         row(3L, "SWEET_PARTNER", 2L),
-                        row(3L, "GOOD_MUSIC", 1L),
-                        row(13L, "CLEAN", 3L),
-                        row(13L, "GOOD_VIBE", 2L),
-                        row(13L, "FAIR_PRICE", 2L),
+                        row(3L, "QUIET", 2L),
+                        row(3L, "BAD_ENV", 1L),
                         row(13L, "HOT", 2L),
+                        row(13L, "RECOMMEND", 2L),
                         row(13L, "SWEET_PARTNER", 2L),
+                        row(13L, "GOOD_SERVICE", 2L),
+                        row(13L, "SERVICE_ISSUE", 2L),
                         row(13L, "QUIET", 1L)));
         when(venueReactionRepository.findTodayCodesByUserAndVenueIds(eq(2L), any(), any(LocalDate.class)))
-                .thenReturn(List.<Object[]>of(myRow(3L, "GOOD_MUSIC")));
+                .thenReturn(List.<Object[]>of(myRow(3L, "BAD_ENV")));
 
         Map<Long, List<ReactionBadge>> result =
                 service.batchGetBadges(List.of(3L, 13L), 2L, ReactionWindow.DAYS_7);
 
-        // venue 3：全部 5 个 count>0 的 code，GOOD_MUSIC 含参与态标注
+        // venue 3：全部 5 个 count>0 的 code，BAD_ENV 含参与态标注
         assertEquals(5, result.get(3L).size());
-        assertTrue(result.get(3L).stream().anyMatch(b -> b.code().equals("GOOD_MUSIC") && b.reactedByMe()));
+        assertTrue(result.get(3L).stream().anyMatch(b -> b.code().equals("BAD_ENV") && b.reactedByMe()));
         // venue 13：全部 6 个 count>0 的 code——QUIET（计数 1）同样包含（无截断），
         // 且无任何 reactedByMe 泄漏（个人状态仅属于 venue 3）
         assertEquals(6, result.get(13L).size());

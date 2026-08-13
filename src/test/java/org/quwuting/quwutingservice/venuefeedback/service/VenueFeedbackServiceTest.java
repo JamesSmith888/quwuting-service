@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.quwuting.quwutingservice.config.PointsProperties;
 import org.quwuting.quwutingservice.config.ReportsProperties;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.message.service.MessageService;
@@ -48,8 +49,11 @@ class VenueFeedbackServiceTest {
 
     @BeforeEach
     void setUp() {
+        // pointsProperties 传全 0/null 触发 PointsProperties 内部安全回退默认值
+        //（2026-08-13 远端合并：VenueFeedbackService 构造器新增 PointsProperties 参数）
         service = new VenueFeedbackService(venueFeedbackRepository, venueRepository,
-                new ReportsProperties(3), pointsService, messageService);
+                new ReportsProperties(3), new PointsProperties(0, 0, 0, 0, null),
+                pointsService, messageService);
         UserContext.set(99L, UserRole.ADMIN);
 
         feedback = new VenueFeedback();
