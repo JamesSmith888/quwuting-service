@@ -10,6 +10,7 @@ import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
+import org.quwuting.quwutingservice.dancer.service.DancerStatsService;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.points.dto.CheckInResponse;
 import org.quwuting.quwutingservice.points.dto.GifterResponse;
@@ -39,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -74,13 +76,15 @@ class PointsServiceTest {
     private PointsProperties pointsProperties;
     @Mock
     private VenueHeatService venueHeatService;
+    @Mock
+    private DancerStatsService dancerStatsService;
 
     private PointsService pointsService;
     @BeforeEach
     void setUp() {
         pointsService = new PointsService(accountRepository, transactionRepository, checkinRepository,
                 gateRepository, unlockRepository, venueLookupService, dancerRepository,
-                dancerPhotoRepository, pointsProperties, venueHeatService);
+                dancerPhotoRepository, pointsProperties, venueHeatService, dancerStatsService);
         // 各测试按需 stub（Mockito strict stubs：不使用的 stubbing 会在测试级报多余）
     }
 
@@ -189,6 +193,10 @@ class PointsServiceTest {
      */
     @Test
     void gift_success_deductsCatalogPriceAndPersistsGiftCode() {
+        // gift(DANCER) 在事务提交后回调 dancerStatsService.invalidate——纯 Mockito 无 Spring 事务，
+        // mockStatic 使 registerSynchronization 空操作（缓存失效回调不属于本用例断言范围）
+        try (org.mockito.MockedStatic<org.springframework.transaction.support.TransactionSynchronizationManager> tsm =
+                     mockStatic(org.springframework.transaction.support.TransactionSynchronizationManager.class)) {
         when(pointsProperties.gift()).thenReturn(new PointsProperties.GiftLimits(10, 20, 5));
         Dancer dancer = new Dancer();
         dancer.setId(2L);
@@ -221,6 +229,8 @@ class PointsServiceTest {
         assertEquals(-5L, tx.getDelta(), "扣减 = -礼物价格");
         assertEquals("HEART", tx.getGiftCode(), "流水必须记录礼物 code");
         assertEquals(PointsTargetType.DANCER, tx.getTargetType());
+        }
+
     }
 
     // ─── 礼物赠送者列表（2026-08-12 礼物墙点击弹层） ─────────────────────────
