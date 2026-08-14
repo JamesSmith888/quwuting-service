@@ -22,8 +22,9 @@ import java.util.concurrent.TimeUnit;
  *   放大分享 / 回流量的漏洞（尽力而为，多 IP 分布式刷无法拦截，与浏览频控同语义）
  * - 不做舞伴存在性校验：事件端点由详情页发起（舞伴不存在时详情页已 404），冗余的舞伴
  *   查询对 fire-and-forget 端点是不合理的延迟负担；孤儿事件不会被任何统计引用
- * - 不参与热度计算：分享维度不在热度公式闭集内（产品定义），本表仅作分析数据源
- *   （邀请排行 / 热门传播舞伴 / 回流归因），不 invalidate 热度缓存
+ * - 不参与热度公式：分享维度不在热度公式闭集内（产品定义），本表仅作分析数据源
+ *   （邀请排行 / 热门传播舞伴 / 回流归因）；2026-08-14 起 SHARE 事件是舞伴分享趋势
+ *   （shareTrend）输入——真实记录后 invalidate DancerStatsService（OPEN 回流不入图，不失效）
  */
 @Slf4j
 @Service
@@ -40,6 +41,9 @@ public class DancerShareService {
             .build();
 
     private final DancerShareRepository dancerShareRepository;
+    /** 舞伴统计（2026-08-14：SHARE 事件是分享趋势 shareTrend 输入，真实记录后须失效；
+     *  OPEN 回流事件不输入分享趋势，不失效） */
+    private final org.quwuting.quwutingservice.dancer.service.DancerStatsService dancerStatsService;
 
     /**
      * 记录一次分享动作（SHARE 事件）。
@@ -59,6 +63,8 @@ public class DancerShareService {
         share.setEventType(ShareEventType.SHARE);
         share.setChannel(channel);
         dancerShareRepository.save(share);
+        // 分享趋势（shareTrend）输入真实写入后失效统计缓存（refresh-ahead 仅兜底）
+        dancerStatsService.invalidate(dancerId);
     }
 
     /**

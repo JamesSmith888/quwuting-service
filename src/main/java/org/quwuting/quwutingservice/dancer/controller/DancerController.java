@@ -5,14 +5,20 @@ import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.dancer.dto.request.AddDancerPhotosRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.RecognizeDancerRequest;
+import org.quwuting.quwutingservice.dancer.dto.request.RecordDancerViewRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
+import org.quwuting.quwutingservice.dancer.dto.response.AdViewResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerDetailResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerPhotoResponse;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerStatsResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerSummaryResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTagStat;
 import org.quwuting.quwutingservice.dancer.dto.response.RecognizeResponse;
 import org.quwuting.quwutingservice.dancer.service.DancerService;
+import org.quwuting.quwutingservice.dancer.service.DancerStatsService;
+import org.quwuting.quwutingservice.dancer.service.DancerViewService;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.venue.enums.ViewSource;
 import org.springframework.data.domain.Page;
 import org.springframework.web.bind.annotation.*;
 
@@ -24,6 +30,9 @@ import java.util.List;
  * <ul>
  *   <li>GET /dancers — 舞伴列表（公开，登录时含个人认可态；city 可选筛选）</li>
  *   <li>GET /dancers/cities — 常驻城市词表（列表页城市筛选；聚合真实数据）</li>
+ *   <li>GET /dancers/favorites — 我的收藏列表（登录，2026-08-14 舞伴收藏）</li>
+ *   <li>POST /dancers/{id}/favorite — 收藏舞伴（登录，幂等）</li>
+ *   <li>POST /dancers/{id}/favorite/remove — 取消收藏（登录，幂等）</li>
  *   <li>POST /dancers — 舞伴主动注册（登录，status=PENDING 待认证）</li>
  *   <li>GET /dancers/{id} — 舞伴详情（公开，可见性规则见 DancerService）</li>
  *   <li>PUT /dancers/{id} — 编辑本人/管理舞伴资料（全量覆盖；REJECTED → 自动重审）</li>
@@ -40,6 +49,8 @@ import java.util.List;
 public class DancerController {
 
     private final DancerService dancerService;
+    private final DancerStatsService dancerStatsService;
+    private final DancerViewService dancerViewService;
 
     /**
      * 舞伴列表（公开，软鉴权：登录时返回个人"今日已认可"状态）。
@@ -101,6 +112,43 @@ public class DancerController {
     }
 
     /**
+     * 舞伴统计（<b>仅本人 + 管理员可查看</b>，2026-08-14 舞伴统计图第一期）：
+     * 六组近30天每日时间序列（认可/收藏/礼物价值/分享/浏览 + 浏览来源），供舞伴统计页
+     * 渲染。舞伴是自然人，逐日时间序列/来源拆解属精细行为数据（与创作者收益计划
+     * 敏感度耦合）——对齐 hide_contact 隐私默认最小化先例，他人不可查看：
+     * 未登录 → HTTP 401（requireAuth，前端触发登录）；已登录非本人/非管理员 →
+     * 业务错 1003「仅舞伴本人可查看统计数据」。缓存 60s refresh-ahead（写路径显式失效）。
+     */
+    @GetMapping("/{id}/stats")
+    public ApiResponse<DancerStatsResponse> stats(@PathVariable Long id) {
+        Long userId = UserContext.requireAuth();
+        dancerService.checkStatsAccess(id, userId, UserContext.getCurrentRole());
+        return ApiResponse.ok(dancerStatsService.getStats(id));
+    }
+
+    /**
+     * 记录舞伴详情页浏览（软鉴权：未登录时 userId 为 null，匿名访问不去重）。
+     * body.source 为浏览来源（LIST/SHARE/SEARCH/OTHER），可空——旧客户端不传时兜底
+     * OTHER（fire-and-forget，由详情页 GET /dancers/{id} 发起）。
+     * POST /dancers/{id}/view
+     */
+    @PostMapping("/{id}/view")
+    public ApiResponse<Void> recordView(@PathVariable Long id,
+                                        @RequestBody(required = false) RecordDancerViewRequest request) {
+        ViewSource source = null;
+        if (request != null && request.source() != null) {
+            try {
+                source = ViewSource.valueOf(request.source());
+            } catch (IllegalArgumentException e) {
+                // 非法来源值兜底 OTHER（应用层防御，枚举列无 CHECK 约束）
+                source = ViewSource.OTHER;
+            }
+        }
+        dancerViewService.recordView(id, UserContext.getCurrentUserId(), source);
+        return ApiResponse.ok(null);
+    }
+
+    /**
      * 常驻城市词表（公开；列表页城市筛选数据源——聚合真实数据，新增城市自动出现，
      * 与 venue 域 /venues/cities 同模式）。
      */
@@ -110,14 +158,58 @@ public class DancerController {
     }
 
     /**
+     * 我的收藏列表（需登录；按收藏时间倒序，仅当前公开 NORMAL 舞伴——HIDDEN 自动
+     * 淡出，2026-08-14 舞伴收藏，见 AGENTS.md「舞伴收藏」）。
+     * 静态路径优先于 /dancers/{id}（与 /cities 同先例），Spring MVC 精确匹配优先。
+     */
+    @GetMapping("/favorites")
+    public ApiResponse<List<DancerSummaryResponse>> listFavorites() {
+        return ApiResponse.ok(dancerService.listFavorites(UserContext.requireAuth()));
+    }
+
+    /**
+     * 收藏舞伴（需登录；幂等——已收藏则忽略，软删行 restore 复用）。
+     * 与门店收藏同款接口形态：POST 幂等写（POST /favorites/{venueId} /
+     * POST /favorites/{venueId}/remove 先例），不用 PUT/DELETE（仅 GET/POST 语义约定）。
+     */
+    @PostMapping("/{id}/favorite")
+    public ApiResponse<Void> addFavorite(@PathVariable Long id) {
+        dancerService.addFavorite(UserContext.requireAuth(), id);
+        return ApiResponse.ok(null);
+    }
+
+    /**
+     * 取消收藏（需登录；幂等——未收藏则忽略）。软删行保留——被收藏舞伴 HIDDEN
+     * 下架后行留存，恢复 NORMAL 后自动重现。
+     */
+    @PostMapping("/{id}/favorite/remove")
+    public ApiResponse<Void> removeFavorite(@PathVariable Long id) {
+        dancerService.removeFavorite(UserContext.requireAuth(), id);
+        return ApiResponse.ok(null);
+    }
+
+    /**
      * 本人/管理员上传相册照片（需登录 + canManage）：插入即 PENDING（先审后发）。
+     * blurUrls 为与原图一一对应的模糊图（收费照片详情页"模糊可见轮廓"占位，可缺省）。
      * 返回本人视角全量照片（含刚上传的待审项，编辑页据此刷新）。
      */
     @PostMapping("/{id}/photos")
     public ApiResponse<List<DancerPhotoResponse>> addPhotos(@PathVariable Long id,
                                                             @Valid @RequestBody AddDancerPhotosRequest request) {
         Long userId = UserContext.requireAuth();
-        return ApiResponse.ok(dancerService.addPhotos(userId, id, request.urls(), UserContext.getCurrentRole()));
+        return ApiResponse.ok(dancerService.addPhotos(userId, id, request.urls(), request.blurUrls(),
+                UserContext.getCurrentRole()));
+    }
+
+    /**
+     * 广告观看完成上报（需登录 + 目标开启创作者收益计划；本人不可观看自己的广告）。
+     * 激励视频完整观看后由前端调用，计入舞伴收益（线下结算依据）；同一用户同舞伴
+     * 每天至多一次（幂等，不重复计收益）。
+     */
+    @PostMapping("/{id}/ad-views")
+    public ApiResponse<AdViewResponse> recordAdView(@PathVariable Long id) {
+        return ApiResponse.ok(dancerService.recordAdView(
+                UserContext.requireAuth(), id, UserContext.getCurrentRole()));
     }
 
     /** 本人/管理员删除照片（软删；普通用户不可调用） */

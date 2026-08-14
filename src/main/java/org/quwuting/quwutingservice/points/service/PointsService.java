@@ -7,19 +7,28 @@ import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.db.DbConstraintViolations;
 import org.quwuting.quwutingservice.config.PointsProperties;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
+import org.quwuting.quwutingservice.dancer.entity.DancerPhoto;
+import org.quwuting.quwutingservice.dancer.enums.DancerPhotoStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
+import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.points.dto.*;
 import org.quwuting.quwutingservice.points.entity.DailyCheckin;
 import org.quwuting.quwutingservice.points.entity.PointsAccount;
+import org.quwuting.quwutingservice.points.entity.PointsGate;
 import org.quwuting.quwutingservice.points.entity.PointsTransaction;
+import org.quwuting.quwutingservice.points.entity.PointsUnlock;
 import org.quwuting.quwutingservice.points.enums.GiftCatalog;
+import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
 import org.quwuting.quwutingservice.points.enums.PointsSourceType;
 import org.quwuting.quwutingservice.points.enums.PointsTargetType;
 import org.quwuting.quwutingservice.points.repository.DailyCheckinRepository;
 import org.quwuting.quwutingservice.points.repository.PointsAccountRepository;
+import org.quwuting.quwutingservice.points.repository.PointsGateRepository;
 import org.quwuting.quwutingservice.points.repository.PointsTransactionRepository;
+import org.quwuting.quwutingservice.points.repository.PointsUnlockRepository;
+import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -30,7 +39,13 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * 积分核心服务（资产模型：账户 + 流水 ledger）。
@@ -60,16 +75,19 @@ public class PointsService {
             case STATUS_REPORT_REWARD -> "暂停报被采纳";
             case ADMIN_ADJUST -> "平台调整";
             case GIFT -> "赠送";
+            case UNLOCK -> "解锁";
         };
     }
 
     /** 合规规则文案（后端下发唯一事实源，前端直接渲染——禁前端硬编码）。
      *  2026-08-12 礼物化：积分退化为"获取礼物的代币"，赠送语义 = 购买礼物并送出
-     *  （一次性表达，不可回收、不可再流转——彻底消除资产转移语义，见 AGENTS.md）。 */
+     *  （一次性表达，不可回收、不可再流转——彻底消除资产转移语义，见 AGENTS.md）。
+     *  2026-08-14 积分解锁：解锁照片/联系方式等门槛内容是积分的又一消费出口，
+     *  与赠送同为"单向消耗"——积分不进任何接收方账户（不可流转准货币红线）。 */
     private static final String RULES_TEXT =
             "积分为社区贡献值，可通过每日打卡、提交信息反馈（经管理员采纳）等免费获得；"
-                    + "积分用于购买礼物送给门店/舞伴，表达支持。"
-                    + "礼物不具备任何货币属性，不可提现、不可转让、不可兑换任何实物或服务。";
+                    + "积分用于解锁照片/联系方式等社区内容、购买礼物送给门店/舞伴，表达支持。"
+                    + "积分不具备任何货币属性，不可提现、不可转让、不可兑换任何实物或服务。";
 
     /**
      * 采纳奖励整句激励文案（2026-08-12 上报激励三触点，文案唯一事实源在本服务）。
@@ -94,10 +112,16 @@ public class PointsService {
     private final PointsAccountRepository accountRepository;
     private final PointsTransactionRepository transactionRepository;
     private final DailyCheckinRepository checkinRepository;
+    private final PointsGateRepository gateRepository;
+    private final PointsUnlockRepository unlockRepository;
     private final VenueLookupService venueLookupService;
     private final DancerRepository dancerRepository;
+    private final DancerPhotoRepository dancerPhotoRepository;
     private final PointsProperties pointsProperties;
     private final org.quwuting.quwutingservice.venue.service.VenueHeatService venueHeatService;
+    /** 舞伴统计（2026-08-14：赠送礼物到 DANCER 改变收礼价值趋势 pointsTrend，
+     *  真实赠送后须失效——与 VENUE 分支同模式） */
+    private final org.quwuting.quwutingservice.dancer.service.DancerStatsService dancerStatsService;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -268,6 +292,16 @@ public class PointsService {
                         @Override
                         public void afterCommit() {
                             venueHeatService.invalidate(targetId);
+                        }
+                    });
+        } else if (targetType == PointsTargetType.DANCER) {
+            // 舞伴收礼价值趋势（pointsTrend）输入：真实赠送后失效舞伴统计缓存
+            // （同事务 afterCommit，与 VENUE 分支同模式）
+            org.springframework.transaction.support.TransactionSynchronizationManager
+                    .registerSynchronization(new org.springframework.transaction.support.TransactionSynchronization() {
+                        @Override
+                        public void afterCommit() {
+                            dancerStatsService.invalidate(targetId);
                         }
                     });
         }
@@ -467,4 +501,226 @@ public class PointsService {
     public long receivedSince(PointsTargetType targetType, Long targetId, LocalDateTime since, LocalDateTime until) {
         return transactionRepository.sumReceivedSince(targetType, targetId, since, until);
     }
+
+    // ─── 积分解锁（2026-08-14 公共模块：门槛设置 + 解锁消费，单向燃烧） ─────────
+
+    /**
+     * 设置/更新/清除积分门槛（POST /points/gates）。
+     * <ul>
+     *   <li>cost &gt; 0 = 设置/更新（upsert，同目标幂等覆盖；≤ app.points.gate.max-cost）；</li>
+     *   <li>cost = 0 = 清除门槛（软删行——"免费查看"）。</li>
+     * </ul>
+     * 权限：目标属主（舞伴本人 createdBy）或平台管理员——设置门槛 = "管理自己内容"，
+     * 与 dancer 域 canManage 语义一致（普通用户不可为他人内容设门槛）。
+     */
+    @Transactional
+    public void upsertGate(Long userId, PointsGateTargetType targetType, Long targetId,
+                           int cost, UserRole currentRole) {
+        if (cost < 0) {
+            throw new BusinessException(1001, "门槛积分不能为负数");
+        }
+        if (cost > 0 && cost > pointsProperties.gate().maxCost()) {
+            throw new BusinessException(1001, "门槛积分最高 " + pointsProperties.gate().maxCost());
+        }
+        Dancer dancer = resolveGateOwner(targetType, targetId); // 目标不存在/无门槛资格 → 1001
+        if (currentRole != UserRole.ADMIN && !dancer.getCreatedBy().equals(userId)) {
+            throw new BusinessException(1003, "仅舞伴本人或管理员可设置积分门槛");
+        }
+        PointsGate gate = gateRepository.findByTargetTypeAndTargetId(targetType, targetId).orElse(null);
+        if (cost == 0) {
+            if (gate != null && !gate.isDeleted()) {
+                gate.setDeleted(true);
+                gate.setUpdatedBy(userId);
+                gateRepository.save(gate);
+            }
+            return; // 无门槛记录 = 本来就免费，幂等返回
+        }
+        if (gate == null) {
+            gate = new PointsGate();
+            gate.setTargetType(targetType);
+            gate.setTargetId(targetId);
+            gate.setCreatedBy(userId);
+        }
+        gate.setDeleted(false);
+        gate.setCost(cost);
+        gate.setUpdatedBy(userId);
+        gateRepository.save(gate);
+        log.info("用户 {} 设置积分门槛 {}#{} = {} 积分（舞伴 {}）", userId, targetType, targetId, cost,
+                dancer.getId());
+    }
+
+    /**
+     * 积分解锁消费（POST /points/unlock）——<b>单向燃烧</b>：扣减的积分不进任何
+     * 接收方账户（若转移给舞伴即成"可流转准货币"，触碰合规红线，见 AGENTS.md
+     * 「积分系统 · 积分解锁」合规决策）。舞伴获得的回报 = "有人愿为 TA 的内容
+     * 花积分"的社会证明（unlocks 表支持解锁人数统计，本期不展示）。
+     * <p>
+     * 校验链：门槛存在（cost>0 且未软删）→ 目标对当前用户可见 → 幂等（已解锁
+     * 直接返回内容，不重复扣费）→ 余额 → 原子扣减 → 写 UNLOCK 流水 → 写解锁记录。
+     * 并发：两请求同时解锁同一目标，唯一键 (user, target, targetId) 23505 兜底——
+     * 本事务整体回滚（含扣费），幂等返回已解锁内容，无重复扣费。
+     *
+     * @return 解锁态 + 解锁后余额 + 解锁内容（照片原图 URL / 联系方式文本）
+     */
+    @Transactional
+    public UnlockResponse unlock(Long userId, PointsGateTargetType targetType, Long targetId) {
+        // 目标可见性 + 门槛存在性（同一处解析出内容，避免重复查询）
+        UnlockTarget target = resolveUnlockTarget(targetType, targetId);
+        PointsGate gate = target.gate();
+        if (gate == null || gate.isDeleted()) {
+            throw new BusinessException(1001, "该内容无需积分即可查看");
+        }
+        // 幂等：已解锁 → 直接返回内容（不重复扣费）
+        if (unlockRepository.findByUserIdAndTargetTypeAndTargetId(userId, targetType, targetId).isPresent()) {
+            return new UnlockResponse(true, currentBalance(userId), targetType, targetId, target.content(), target.contactImageUrl());
+        }
+        int cost = gate.getCost();
+        PointsAccount account = getOrCreateAccount(userId);
+        if (account.getBalance() < cost) {
+            throw new BusinessException(1011, "积分余额不足");
+        }
+        if (accountRepository.deductBalance(userId, cost) == 0) {
+            throw new BusinessException(1011, "积分余额不足");
+        }
+        long newBalance = account.getBalance() - cost;
+        PointsTransaction tx = new PointsTransaction();
+        tx.setUserId(userId);
+        tx.setDelta(-cost);
+        tx.setBalanceAfter(newBalance);
+        tx.setSourceType(PointsSourceType.UNLOCK);
+        // 解锁流水不挂 target_type/target_id：PointsTargetType 是"赠送/收到积分"
+        // 聚合维度（VENUE/DANCER），解锁目标（照片/联系方式）不属于该维度，硬挂
+        // 会造成语义混杂；解锁行为的权威记录 = qwt_points_unlocks（含
+        // transaction_id 关联本流水），此处用 remark 冗余目标便于人工审计。
+        tx.setRemark(targetType.name() + ":" + targetId);
+        PointsTransaction savedTx = transactionRepository.save(tx);
+        PointsUnlock unlock = new PointsUnlock();
+        unlock.setUserId(userId);
+        unlock.setTargetType(targetType);
+        unlock.setTargetId(targetId);
+        unlock.setTransactionId(savedTx.getId());
+        try {
+            unlockRepository.saveAndFlush(unlock);
+        } catch (DataIntegrityViolationException e) {
+            if (!DbConstraintViolations.isUniqueViolation(e)) {
+                throw e;
+            }
+            // 并发竞态：另一请求已解锁同一目标——本事务整体回滚（含扣费与流水），
+            // 幂等视为已解锁（与 earn() 撞唯一键同模式，无重复扣费）
+            log.debug("解锁并发冲突，幂等忽略: userId={}, target={}#{}", userId, targetType, targetId);
+            entityManager.clear();
+            return new UnlockResponse(true, currentBalance(userId), targetType, targetId, target.content(), target.contactImageUrl());
+        }
+        log.info("用户 {} 解锁 {}#{}，消耗 {} 积分（流水 {}）", userId, targetType, targetId, cost, savedTx.getId());
+        return new UnlockResponse(true, newBalance, targetType, targetId, target.content(), target.contactImageUrl());
+    }
+
+    /**
+     * 目标门槛积分（0 = 无门槛/已清除）——供 dancer 详情组装解锁态（DancerService 调用）。
+     */
+    @Transactional(readOnly = true)
+    public int gateCost(PointsGateTargetType targetType, Long targetId) {
+        PointsGate gate = gateRepository.findByTargetTypeAndTargetId(targetType, targetId).orElse(null);
+        return gate == null || gate.isDeleted() ? 0 : gate.getCost();
+    }
+
+    /**
+     * 当前用户是否已解锁某目标——供 dancer 详情组装解锁态（DancerService 调用）。
+     * 未登录（匿名）恒 false（匿名无账户无解锁记录）。
+     */
+    @Transactional(readOnly = true)
+    public boolean isUnlocked(Long userId, PointsGateTargetType targetType, Long targetId) {
+        return userId != null && unlockRepository
+                .findByUserIdAndTargetTypeAndTargetId(userId, targetType, targetId).isPresent();
+    }
+
+    /**
+     * 批量目标门槛积分（targetId → cost，无门槛/已清除的目标缺席——调用方按 0 处理）。
+     * 供 dancer 详情一次 IN 查询组装整页照片/联系方式的解锁态（N+1 规避）。
+     */
+    @Transactional(readOnly = true)
+    public Map<Long, Integer> gateCosts(PointsGateTargetType targetType, Collection<Long> targetIds) {
+        if (targetIds == null || targetIds.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<Long, Integer> result = new HashMap<>();
+        for (PointsGate gate : gateRepository.findByTargetTypeAndTargetIdInAndDeletedFalse(targetType, targetIds)) {
+            result.put(gate.getTargetId(), gate.getCost());
+        }
+        return result;
+    }
+
+    /**
+     * 批量当前用户已解锁的目标 ID 集合（供 dancer 详情组装"已解锁"态，N+1 规避）。
+     * 未登录（匿名）返回空集（匿名无账户无解锁记录）。
+     */
+    @Transactional(readOnly = true)
+    public Set<Long> unlockedIds(Long userId, PointsGateTargetType targetType, Collection<Long> targetIds) {
+        if (userId == null || targetIds == null || targetIds.isEmpty()) {
+            return Collections.emptySet();
+        }
+        Set<Long> result = new HashSet<>();
+        for (PointsUnlock unlock : unlockRepository
+                .findByUserIdAndTargetTypeAndTargetIdIn(userId, targetType, targetIds)) {
+            result.add(unlock.getTargetId());
+        }
+        return result;
+    }
+
+    /** 当前余额快照（无账户返回 0——幂等解锁分支用，不触发懒创建写副作用） */
+    @Transactional(readOnly = true)
+    private long currentBalance(Long userId) {
+        PointsAccount account = accountRepository.findByUserId(userId).orElse(null);
+        return account != null ? account.getBalance() : 0L;
+    }
+
+    /** 门槛目标属主解析：目标存在性 + 归属舞伴（设置门槛资格校验的公共前置） */
+    private Dancer resolveGateOwner(PointsGateTargetType targetType, Long targetId) {
+        if (targetType == PointsGateTargetType.DANCER_PHOTO) {
+            DancerPhoto photo = dancerPhotoRepository.findByIdAndDeletedFalse(targetId)
+                    .orElseThrow(() -> new BusinessException(1001, "照片不存在"));
+            return dancerRepository.findByIdAndDeletedFalse(photo.getDancerId())
+                    .orElseThrow(() -> new BusinessException(1001, "舞伴不存在"));
+        }
+        // DANCER_CONTACT：target_id = 舞伴 ID
+        return dancerRepository.findByIdAndDeletedFalse(targetId)
+                .orElseThrow(() -> new BusinessException(1001, "舞伴不存在"));
+    }
+
+    /**
+     * 解锁目标解析：目标可见性 + 门槛存在性 + 解锁内容（照片原图 URL / 联系方式）。
+     * <ul>
+     *   <li>DANCER_PHOTO：照片须 PUBLIC（未公开对公众不可见）且舞伴 NORMAL；
+     *       内容 = 照片原图 URL；</li>
+     *   <li>DANCER_CONTACT：舞伴须 NORMAL；内容 = 联系方式文本（可能为空串——
+     *       舞伴未填联系方式时门槛无意义，防御性返回空）。</li>
+     * </ul>
+     */
+    private UnlockTarget resolveUnlockTarget(PointsGateTargetType targetType, Long targetId) {
+        if (targetType == PointsGateTargetType.DANCER_PHOTO) {
+            DancerPhoto photo = dancerPhotoRepository.findByIdAndDeletedFalse(targetId)
+                    .orElseThrow(() -> new BusinessException(1001, "照片不存在"));
+            if (photo.getStatus() != DancerPhotoStatus.PUBLIC) {
+                throw new BusinessException(1001, "该照片暂不可查看");
+            }
+            Dancer dancer = dancerRepository.findByIdAndDeletedFalse(photo.getDancerId())
+                    .orElseThrow(() -> new BusinessException(1001, "舞伴不存在"));
+            if (dancer.getStatus() != DancerStatus.NORMAL) {
+                throw new BusinessException(1001, "该舞伴资料暂不可见");
+            }
+            PointsGate gate = gateRepository.findByTargetTypeAndTargetId(targetType, targetId).orElse(null);
+            return new UnlockTarget(gate, photo.getUrl(), null);
+        }
+        Dancer dancer = dancerRepository.findByIdAndDeletedFalse(targetId)
+                .orElseThrow(() -> new BusinessException(1001, "舞伴不存在"));
+        if (dancer.getStatus() != DancerStatus.NORMAL) {
+            throw new BusinessException(1001, "该舞伴资料暂不可见");
+        }
+        PointsGate gate = gateRepository.findByTargetTypeAndTargetId(targetType, targetId).orElse(null);
+        // 联系方式（2026-08-14 多形态：文本 contact + 图片 contactImageUrl 一并下发，解锁后展示）
+        return new UnlockTarget(gate, dancer.getContact(), dancer.getContactImageUrl());
+    }
+
+    /** 解锁目标解析结果（门槛 + 解锁内容，一次解析避免重复查询；contactImageUrl 仅联系方式场景非空） */
+    private record UnlockTarget(PointsGate gate, String content, String contactImageUrl) {}
 }

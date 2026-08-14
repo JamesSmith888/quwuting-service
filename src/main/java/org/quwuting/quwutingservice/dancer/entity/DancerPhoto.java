@@ -42,6 +42,15 @@ public class DancerPhoto extends BaseEntity {
     @Column(nullable = false, length = 500)
     private String url;
 
+    /**
+     * 模糊图 URL（2026-08-14 新增，可空）——收费照片"模糊可见轮廓"占位（Telegram
+     * 打遮罩语义）。上传时前端用 canvas 离屏降采样生成低分辨率版本（不可还原为原图），
+     * 与原图一起上传。未解锁用户仅获得本 URL（原图 url 不下发，防绕过）。
+     * 缺失（旧数据/生成失败）时详情页回退纯锁占位。
+     */
+    @Column(length = 500)
+    private String blurUrl;
+
     /** 审核状态（列默认值唯一声明通道 = @ColumnDefault；默认 PENDING = 上传即待审） */
     @Enumerated(EnumType.STRING)
     @Column(length = 20, nullable = false)

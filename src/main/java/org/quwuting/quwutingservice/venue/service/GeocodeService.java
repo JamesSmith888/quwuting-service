@@ -147,6 +147,57 @@ public class GeocodeService {
         return new double[]{location.path("lat").asDouble(), location.path("lng").asDouble()};
     }
 
+    /**
+     * 逆地理编码：坐标 → 城市名（2026-08-14 新增，舞伴表单"默认定位当前城市"）。
+     * <p>
+     * 复用腾讯位置服务 WebService 逆地理编码 API（同 key / HttpClient）：
+     * 返回 result.address_component.city（标准行政区划名，如"深圳市"——与
+     * picker mode="region" 词表、列表筛选共用词表，精确匹配）。
+     * <p>
+     * 失败语义（调用方前端静默降级——拿不到城市留空让用户手动选择）：
+     * 未配置 key → 1004；坐标越界（境外/非法值）→ 1001；腾讯 API 失败 → IllegalStateException
+     * （Controller 层转 5000 未预期错误）。城市名是粗粒度低敏信息，公开接口不设频控
+     * （与 GET /venues/cities 同策略）。
+     *
+     * @return 城市名（如"深圳市"）
+     */
+    public String reverseGeocode(double lat, double lng) {
+        String key = geocodeProperties.key();
+        if (!geocodeProperties.isConfigured()) {
+            throw new org.quwuting.quwutingservice.exception.BusinessException(
+                    1004, "未配置地理编码 key（app.geocode.key / QQMAP_KEY）");
+        }
+        if (!isValidCnCoord(lat, lng)) {
+            throw new org.quwuting.quwutingservice.exception.BusinessException(1001, "坐标超出中国境内范围");
+        }
+        try {
+            String url = GEOCODER_URL + "?location=" + lat + "," + lng
+                    + "&key=" + URLEncoder.encode(key, StandardCharsets.UTF_8);
+            HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                    .timeout(Duration.ofSeconds(8))
+                    .header("User-Agent", "quwuting-service/1.0")
+                    .GET()
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            JsonNode root = objectMapper.readTree(response.body());
+            int status = root.path("status").asInt(-1);
+            if (status != 0) {
+                throw new IllegalStateException("reverse geocode status=" + status
+                        + " msg=" + root.path("message").asText(""));
+            }
+            JsonNode component = root.path("result").path("address_component");
+            String city = component.path("city").asText(null);
+            if (city == null || city.isBlank()) {
+                throw new IllegalStateException("reverse geocode result missing city");
+            }
+            return city;
+        } catch (org.quwuting.quwutingservice.exception.BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException("reverse geocode failed: " + e.getMessage(), e);
+        }
+    }
+
     /** 中国境内经纬度粗校验（gcj02）。 */
     private boolean isValidCnCoord(double lat, double lng) {
         return lat >= LAT_MIN && lat <= LAT_MAX && lng >= LNG_MIN && lng <= LNG_MAX;

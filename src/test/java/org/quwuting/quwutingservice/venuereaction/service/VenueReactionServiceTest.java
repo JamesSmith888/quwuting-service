@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
@@ -48,14 +49,17 @@ class VenueReactionServiceTest {
     private VenueLookupService venueLookupService;
     @Mock
     private VenueHeatService venueHeatService;
+    @Mock
+    private OpsConfigService opsConfigService;
 
     private VenueReactionService service;
 
     @BeforeEach
     void setUp() {
         // @PersistenceContext entityManager 为字段注入，不参与构造；batchGetBadges 路径不触碰
+        // opsConfigService 仅 toggle（每日一票开关）使用，徽标路径不触碰，mock 即可
         service = new VenueReactionService(venueReactionRepository, aggregateService,
-                venueLookupService, venueHeatService);
+                venueLookupService, venueHeatService, opsConfigService);
     }
 
     /** 聚合行：Object[]{venueId, code, countAll, count7d, count30d}（与原生 SQL 返回结构一致） */

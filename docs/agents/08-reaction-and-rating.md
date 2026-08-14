@@ -78,6 +78,21 @@
 
 **为何取消用物理删除而非软删**：软删 + 按日唯一约束下，同日"取消后再点"需要恢复旧行（槽位被软删行占用），与"取消即当日贡献移除"语义叠加复杂度；物理删除使按日槽位随日期自然释放，逻辑最简，且本表无历史追溯需求（个人参与历史不对外展示）。与 Favorite/StatusReport 软删模式的区别：后者的唯一槽位是"永久性"的（user-venue 关系），必须靠软删占用防重复；Reaction 的槽位按日自然过期。
 
+### 每日一票（换票语义，2026-08-14 用户驱动 + 根因分析，可配置）
+
+**需求**：列表页 Reaction 表情"每天只能选择唯一一个他认为最好的表情"。根因：原模型唯一约束按 code 维度（`(userId, venueId, code, date)`），同一用户同一天可对同一场所贡献多个不同 code——用户可零成本"全选"（chip 快捷参与 + Picker 多选均无约束），各场所计数同步膨胀、分布趋同，列表 chip 看不出差别（选择退化为确认，信号稀释）。修复 = 把**稀缺性**还给写入模型（一人一店一日一票）。
+
+**设计决策（应用层语义 + 可配置，非 DB 约束）**：
+
+- **一票约束在 `VenueReactionService.toggle` 事务内实现**（不建 DB 唯一约束）：
+  - 当日无票 → 插入（replacedFrom=null）；当日票=目标 code → 取消（replacedFrom=null）；当日票≠目标 code → **原子换票**（同事务删旧票 + 插新票，replacedFrom=旧 code）
+  - **并发串行化**：`pg_advisory_xact_lock(hashtext('reaction:' + userId + ':' + venueId + ':' + date))` 事务级咨询锁——无 DB 约束兜底时，"查当日票→删→插"不串行化会让两个并发请求同日插入不同 code 破坏一票不变量。锁在事务提交/回滚自动释放
+- **为什么不做 DB 唯一约束**：一票规则要能被运营即时开关（feature flag），数据层不硬编码产品规则——开关关闭时退化为原多选语义（`toggleLegacy`，按 code 维度唯一约束兜底）
+- **开关**：`qwt_ops_config` 表 `reaction.daily.single`（默认 `'true'`），管理端 FAB「运营配置」页修改即时生效；服务端读走 `OpsConfigService.isEnabled`（Caffeine 短 TTL 缓存 + 写路径失效）
+- **契约扩展**：toggle 返回 `ToggleReactionResult{reacted, replacedFrom}`（原 boolean）——replacedFrom 仅换票路径非空，前端据此把旧 code 本地参与态同步为 false（乐观换票的幂等 reconcile，见[前端文档](../../quwuting/docs/agents/08-reaction-system.md) · 「每日一票」）
+- **数据卫生（V22 迁移）**：清理历史"同日同用户同场所多行"（保留每 (user_id, venue_id, reaction_date) 的 `max(id)` = 最后一次点击意图）——开启一票制后当日查询至多一行，四窗口计数本地 ±1 恢复精确（换票 = 旧 code -1 + 新 code +1，各窗口自洽）；`findFirstBy...OrderByIdAsc` 防御残留多行不抛 `NonUniqueResultException`
+- **四窗口计数精确性保持**：换票在同事务内完成（删旧 +1 插新），对任何窗口净贡献 0 且两侧各自精确 ±1——乐观更新与跨页同步的既有机制零改动继续成立
+
 ### Reaction 字典（ReactionCode，后台维护）
 
 Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对刷评价。字典是后台维护的 Java 枚举（`ReactionCode`），emoji + label 由后端唯一定义并通过接口下发，前端 Picker 的静态字典（`constants/reactions.ts`）是镜像副本需两端同步。
@@ -152,10 +167,10 @@ Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对�
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
 | GET | `/venues/{venueId}/reactions/stats` | 公开（软鉴权） | 字典内全部 Reaction 的四窗口统计 + 当前用户"今日已参与"状态，详情页"大家对这里的感受"+"查看更多"用 |
-| POST | `/venues/{venueId}/reactions/{code}` | 需登录 | toggle 语义（今日未参与=参与，今日已参与=取消当日），`code` 为路径变量而非请求体（字典固定，路径更简洁） |
+| POST | `/venues/{venueId}/reactions/{code}` | 需登录 | toggle 语义（2026-08-14 每日一票：今日未参与=参与、今日已参与=取消、已选其他=**换票**），返回 `{reacted, replacedFrom}`；`code` 为路径变量而非请求体（字典固定，路径更简洁） |
 | GET | `/venues?...&window=7d/30d/all` | 公开（软鉴权） | 列表接口新增 `window` 参数：控制卡片 Top Reaction 徽标的排序/筛选窗口，默认 `7d`（近7天） |
 
-**toggle 并发**：同日并发重复插入触发唯一约束冲突 → 幂等视为已参与（`DataIntegrityViolationException` 捕获 + `entityManager.clear()`）。前端每 code 一个 in-flight 守卫（见前端 AGENTS.md）已把同端连点串行化，本防御兜底多端竞态。
+**toggle 并发**：每日一票模式下同日并发由 `pg_advisory_xact_lock` 事务级咨询锁串行化（见上「每日一票」章节）；多选模式（开关关闭）下同日并发重复插入触发唯一约束冲突 → 幂等视为已参与（`DataIntegrityViolationException` 捕获 + `entityManager.clear()`）。前端每 code 一个 in-flight 守卫（见前端 AGENTS.md）已把同端连点串行化，本防御兜底多端竞态。
 
 ### 列表页 Top Reaction 徽标（VenueResponse.topReactions，替代原 tagLikeCounts）
 

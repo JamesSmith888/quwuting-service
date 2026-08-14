@@ -20,6 +20,8 @@ public enum FileCategory {
     DANCER_PHOTO("dancer-photos"),
     /** 舞伴头像（本人编辑资料时上传） */
     DANCER_AVATAR("dancer-avatars"),
+    /** 舞伴联系方式图片（2026-08-14 新增，二维码等；与 contact 同一门槛/遮挡语义） */
+    DANCER_CONTACT_QR("dancer-contact-qr"),
     /** 门店认领营业执照（2026-08-11 新增，认领申请材料，仅管理端审核可见） */
     VENUE_CLAIM_LICENSE("claim-licenses");
 

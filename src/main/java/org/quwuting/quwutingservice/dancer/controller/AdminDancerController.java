@@ -6,6 +6,7 @@ import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpdateDancerPhotoStatusRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpdateDancerStatusRequest;
+import org.quwuting.quwutingservice.dancer.dto.request.UpdateDancerVerificationRequest;
 import org.quwuting.quwutingservice.dancer.dto.response.AdminDancerPhotoResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.AdminDancerResponse;
 import org.quwuting.quwutingservice.dancer.enums.DancerPhotoStatus;
@@ -73,6 +74,21 @@ public class AdminDancerController {
     public ApiResponse<DancerStatus[]> statuses() {
         UserContext.requireAdmin();
         return ApiResponse.ok(DancerStatus.values());
+    }
+
+    /**
+     * 舞伴信息核验操作（仅 ADMIN，2026-08-14 官方认证）：
+     * VERIFY = 授予/复核确认「信息已核验」标识（UNVERIFIED / PENDING_REVIEW → VERIFIED，
+     * 站内信通知创建人）；UNVERIFY = 撤销（VERIFIED / PENDING_REVIEW → UNVERIFIED，
+     * reason 必填——撤销必须留痕理由，随站内信通知舞伴）。
+     * 全部变迁写审计日志（qwt_dancer_verification_logs），见 AGENTS.md「舞伴官方认证」。
+     */
+    @PutMapping("/{id}/verification")
+    public ApiResponse<Void> updateVerification(@PathVariable Long id,
+                                                @Valid @RequestBody UpdateDancerVerificationRequest request) {
+        Long adminId = UserContext.requireAdmin();
+        dancerService.updateVerification(adminId, id, request.action(), request.reason());
+        return ApiResponse.ok(null);
     }
 
     /**

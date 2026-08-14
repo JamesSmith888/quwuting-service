@@ -22,15 +22,20 @@ public record PointsProperties(
         int statusReportReward,
         /** 积分对热度公式的权重（校准对象，V2 三阶段校准机制） */
         int heatWeight,
-        GiftLimits gift
+        GiftLimits gift,
+        /** 积分解锁门槛限制（2026-08-14 公共模块：单点门槛上限） */
+        GateLimits gate
 ) {
 
     /** 赠送限制（单次/每日/单目标每日） */
     public record GiftLimits(int maxPerGift, int maxPerDay, int maxPerTargetDay) {}
 
+    /** 积分解锁门槛限制（单点门槛积分上限；0 = 免费即清除门槛，语义见 UpsertGateRequest） */
+    public record GateLimits(int maxCost) {}
+
     /** 配置缺失时的安全回退 */
     private static final PointsProperties DEFAULT = new PointsProperties(2, 5, 5, 2,
-            new GiftLimits(10, 20, 5));
+            new GiftLimits(10, 20, 5), new GateLimits(50));
 
     public PointsProperties {
         if (checkInReward <= 0) checkInReward = DEFAULT.checkInReward();
@@ -40,6 +45,10 @@ public record PointsProperties(
         if (gift == null) gift = DEFAULT.gift();
         if (gift.maxPerGift() <= 0 || gift.maxPerDay() <= 0 || gift.maxPerTargetDay() <= 0) {
             gift = DEFAULT.gift();
+        }
+        if (gate == null) gate = DEFAULT.gate();
+        if (gate.maxCost() <= 0) {
+            gate = DEFAULT.gate();
         }
     }
 }

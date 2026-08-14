@@ -21,5 +21,14 @@ public enum PointsSourceType {
     /** 管理端人工调整（可正可负，纠正误发/惩罚刷分），source_id = 操作管理员 id */
     ADMIN_ADJUST,
     /** 赠送（用户消费动作，delta < 0，必带 target_type + target_id；source_id 空） */
-    GIFT
+    GIFT,
+    /**
+     * 积分解锁内容（2026-08-14 新增：照片/联系方式等门槛目标，delta < 0，
+     * 必带 target_type + target_id = PointsGateTargetType 目标）。
+     * 与 GIFT 的差异：GIFT 是"购买礼物送出"（资产不转移但产生接收方展示），
+     * UNLOCK 是"单向燃烧换取查看权"——积分不进任何接收方账户（合规红线：
+     * 不可流转准货币，见 AGENTS.md「积分系统 · 积分解锁」），故不参与
+     * receivedTotal（收到积分）聚合。
+     */
+    UNLOCK
 }

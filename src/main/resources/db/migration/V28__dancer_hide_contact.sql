@@ -1,0 +1,16 @@
+-- ============================================================================
+-- V28: 舞伴联系方式遮挡开关（2026-08-14）
+--
+-- 需求（新增舞伴信息时，联系方式附近增加开关）：
+-- 默认遮挡联系方式（hide_contact = true），可选择不遮挡（false）直接展示。
+-- 与积分门槛（V23/V24 qwt_points_gates target_type='DANCER_CONTACT'）正交：
+-- - hide_contact = 是否打码展示（遮罩）；
+-- - 门槛 cost = 打码后如何解锁：cost=0（免费）→ 用户点击遮罩直接显示；
+--   cost>0 → 用户先支付积分解锁再显示（既有 POST /points/unlock 链路）。
+-- 不遮挡时（hide_contact=false）联系方式恒直接展示（后端忽略门槛下发真实值），
+-- 表单「查看需积分」行随之隐藏（残留门槛值保留，重新遮挡后恢复生效）。
+--
+-- 列默认值唯一声明通道 = @ColumnDefault（实体 Dancer.hideContact = true）；
+-- 存量舞伴（含已填联系方式的）一律默认遮挡——符合"默认遮挡"产品语义。
+-- ============================================================================
+ALTER TABLE qwt_dancers ADD COLUMN hide_contact boolean NOT NULL DEFAULT true;

@@ -31,7 +31,7 @@
 普通用户对舞伴唯一可写公开影响 = 认可 + 字典标签（禁传照片/禁编辑）；舞伴本人（createdBy 匹配）
 与管理员可编辑资料、上传相册照片（照片逐张 PENDING 审核后公开，见「相册与照片审核」）。
 
-### 数据模型（5 张表，全部继承 BaseEntity；2026-08-07 起 Flyway 迁移 + validate，禁 ddl-auto 演进）
+### 数据模型（8 张表，全部继承 BaseEntity；2026-08-07 起 Flyway 迁移 + validate，禁 ddl-auto 演进）
 
 | 表 | 职责 | 关键约束 |
 |---|---|---|
@@ -40,6 +40,9 @@
 | `qwt_dancer_recognitions` | 认可记录（每日一记模型） | UNIQUE(userId, dancerId, recognitionDate) |
 | `qwt_dancer_recognition_tags` | 认可携带的标签 | UNIQUE(recognitionId, tag)；dancerId/userId 冗余便于聚合 |
 | `qwt_dancer_photos` | 舞伴相册照片（V7 迁移，2026-08-10） | status 默认 `PENDING`（@ColumnDefault）；照片必须**逐张**审核，JSON 列无法表达逐张状态故独立成表 |
+| `qwt_dancer_ad_views` | 创作者收益-广告支持记录（V25，2026-08-14） | UNIQUE(userId, dancerId, viewDate) 每日一次防刷 |
+| `qwt_dancer_verification_logs` | 信息核验审计日志（V26，2026-08-14） | 每次状态变迁一行（from→to + operator + reason）；认证唯一历史事实源 |
+| `qwt_dancer_favorites` | 舞伴收藏（V27，2026-08-14） | UNIQUE(userId, dancerId)；软删 + restore 复用；**无趋势输入故无取消时刻列/无频控** |
 
 - **不强绑定单一舞厅**：一个舞伴可在多个舞厅出现、随时间变化（HOME 可多个、APPEARANCE 随时间增删）。
   `Dancer.city` 仅作列表按城市筛选的冗余字段，不构成绑定。
@@ -109,7 +112,7 @@
 | GET /dancers | 软鉴权 | 列表（仅 NORMAL；city 可选；按 count7d 倒序分页；登录含 myRecognizedToday；含 coverPhotoUrl） |
 | GET /dancers/cities | 软鉴权 | 常驻城市词表（聚合真实数据，2026-08-10 激活列表页城市筛选） |
 | POST /dancers | 登录 | 舞伴主动注册 → PENDING；返回新建 ID |
-| GET /dancers/{id} | 软鉴权 | 详情（可见性校验；登录含 isMine + myRecognizedToday + 四窗口统计 + 近7日每日认可 + 标签云 + 常去/出现舞厅 + 相册 photos（按身份过滤）） |
+| GET /dancers/{id} | 软鉴权 | 详情（可见性校验；登录含 isMine + myRecognizedToday + **favorite（2026-08-14 服务端权威收藏态）** + 四窗口统计 + 近7日每日认可 + 标签云 + 常去/出现舞厅 + 相册 photos（按身份过滤）） |
 | PUT /dancers/{id} | 本人/管理员 | 编辑资料（全量覆盖；REJECTED → 自动 PENDING 重审；HOME 关系完整替换；返回更新后详情） |
 | GET /dancers/{id}/tags | 软鉴权 | 标签聚合（可见性校验） |
 | POST /dancers/{id}/recognitions | 登录 | 认可 toggle（body.tags 可选 0-3 字典标签；返回 RecognizeResponse{recognized, stats}） |
@@ -122,6 +125,127 @@
 | PUT /admin/dancers/{id}/status | 管理员 | 状态切换（PENDING→NORMAL 审核通过 / PENDING→REJECTED 驳回 / NORMAL↔HIDDEN 下架恢复；body.reason 可选操作说明，**状态变化即向创建人发送站内信**，2026-08-08 新增，见「站内信（消息中心）」） |
 | GET /admin/dancers/photos | 管理员 | 相册照片审核列表（status 可选，按上传时间倒序，2026-08-10） |
 | PUT /admin/dancers/photos/{id}/status | 管理员 | 照片审核（PENDING→PUBLIC/REJECTED；reason 可选仅审计日志，2026-08-10） |
+| GET /dancers/favorites | 登录 | **我的收藏列表**（按收藏时间倒序，仅当前公开 NORMAL 舞伴；2026-08-14 舞伴收藏，见下） |
+| POST /dancers/{id}/favorite | 登录 | **收藏舞伴**（幂等：已收藏忽略，软删行 restore 复用；仅 NORMAL 可收藏，纵深防御） |
+| POST /dancers/{id}/favorite/remove | 登录 | **取消收藏**（幂等软删；行保留——HIDDEN 下架后恢复 NORMAL 自动重现） |
+| GET /dancers/{id}/stats | 仅本人/管理员 | **舞伴统计**（六组近30天趋势：认可/收藏/礼物价值/分享/浏览+浏览来源；<b>舞伴是自然人，统计属精细行为数据，仅本人+管理员可查看</b>——未登录 401/非本人 1003；缓存 60s refresh-ahead，2026-08-14） |
+| POST /dancers/{id}/view | 软鉴权 | **浏览埋点**（body {source} 可空；按天按来源去重，匿名 60s IP 频控，2026-08-14） |
+
+### 舞伴收藏（2026-08-14：能力平权，根因驱动）
+
+**根因**：门店收藏体系（qwt_favorites + FavoriteService）是**场所域特化**的——表结构
+venue_id NOT NULL + UNIQUE(user_id, venue_id)、接口返回 VenueResponse。舞伴域从未获得
+「收藏」能力（无表/无接口/详情页无星标），因此舞伴列表页结构上不可能有「收藏」Tab——
+「收藏 = 门店专属」从 qwt_favorites 诞生起就成为**事实平台决策而非显式设计**，单点特化
+演变为隐式全局决策。**系统性防复发**：用户级资源能力（收藏/浏览归因等）上线时必须审视
+是否适用于全部内容域（venue + dancer），领域能力设计阶段即抽象「每域一张表 + 域内接口 +
+详情页入口 + 列表页消费」四件套。
+
+**设计决策**（与门店收藏的关键差异，见 V27 迁移注释）：
+- **独立表 `qwt_dancer_favorites` 而非多态化 qwt_favorites**：门店收藏表与热度趋势 SQL
+  （unfavorited_at 按日分组、收藏总数/近30天新增为热度公式输入）及 VenueResponse 深度耦合，
+  多态化改造（target_type 列 + 唯一约束迁移 + 趋势 SQL 过滤）风险远大于收益。
+- **无 unfavorited_at / 无 Caffeine 频控**：门店收藏的取消时刻列与 60s 阈值频控根因是
+  "取消收藏每次真实写入会刷高取消趋势折线"；舞伴收藏不输入任何趋势图，无膨胀风险，
+  只需幂等（唯一约束 + 软删恢复）。
+- **收藏列表仅含当前公开舞伴**（d.status='NORMAL' AND d.deleted=false）：HIDDEN 是可见性
+  开关（下架=退出公众视野），被收藏后下架的舞伴自动淡出收藏列表（行保留，恢复 NORMAL
+  后自动重现）——收藏的是"当前可见的内容"。
+- **详情收藏态 = 服务端权威字段**（DancerDetailResponse.favorite，登录实时判定）——替代
+  venue 详情页用 URL fav 参数传递收藏态的 hack（分享深链等无参数入口会丢失状态）。
+- **列表摘要构建复用**：listPublic 的行内 Object[] → DancerSummaryResponse 逻辑抽取为
+  buildSummaries 私有方法，收藏列表（findFavoriteDancersByUserId 返回同构行）共用——DRY。
+
+### 舞伴官方认证（2026-08-14：「信息已核验」标识，V26 迁移）
+
+**治理定性**：认证 = 「身份与公开信息经平台人工核验属实」的**信息真实性背书**（裁决事实、
+不裁决人品）；与 DancerStatus（先认证、后展示的隐私闸门）**显式分离**——审核通过 ≠ 认证，
+绝无"审核通过自动带认证"；**不参与排序**（避免"官方钦定优先"二等化非认证舞伴）。
+
+**数据模型（V26）**：dancer 表追加 `verification_status varchar(20) NOT NULL DEFAULT 'UNVERIFIED'`
+（枚举类列禁 CHECK）+ `verified_at timestamp(6)` + `verified_by bigint`（后两列仅 VERIFIED 时
+有值 = 当前快照）；`qwt_dancer_verification_logs` 审计表（**不继承 BaseEntity**——审计日志
+只追加无软删，同 qwt_venue_status_logs 模式：dancer_id/operator_id/from_status/to_status/
+reason/created_at + 索引 dancer_id）。
+
+**状态机（可回退 = 第一约束）**：
+- `UNVERIFIED → VERIFIED`：admin 授予（`PUT /admin/dancers/{id}/verification`，action=VERIFY）；
+- `VERIFIED → PENDING_REVIEW`：**舞伴本人**编辑资料自动降级（护栏：防"认证挂在过期信息上"；
+  管理员直改不触发，避免待办噪音）；
+- `PENDING_REVIEW → VERIFIED`：admin 复核确认（action=VERIFY，恢复）；
+- `PENDING_REVIEW/VERIFIED → UNVERIFIED`：admin 撤销（action=UNVERIFY，**reason 必填**——
+  撤销必须留痕理由，随站内信通知舞伴，被撤销舞伴可查原因）；
+- **曾认证被撤销后再次编辑** → 同样进入 PENDING_REVIEW（闭环"撤销 → 修改 → 复核恢复"，
+  曾认证判定 = verificationLogRepository.existsByDancerIdAndToStatus(VERIFIED)）。
+
+**接口与通知**：
+- `PUT /admin/dancers/{id}/verification`（仅 ADMIN）：body `{action: VERIFY|UNVERIFY, reason?}`；
+  目标状态相同幂等返回；每次实际变迁写审计日志（transitionVerification 唯一出口）。
+- 站内信 `MessageType.DANCER_VERIFICATION`（同事务、幂等）：授予「信息核验通过」/ 撤销
+  「信息核验标识已移除」（附原因 + 提示可修改资料后重新申请核验）。
+- 响应下发：DancerSummaryResponse.verificationStatus / DancerDetailResponse.verificationStatus
+  + verifiedAt / AdminDancerResponse.verificationStatus + verifiedAt（PENDING_REVIEW = 管理端待办）。
+
+**测试**（DancerServiceTest 42 例含）：授予留痕+通知、撤销必填原因、幂等、本人编辑降级待复核、
+管理员直改保持、从未认证编辑不触发、曾认证撤销后编辑重新待复核。
+
+### 舞伴统计（2026-08-14 第一期：趋势时间序列，V29 浏览埋点）
+
+**背景**：舞伴详情页参考门店热度页（venue-heat）做统计图（用户需求"舞伴详情页也需要
+做一个统计图，第一期先做核心关注点"）。与门店的关键差异 = ① **舞伴域无热度公式**（列表
+排序已有认可数/收礼信号，综合指数属后续扩展），第一期只做**趋势时间序列**六张图：
+认可 / 收藏 / 礼物价值 / 分享 / 浏览 + 浏览来源；② **可见范围仅本人 + 管理员**（门店热度
+页公开，舞伴是自然人——逐日时间序列/来源拆解属精细行为数据且与创作者收益计划敏感度
+耦合，对齐 hide_contact 隐私默认最小化先例；详情页头部已公开的聚合信号"328 人认可"等
+足以支撑他人评估，不需要开放逐日明细）。前端独立页 `dancer-stats`（对齐 venue-heat 的
+charts 数组模板 + chart-brush + 图例开关 + 空图恒渲染 + y 轴全量锁定）。
+
+**接口**：
+- `GET /dancers/{id}/stats`（**仅本人 + 管理员**）：`DancerStatsResponse{recognitionTrend,
+  favoriteTrend, pointsTrend, shareTrend, viewTrend, viewSourceTrend, statsAsOfDate}`——
+  六组近30天每日时间序列（含今日，骨架 31 天，generate_series 补零；与门店 countDailyTrends
+  同骨架，见下）。**鉴权**：Controller `requireAuth()`（未登录 → HTTP 401，前端触发登录）
+  + `DancerService.checkStatsAccess`（已登录非本人/非管理员 → 业务错 1003「仅舞伴本人可查看
+  统计数据」）。缓存 = 内嵌 Caffeine LoadingCache（60s refresh-ahead / 30min 过期，对齐
+  VenueHeatService 模式）。
+- `POST /dancers/{id}/view`（软鉴权，fire-and-forget）：浏览埋点，body `{source}` 可空，
+  null/非法值兜底 OTHER（枚举类列无 CHECK，应用层防御；与门店 POST /venues/{id}/view 同模式）。
+
+**浏览埋点（V29 迁移 `qwt_dancer_views`）**：独立表而非多态化 qwt_venue_views（对齐
+舞伴收藏独立表的既有决策）；唯一索引 `(dancer_id, user_id, view_date, source)` 按天按来源
+去重（匿名 userId=NULL 不去重 + 60s IP 频控兜底，对齐门店 V18/V21 教训：upsert 必须用
+ON CONFLICT 列清单推断，勿用 ON CONSTRAINT）；source 复用门店 `ViewSource` 枚举（跨域
+复用先例 = DancerShare 复用 venueshare.enums.ShareEventType）。
+
+**趋势口径（对齐门店 2026-08-13 实时化）**：`DancerStatsService` 窗口上界 = 请求时刻 now
+（含今日）；骨架 [今天-30, 今天] 31 天；DATE 列（认可 recognition_date / 浏览 view_date）
+按 [sinceDate, 明天0点) 过滤、timestamptz 列（收藏/礼物/分享 created_at）按 [windowSince,
+now) 过滤。聚合为单条 mega-query（`DancerStatsRepository.countDancerDailyTrends`，骨架
+generate_series 显式 ::timestamp 重载 + ::date 收口——门店时区链缺陷教训）。
+
+**各序列数据源与图型**：
+- 认可趋势：`qwt_dancer_recognitions`（每日一记，按 recognition_date 分组；取消=物理删除）
+  → 单折线；
+- 收藏趋势：`qwt_dancer_favorites.created_at`（deleted=false；**无 unfavorited_at 取消线**——
+  舞伴收藏软删无取消时刻，趋势为"新增"单序列，与门店双线不同）→ 单折线；
+- 礼物价值趋势：`qwt_points_transactions`（target_type='DANCER' AND delta<0，按日
+  SUM(-delta)，与门店 pointsTrend 同口径）→ 单折线；
+- 分享趋势：`qwt_dancer_shares`（event_type='SHARE' 主动分享事件，不含 OPEN 回流）→ 单折线；
+- 浏览趋势 / 浏览来源：`qwt_dancer_views`（V29；viewSource 的 other = 全量 − list − share
+  − search 减法派生，前端只画 list/share/search 三线）→ 单折线 / 三折线。
+
+**写路径缓存失效矩阵**（对齐门店「写路径缓存逐出」约定；refresh-ahead 仅兜底）：
+浏览 recordView（真实插入后 afterCommit，VenueViewService 同款）/ 认可 toggleRecognize /
+收藏 add·removeFavorite / 分享 recordShare / 礼物赠送 gift（DANCER 分支 afterCommit）——
+全部调用 `DancerStatsService.invalidate(dancerId)`；幂等无写入分支（已收藏 return、匿名
+频控命中）不失效。
+
+**来源判定（前端单一判定点 = dancer-detail.onLoad）**：share_from 参数 → SHARE；from=list
+参数（dancers.onTapDancer 列表页跳转携带）→ LIST；其余（深链/收藏 Tab）→ OTHER。舞伴域
+**无搜索入口与快照机制**——LIST 判定走 URL 参数而非门店式 storeVenueSnapshot。
+
+**历史局限**：浏览埋点自 V29 上线日起积累（存量无浏览数据）；分享趋势自 V20（分享事件
+日志）起积累。
 
 ### 聚合缓存（DancerAggregateService）
 
@@ -236,6 +360,97 @@ Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻
 ### 合规红线（微信小程序审核）
 
 无充值入口（积分仅免费获得）/ 不可提现·转让·兑换 / 无邀请分享得积分（诱导分享违规）/ 无随机奖励（博彩）/ 文案禁「打赏·赞赏·小费」，统一「支持·感谢」。规则文案由后端 `PointsService.RULES_TEXT` 下发，前端只渲染。
+
+### 积分解锁（2026-08-14 公共模块：照片/联系方式"自由设置是否需要积分"）
+
+**需求**：舞伴上传的每张照片、联系方式都可"自由设置是否需要积分、支付多少"；
+且是**公共模块**——任何内容点未来都可声明门槛。统一模型 = 门槛
+（`qwt_points_gates`：target_type + target_id + cost）+ 解锁记录（`qwt_points_unlocks`）。
+
+- **合规决策（核心）**：解锁消耗积分**单向燃烧（burn）**，不进舞伴账户——若转移
+  即成"可流转准货币"红线（与礼物化根因同源）；舞伴回报 = "有人愿为 TA 的内容
+  花积分"的社会证明（unlocks 表天然支持解锁人数统计，本期不展示，预留给后续）。
+  <b>解锁流水 source_type=UNLOCK、delta&lt;0，不挂 target_type/target_id</b>
+  （`PointsTargetType` 是赠送/收积分聚合维度 VENUE/DANCER，语义不混杂），
+  目标记入 remark（"DANCER_PHOTO:123"），权威记录 = unlocks 表（含 transaction_id 关联）。
+- **数据模型（V23/V24/V25 迁移）**：
+  - `qwt_points_gates`：target_type + target_id + cost + created_by/updated_by；
+    **继承 BaseEntity**（可改可删的业务配置）；**cost&gt;0 才落行**（"存在行"即"有门槛"，
+    清除 = 软删）；部分唯一索引 `WHERE deleted=false`（软删后重建兼容）。
+  - `qwt_points_unlocks`：user_id + target_type + target_id + transaction_id；
+    **不继承 BaseEntity**（锚点记录只写一次）；`UNIQUE(user_id,target_type,target_id)`
+    **一人一目标只扣一次费**——并发撞 23505 时本事务整体回滚（含扣费与流水），
+    幂等返回已解锁，无重复扣费（同 earn() 幂等模式）。
+  - `qwt_dancers.contact`（V24，varchar 100 可空）：联系方式随 UpsertDancerRequest
+    走既有 PENDING 审核（管理员可见），明文存储（与昵称/简介同级别，MVP 不加密）。
+  - `qwt_dancers.hide_contact`（V28，boolean NOT NULL DEFAULT true）：<b>联系方式遮挡
+    开关</b>（2026-08-14，默认遮挡）——与积分门槛<b>正交</b>：hide_contact 决定是否
+    打码展示；门槛 cost 决定打码后如何解锁（0=免费点击直显，>0=积分解锁后显示）。
+    不遮挡（false）时后端<b>忽略门槛恒下发真实值</b>（残留门槛值保留，重新遮挡后
+    恢复生效）；遮挡 + 免费照常下发（内容免费，前端遮罩承载"点击直显"交互）；
+    遮挡 + 有门槛 + 未解锁才置 null 防绕过。UpsertDancerRequest 增 hideContact
+    （null = 默认遮挡 true，旧客户端向后兼容）。
+  - `qwt_dancer_photos.blur_url`（V25，可空）：<b>模糊占位图</b>（需求 4：
+    收费照片详情页"模糊可见轮廓"遮罩，<b>薄码语义</b>——轻模糊、轮廓隐约可见，
+    非厚码/马赛克）——前端上传原图时 canvas 离屏降采样生成（最长边 96px +
+    JPEG 0.5 + 轻 blur(1px)，不可还原为原图）随 blurUrls 一起上传；缺失
+    （旧数据/生成失败）时详情页回退<b>虚焦占位</b>（前端柔和光斑 + 锁角标——
+    无原图可模糊，仅表达"内容被遮挡"；2026-08-14 根因修复）。
+    <b>blurUrls 完整性契约（2026-08-14 前端根因修复）</b>：image-upload 的 change
+    事件在<b>主图 + 模糊图全部 settle 后只发一次</b>，blurUrls 与 urls 一一对应且为
+    最终值（blur 失败项空串）——服务端按 index 消费即可，blur_url 恒有值（新数据）。
+- **接口**：
+  - `POST /points/gates` body `{targetType, targetId, cost}`：cost&gt;0 设置/更新
+    （≤ `app.points.gate.max-cost`，PointsProperties 配置化禁硬编码）；cost=0 清除
+    （软删）。权限 = 目标属主（舞伴本人 createdBy）或管理员（与 dancer canManage 语义一致）。
+  - `POST /points/unlock` body `{targetType, targetId}`：登录解锁；校验链 = 门槛存在
+    （cost&gt;0 未软删）→ 目标可见（照片 PUBLIC + 舞伴 NORMAL / 联系方式 → 舞伴 NORMAL）
+    → 幂等（已解锁直接返回内容）→ 余额（原子条件扣减 deductBalance，1011）→
+    写 UNLOCK 流水 → 写 unlock 记录。响应 `UnlockResponse{unlocked, balance, targetType, targetId, content}`
+    （content = 照片原图 URL / 联系方式文本，仅解锁成功返回）。
+  - `POST /dancers/{id}/photos` body 扩展 `{urls, blurUrls}`（2026-08-14）：
+    blurUrls 与 urls 按 index 一一对应（可缺省），落库 DancerPhoto.blurUrl。
+- **详情组装（DancerService）**：`DancerDetailResponse` 增 contact/contactCost/
+  contactUnlocked/hideContact；`DancerPhotoResponse` 增 cost/unlocked/blurUrl；**未解锁照片 url 置
+  null**（不下发原图防绕过，blurUrl 恒下发作遮罩）；列表封面 SQL
+  （findCoverUrlsByDancerIds）LEFT JOIN gates **跳过有门槛照片**（列表页不泄露需解锁
+  原图；全设门槛的舞伴无封面 = 诚实呈现）。批量组装走 PointsService.gateCosts /
+  unlockedIds（一次 IN 查询，N+1 规避）。
+- **错误码**：复用 1001（目标不存在/无门槛/照片未公开）/ 1003（无权限）/ 1011（余额不足）。
+- **测试**：PointsServiceTest / DancerServiceTest 适配新构造参数（UpsertDancerRequest
+  + contact/earningsEnabled/hideContact、PointsService + gate/unlock/photo repo、PointsProperties + gate、
+  DancerService + adViewRepo/DancerAdProperties、addPhotos + blurUrls；DancerServiceTest
+  增 hideContact 三态用例：默认遮挡+付费→不下发 / 遮挡+免费→下发（前端遮罩）/
+  不遮挡→恒下发 / 本人恒可见）。
+
+---
+
+### 创作者收益计划（2026-08-14：激励视频广告支持 TA，收益线下转账结算）
+
+**需求**：舞伴开启后，详情页接入微信小程序激励视频广告——其他用户主动观看广告支持
+TA（完整观看计入收益），收益由平台**线下转账**结算（MVP 无线上结算；收益记录 = 结算依据）。
+
+- **合规与防刷**：
+  - <b>广告必须用户主动触发</b>（前端点击入口才播放，微信广告规范禁自动弹出）；
+  - <b>本人不可观看自己的广告</b>（自刷收益红线，同自赠检测 1015 语义）→ 1001；
+  - 同一用户同舞伴<b>每天至多一次</b>（`qwt_dancer_ad_views` UNIQUE(user,dancer,view_date)，
+    23505 幂等返回 recorded=false 不重复计收益）；匿名不可（requireAuth）。
+- **数据模型（V25 迁移）**：
+  - `qwt_dancers.earnings_enabled`（boolean @ColumnDefault false）：收益计划开关，
+    随 UpsertDancerRequest 走审核（null = 关闭）；
+  - `qwt_dancer_ad_views`：dancer_id + user_id + view_date + created_at，
+    **不继承 BaseEntity**（收益锚点只写一次）；`UNIQUE(user_id,dancer_id,view_date)` 防刷；
+    countByDancerId = 累计支持次数（详情页"已获得 N 次支持" + 线下结算依据）。
+- **接口**：
+  - `POST /dancers/{id}/ad-views`（登录；目标须开启收益计划且非本人；每日幂等）：
+    响应 `AdViewResponse{recorded, viewsTotal}`——recorded=true 计入收益；
+  - 详情 `GET /dancers/{id}` 增 `earningsEnabled`/`earningsAdUnitId`（配置下发，
+    前端零硬编码）/`earningsViews`（累计支持次数）。
+- **配置**：`app.dancer-ad.ad-unit-id`（`DancerAdProperties`，@ConfigurationPropertiesScan
+  自动注册；环境变量 DANCER_AD_UNIT_ID 注入；留空 = 未配置广告位，前端不渲染广告入口）。
+  需小程序开通**流量主**后填真实激励视频广告位 ID。
+- **管理端结算**：MVP 不做线上结算（线下转账 = 运营人工核对 qwt_dancer_ad_views），
+  数据模型已支持；后续可加管理端收益列表（按舞伴聚合观看次数）。
 
 ---
 

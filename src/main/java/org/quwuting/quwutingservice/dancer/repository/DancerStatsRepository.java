@@ -1,0 +1,135 @@
+package org.quwuting.quwutingservice.dancer.repository;
+
+import org.quwuting.quwutingservice.dancer.entity.DancerView;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.Repository;
+import org.springframework.data.repository.query.Param;
+
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.List;
+
+/**
+ * 舞伴统计聚合仓库（2026-08-14 舞伴统计图第一期）。
+ * <p>
+ * 独立于 {@code DancerRepository}（单职责：只承载统计趋势 mega-query）。
+ * 继承空标记 {@link Repository} 而非 {@code JpaRepository}——本仓库只提供只读
+ * 趋势查询，不为 DancerView 生成标准 CRUD（避免与 DancerViewRepository 职责重叠）。
+ * 完全对齐门店 {@code VenueRepository#countDailyTrends} 的骨架与口径：
+ * <ul>
+ *   <li>generate_series 生成连续日期骨架（天然补零），各源表 GROUP BY day 后
+ *       LEFT JOIN 骨架——一条 DB 往返取回全部时间序列（认可/收藏/礼物/分享/
+ *       浏览含来源分列，共 8 个计数字段）；</li>
+ *   <li>时区链修复（门店 2026-08-08 实机复现教训）：骨架必须显式
+ *       {@code ::timestamp} 重载 + {@code ::date} 收口——generate_series(date, date,
+ *       interval) 会被 PG 解析到 timestamptz 重载（datetime 类别 preferred type），
+ *       依赖 session timezone，session/JVM 时区不一致时骨架整体偏移一天、与源表
+ *       DATE 列 LEFT JOIN 恒失配（计数全 0）。本写法与 session/JVM 时区无关；</li>
+ *   <li>窗口语义（对齐门店 2026-08-13 实时化）：day 骨架 = [sinceDate, asOfDate]
+ *       （[今天-30, 今天]，共 31 天，含今日）；DATE 列（认可 recognition_date /
+ *       浏览 view_date）按 [sinceDate, untilDate) 过滤（untilDate = 明天 0 点，
+ *       覆盖今日全天）；timestamptz 列（收藏/礼物/分享 created_at）按
+ *       [windowSince, windowUntil) 过滤（上界 = 请求时刻 now，实时）。</li>
+ * </ul>
+ */
+public interface DancerStatsRepository extends Repository<DancerView, Long> {
+
+    /**
+     * 单日趋势行投影。注意：getDay() 列经骨架 {@code ::date} 收口后为 DATE 类型，
+     * Hibernate 经 Jsr310Converters 正常转换为 LocalDate（勿移除该 cast，门店根因）。
+     */
+    interface DailyTrendRow {
+        java.time.LocalDate getDay();
+        /** 当日认可数（按 recognition_date 分组） */
+        Long getRecognitioncount();
+        /** 当日新增收藏数（按 created_at 分组，deleted=false） */
+        Long getFavcount();
+        /** 当日收到礼物价值（target_type='DANCER' 的 SUM(-delta)，已补零） */
+        Long getPoints();
+        /** 当日分享次数（event_type='SHARE' 主动分享事件） */
+        Long getSharecount();
+        /** 当日浏览数（含匿名，按日计数，全来源合计） */
+        Long getViewcount();
+        /** 当日来源=LIST 浏览数（「浏览来源」图主序列） */
+        Long getViewlistcount();
+        /** 当日来源=SHARE 浏览数（「浏览来源」图次序列） */
+        Long getViewsharecount();
+        /** 当日来源=SEARCH 浏览数（「浏览来源」图第三序列） */
+        Long getViewsearchcount();
+    }
+
+    /**
+     * 舞伴统计趋势 mega-query：一条 DB 往返取回 认可/收藏/礼物价值/分享/浏览
+     * （含来源分列）八组按天时间序列。结构与门店 countDailyTrends 完全同构
+     * （骨架 generate_series + 各源表 LEFT JOIN，天然补零）。
+     *
+     * @param dancerId     舞伴 ID
+     * @param sinceDate    骨架起始（含，今天-30）
+     * @param asOfDate     骨架结束（含，今天）
+     * @param untilDate    DATE 列排他上界（今天+1，覆盖今日全天）
+     * @param windowSince  timestamptz 列窗口下界（今天 0 点-30 天）
+     * @param windowUntil  timestamptz 列窗口上界（请求时刻 now，实时）
+     */
+    @Query(value = """
+            SELECT d.day,
+                   COALESCE(r.cnt, 0) AS recognitioncount,
+                   COALESCE(f.cnt, 0) AS favcount,
+                   COALESCE(pt.cnt, 0) AS points,
+                   COALESCE(s.cnt, 0) AS sharecount,
+                   COALESCE(v.cnt, 0) AS viewcount,
+                   COALESCE(vl.cnt, 0) AS viewlistcount,
+                   COALESCE(vs.cnt, 0) AS viewsharecount,
+                   COALESCE(vq.cnt, 0) AS viewsearchcount
+            FROM (SELECT generate_series(CAST(:sinceDate AS timestamp), CAST(:asOfDate AS timestamp), interval '1 day')::date AS day) AS d
+            LEFT JOIN (SELECT recognition_date AS day, COUNT(*) AS cnt
+                       FROM qwt_dancer_recognitions
+                       WHERE dancer_id = :dancerId AND deleted = false
+                         AND recognition_date >= :sinceDate AND recognition_date < :untilDate
+                       GROUP BY 1) r ON r.day = d.day
+            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS cnt
+                       FROM qwt_dancer_favorites
+                       WHERE dancer_id = :dancerId AND deleted = false
+                         AND created_at >= :windowSince AND created_at < :windowUntil
+                       GROUP BY 1) f ON f.day = d.day
+            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, SUM(-delta) AS cnt
+                       FROM qwt_points_transactions
+                       WHERE target_type = 'DANCER' AND target_id = :dancerId AND delta < 0
+                         AND created_at >= :windowSince AND created_at < :windowUntil
+                       GROUP BY 1) pt ON pt.day = d.day
+            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS cnt
+                       FROM qwt_dancer_shares
+                       WHERE dancer_id = :dancerId AND event_type = 'SHARE'
+                         AND created_at >= :windowSince AND created_at < :windowUntil
+                       GROUP BY 1) s ON s.day = d.day
+            LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
+                       FROM qwt_dancer_views
+                       WHERE dancer_id = :dancerId
+                         AND view_date >= :sinceDate AND view_date < :untilDate
+                       GROUP BY 1) v ON v.day = d.day
+            LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
+                       FROM qwt_dancer_views
+                       WHERE dancer_id = :dancerId
+                         AND source = 'LIST'
+                         AND view_date >= :sinceDate AND view_date < :untilDate
+                       GROUP BY 1) vl ON vl.day = d.day
+            LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
+                       FROM qwt_dancer_views
+                       WHERE dancer_id = :dancerId
+                         AND source = 'SHARE'
+                         AND view_date >= :sinceDate AND view_date < :untilDate
+                       GROUP BY 1) vs ON vs.day = d.day
+            LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
+                       FROM qwt_dancer_views
+                       WHERE dancer_id = :dancerId
+                         AND source = 'SEARCH'
+                         AND view_date >= :sinceDate AND view_date < :untilDate
+                       GROUP BY 1) vq ON vq.day = d.day
+            ORDER BY d.day
+            """, nativeQuery = true)
+    List<DailyTrendRow> countDancerDailyTrends(@Param("dancerId") Long dancerId,
+                                               @Param("sinceDate") LocalDate sinceDate,
+                                               @Param("asOfDate") LocalDate asOfDate,
+                                               @Param("untilDate") LocalDate untilDate,
+                                               @Param("windowSince") LocalDateTime windowSince,
+                                               @Param("windowUntil") LocalDateTime windowUntil);
+}

@@ -6,6 +6,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.quwuting.quwutingservice.dancer.dto.request.RecognizeDancerRequest;
+import org.quwuting.quwutingservice.dancer.dto.request.UpdateDancerVerificationRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerDetailResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.RecognizeResponse;
@@ -16,11 +17,16 @@ import org.quwuting.quwutingservice.dancer.entity.DancerVenue;
 import org.quwuting.quwutingservice.dancer.enums.DancerPhotoStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerVenueRelation;
+import org.quwuting.quwutingservice.dancer.enums.DancerVerificationAction;
+import org.quwuting.quwutingservice.dancer.enums.DancerVerificationStatus;
+import org.quwuting.quwutingservice.dancer.repository.DancerAdViewRepository;
+import org.quwuting.quwutingservice.dancer.repository.DancerFavoriteRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionTagRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVenueRepository;
+import org.quwuting.quwutingservice.dancer.repository.DancerVerificationLogRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.message.service.MessageService;
@@ -67,6 +73,12 @@ class DancerServiceTest {
     private org.quwuting.quwutingservice.points.service.PointsService pointsService;
     @Mock
     private org.quwuting.quwutingservice.storage.ImageContentValidator imageValidator;
+    @Mock
+    private DancerAdViewRepository adViewRepository;
+    @Mock
+    private DancerVerificationLogRepository verificationLogRepository;
+    @Mock
+    private DancerFavoriteRepository dancerFavoriteRepository;
 
     private DancerService dancerService;
 
@@ -75,8 +87,9 @@ class DancerServiceTest {
     @BeforeEach
     void setUp() {
         dancerService = new DancerService(dancerRepository, dancerVenueRepository, recognitionRepository,
-                recognitionTagRepository, photoRepository, aggregateService, venueLookupService, messageService,
-                pointsService, imageValidator);
+                recognitionTagRepository, photoRepository, adViewRepository, verificationLogRepository,
+                dancerFavoriteRepository, aggregateService, venueLookupService,
+                messageService, pointsService, imageValidator, new org.quwuting.quwutingservice.config.DancerAdProperties(""));
 
         dancer = new Dancer();
         dancer.setId(1L);
@@ -96,7 +109,7 @@ class DancerServiceTest {
         });
 
         Long id = dancerService.createDancer(2L,
-                new UpsertDancerRequest("  小雅  ", null, " 舞姿优秀 ", null, "杭州", null), false);
+                new UpsertDancerRequest("  小雅  ", null, " 舞姿优秀 ", null, "杭州", null, null, null, null), false);
 
         assertEquals(10L, id);
         verify(dancerRepository).save(argThat(d ->
@@ -111,7 +124,7 @@ class DancerServiceTest {
     void createDancer_adminCreatesNormal() {
         when(dancerRepository.save(any(Dancer.class))).thenAnswer(inv -> inv.getArgument(0));
 
-        dancerService.createDancer(99L, new UpsertDancerRequest("后台舞伴", null, null, null, null, null), true);
+        dancerService.createDancer(99L, new UpsertDancerRequest("后台舞伴", null, null, null, null, null, null, null, null), true);
 
         verify(dancerRepository).save(argThat(d ->
                 d.getStatus() == DancerStatus.NORMAL && d.getCreatedBy().equals(99L)));
@@ -120,7 +133,7 @@ class DancerServiceTest {
     @Test
     void createDancer_blankNickname_throws() {
         BusinessException ex = assertThrows(BusinessException.class,
-                () -> dancerService.createDancer(1L, new UpsertDancerRequest("   ", null, null, null, null, null), false));
+                () -> dancerService.createDancer(1L, new UpsertDancerRequest("   ", null, null, null, null, null, null, null, null), false));
         assertEquals(1001, ex.getCode());
         verify(dancerRepository, never()).save(any());
     }
@@ -135,7 +148,7 @@ class DancerServiceTest {
         when(dancerVenueRepository.findByDancerIdAndVenueIdAndRelationAndDeletedFalse(
                 eq(7L), eq(5L), any())).thenReturn(Optional.empty());
 
-        dancerService.createDancer(1L, new UpsertDancerRequest("小雅", null, null, null, null, 5L), false);
+        dancerService.createDancer(1L, new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, 5L), false);
 
         verify(venueLookupService).findById(5L); // 常驻舞厅存在性校验
         verify(dancerVenueRepository).save(argThat(dv ->
@@ -200,6 +213,81 @@ class DancerServiceTest {
         DancerDetailResponse resp = dancerService.getDetail(1L, 99L, UserRole.ADMIN);
 
         assertEquals(DancerStatus.HIDDEN, resp.status());
+    }
+
+    // ─── 联系方式遮挡（2026-08-14：默认遮挡 + 积分门槛正交） ─────────────────
+
+    /** getDetail 联系方式可见性测试的公共 stub（匿名视角，isUnlocked mock 默认 false） */
+    private void stubDetailForContact() {
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{5L, 1L, 3L, 4L});
+        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
+                .thenReturn(Collections.emptyList());
+        when(pointsService.receivedTotal(any(), anyLong())).thenReturn(0L);
+        when(pointsService.receivedSince(any(), anyLong(), any(), any())).thenReturn(0L);
+        when(pointsService.receivedGifts(any(), anyLong())).thenReturn(Collections.emptyList());
+        when(adViewRepository.countByDancerId(anyLong())).thenReturn(0L);
+    }
+
+    @Test
+    void getDetail_hideContactDefaultTrue_withPaidGate_contactHiddenFromOthers() {
+        dancer.setContact("wx:xiaoya");
+        dancer.setHideContact(true); // 显式声明（实体默认即 true，此处防回归）
+        stubDetailForContact();
+        when(pointsService.gateCost(any(), eq(1L))).thenReturn(5);
+        when(pointsService.isUnlocked(any(), any(), eq(1L))).thenReturn(false);
+
+        DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
+
+        assertTrue(resp.hideContact(), "默认遮挡");
+        assertEquals(5, resp.contactCost());
+        assertNull(resp.contact(), "遮挡 + 有门槛 + 未解锁 → 不下发真实值（防绕过）");
+    }
+
+    @Test
+    void getDetail_hideContactTrue_withFreeGate_contactDeliveredForFrontendMask() {
+        dancer.setContact("wx:xiaoya");
+        dancer.setHideContact(true);
+        stubDetailForContact();
+        when(pointsService.gateCost(any(), eq(1L))).thenReturn(0); // 免费（无门槛）
+
+        DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
+
+        assertTrue(resp.hideContact());
+        assertEquals(0, resp.contactCost());
+        assertEquals("wx:xiaoya", resp.contact(),
+                "遮挡 + 免费 → 下发真实值（内容本身免费），前端遮罩承载点击直显交互");
+    }
+
+    @Test
+    void getDetail_hideContactFalse_contactAlwaysDelivered() {
+        dancer.setContact("wx:xiaoya");
+        dancer.setHideContact(false);
+        stubDetailForContact();
+        when(pointsService.gateCost(any(), eq(1L))).thenReturn(5); // 残留门槛
+        when(pointsService.isUnlocked(any(), any(), eq(1L))).thenReturn(false);
+
+        DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
+
+        assertFalse(resp.hideContact(), "不遮挡 → 恒直显");
+        assertEquals("wx:xiaoya", resp.contact(), "不遮挡时忽略门槛下发真实值");
+    }
+
+    @Test
+    void getDetail_hideContactTrue_ownerAlwaysSeesContact() {
+        dancer.setContact("wx:xiaoya");
+        dancer.setHideContact(true);
+        stubDetailForContact();
+        when(pointsService.gateCost(any(), eq(1L))).thenReturn(5);
+        when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(any(), any(), any()))
+                .thenReturn(Optional.empty());
+
+        DancerDetailResponse resp = dancerService.getDetail(1L, 1L, UserRole.USER);
+
+        assertEquals("wx:xiaoya", resp.contact(), "本人恒可见（showAllPhotos 短路解锁判定）");
     }
 
     // ─── 认可（每日一记 toggle） ─────────────────────────────────────────────
@@ -410,12 +498,14 @@ class DancerServiceTest {
 
     @Test
     void listAdminDancers_mapsRowsWithCreatorFallback() {
-        // 管理端列表行：{id, nickname, avatar, bio, gender, city, status, created_at, u.nickname, u.avatar_url}
+        // 管理端列表行：{id, nickname, avatar, bio, gender, city, status, created_at, u.nickname,
+        //               u.avatar_url, verification_status, verified_at}（认证列 2026-08-14 追加）
         // 时间列按 Hibernate 7 native 查询映射为 java.time.LocalDateTime（禁 java.sql.Timestamp，
         // 见后端 AGENTS.md「native 查询时间列强转约定」——2026-08-08 DancerService 修复后
         // 本测试同步，否则 mock 类型与服务强转不一致抛 ClassCastException）。
         var row = new Object[]{1L, "小雅", null, "舞姿优秀", "FEMALE", "杭州", "PENDING",
-                LocalDateTime.of(2026, 8, 8, 10, 0), null, null};
+                LocalDateTime.of(2026, 8, 8, 10, 0), null, null, "VERIFIED",
+                LocalDateTime.of(2026, 8, 10, 9, 0)};
         org.springframework.data.domain.Page<Object[]> page =
                 new org.springframework.data.domain.PageImpl<Object[]>(Collections.singletonList(row));
         when(dancerRepository.findAdminPage(eq("PENDING"), any())).thenReturn(page);
@@ -426,6 +516,7 @@ class DancerServiceTest {
         assertEquals("小雅", result.getContent().get(0).nickname());
         assertEquals("未知用户", result.getContent().get(0).creatorNickname(), "注册人已删时回退占位");
         assertEquals(DancerStatus.PENDING, result.getContent().get(0).status());
+        assertEquals(DancerVerificationStatus.VERIFIED, result.getContent().get(0).verificationStatus());
     }
 
     // ─── 本人编辑（2026-08-10 新增：全量覆盖 / REJECTED 重审 / HOME 替换 / 权限） ───
@@ -446,7 +537,7 @@ class DancerServiceTest {
                 .thenReturn(Collections.emptyList());
 
         DancerDetailResponse resp = dancerService.updateDancer(1L, 1L,
-                new UpsertDancerRequest("小雅2", "https://cdn/x.jpg", "新简介", "FEMALE", "上海", null),
+                new UpsertDancerRequest("小雅2", "https://cdn/x.jpg", "新简介", "FEMALE", "上海", null, null, null, null),
                 UserRole.USER);
 
         assertEquals("小雅2", resp.nickname());
@@ -473,7 +564,7 @@ class DancerServiceTest {
                 .thenReturn(Collections.emptyList());
 
         DancerDetailResponse resp = dancerService.updateDancer(1L, 1L,
-                new UpsertDancerRequest("小雅", null, null, null, null, null), UserRole.USER);
+                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null), UserRole.USER);
 
         assertEquals(DancerStatus.PENDING, resp.status(), "驳回后本人编辑 → 自动回到审核中（重新送审）");
     }
@@ -500,7 +591,7 @@ class DancerServiceTest {
                 .thenReturn(Collections.emptyList());
 
         dancerService.updateDancer(1L, 1L,
-                new UpsertDancerRequest("小雅", null, null, null, null, 9L), UserRole.USER);
+                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, 9L), UserRole.USER);
 
         verify(venueLookupService).findById(9L);                    // 新常驻舞厅存在性校验
         verify(dancerVenueRepository).save(argThat(dv -> dv.isDeleted())); // 旧 HOME 软删（Lombok boolean → isDeleted）
@@ -514,7 +605,7 @@ class DancerServiceTest {
 
         BusinessException ex = assertThrows(BusinessException.class,
                 () -> dancerService.updateDancer(99L, 1L,
-                        new UpsertDancerRequest("小雅", null, null, null, null, null), UserRole.USER));
+                        new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null), UserRole.USER));
         assertEquals(1003, ex.getCode());
         verify(dancerRepository, never()).save(any());
     }
@@ -528,7 +619,7 @@ class DancerServiceTest {
                 .thenReturn(Collections.emptyList()); // maxSortOrder = 0 → 新照片从 1 起
         when(photoRepository.save(any(DancerPhoto.class))).thenAnswer(inv -> inv.getArgument(0));
 
-        dancerService.addPhotos(1L, 1L, List.of("https://cdn/a.jpg", "https://cdn/b.jpg"), UserRole.USER);
+        dancerService.addPhotos(1L, 1L, List.of("https://cdn/a.jpg", "https://cdn/b.jpg"), null, UserRole.USER);
 
         verify(photoRepository, times(2)).save(argThat(p ->
                 p.getStatus() == DancerPhotoStatus.PENDING && p.getDancerId().equals(1L)));
@@ -539,7 +630,7 @@ class DancerServiceTest {
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
 
         BusinessException ex = assertThrows(BusinessException.class,
-                () -> dancerService.addPhotos(99L, 1L, List.of("https://cdn/a.jpg"), UserRole.USER));
+                () -> dancerService.addPhotos(99L, 1L, List.of("https://cdn/a.jpg"), null, UserRole.USER));
         assertEquals(1003, ex.getCode());
         verify(photoRepository, never()).save(any());
     }
@@ -549,7 +640,7 @@ class DancerServiceTest {
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
 
         BusinessException ex = assertThrows(BusinessException.class,
-                () -> dancerService.addPhotos(1L, 1L, List.of("file:///etc/passwd"), UserRole.USER));
+                () -> dancerService.addPhotos(1L, 1L, List.of("file:///etc/passwd"), null, UserRole.USER));
         assertEquals(1001, ex.getCode());
         verify(photoRepository, never()).save(any());
     }
@@ -641,5 +732,161 @@ class DancerServiceTest {
         assertTrue(resp.isMine());
         assertEquals(1, resp.photos().size(), "本人视角含待审照片（编辑页回显状态）");
         assertEquals(DancerPhotoStatus.PENDING, resp.photos().get(0).status());
+    }
+
+    // ─── 信息核验（2026-08-14 官方认证：授予 / 撤销 / 编辑触发待复核） ───────────
+
+    /** updateDancer 尾部 getDetail 组装依赖（可选链统一 stub，避免各测试重复 12 行 mock） */
+    private void stubDetailDeps() {
+        when(aggregateService.getAggregate(anyLong())).thenReturn(new long[]{0L, 0L, 0L, 0L});
+        when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(any(), any(), any()))
+                .thenReturn(Optional.empty());
+        when(recognitionRepository.countByDay(any(), any())).thenReturn(Collections.emptyList());
+        when(dancerVenueRepository.findByDancerIdAndRelationAndDeletedFalse(anyLong(), any()))
+                .thenReturn(Collections.emptyList());
+        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(anyLong())).thenReturn(Collections.emptyList());
+        when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(anyLong()))
+                .thenReturn(Collections.emptyList());
+        when(pointsService.receivedTotal(any(), anyLong())).thenReturn(0L);
+        when(pointsService.receivedSince(any(), anyLong(), any(), any())).thenReturn(0L);
+        when(pointsService.receivedGifts(any(), anyLong())).thenReturn(Collections.emptyList());
+        when(pointsService.gateCost(any(), anyLong())).thenReturn(0);
+        // 注：不 stub pointsService.isUnlocked——updateDancer 测试均为本人/管理员视角，
+        // getDetail 中 showAllPhotos=true 短路该调用（isUnlocked 仅非本人/非管理员路径使用）
+        when(adViewRepository.countByDancerId(anyLong())).thenReturn(0L);
+    }
+
+    @Test
+    void updateVerification_verifyFromUnverified_grantedNotifiedAndLogged() {
+        dancer.setVerificationStatus(DancerVerificationStatus.UNVERIFIED);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(dancerRepository.save(any(Dancer.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        dancerService.updateVerification(99L, 1L, DancerVerificationAction.VERIFY, "线下核实身份证件");
+
+        assertEquals(DancerVerificationStatus.VERIFIED, dancer.getVerificationStatus());
+        assertEquals(99L, dancer.getVerifiedBy(), "认证授予人留痕（快照）");
+        assertNotNull(dancer.getVerifiedAt(), "认证授予时间快照");
+        // 审计日志：from UNVERIFIED → to VERIFIED（reason 入日志）
+        verify(verificationLogRepository).save(argThat(log ->
+                log.getDancerId().equals(1L)
+                        && log.getFromStatus().equals("UNVERIFIED")
+                        && log.getToStatus().equals("VERIFIED")
+                        && log.getOperatorId().equals(99L)
+                        && log.getReason().equals("线下核实身份证件")));
+        // 授予结果 → 站内信通知创建人（同事务）
+        verify(messageService).create(eq(1L), eq(MessageType.DANCER_VERIFICATION),
+                eq("信息核验通过"), contains("信息已核验"), eq("DANCER"), eq(1L));
+    }
+
+    @Test
+    void updateVerification_verifyIdempotent_noChangeNoMessage() {
+        dancer.setVerificationStatus(DancerVerificationStatus.VERIFIED);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+
+        dancerService.updateVerification(99L, 1L, DancerVerificationAction.VERIFY, null);
+
+        verify(dancerRepository, never()).save(any());
+        verify(verificationLogRepository, never()).save(any());
+        verify(messageService, never()).create(anyLong(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void updateVerification_unverifyBlankReason_throws() {
+        dancer.setVerificationStatus(DancerVerificationStatus.VERIFIED);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> dancerService.updateVerification(99L, 1L, DancerVerificationAction.UNVERIFY, "  "));
+
+        assertEquals(1001, ex.getCode());
+        verify(verificationLogRepository, never()).save(any());
+        verify(messageService, never()).create(anyLong(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void updateVerification_unverifyWithReason_revokedAndNotified() {
+        dancer.setVerificationStatus(DancerVerificationStatus.VERIFIED);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(dancerRepository.save(any(Dancer.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        dancerService.updateVerification(99L, 1L, DancerVerificationAction.UNVERIFY, "资料与真实信息不符");
+
+        assertEquals(DancerVerificationStatus.UNVERIFIED, dancer.getVerificationStatus());
+        assertNull(dancer.getVerifiedAt(), "撤销后认证快照清空（历史在审计日志）");
+        assertNull(dancer.getVerifiedBy());
+        // 审计日志：from VERIFIED → to UNVERIFIED
+        verify(verificationLogRepository).save(argThat(log ->
+                log.getFromStatus().equals("VERIFIED") && log.getToStatus().equals("UNVERIFIED")));
+        // 撤销原因随站内信通知舞伴（被指涉方有申辩权）
+        verify(messageService).create(eq(1L), eq(MessageType.DANCER_VERIFICATION),
+                eq("信息核验标识已移除"), contains("资料与真实信息不符"), eq("DANCER"), eq(1L));
+    }
+
+    @Test
+    void updateDancer_ownerEdit_verified_downgradesToPendingReview() {
+        dancer.setVerificationStatus(DancerVerificationStatus.VERIFIED);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(dancerRepository.save(any(Dancer.class))).thenAnswer(inv -> inv.getArgument(0));
+        stubDetailDeps();
+
+        DancerDetailResponse resp = dancerService.updateDancer(1L, 1L,
+                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null), UserRole.USER);
+
+        assertEquals(DancerVerificationStatus.PENDING_REVIEW, resp.verificationStatus(),
+                "本人编辑已认证资料 → 自动降级待复核（护栏：防认证挂在过期信息上）");
+        // 审计日志：from VERIFIED → to PENDING_REVIEW（operator = 编辑者本人）
+        verify(verificationLogRepository).save(argThat(log ->
+                log.getFromStatus().equals("VERIFIED")
+                        && log.getToStatus().equals("PENDING_REVIEW")
+                        && log.getOperatorId().equals(1L)));
+    }
+
+    @Test
+    void updateDancer_adminEdit_verified_keepsVerified() {
+        dancer.setVerificationStatus(DancerVerificationStatus.VERIFIED);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(dancerRepository.save(any(Dancer.class))).thenAnswer(inv -> inv.getArgument(0));
+        stubDetailDeps();
+
+        DancerDetailResponse resp = dancerService.updateDancer(99L, 1L,
+                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null), UserRole.ADMIN);
+
+        assertEquals(DancerVerificationStatus.VERIFIED, resp.verificationStatus(),
+                "管理员直改不触发待复核（已在进行管理动作，避免待办噪音）");
+        verify(verificationLogRepository, never()).save(any());
+    }
+
+    @Test
+    void updateDancer_ownerEdit_neverVerified_keepsUnverified() {
+        dancer.setVerificationStatus(DancerVerificationStatus.UNVERIFIED);
+        when(verificationLogRepository.existsByDancerIdAndToStatus(1L, "VERIFIED")).thenReturn(false);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(dancerRepository.save(any(Dancer.class))).thenAnswer(inv -> inv.getArgument(0));
+        stubDetailDeps();
+
+        DancerDetailResponse resp = dancerService.updateDancer(1L, 1L,
+                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null), UserRole.USER);
+
+        assertEquals(DancerVerificationStatus.UNVERIFIED, resp.verificationStatus(),
+                "从未认证的舞伴编辑不制造待复核噪音");
+        verify(verificationLogRepository, never()).save(any());
+    }
+
+    @Test
+    void updateDancer_ownerEdit_revokedThenEdit_triggersPendingReview() {
+        // 曾认证被撤销（UNVERIFIED + 日志存在 VERIFIED 记录）→ 再次编辑 → 待复核闭环
+        dancer.setVerificationStatus(DancerVerificationStatus.UNVERIFIED);
+        when(verificationLogRepository.existsByDancerIdAndToStatus(1L, "VERIFIED")).thenReturn(true);
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(dancerRepository.save(any(Dancer.class))).thenAnswer(inv -> inv.getArgument(0));
+        stubDetailDeps();
+
+        DancerDetailResponse resp = dancerService.updateDancer(1L, 1L,
+                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null), UserRole.USER);
+
+        assertEquals(DancerVerificationStatus.PENDING_REVIEW, resp.verificationStatus(),
+                "撤销后修改资料 → 重新待复核（撤销→修改→复核恢复闭环）");
     }
 }

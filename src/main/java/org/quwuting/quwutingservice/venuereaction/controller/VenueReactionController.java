@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionStatsResponse;
+import org.quwuting.quwutingservice.venuereaction.dto.response.ToggleReactionResult;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
 import org.springframework.web.bind.annotation.*;
 
@@ -29,13 +30,14 @@ public class VenueReactionController {
     }
 
     /**
-     * 切换 Reaction 参与（toggle：首次=参与，再次=取消）
+     * 切换 Reaction 参与（toggle：首次=参与，再次=取消；每日一票模式下点新表情=换票）。
      * POST /venues/{venueId}/reactions/{code}
+     * 返回 {@code {reacted, replacedFrom}}——reacted=目标 code 当前是否已参与；
+     * replacedFrom=被替换的旧 code（仅换票路径非空，见 ToggleReactionResult javadoc）。
      */
     @PostMapping("/{code}")
-    public ApiResponse<Boolean> toggle(@PathVariable Long venueId, @PathVariable String code) {
+    public ApiResponse<ToggleReactionResult> toggle(@PathVariable Long venueId, @PathVariable String code) {
         Long userId = UserContext.requireAuth();
-        boolean reacted = venueReactionService.toggle(userId, venueId, code);
-        return ApiResponse.ok(reacted);
+        return ApiResponse.ok(venueReactionService.toggle(userId, venueId, code));
     }
 }

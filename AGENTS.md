@@ -31,13 +31,14 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务，为去舞厅小程序
 | [`06-listing-and-stats.md`](docs/agents/06-listing-and-stats.md) | 复合评分排序、双查询拆分坑位、标签筛选、城市词表、isHot 热门标记、累计浏览量 | 列表接口 |
 | [`07-feedback-and-reporting.md`](docs/agents/07-feedback-and-reporting.md) | 统一用户上报（类型/状态机/防刷/激励下发）、场所状态上报（TTL/采纳联动/紧急公告） | 上报模块 |
 | [`08-reaction-and-rating.md`](docs/agents/08-reaction-and-rating.md) | 评分交互（维度/防刷）、Reaction 系统（每日一记模型、字典、聚合缓存） | 评分/Reaction |
-| [`09-dancer-and-points.md`](docs/agents/09-dancer-and-points.md) | 舞伴生态（5 表模型/审核/认可/可见性）、积分系统（账务规则/礼物赠送/合规红线） | 舞伴/积分模块 |
+| [`09-dancer-and-points.md`](docs/agents/09-dancer-and-points.md) | 舞伴生态（8 表模型/审核/认可/可见性）、**舞伴收藏**（独立表/幂等接口/收藏列表仅 NORMAL，能力平权）、**舞伴官方认证**（「信息已核验」：V26 审计日志/状态机可回退/编辑触发待复核/撤销必留痕，2026-08-14）、**舞伴统计**（六图趋势/GET stats/V29 浏览埋点/写路径缓存失效，2026-08-14）、积分系统（账务规则/礼物赠送/合规红线）、**积分解锁公共模块**（门槛/解锁/模糊图）、**创作者收益计划**（激励视频广告/线下结算，2026-08-14） | 舞伴/积分模块 |
 | [`10-messaging-and-sharing.md`](docs/agents/10-messaging-and-sharing.md) | 站内信（消息中心）、关注门店营业状态（触发挂点/幂等）、分享追踪 | 通知/分享 |
 | [`11-storage.md`](docs/agents/11-storage.md) | 文件存储（前端直传 Supabase、FileCategory、内容校验安全模型） | 上传相关 |
 | [`12-api-conventions.md`](docs/agents/12-api-conventions.md) | HTTP API 规范（仅 GET/POST）、统一响应格式、错误码登记表 | 写新接口前 |
 | [`13-code-standards.md`](docs/agents/13-code-standards.md) | JPA 实体、多值字段 JSON 列、Repository、DTO、异常处理、请求耗时日志、Jackson 3.x、命名 | 写后端代码前 |
 | [`14-deployment-and-schema.md`](docs/agents/14-deployment-and-schema.md) | 配置管理、生产部署、连接池与数据库抖动韧性、Flyway Schema 演进与完整性 | 部署、Schema 变更 |
 | [`15-governance.md`](docs/agents/15-governance.md) | 禁止操作、AI 代理常见错误表、验证清单 | 每次修改后、提交前 |
+| [`16-ops-config.md`](docs/agents/16-ops-config.md) | 运营配置（feature flag）设施：qwt_ops_config 表、读写接口、管理端入口、键即代码契约 | 新增可配置产品规则时 |
 
 ---
 

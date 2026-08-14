@@ -20,11 +20,19 @@ public interface DancerPhotoRepository extends JpaRepository<DancerPhoto, Long> 
     /**
      * 批量舞伴封面照片：每个舞伴取展示顺序最小的一张 PUBLIC（列表页/我的舞伴主页封面，
      * 一次 IN 查询覆盖整页舞伴，规避 N+1）。返回 Object[]{dancerId, url}。
+     * <p>
+     * 2026-08-14 积分解锁：<b>跳过有积分门槛的照片</b>（LEFT JOIN qwt_points_gates
+     * target_type='DANCER_PHOTO' 未软删行）——封面是"展示性"位置，列表页不应泄露
+     * 需解锁的照片原图（未解锁用户经列表页看到封面 = 绕过解锁）；全部照片都设门槛
+     * 的舞伴无封面（诚实呈现，也隐性引导舞伴保留至少一张免费展示照）。
      */
     @Query(value = """
             SELECT DISTINCT ON (p.dancer_id) p.dancer_id, p.url
             FROM qwt_dancer_photos p
+            LEFT JOIN qwt_points_gates g
+              ON g.target_type = 'DANCER_PHOTO' AND g.target_id = p.id AND g.deleted = false
             WHERE p.dancer_id IN :dancerIds AND p.status = 'PUBLIC' AND p.deleted = false
+              AND g.id IS NULL
             ORDER BY p.dancer_id, p.sort_order ASC, p.id ASC
             """, nativeQuery = true)
     List<Object[]> findCoverUrlsByDancerIds(@Param("dancerIds") List<Long> dancerIds);

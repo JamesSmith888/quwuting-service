@@ -8,6 +8,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.quwuting.quwutingservice.config.PointsProperties;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
+import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.points.dto.CheckInResponse;
@@ -20,8 +21,10 @@ import org.quwuting.quwutingservice.points.entity.PointsTransaction;
 import org.quwuting.quwutingservice.points.enums.PointsSourceType;
 import org.quwuting.quwutingservice.points.enums.PointsTargetType;
 import org.quwuting.quwutingservice.points.repository.DailyCheckinRepository;
+import org.quwuting.quwutingservice.points.repository.PointsGateRepository;
 import org.quwuting.quwutingservice.points.repository.PointsAccountRepository;
 import org.quwuting.quwutingservice.points.repository.PointsTransactionRepository;
+import org.quwuting.quwutingservice.points.repository.PointsUnlockRepository;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
@@ -62,6 +65,12 @@ class PointsServiceTest {
     @Mock
     private DancerRepository dancerRepository;
     @Mock
+    private PointsGateRepository gateRepository;
+    @Mock
+    private PointsUnlockRepository unlockRepository;
+    @Mock
+    private DancerPhotoRepository dancerPhotoRepository;
+    @Mock
     private PointsProperties pointsProperties;
     @Mock
     private VenueHeatService venueHeatService;
@@ -70,7 +79,8 @@ class PointsServiceTest {
     @BeforeEach
     void setUp() {
         pointsService = new PointsService(accountRepository, transactionRepository, checkinRepository,
-                venueLookupService, dancerRepository, pointsProperties, venueHeatService);
+                gateRepository, unlockRepository, venueLookupService, dancerRepository,
+                dancerPhotoRepository, pointsProperties, venueHeatService);
         // 各测试按需 stub（Mockito strict stubs：不使用的 stubbing 会在测试级报多余）
     }
 

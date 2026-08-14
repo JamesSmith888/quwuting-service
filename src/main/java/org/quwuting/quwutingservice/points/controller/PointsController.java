@@ -10,6 +10,9 @@ import org.quwuting.quwutingservice.points.dto.GiftResponse;
 import org.quwuting.quwutingservice.points.dto.PointsSummaryResponse;
 import org.quwuting.quwutingservice.points.dto.PointsTransactionResponse;
 import org.quwuting.quwutingservice.points.dto.RewardHintResponse;
+import org.quwuting.quwutingservice.points.dto.UnlockRequest;
+import org.quwuting.quwutingservice.points.dto.UnlockResponse;
+import org.quwuting.quwutingservice.points.dto.UpsertGateRequest;
 import org.quwuting.quwutingservice.points.enums.PointsTargetType;
 import org.quwuting.quwutingservice.points.service.PointsService;
 import org.quwuting.quwutingservice.security.UserContext;
@@ -81,5 +84,29 @@ public class PointsController {
             @RequestParam Long targetId,
             @RequestParam String giftCode) {
         return ApiResponse.ok(pointsService.gifters(targetType, targetId, giftCode));
+    }
+
+    /**
+     * 设置/更新/清除积分门槛（2026-08-14 公共模块，需登录 + 目标属主/管理员）。
+     * body {@code {targetType, targetId, cost}}：cost&gt;0 设置门槛（≤ 配置上限）；
+     * cost=0 清除门槛（免费查看）。幂等 upsert。
+     */
+    @PostMapping("/gates")
+    public ApiResponse<Void> upsertGate(@Valid @RequestBody UpsertGateRequest request) {
+        Long userId = UserContext.requireAuth();
+        pointsService.upsertGate(userId, request.targetType(), request.targetId(), request.cost(),
+                UserContext.getCurrentRole());
+        return ApiResponse.ok(null);
+    }
+
+    /**
+     * 积分解锁内容（2026-08-14 公共模块，需登录）：消耗积分换取查看权（单向燃烧，
+     * 不进任何接收方账户——合规红线见 AGENTS.md「积分系统 · 积分解锁」）。
+     * 幂等：已解锁直接返回内容，不重复扣费。响应含解锁后余额与解锁内容。
+     */
+    @PostMapping("/unlock")
+    public ApiResponse<UnlockResponse> unlock(@Valid @RequestBody UnlockRequest request) {
+        return ApiResponse.ok(pointsService.unlock(
+                UserContext.requireAuth(), request.targetType(), request.targetId()));
     }
 }

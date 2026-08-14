@@ -3,6 +3,8 @@ package org.quwuting.quwutingservice.dancer.dto.request;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 
+import java.util.List;
+
 /**
  * 创建/编辑舞伴资料请求体（创建与编辑共用同一领域对象 = 全量覆盖可编辑字段，
  * 与 venue 域 CreateVenueRequest 复用于 create/update 的模式一致——资料是可演进
@@ -36,6 +38,45 @@ public record UpsertDancerRequest(
 
         @Size(max = 50, message = "城市最长50个字符")
         String city,
+
+        /**
+         * 多城市（2026-08-14 新增，最多 3 个，可空 = 回退 city 单值兼容旧客户端）：
+         * 城市选择器支持一个舞伴常驻/活跃于最多 3 个城市；首个 = 主城市
+         * （service 冗余同步 dancer.city，列表/详情/分享展示位零改动）。
+         * 服务层负责去重/去空/上限校验（子表 qwt_dancer_cities，V29 迁移）。
+         */
+        List<@Size(max = 50, message = "城市最长50个字符") String> cities,
+
+        /**
+         * 联系方式图片（2026-08-14 新增，二维码等，可选；null/空串 = 不填）。
+         * 与 contact 同一门槛/遮挡语义（详情页三态一致）；入库前必须经
+         * storage/ImageContentValidator 内容校验（08-12 安全加固约定）。
+         */
+        @Size(max = 500, message = "联系方式图片地址过长")
+        String contactImageUrl,
+
+        /**
+         * 联系方式（2026-08-14 新增，微信号等，可选；null/空串 = 不填）。
+         * 属于资料的一部分随审核流程走（管理员可见）；公开后是否直接展示由
+         * 积分门槛决定（qwt_points_gates，target_type='DANCER_CONTACT'——
+         * 门槛设置独立走 POST /points/gates，不在本请求内）。
+         */
+        @Size(max = 100, message = "联系方式最长100个字符")
+        String contact,
+
+        /**
+         * 联系方式遮挡开关（2026-08-14 新增，null = 默认遮挡 true）：
+         * true = 详情页打码展示（无门槛点击直显 / 有门槛积分解锁后显示）；
+         * false = 不遮挡，联系方式直接展示。与积分门槛正交（见 V28 迁移）。
+         */
+        Boolean hideContact,
+
+        /**
+         * 创作者收益计划开关（2026-08-14 新增，null = 关闭）：
+         * 开启后详情页接入激励视频广告，收益平台线下转账结算（见 AGENTS.md
+         * 「舞伴生态 · 创作者收益计划」）。属资料配置，随资料审核流程走。
+         */
+        Boolean earningsEnabled,
 
         /** 常驻舞厅 ID（可选；落 DancerVenue HOME 关系，仅作"常去"展示，不构成强绑定） */
         Long homeVenueId

@@ -21,6 +21,31 @@ public interface VenueReactionRepository extends JpaRepository<VenueReaction, Lo
             Long userId, Long venueId, String reactionCode, LocalDate reactionDate);
 
     /**
+     * 当日该用户在该场所的任意 Reaction 记录（每日一票模式用，2026-08-14 新增）。
+     * <p>
+     * 每日一票（应用层语义）下"当日是否已有票 + 票面 code"是换票决策的输入。
+     * 用 {@code findFirstBy...OrderByIdAsc} 而非普通 Optional 查询：V22 迁移已清理
+     * 历史"同日同用户同场所多行"（保留 max(id)），但防御性保持不抛
+     * NonUniqueResultException——历史残留多行时取 id 最小一行（最早票），
+     * 后续换票逻辑按行收敛（删该行 + 插新行，残留行由下次 V22 类清理或
+     * 人工处理；不影响一票语义的持续推进）。
+     */
+    Optional<VenueReaction> findFirstByUserIdAndVenueIdAndReactionDateOrderByIdAsc(
+            Long userId, Long venueId, LocalDate reactionDate);
+
+    /**
+     * 事务级 Postgres 咨询锁：串行化同 (userId, venueId, reactionDate) 的并发换票
+     * （2026-08-14 每日一票模式用）。
+     * <p>
+     * 每日一票为<b>应用层语义</b>（无 DB 唯一约束兜底，见 V22 migration 注释）——
+     * 并发下"查当日票 → 删旧 → 插新"若不串行化，两个请求可能同日插入不同 code，
+     * 破坏一人一店一日一票不变量。本锁在事务内获取、事务提交/回滚自动释放
+     * （pg_advisory_xact_lock 语义），lockKey 构造见 {@code VenueReactionService}。
+     */
+    @Query(value = "SELECT pg_advisory_xact_lock(hashtext(:lockKey))", nativeQuery = true)
+    void lockDailyTicket(@Param("lockKey") String lockKey);
+
+    /**
      * 当前用户在该场所"今日已参与"的 Reaction 代码集合（个人状态，实时查询不缓存）。
      * 每日一记模型下"已参与"语义 = 今日存在该记录——次日自动恢复可点击状态（新增一行而非恢复旧行）。
      */

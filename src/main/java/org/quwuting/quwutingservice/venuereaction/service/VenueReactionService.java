@@ -6,6 +6,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.db.DbConstraintViolations;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.quwuting.quwutingservice.venuereaction.ReactionCode;
@@ -13,6 +14,7 @@ import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionStat;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionStatsResponse;
+import org.quwuting.quwutingservice.venuereaction.dto.response.ToggleReactionResult;
 import org.quwuting.quwutingservice.venuereaction.entity.VenueReaction;
 import org.quwuting.quwutingservice.venuereaction.repository.VenueReactionRepository;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -34,6 +36,14 @@ import java.util.stream.Collectors;
  * 取代旧"toggle 软删 hold 模型"——旧模型下取消可能作用于 createdAt 超窗的旧记录，
  * 使近7天/近30天窗口计数无法本地精确推导，迫使前端发明"展示 countAll、排序 count30d"的双计数 hack；
  * 每日一记模型下取消只作用于当日记录，四个窗口计数本地 ±1 全部精确，hack 消失。
+ * <p>
+ * 2026-08-14 升级为<b>每日一票（可配置）</b>模型（用户驱动 + 根因分析，见
+ * {@code OpsConfigService.KEY_REACTION_DAILY_SINGLE}）：同一用户对同一场所每天只能
+ * 贡献一个 Reaction——点新表情 = 当日旧票<b>原子换票</b>（删旧插新）。根因：原模型下
+ * 唯一约束按 code 维度（(userId, venueId, code, date)），用户可零成本"全选"多个表情，
+ * 各场所计数同步膨胀、分布趋同，列表 chip 看不出差别（信号稀释）。一票约束为
+ * <b>应用层语义</b>（无 DB 唯一约束），由 toggle 事务 + {@code pg_advisory_xact_lock}
+ * 保证，运营可即时开关恢复多选。
  * <p>
  * 替代原"标签点赞"，见 AGENTS.md「Reaction 快速反馈系统」章节。
  */
@@ -58,6 +68,7 @@ public class VenueReactionService {
     private final VenueReactionAggregateService aggregateService;
     private final VenueLookupService venueLookupService;
     private final VenueHeatService venueHeatService;
+    private final OpsConfigService opsConfigService;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -65,51 +76,30 @@ public class VenueReactionService {
     /**
      * 切换 Reaction 参与状态（toggle：今日未参与→参与，今日已参与→取消）。
      * <p>
-     * 每日一记模型：
+     * 每日一票模型（开关 {@link OpsConfigService#KEY_REACTION_DAILY_SINGLE} 开启，默认）：
      * <ul>
-     *   <li>未命中今日记录 → 插入（reactionDate = 今天），贡献 +1（所有窗口）；</li>
-     *   <li>命中今日记录 → 物理删除（取消当日 Reaction），贡献 -1（所有窗口）；</li>
-     *   <li>同日并发重复插入 → 唯一约束冲突，幂等视为已参与（防连点/多端竞态）。</li>
+     *   <li>当日无票 → 插入（reactionDate = 今天），贡献 +1（所有窗口），replacedFrom=null；</li>
+     *   <li>当日票 = 目标 code → 物理删除（取消当日票），贡献 -1，replacedFrom=null；</li>
+     *   <li>当日票 ≠ 目标 code → <b>原子换票</b>：同事务删旧票 + 插新票
+     *       （贡献不变，旧 code -1 新 code +1），replacedFrom=旧 code；</li>
+     *   <li>并发串行化：pg_advisory_xact_lock 锁 (userId, venueId, date)，事务级自动释放。</li>
      * </ul>
+     * 开关关闭（多选模式）：退化为原"每日每 code 独立"语义（legacy），replacedFrom 恒 null。
      *
-     * @return true=当前已参与（今日有记录），false=当前已取消（今日无记录）
+     * @return 操作结果（reacted=目标 code 当前是否已参与；replacedFrom=被替换的旧 code，非换票为 null）
      */
     @Transactional
-    public boolean toggle(Long userId, Long venueId, String code) {
+    public ToggleReactionResult toggle(Long userId, Long venueId, String code) {
         if (!ReactionCode.isValid(code)) {
             throw new BusinessException(1007, "无效的 Reaction 类型");
         }
         venueLookupService.findById(venueId); // 存在性校验（缓存命中时 <1ms）
 
         LocalDate today = LocalDate.now();
-        var existing = venueReactionRepository
-                .findByUserIdAndVenueIdAndReactionCodeAndReactionDate(userId, venueId, code, today);
-        boolean reacted;
-        if (existing.isPresent()) {
-            // 取消当日 Reaction：物理删除（"取消当天 Reaction"语义 = 当日贡献移除）
-            venueReactionRepository.delete(existing.get());
-            reacted = false;
-        } else {
-            VenueReaction reaction = new VenueReaction();
-            reaction.setUserId(userId);
-            reaction.setVenueId(venueId);
-            reaction.setReactionCode(code);
-            reaction.setReactionDate(today);
-            try {
-                venueReactionRepository.save(reaction);
-                reacted = true;
-            } catch (DataIntegrityViolationException e) {
-                if (!DbConstraintViolations.isUniqueViolation(e)) {
-                    // 非唯一键冲突（NOT NULL/列约束/外键）不能当并发竞态吞掉——
-                    // 项目统一约定（见 AGENTS.md「并发与幂等」）：只允许吞 SQLState 23505
-                    throw e;
-                }
-                // 并发竞态：另一请求已创建今日记录，幂等视为已参与
-                log.debug("toggle Reaction 并发冲突，幂等忽略: userId={}, venueId={}, code={}", userId, venueId, code);
-                entityManager.clear();
-                reacted = true;
-            }
-        }
+        boolean dailySingle = opsConfigService.isEnabled(OpsConfigService.KEY_REACTION_DAILY_SINGLE, true);
+        ToggleReactionResult result = dailySingle
+                ? toggleSingleTicket(userId, venueId, code, today)
+                : toggleLegacy(userId, venueId, code, today);
         // 聚合/热度缓存失效必须延后到事务提交后（2026-08-08 根因修复）：
         // 事务提交前失效存在竞态窗口——另一线程读到 cache miss → 回源重算 → 读不到本事务
         // 未提交数据 → 缓存陈旧值（refreshAfterWrite 60s 内持续返回）。afterCommit 注册的
@@ -121,7 +111,70 @@ public class VenueReactionService {
                 venueHeatService.invalidate(venueId); // Reaction 总量是热度公式输入之一
             }
         });
-        return reacted;
+        return result;
+    }
+
+    /**
+     * 每日一票模式：一人一店一日一票（换票语义）。
+     * 咨询锁串行化后，当日查询至多一行（V22 已清理历史多行；findFirst 防御残留不抛异常）。
+     */
+    private ToggleReactionResult toggleSingleTicket(Long userId, Long venueId, String code, LocalDate today) {
+        // 事务级咨询锁：串行化同 user+venue+date 的并发换票（提交/回滚自动释放）
+        venueReactionRepository.lockDailyTicket("reaction:" + userId + ":" + venueId + ":" + today);
+
+        Optional<VenueReaction> existing = venueReactionRepository
+                .findFirstByUserIdAndVenueIdAndReactionDateOrderByIdAsc(userId, venueId, today);
+        if (existing.isPresent()) {
+            VenueReaction row = existing.get();
+            if (row.getReactionCode().equals(code)) {
+                // 取消当日票（物理删除："取消当天 Reaction"语义 = 当日贡献移除）
+                venueReactionRepository.delete(row);
+                return new ToggleReactionResult(false, null);
+            }
+            // 换票：删旧票 + 插新票（同事务原子；咨询锁下无并发竞态，23505 幂等仅作防御）
+            venueReactionRepository.delete(row);
+            insertReaction(userId, venueId, code, today);
+            return new ToggleReactionResult(true, row.getReactionCode());
+        }
+        insertReaction(userId, venueId, code, today);
+        return new ToggleReactionResult(true, null);
+    }
+
+    /**
+     * 多选模式（开关关闭）：原"每日每 code 独立"语义——每个 code 各自 toggle，
+     * 同日不同 code 可并存（唯一约束 (userId, venueId, code, date) 兜底）。
+     */
+    private ToggleReactionResult toggleLegacy(Long userId, Long venueId, String code, LocalDate today) {
+        var existing = venueReactionRepository
+                .findByUserIdAndVenueIdAndReactionCodeAndReactionDate(userId, venueId, code, today);
+        if (existing.isPresent()) {
+            // 取消当日 Reaction：物理删除（"取消当天 Reaction"语义 = 当日贡献移除）
+            venueReactionRepository.delete(existing.get());
+            return new ToggleReactionResult(false, null);
+        }
+        insertReaction(userId, venueId, code, today);
+        return new ToggleReactionResult(true, null);
+    }
+
+    /** 插入今日 Reaction 记录（23505 唯一冲突幂等化为已参与——并发兜底，见调用方注释） */
+    private void insertReaction(Long userId, Long venueId, String code, LocalDate today) {
+        VenueReaction reaction = new VenueReaction();
+        reaction.setUserId(userId);
+        reaction.setVenueId(venueId);
+        reaction.setReactionCode(code);
+        reaction.setReactionDate(today);
+        try {
+            venueReactionRepository.save(reaction);
+        } catch (DataIntegrityViolationException e) {
+            if (!DbConstraintViolations.isUniqueViolation(e)) {
+                // 非唯一键冲突（NOT NULL/列约束/外键）不能当并发竞态吞掉——
+                // 项目统一约定（见 AGENTS.md「并发与幂等」）：只允许吞 SQLState 23505
+                throw e;
+            }
+            // 并发竞态：另一请求已创建今日记录，幂等视为已参与
+            log.debug("toggle Reaction 并发冲突，幂等忽略: userId={}, venueId={}, code={}", userId, venueId, code);
+            entityManager.clear();
+        }
     }
 
     /**

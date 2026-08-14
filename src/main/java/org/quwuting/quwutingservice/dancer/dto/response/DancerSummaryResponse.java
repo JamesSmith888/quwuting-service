@@ -1,6 +1,7 @@
 package org.quwuting.quwutingservice.dancer.dto.response;
 
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
+import org.quwuting.quwutingservice.dancer.enums.DancerVerificationStatus;
 
 import java.util.List;
 
@@ -22,6 +23,11 @@ public record DancerSummaryResponse(
         String gender,
         String city,
         DancerStatus status,
+        /**
+         * 信息核验状态（2026-08-14 官方认证）。展示规则：VERIFIED → 卡片「信息已核验」
+         * 徽标；PENDING_REVIEW / UNVERIFIED → 不展示（对外语义 = 未认证）。
+         */
+        DancerVerificationStatus verificationStatus,
         /** 常驻舞厅名（取最早一条 HOME 关系；无则 null，前端不渲染"常去"行） */
         String homeVenueName,
         /** 相册封面（展示顺序最小的一张 PUBLIC 照片；无则 null，卡片不渲染封面图） */

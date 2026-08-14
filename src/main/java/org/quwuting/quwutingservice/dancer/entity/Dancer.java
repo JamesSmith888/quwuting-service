@@ -6,6 +6,9 @@ import lombok.Setter;
 import org.hibernate.annotations.ColumnDefault;
 import org.quwuting.quwutingservice.base.BaseEntity;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
+import org.quwuting.quwutingservice.dancer.enums.DancerVerificationStatus;
+
+import java.time.LocalDateTime;
 
 /**
  * 舞伴实体（独立领域模型，与舞厅解耦——不设计强绑定单一舞厅，多舞厅关系见 DancerVenue）。
@@ -44,6 +47,53 @@ public class Dancer extends BaseEntity {
     private String gender;
 
     /**
+     * 联系方式（2026-08-14 新增，微信号等，可空）。
+     * <p>
+     * 隐私边界（与 2026-08-14 积分解锁公共模块配套，见 V24 迁移）：
+     * 联系方式属于舞伴资料的一部分，随 UpsertDancerRequest 走既有 PENDING 审核流程；
+     * 公开后是否直接可见由积分门槛决定（qwt_points_gates target_type='DANCER_CONTACT'，
+     * target_id = 本舞伴 ID）——无门槛 → 详情页直接展示；有门槛 → 解锁后展示
+     * （未解锁不下发真实值）。明文存储（与昵称/简介同级别，MVP 不加密）。
+     */
+    @Column(length = 100)
+    private String contact;
+
+    /**
+     * 联系方式图片（2026-08-14 新增，二维码等，可空；见 V29 迁移）。
+     * <p>
+     * 语义与 contact 同一门槛/遮挡（详情页三态一致）：图片是联系方式的一部分，
+     * 未解锁/遮挡时不下发真实 URL（防绕过）。入库前必须经
+     * storage/ImageContentValidator 内容校验（08-12 安全加固约定，见 AGENTS.md
+     * 「文件上传与存储」——新增图片 URL 落库字段必须挂载校验）。
+     */
+    @Column(length = 500)
+    private String contactImageUrl;
+
+    /**
+     * 联系方式遮挡开关（2026-08-14 新增，默认遮挡）。
+     * <p>
+     * true = 详情页联系方式<b>打码展示</b>（遮罩）：无门槛（免费）→ 用户点击遮罩
+     * 直接显示；有门槛（cost>0）→ 用户先支付积分解锁再显示（POST /points/unlock）。
+     * false = 不遮挡，联系方式<b>恒直接展示</b>（后端忽略积分门槛下发真实值，
+     * 残留门槛值保留，重新遮挡后恢复生效）。与 qwt_points_gates 门槛正交。
+     * 列默认值唯一声明通道 = @ColumnDefault（见 V28 迁移）。
+     */
+    @Column(nullable = false)
+    @ColumnDefault("true")
+    private boolean hideContact = true;
+
+    /**
+     * 创作者收益计划开关（2026-08-14 新增，默认关闭）。
+     * <p>
+     * 开启后舞伴详情页接入微信小程序<b>激励视频广告</b>（用户主动点击观看"支持 TA"），
+     * 观看记录写入 qwt_dancer_ad_views（线下结算依据），收益由平台<b>线下转账</b>
+     * 结算（MVP 无线上结算）。列默认值唯一声明通道 = @ColumnDefault。
+     */
+    @Column(nullable = false)
+    @ColumnDefault("false")
+    private boolean earningsEnabled = false;
+
+    /**
      * 资料状态。列默认值唯一声明通道 = @ColumnDefault（见 AGENTS.md「Schema 演进」）。
      * 默认 PENDING：所有新资料必须经管理员认证后才公开（真实个人隐私边界的第一道闸）。
      */
@@ -52,13 +102,39 @@ public class Dancer extends BaseEntity {
     @ColumnDefault("'PENDING'")
     private DancerStatus status = DancerStatus.PENDING;
 
+    /**
+     * 信息核验状态（2026-08-14 官方认证——「信息已核验」标识）。
+     * <p>
+     * 语义 = 身份与公开信息经平台人工核验属实（裁决事实，不裁决人品）；
+     * 状态机：UNVERIFIED（默认）→ VERIFIED（admin 授予）→ PENDING_REVIEW
+     * （舞伴本人编辑触发待复核）→ admin 复核确认 VERIFIED 或撤销回 UNVERIFIED。
+     * 与 DancerStatus（先认证、后展示的隐私闸门）互补：DancerStatus 管"是否公开"，
+     * 本状态管"平台是否背书信息真实性"——两条链路显式分离，审核通过不等于认证。
+     * 全部变迁留痕 qwt_dancer_verification_logs（见类 javadoc / AGENTS.md）。
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(length = 20, nullable = false)
+    @ColumnDefault("'UNVERIFIED'")
+    private DancerVerificationStatus verificationStatus = DancerVerificationStatus.UNVERIFIED;
+
+    /** 最近一次授予认证的时间（非 VERIFIED 恒 null；历史变迁在审计日志表） */
+    private LocalDateTime verifiedAt;
+
+    /** 最近一次授予认证的管理员 ID（非 VERIFIED 恒 null；历史变迁在审计日志表） */
+    private Long verifiedBy;
+
     /** 创建人用户 ID（舞伴主动注册 = 本人认领；后台创建 = 管理员 ID） */
     @Column(nullable = false)
     private Long createdBy;
 
     /**
-     * 常驻城市（冗余筛选字段，创建时填写；不构成与舞厅的强绑定——
-     * 舞伴的场所归属以 DancerVenue 关系表为准，本字段仅服务列表按城市筛选）。
+     * 主城市（2026-08-14 多城市：= qwt_dancer_cities 第一个城市，service 单一写入方）。
+     * <p>
+     * 冗余筛选字段（创建时填写，多城市见 {@code qwt_dancer_cities} 子表）——
+     * 本列保留为<b>主城市</b>（cities[0]）：列表/详情/分享展示位与列表排序 SQL
+     * 零改动；列表按任意城市筛选时经子表匹配（见 DancerRepository#findPublicPage）。
+     * 不构成与舞厅的强绑定——舞伴的场所归属以 DancerVenue 关系表为准，
+     * 本字段仅服务列表按城市筛选与展示。
      */
     @Column(length = 50)
     private String city;

@@ -5,27 +5,39 @@ import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.text.TextSanitizer;
+import org.quwuting.quwutingservice.config.DancerAdProperties;
 import org.quwuting.quwutingservice.dancer.DancerTagCode;
 import org.quwuting.quwutingservice.dancer.dto.request.RecognizeDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.response.*;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
+import org.quwuting.quwutingservice.dancer.entity.DancerAdView;
+import org.quwuting.quwutingservice.dancer.entity.DancerCity;
+import org.quwuting.quwutingservice.dancer.entity.DancerFavorite;
 import org.quwuting.quwutingservice.dancer.entity.DancerPhoto;
 import org.quwuting.quwutingservice.dancer.entity.DancerRecognition;
 import org.quwuting.quwutingservice.dancer.entity.DancerRecognitionTag;
 import org.quwuting.quwutingservice.dancer.entity.DancerVenue;
+import org.quwuting.quwutingservice.dancer.entity.DancerVerificationLog;
 import org.quwuting.quwutingservice.dancer.enums.DancerPhotoStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerVenueRelation;
+import org.quwuting.quwutingservice.dancer.enums.DancerVerificationAction;
+import org.quwuting.quwutingservice.dancer.enums.DancerVerificationStatus;
+import org.quwuting.quwutingservice.dancer.repository.DancerAdViewRepository;
+import org.quwuting.quwutingservice.dancer.repository.DancerCityRepository;
+import org.quwuting.quwutingservice.dancer.repository.DancerFavoriteRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionTagRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVenueRepository;
+import org.quwuting.quwutingservice.dancer.repository.DancerVerificationLogRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.message.service.MessageService;
 import org.quwuting.quwutingservice.points.dto.GiftCountResponse;
+import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
 import org.quwuting.quwutingservice.points.enums.PointsTargetType;
 import org.quwuting.quwutingservice.storage.ImageContentValidator;
 import org.quwuting.quwutingservice.user.enums.UserRole;
@@ -78,16 +90,27 @@ public class DancerService {
     private static final String PHOTO_OWNER_GONE_NAME = "未知舞伴";
 
     private final DancerRepository dancerRepository;
+    private final DancerCityRepository dancerCityRepository;
     private final DancerVenueRepository dancerVenueRepository;
     private final DancerRecognitionRepository recognitionRepository;
     private final DancerRecognitionTagRepository recognitionTagRepository;
     private final DancerPhotoRepository photoRepository;
+    private final DancerAdViewRepository adViewRepository;
+    /** 信息核验审计日志（2026-08-14 官方认证：全部状态变迁的唯一历史事实源） */
+    private final DancerVerificationLogRepository verificationLogRepository;
+    /** 舞伴收藏（2026-08-14：qwt_dancer_favorites，见 V27 迁移与 AGENTS.md「舞伴收藏」） */
+    private final DancerFavoriteRepository dancerFavoriteRepository;
     private final DancerAggregateService aggregateService;
+    /** 舞伴统计（2026-08-14 统计图第一期：认可/收藏等时间序列的缓存失效入口，
+     *  本服务的认可/收藏写路径与统计强相关，真实写入后须失效，见「写路径缓存失效」约定） */
+    private final DancerStatsService dancerStatsService;
     private final VenueLookupService venueLookupService;
     private final MessageService messageService;
     private final org.quwuting.quwutingservice.points.service.PointsService pointsService;
     /** 图片内容校验（2026-08-12 恶意文件防线：业务提交时对图片 URL 做内容级校验） */
     private final ImageContentValidator imageValidator;
+    /** 创作者收益计划配置（2026-08-14：激励视频广告位 ID，后端下发前端零硬编码） */
+    private final DancerAdProperties dancerAdProperties;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -113,10 +136,18 @@ public class DancerService {
         dancer.setAvatarUrl(avatarUrl);
         dancer.setBio(TextSanitizer.sanitize(request.bio(), 300));
         dancer.setGender(TextSanitizer.sanitize(request.gender(), 20));
-        dancer.setCity(TextSanitizer.sanitize(request.city(), 50));
+        // 多城市（2026-08-14）：cities 优先（去空去重，最多 3 个）；主城市 = 首个
+        List<String> cities = resolveCities(request);
+        dancer.setCity(primaryCity(cities));
+        dancer.setContactImageUrl(sanitizeContactImageUrl(request.contactImageUrl()));
+        dancer.setContact(TextSanitizer.sanitize(request.contact(), 100));
+        // 联系方式遮挡开关（2026-08-14：null = 默认遮挡 true，向后兼容旧客户端）
+        dancer.setHideContact(request.hideContact() == null || request.hideContact());
+        dancer.setEarningsEnabled(request.earningsEnabled() != null && request.earningsEnabled());
         dancer.setStatus(adminApproved ? DancerStatus.NORMAL : DancerStatus.PENDING);
         dancer.setCreatedBy(userId);
         dancer = dancerRepository.save(dancer);
+        replaceDancerCities(dancer.getId(), cities);
 
         if (request.homeVenueId() != null) {
             attachHomeVenue(dancer.getId(), request.homeVenueId());
@@ -135,6 +166,74 @@ public class DancerService {
             dv.setRelation(DancerVenueRelation.HOME);
             dancerVenueRepository.save(dv);
         }
+    }
+
+    // ─── 多城市（2026-08-14，V29 迁移） ────────────────────────────────────────
+
+    /** 一个舞伴最多可选的城市数（产品规则：常驻/活跃城市收敛，防堆砌） */
+    public static final int MAX_CITIES = 3;
+
+    /**
+     * 解析城市列表（创建/编辑共用，单一权威）：
+     * cities 优先（逐个清洗、去空、去重，最多 {@link #MAX_CITIES} 个，保序）；
+     * cities 为空/全空时回退 city 单值（旧客户端兼容——新版前端恒传 cities）。
+     *
+     * @return 去重有序列表（可为空 = 未填城市）
+     */
+    private List<String> resolveCities(UpsertDancerRequest request) {
+        List<String> raw = request.cities() == null ? Collections.emptyList() : request.cities();
+        List<String> result = new ArrayList<>(MAX_CITIES);
+        for (String c : raw) {
+            String clean = TextSanitizer.sanitize(c, 50);
+            if (clean.isEmpty() || result.contains(clean)) {
+                continue;
+            }
+            result.add(clean);
+            if (result.size() >= MAX_CITIES) {
+                break;
+            }
+        }
+        if (result.isEmpty()) {
+            String legacy = TextSanitizer.sanitize(request.city(), 50);
+            if (!legacy.isEmpty()) {
+                result.add(legacy);
+            }
+        }
+        return result;
+    }
+
+    /** 主城市（= cities 首个，冗余同步 dancer.city 展示位；空列表 → null） */
+    private String primaryCity(List<String> cities) {
+        return cities.isEmpty() ? null : cities.get(0);
+    }
+
+    /**
+     * 全量替换舞伴城市子表（编辑 = 软删旧 + 插入新，幂等去重由 resolveCities 保证；
+     * 与 DancerVenue HOME 关系替换先例一致，无唯一约束防软删行冲突）。
+     */
+    private void replaceDancerCities(Long dancerId, List<String> cities) {
+        List<DancerCity> old = dancerCityRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(dancerId);
+        for (DancerCity c : old) {
+            c.setDeleted(true);
+            dancerCityRepository.save(c);
+        }
+        for (int i = 0; i < cities.size(); i++) {
+            DancerCity dc = new DancerCity();
+            dc.setDancerId(dancerId);
+            dc.setCity(cities.get(i));
+            dc.setSortOrder(i);
+            dancerCityRepository.save(dc);
+        }
+    }
+
+    /** 联系方式图片 URL（可空；非空时清洗 + 内容校验——08-12 安全加固约定：新增图片 URL 落库字段必须挂载校验） */
+    private String sanitizeContactImageUrl(String url) {
+        String clean = TextSanitizer.sanitize(url, 500);
+        if (clean.isEmpty()) {
+            return null;
+        }
+        imageValidator.validate(clean);
+        return clean;
     }
 
     // ─── 编辑（本人 / 管理员，全量覆盖可编辑字段） ───────────────────────────────
@@ -170,14 +269,46 @@ public class DancerService {
         dancer.setAvatarUrl(avatarUrl);
         dancer.setBio(TextSanitizer.sanitize(request.bio(), 300));
         dancer.setGender(TextSanitizer.sanitize(request.gender(), 20));
-        dancer.setCity(TextSanitizer.sanitize(request.city(), 50));
+        // 多城市（2026-08-14）：全量替换语义（同 homeVenueId HOME 关系——编辑是
+        // "城市变更"而非"追加"，防止多次编辑累积超过 3 个城市）
+        List<String> cities = resolveCities(request);
+        dancer.setCity(primaryCity(cities));
+        dancer.setContactImageUrl(sanitizeContactImageUrl(request.contactImageUrl()));
+        dancer.setContact(TextSanitizer.sanitize(request.contact(), 100));
+        dancer.setHideContact(request.hideContact() == null || request.hideContact());
+        dancer.setEarningsEnabled(request.earningsEnabled() != null && request.earningsEnabled());
         // REJECTED 资料编辑后重新送审（管理员直改仍由管理员后续流转，此处不覆盖）
         if (dancer.getStatus() == DancerStatus.REJECTED) {
             dancer.setStatus(DancerStatus.PENDING);
         }
-        dancerRepository.save(dancer);
+        // 信息核验降级护栏（2026-08-14 官方认证：防"认证挂在过期信息上"）：
+        // 舞伴本人编辑资料 → 已认证（VERIFIED）或曾认证（撤销后再次编辑）→ 自动降级
+        // PENDING_REVIEW 待 admin 复核；管理员直改不触发（管理者已在该资料上进行管理
+        // 动作，避免制造待办噪音——见 AGENTS.md「舞伴官方认证」状态机）。
+        if (currentRole != UserRole.ADMIN && needsVerificationReview(dancer)) {
+            transitionVerification(dancer, DancerVerificationStatus.PENDING_REVIEW,
+                    userId, "本人修改资料，认证待复核");
+        } else {
+            dancerRepository.save(dancer);
+        }
         replaceHomeVenue(dancerId, request.homeVenueId());
+        // 多城市子表全量替换（与 homeVenueId 同"编辑 = 变更而非追加"语义）
+        replaceDancerCities(dancerId, cities);
         return getDetail(dancerId, userId, currentRole);
+    }
+
+    /**
+     * 编辑是否触发认证待复核（2026-08-14）：当前已认证（VERIFIED），或曾认证
+     * （日志存在 to_status=VERIFIED——撤销后再次编辑 → 重新核验闭环，"被撤销 →
+     * 修改资料 → 待复核 → 复核恢复"）。
+     */
+    private boolean needsVerificationReview(Dancer dancer) {
+        if (dancer.getVerificationStatus() == DancerVerificationStatus.VERIFIED) {
+            return true;
+        }
+        return dancer.getVerificationStatus() == DancerVerificationStatus.UNVERIFIED
+                && verificationLogRepository.existsByDancerIdAndToStatus(
+                        dancer.getId(), DancerVerificationStatus.VERIFIED.name());
     }
 
     /** HOME 关系完整替换：先软删全部旧 HOME，再按需建立新 HOME（null = 清除常驻舞厅） */
@@ -213,9 +344,87 @@ public class DancerService {
         if (rows.isEmpty()) {
             return new PageImpl<>(Collections.emptyList(), pageable, rows.getTotalElements());
         }
-        List<Object[]> content = rows.getContent();
-        List<Long> ids = content.stream().map(r -> (Long) r[0]).toList();
+        return new PageImpl<>(buildSummaries(rows.getContent(), currentUserId), pageable, rows.getTotalElements());
+    }
 
+    // ─── 收藏（2026-08-14 舞伴收藏：列表/详情/详情星标，见 AGENTS.md「舞伴收藏」） ─────
+
+    /**
+     * 当前用户收藏的舞伴列表（按收藏时间倒序；仅当前公开 NORMAL 舞伴——HIDDEN 自动
+     * 淡出，见 V27 迁移注释）。返回与公开列表同构的 DancerSummaryResponse，前端
+     * 复用同一套卡片 ViewModel 派生（toCardVM）。
+     */
+    @Transactional(readOnly = true)
+    public List<DancerSummaryResponse> listFavorites(Long userId) {
+        LocalDateTime now = LocalDateTime.now();
+        List<Object[]> rows = dancerFavoriteRepository.findFavoriteDancersByUserId(
+                userId, LocalDate.now().atStartOfDay(), now.minusDays(7));
+        if (rows.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return buildSummaries(rows, userId);
+    }
+
+    /**
+     * 收藏舞伴（需登录；幂等——已收藏则忽略，软删行 restore 复用）。
+     * <p>
+     * 可见性防御：仅公开舞伴（NORMAL）可被收藏——HIDDEN/PENDING/REJECTED 属于
+     * 不可见/未公开资料，收藏入口本就不可达（详情页可见性校验先行），此处校验为
+     * 纵深防御（防绕过）。并发竞态由唯一约束 23505 幂等兜底。
+     */
+    @Transactional
+    public void addFavorite(Long userId, Long dancerId) {
+        Dancer dancer = findDancerOrThrow(dancerId);
+        if (dancer.getStatus() != DancerStatus.NORMAL) {
+            throw new BusinessException(1003, "该舞伴资料暂不可见");
+        }
+        var existing = dancerFavoriteRepository.findByUserIdAndDancerId(userId, dancerId);
+        if (existing.isPresent()) {
+            if (!existing.get().isDeleted()) {
+                return; // 已收藏，幂等（无写入）
+            }
+            existing.get().setDeleted(false); // restore：软删行复用，created_at 不变
+            dancerFavoriteRepository.save(existing.get());
+            dancerStatsService.invalidate(dancerId); // 收藏趋势输入（favoriteTrend）真实写入后失效
+            return;
+        }
+        DancerFavorite fav = new DancerFavorite();
+        fav.setUserId(userId);
+        fav.setDancerId(dancerId);
+        try {
+            dancerFavoriteRepository.save(fav);
+        } catch (DataIntegrityViolationException e) {
+            // 并发竞态：另一请求已插入，幂等忽略
+            log.debug("addDancerFavorite 并发冲突，幂等忽略: userId={}, dancerId={}", userId, dancerId);
+        }
+        dancerStatsService.invalidate(dancerId); // 新增/冲突均可能改变收藏趋势，统一失效
+    }
+
+    /**
+     * 取消收藏（需登录；幂等——未收藏则忽略）。软删（deleted=true）行保留——
+     * 被收藏舞伴 HIDDEN 下架后行留存，恢复 NORMAL 后自动重现（见 V27 迁移注释）。
+     * 无取消时刻列/无频控：舞伴收藏趋势为"新增"单序列（无门店式 unfavorited_at
+     * 取消线），取消不输入趋势图，无膨胀风险（见 DancerFavorite 注释）。
+     */
+    @Transactional
+    public void removeFavorite(Long userId, Long dancerId) {
+        dancerFavoriteRepository.findByUserIdAndDancerId(userId, dancerId)
+                .filter(fav -> !fav.isDeleted())
+                .ifPresent(fav -> {
+                    fav.setDeleted(true);
+                    dancerFavoriteRepository.save(fav);
+                    dancerStatsService.invalidate(dancerId); // 软删恢复后 created_at 不变、新增序列不变，但列表/详情收藏态变化；统计缓存失效无实质影响，保持写路径一致约定
+                });
+    }
+
+    /**
+     * 行内 Object[]（{id, nickname, avatar_url, bio, gender, city, cnt_all, cnt_today,
+     * cnt7, verification_status}）→ 卡片摘要列表。公开列表（listPublic）与收藏列表
+     * （listFavorites）共用——两处查询返回同构行，摘要构建逻辑单一权威（2026-08-14
+     * 抽取；此前 listPublic 内联构建，收藏列表落地时必然复制，违反 DRY）。
+     */
+    private List<DancerSummaryResponse> buildSummaries(List<Object[]> content, Long currentUserId) {
+        List<Long> ids = content.stream().map(r -> (Long) r[0]).toList();
         // 行内计数：Object[]{id, ..., count_all(6), count_today(7), count_7d(8)}
         Map<Long, long[]> countsById = new HashMap<>();
         for (Object[] row : content) {
@@ -233,11 +442,12 @@ public class DancerService {
             long[] counts = countsById.get(id);
             summaries.add(new DancerSummaryResponse(
                     id, (String) row[1], (String) row[2], (String) row[3], (String) row[4], (String) row[5],
-                    DancerStatus.NORMAL, homeVenueNameById.get(id), coverPhotoUrlById.get(id),
+                    DancerStatus.NORMAL, toVerificationStatus(row[9]),
+                    homeVenueNameById.get(id), coverPhotoUrlById.get(id),
                     counts[0], counts[2], counts[1],
                     myTodayIds.contains(id), tagsById.getOrDefault(id, Collections.emptyList())));
         }
-        return new PageImpl<>(summaries, pageable, rows.getTotalElements());
+        return summaries;
     }
 
     /** 公开舞伴的常驻城市词表（列表页城市筛选数据源，聚合真实数据） */
@@ -261,6 +471,11 @@ public class DancerService {
         boolean showAllPhotos = isMine || currentRole == UserRole.ADMIN;
         boolean myToday = currentUserId != null && recognitionRepository
                 .findByUserIdAndDancerIdAndRecognitionDate(currentUserId, dancerId, LocalDate.now()).isPresent();
+        // 收藏态（2026-08-14 舞伴收藏：服务端权威，替代 venue 的 URL fav 参数 hack——
+        // 分享深链等无参数入口不丢状态；匿名/未收藏恒 false）
+        boolean favorite = currentUserId != null && dancerFavoriteRepository
+                .findByUserIdAndDancerId(currentUserId, dancerId)
+                .filter(f -> !f.isDeleted()).isPresent();
         // 收到积分统计（2026-08-10 V2：窗口口径与热度公式一致 = 近30天截至昨日，
         // 全量 = 历史累计；同源口径见 PointsTransactionRepository#sumReceived*）
         LocalDateTime windowStart = LocalDate.now().minusDays(30).atStartOfDay();
@@ -269,13 +484,91 @@ public class DancerService {
         long pointsReceived30d = pointsService.receivedSince(PointsTargetType.DANCER, dancerId, windowStart, windowEnd);
         // 收到礼物聚合（2026-08-12 礼物化：「收获的支持」礼物墙数据源）
         List<GiftCountResponse> giftsReceived = pointsService.receivedGifts(PointsTargetType.DANCER, dancerId);
+        // 联系方式可见性（2026-08-14 积分解锁 + 遮挡开关）：
+        // - 不遮挡（hideContact=false）→ 恒下发真实值（门槛被忽略——打码与否是展示层决策，
+        //   残留门槛值保留，重新遮挡后恢复生效）；
+        // - 遮挡 + 有门槛 + 未解锁 → 不下发真实值（防绕过），经 POST /points/unlock 解锁后返回；
+        // - 遮挡 + 无门槛（免费）→ 下发真实值，由前端遮罩承载"点击直显"交互（内容本身免费）。
+        // 本人/管理员（contactUnlocked 恒 true）恒可见。
+        boolean hideContact = dancer.isHideContact();
+        int contactCost = pointsService.gateCost(PointsGateTargetType.DANCER_CONTACT, dancerId);
+        boolean contactUnlocked = showAllPhotos
+                || pointsService.isUnlocked(currentUserId, PointsGateTargetType.DANCER_CONTACT, dancerId);
+        String contact = dancer.getContact();
+        if (contact != null && !contact.isBlank() && hideContact && contactCost > 0 && !contactUnlocked) {
+            contact = null;
+        }
+        // 联系方式图片（2026-08-14）：与 contact 同一可见性——未解锁不下发真实 URL
+        String contactImageUrl = dancer.getContactImageUrl();
+        if (contactImageUrl != null && !contactImageUrl.isBlank() && hideContact && contactCost > 0 && !contactUnlocked) {
+            contactImageUrl = null;
+        }
+        // 多城市回显（2026-08-14：编辑页预填；首个 = 主城市）
+        List<String> cities = dancerCityRepository
+                .findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(dancerId)
+                .stream().map(DancerCity::getCity).toList();
+        // 创作者收益计划（2026-08-14）：开关 + 广告位 ID（配置下发，前端零硬编码）+
+        // 累计广告支持次数（收益线下结算依据）
+        boolean earningsEnabled = dancer.isEarningsEnabled();
+        String earningsAdUnitId = earningsEnabled ? dancerAdProperties.adUnitId() : "";
+        long earningsViews = adViewRepository.countByDancerId(dancerId);
         return new DancerDetailResponse(
                 dancer.getId(), dancer.getNickname(), dancer.getAvatarUrl(), dancer.getBio(),
-                dancer.getGender(), dancer.getCity(), dancer.getStatus(),
-                isMine, myToday, buildStats(dancerId),
+                dancer.getGender(), dancer.getCity(), cities, dancer.getStatus(),
+                dancer.getVerificationStatus(), dancer.getVerifiedAt(),
+                isMine, myToday, favorite, buildStats(dancerId),
                 pointsReceivedTotal, pointsReceived30d, giftsReceived,
-                fetchPhotos(dancerId, showAllPhotos),
-                fetchAllTags(dancerId), fetchVenues(dancerId));
+                fetchPhotos(dancerId, showAllPhotos, currentUserId),
+                fetchAllTags(dancerId), fetchVenues(dancerId),
+                contact, contactImageUrl, hideContact, contactCost, contactUnlocked,
+                earningsEnabled, earningsAdUnitId, earningsViews);
+    }
+
+    // ─── 创作者收益计划（2026-08-14：激励视频广告观看上报） ─────────────────────
+
+    /**
+     * 广告观看完成上报（POST /dancers/{id}/ad-views）——激励视频完整观看后由前端调用，
+     * 计入该舞伴的收益记录（线下结算依据）。
+     * <ul>
+     *   <li>目标须对当前用户可见（canView）且开启收益计划；</li>
+     *   <li><b>本人不可观看自己的广告</b>（自刷收益红线，同自赠检测语义）；</li>
+     *   <li>同一用户同舞伴<b>每天至多一次</b>（UNIQUE(user,dancer,view_date)，
+     *       SQLState 23505 幂等返回 recorded=false，不重复计收益）。</li>
+     * </ul>
+     *
+     * @return recorded（是否计入收益）+ 该舞伴累计广告支持次数
+     */
+    @Transactional
+    public AdViewResponse recordAdView(Long userId, Long dancerId, UserRole currentRole) {
+        Dancer dancer = findDancerOrThrow(dancerId);
+        if (!canView(dancer, userId, currentRole)) {
+            throw new BusinessException(1003, "该舞伴资料暂不可见");
+        }
+        if (!dancer.isEarningsEnabled()) {
+            throw new BusinessException(1001, "该舞伴未开启创作者收益计划");
+        }
+        if (dancer.getCreatedBy().equals(userId)) {
+            throw new BusinessException(1001, "不能观看自己舞伴的广告");
+        }
+        LocalDate today = LocalDate.now();
+        if (adViewRepository.findByUserIdAndDancerIdAndViewDate(userId, dancerId, today).isPresent()) {
+            // 当日已支持过（幂等，不重复计收益）
+            return new AdViewResponse(false, adViewRepository.countByDancerId(dancerId));
+        }
+        DancerAdView view = new DancerAdView();
+        view.setDancerId(dancerId);
+        view.setUserId(userId);
+        view.setViewDate(today);
+        try {
+            adViewRepository.saveAndFlush(view);
+        } catch (DataIntegrityViolationException e) {
+            // 并发竞态：另一请求已记录当日观看——本事务回滚，幂等视为已支持
+            log.debug("广告观看并发冲突，幂等忽略: userId={}, dancerId={}", userId, dancerId);
+            return new AdViewResponse(false, adViewRepository.countByDancerId(dancerId));
+        }
+        log.info("用户 {} 观看广告支持舞伴 {}（累计 {} 次）", userId, dancerId,
+                adViewRepository.countByDancerId(dancerId));
+        return new AdViewResponse(true, adViewRepository.countByDancerId(dancerId));
     }
 
     /** 单舞伴标签聚合（GET /dancers/{id}/tags，公开接口；先校验舞伴可见性） */
@@ -286,6 +579,22 @@ public class DancerService {
             throw new BusinessException(1003, "该舞伴资料暂不可见");
         }
         return fetchAllTags(dancerId);
+    }
+
+    /**
+     * 舞伴统计访问校验（GET /dancers/{id}/stats，2026-08-14 舞伴统计图：<b>仅本人 +
+     * 管理员可查看</b>——舞伴是自然人，逐日时间序列/来源拆解属精细行为数据，且与
+     * 创作者收益计划（收礼价值）敏感度耦合；对齐 hide_contact 隐私默认最小化先例，
+     * 他人不可查看）。未登录由 Controller requireAuth 前置拦截（HTTP 401），
+     * 本方法只处理"已登录但非本人/非管理员"的业务拒绝（HTTP 200 + 1003）。
+     */
+    @Transactional(readOnly = true)
+    public void checkStatsAccess(Long dancerId, Long currentUserId, UserRole currentRole) {
+        Dancer dancer = findDancerOrThrow(dancerId);
+        boolean isMine = currentUserId != null && dancer.getCreatedBy().equals(currentUserId);
+        if (!isMine && currentRole != UserRole.ADMIN) {
+            throw new BusinessException(1003, "仅舞伴本人可查看统计数据");
+        }
     }
 
     // ─── 认可（每日一记 toggle 模型） ──────────────────────────────────────────
@@ -329,6 +638,7 @@ public class DancerService {
                 log.debug("toggle 认可并发冲突，幂等忽略: userId={}, dancerId={}", userId, dancerId);
                 entityManager.clear();
                 aggregateService.invalidate(dancerId);
+                dancerStatsService.invalidate(dancerId);
                 return new RecognizeResponse(true, buildStats(dancerId));
             }
             for (String tag : tags) {
@@ -428,7 +738,7 @@ public class DancerService {
             long[] counts = countsById.getOrDefault(d.getId(), new long[]{0L, 0L, 0L});
             result.add(new DancerSummaryResponse(
                     d.getId(), d.getNickname(), d.getAvatarUrl(), d.getBio(), d.getGender(), d.getCity(),
-                    d.getStatus(), homeVenueNameById.get(d.getId()), coverPhotoUrlById.get(d.getId()),
+                    d.getStatus(), d.getVerificationStatus(), homeVenueNameById.get(d.getId()), coverPhotoUrlById.get(d.getId()),
                     counts[0], counts[2], counts[1],
                     myTodayIds.contains(d.getId()), tagsById.getOrDefault(d.getId(), Collections.emptyList())));
         }
@@ -445,7 +755,7 @@ public class DancerService {
      */
     @Transactional
     public List<DancerPhotoResponse> addPhotos(Long userId, Long dancerId,
-                                               List<String> urls, UserRole currentRole) {
+                                               List<String> urls, List<String> blurUrls, UserRole currentRole) {
         Dancer dancer = findDancerOrThrow(dancerId);
         if (!canManage(dancer, userId, currentRole)) {
             throw new BusinessException(1003, "仅舞伴本人或管理员可上传照片");
@@ -453,9 +763,12 @@ public class DancerService {
         if (urls == null || urls.isEmpty()) {
             throw new BusinessException(1001, "请至少选择一张照片");
         }
+        // 模糊图（2026-08-14 需求：收费照片详情页"模糊可见轮廓"占位）——与 urls 按
+        // index 一一对应；缺省/为空时该照片无模糊图（详情页未解锁回退纯锁占位）
+        List<String> blurList = blurUrls == null ? Collections.emptyList() : blurUrls;
         int nextOrder = maxSortOrder(dancerId) + 1;
-        for (String url : urls) {
-            String clean = TextSanitizer.sanitize(url, 500);
+        for (int i = 0; i < urls.size(); i++) {
+            String clean = TextSanitizer.sanitize(urls.get(i), 500);
             if (clean.isEmpty() || !clean.startsWith("http")) {
                 throw new BusinessException(1001, "照片地址不合法");
             }
@@ -463,12 +776,16 @@ public class DancerService {
             DancerPhoto photo = new DancerPhoto();
             photo.setDancerId(dancerId);
             photo.setUrl(clean);
+            String blurUrl = i < blurList.size() ? TextSanitizer.sanitize(blurList.get(i), 500) : null;
+            if (blurUrl != null && !blurUrl.isEmpty() && blurUrl.startsWith("http")) {
+                photo.setBlurUrl(blurUrl);
+            }
             photo.setStatus(DancerPhotoStatus.PENDING);
             photo.setCreatedBy(userId);
             photo.setSortOrder(nextOrder++);
             photoRepository.save(photo);
         }
-        return fetchPhotos(dancerId, true);
+        return fetchPhotos(dancerId, true, userId);
     }
 
     /** 舞伴本人/管理员删除照片（软删；普通用户不可调用） */
@@ -544,6 +861,7 @@ public class DancerService {
                 .map(r -> new AdminDancerResponse(
                         (Long) r[0], (String) r[1], (String) r[2], (String) r[3], (String) r[4], (String) r[5],
                         DancerStatus.valueOf((String) r[6]),
+                        toVerificationStatus(r[10]), (LocalDateTime) r[11],
                         r[8] != null ? (String) r[8] : CREATOR_GONE_NAME, (String) r[9],
                         (LocalDateTime) r[7]))
                 .toList();
@@ -573,6 +891,93 @@ public class DancerService {
         dancer.setStatus(status);
         dancerRepository.save(dancer);
         notifyStatusChange(dancer, from, status, reason);
+    }
+
+    // ─── 信息核验（2026-08-14 官方认证：授予 / 撤销 / 复核） ─────────────────────
+
+    /**
+     * 管理端信息核验操作（PUT /admin/dancers/{id}/verification，仅 ADMIN）。
+     * <ul>
+     *   <li>{@link DancerVerificationAction#VERIFY}：授予认证——UNVERIFIED / PENDING_REVIEW
+     *       → VERIFIED（PENDING_REVIEW 场景 = 复核后确认恢复）；reason 可选（仅审计）；</li>
+     *   <li>{@link DancerVerificationAction#UNVERIFY}：撤销认证——VERIFIED / PENDING_REVIEW
+     *       → UNVERIFIED，<b>reason 必填</b>（撤销必须留痕理由，随站内信通知舞伴——
+     *       延续"被指涉方有申辩权"：被撤销舞伴可查原因）。</li>
+     * </ul>
+     * 目标状态相同幂等返回；每次实际变迁写审计日志（qwt_dancer_verification_logs）
+     * 并按「状态流转对用户有结果的通知必须走站内信」约定通知创建人（同事务）。
+     */
+    @Transactional
+    public void updateVerification(Long adminId, Long dancerId, DancerVerificationAction action, String reason) {
+        Dancer dancer = findDancerOrThrow(dancerId);
+        DancerVerificationStatus from = dancer.getVerificationStatus();
+        if (action == DancerVerificationAction.VERIFY) {
+            if (from == DancerVerificationStatus.VERIFIED) {
+                return; // 幂等：已认证
+            }
+            transitionVerification(dancer, DancerVerificationStatus.VERIFIED,
+                    adminId, TextSanitizer.sanitize(reason, 200));
+            notifyVerification(dancer, true, null);
+        } else {
+            if (from == DancerVerificationStatus.UNVERIFIED) {
+                return; // 幂等：未认证
+            }
+            String cleanReason = TextSanitizer.sanitize(reason, 200);
+            if (cleanReason.isBlank()) {
+                throw new BusinessException(1001, "撤销认证必须填写原因");
+            }
+            transitionVerification(dancer, DancerVerificationStatus.UNVERIFIED, adminId, cleanReason);
+            notifyVerification(dancer, false, cleanReason);
+        }
+    }
+
+    /**
+     * 认证状态迁移（唯一状态变更出口）：更新 dancer 快照（VERIFIED 写入
+     * verifiedAt/verifiedBy，其余清空——历史在审计日志）+ 写审计日志（同事务）。
+     */
+    private void transitionVerification(Dancer dancer, DancerVerificationStatus to,
+                                        Long operatorId, String reason) {
+        DancerVerificationStatus from = dancer.getVerificationStatus();
+        if (from == to) {
+            return; // 幂等：无变更不写日志
+        }
+        dancer.setVerificationStatus(to);
+        if (to == DancerVerificationStatus.VERIFIED) {
+            dancer.setVerifiedAt(LocalDateTime.now());
+            dancer.setVerifiedBy(operatorId);
+        } else {
+            dancer.setVerifiedAt(null);
+            dancer.setVerifiedBy(null);
+        }
+        dancerRepository.save(dancer);
+        DancerVerificationLog audit = new DancerVerificationLog();
+        audit.setDancerId(dancer.getId());
+        audit.setOperatorId(operatorId);
+        audit.setFromStatus(from.name());
+        audit.setToStatus(to.name());
+        audit.setReason(reason);
+        verificationLogRepository.save(audit);
+        log.info("舞伴 {} 信息核验 {} → {}（操作人 {}）{}", dancer.getId(), from, to, operatorId,
+                reason == null || reason.isBlank() ? "" : "，原因：" + reason);
+    }
+
+    /** 认证授予/撤销站内信（与状态流转同事务；文案真实正式、只陈述事实，禁营销化描述） */
+    private void notifyVerification(Dancer dancer, boolean granted, String reason) {
+        String nickname = dancer.getNickname();
+        if (granted) {
+            messageService.create(dancer.getCreatedBy(), MessageType.DANCER_VERIFICATION,
+                    "信息核验通过",
+                    "你的舞伴主页「" + nickname + "」已通过平台信息核验，获得「信息已核验」标识。",
+                    "DANCER", dancer.getId());
+            return;
+        }
+        String reasonText = reason == null || reason.isBlank()
+                ? "" : "，原因：" + reason;
+        messageService.create(dancer.getCreatedBy(), MessageType.DANCER_VERIFICATION,
+                "信息核验标识已移除",
+                "你的舞伴主页「" + nickname + "」的信息核验标识已被移除" + reasonText
+                        + "。可修改资料后重新申请核验。",
+                "DANCER", dancer.getId());
     }
 
     /**
@@ -625,6 +1030,14 @@ public class DancerService {
     private Dancer findDancerOrThrow(Long dancerId) {
         return dancerRepository.findByIdAndDeletedFalse(dancerId)
                 .orElseThrow(() -> new BusinessException(1001, "舞伴不存在"));
+    }
+
+    /** 认证状态安全转换（native 查询列值防御：null → UNVERIFIED） */
+    private DancerVerificationStatus toVerificationStatus(Object value) {
+        if (value == null) {
+            return DancerVerificationStatus.UNVERIFIED;
+        }
+        return DancerVerificationStatus.valueOf((String) value);
     }
 
     /** 详情/认可响应用：四窗口统计 + 近7日每日认可（"昨天 +3 前天 +5"动态信息） */
@@ -724,16 +1137,32 @@ public class DancerService {
     /**
      * 舞伴相册照片（按 sortOrder 升序 = 上传序）。
      *
-     * @param showAll true = 本人/管理员视角（全量含 PENDING/REJECTED，编辑页回显状态）；
-     *                false = 公开视角（仅 PUBLIC）。
+     * @param showAll       true = 本人/管理员视角（全量含 PENDING/REJECTED，编辑页回显状态）；
+     *                      false = 公开视角（仅 PUBLIC）。
+     * @param currentUserId 当前用户（组装"已解锁"态；匿名 null）
+     * @apiNote 积分解锁（2026-08-14 公共模块）：照片有门槛（cost&gt;0）且当前用户
+     * 未解锁 → <b>url 置 null</b>（不下发原图，防绕过——原图仅经 POST /points/unlock
+     * 解锁成功后返回）；本人/管理员（showAll）恒可看。门槛/解锁态经 PointsService
+     * 批量查询组装（N+1 规避）。
      */
-    private List<DancerPhotoResponse> fetchPhotos(Long dancerId, boolean showAll) {
-        List<DancerPhotoResponse> result = new ArrayList<>();
-        for (DancerPhoto p : photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(dancerId)) {
+    private List<DancerPhotoResponse> fetchPhotos(Long dancerId, boolean showAll, Long currentUserId) {
+        List<DancerPhoto> photos = photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(dancerId);
+        if (photos.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<Long> ids = photos.stream().map(DancerPhoto::getId).toList();
+        Map<Long, Integer> costs = pointsService.gateCosts(PointsGateTargetType.DANCER_PHOTO, ids);
+        Set<Long> unlockedIds = pointsService.unlockedIds(currentUserId, PointsGateTargetType.DANCER_PHOTO, ids);
+        List<DancerPhotoResponse> result = new ArrayList<>(photos.size());
+        for (DancerPhoto p : photos) {
             if (!showAll && p.getStatus() != DancerPhotoStatus.PUBLIC) {
                 continue;
             }
-            result.add(new DancerPhotoResponse(p.getId(), p.getUrl(), p.getStatus(), p.getSortOrder(), p.getCreatedAt()));
+            int cost = costs.getOrDefault(p.getId(), 0);
+            boolean unlocked = showAll || cost == 0 || unlockedIds.contains(p.getId());
+            result.add(new DancerPhotoResponse(
+                    p.getId(), unlocked ? p.getUrl() : null, p.getStatus(), p.getSortOrder(),
+                    p.getCreatedAt(), cost, unlocked, p.getBlurUrl()));
         }
         return result;
     }
