@@ -39,5 +39,10 @@ build/
 ### Local data (uploads etc.) ###
 data/
 
+### Server runtime artifacts ###
+.m2/
+app.log
+nohup.out
+
 ### OS ###
 .DS_Store
