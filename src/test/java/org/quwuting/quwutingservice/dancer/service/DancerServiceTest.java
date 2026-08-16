@@ -28,14 +28,17 @@ import org.quwuting.quwutingservice.dancer.repository.DancerCityRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVenueRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVerificationLogRepository;
+import org.quwuting.quwutingservice.dancer.repository.DancerViewRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.message.service.MessageService;
+import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
@@ -84,6 +87,10 @@ class DancerServiceTest {
     private DancerVerificationLogRepository verificationLogRepository;
     @Mock
     private DancerFavoriteRepository dancerFavoriteRepository;
+    @Mock
+    private DancerViewRepository dancerViewRepository;
+    @Mock
+    private OpsConfigService opsConfigService;
 
     private DancerService dancerService;
 
@@ -93,8 +100,9 @@ class DancerServiceTest {
     void setUp() {
         dancerService = new DancerService(dancerRepository, dancerCityRepository, dancerVenueRepository, recognitionRepository,
                 recognitionTagRepository, photoRepository, adViewRepository, verificationLogRepository,
-                dancerFavoriteRepository, aggregateService, dancerStatsService, venueLookupService,
-                messageService, pointsService, imageValidator, new org.quwuting.quwutingservice.config.DancerAdProperties(""));
+                dancerFavoriteRepository, dancerViewRepository, aggregateService, dancerStatsService, venueLookupService,
+                messageService, pointsService, imageValidator, new org.quwuting.quwutingservice.config.DancerAdProperties(""),
+                opsConfigService);
 
         dancer = new Dancer();
         dancer.setId(1L);
@@ -168,7 +176,7 @@ class DancerServiceTest {
         when(aggregateService.getAggregate(1L)).thenReturn(new long[]{5L, 1L, 3L, 4L});
         when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
         when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
 
         DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
 
@@ -196,7 +204,7 @@ class DancerServiceTest {
                 .thenReturn(Optional.empty());
         when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
         when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
 
         DancerDetailResponse resp = dancerService.getDetail(1L, 1L, UserRole.USER);
 
@@ -213,7 +221,7 @@ class DancerServiceTest {
                 .thenReturn(Optional.empty());
         when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
         when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
 
         DancerDetailResponse resp = dancerService.getDetail(1L, 99L, UserRole.ADMIN);
 
@@ -228,7 +236,7 @@ class DancerServiceTest {
         when(aggregateService.getAggregate(1L)).thenReturn(new long[]{5L, 1L, 3L, 4L});
         when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
         when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
         when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
                 .thenReturn(Collections.emptyList());
         when(pointsService.receivedTotal(any(), anyLong())).thenReturn(0L);
@@ -311,7 +319,7 @@ class DancerServiceTest {
         when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
 
         RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
-                new RecognizeDancerRequest(List.of("DANCE", "EASY_TALK")), UserRole.USER);
+                new RecognizeDancerRequest(List.of("DANCE", "EASY_TALK"), null), UserRole.USER);
 
         assertTrue(resp.recognized());
         verify(recognitionRepository).save(argThat(r ->
@@ -339,7 +347,7 @@ class DancerServiceTest {
 
         assertFalse(resp.recognized(), "取消当天认可后 recognized=false");
         verify(recognitionTagRepository).deleteByRecognitionId(100L); // 级联删除当日标签
-        verify(recognitionRepository).delete(existing);                // 物理删除当日记录
+        verify(recognitionRepository).deleteRecognitionById(100L); // 批量删除当日记录（@Modifying）
         verify(aggregateService).invalidate(1L);
     }
 
@@ -351,7 +359,7 @@ class DancerServiceTest {
 
         BusinessException ex = assertThrows(BusinessException.class,
                 () -> dancerService.toggleRecognize(2L, 1L,
-                        new RecognizeDancerRequest(List.of("NOT_IN_DICT")), UserRole.USER));
+                        new RecognizeDancerRequest(List.of("NOT_IN_DICT"), null), UserRole.USER));
         assertEquals(1001, ex.getCode());
         verify(recognitionRepository, never()).save(any());
     }
@@ -364,7 +372,7 @@ class DancerServiceTest {
 
         BusinessException ex = assertThrows(BusinessException.class,
                 () -> dancerService.toggleRecognize(2L, 1L,
-                        new RecognizeDancerRequest(List.of("DANCE", "EASY_TALK", "GOOD_VIBE", "FUNNY")), UserRole.USER));
+                        new RecognizeDancerRequest(List.of("DANCE", "EASY_TALK", "GOOD_VIBE", "FUNNY"), null), UserRole.USER));
         assertEquals(1001, ex.getCode());
         verify(recognitionRepository, never()).save(any());
     }
@@ -383,10 +391,202 @@ class DancerServiceTest {
         when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
 
         dancerService.toggleRecognize(2L, 1L,
-                new RecognizeDancerRequest(List.of("DANCE", "DANCE", "EASY_TALK")), UserRole.USER);
+                new RecognizeDancerRequest(List.of("DANCE", "DANCE", "EASY_TALK"), null), UserRole.USER);
 
         verify(recognitionTagRepository, times(1)).save(argThat(t -> t.getTag().equals("DANCE")));
         verify(recognitionTagRepository, times(1)).save(argThat(t -> t.getTag().equals("EASY_TALK")));
+    }
+
+    // ─── 认可单票换票（2026-08-15 交互模型变更：Reaction 风格 chip 单票） ────────
+
+    @Test
+    void toggleRecognize_singleTag_firstTime_createsWithSingleTag() {
+        when(opsConfigService.isEnabled(anyString(), anyBoolean())).thenReturn(true); // 每日一票开
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(2L, 1L, LocalDate.now()))
+                .thenReturn(Optional.empty());
+        when(recognitionRepository.save(any(DancerRecognition.class))).thenAnswer(inv -> {
+            DancerRecognition r = inv.getArgument(0);
+            r.setId(100L);
+            return r;
+        });
+        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{1L, 1L, 1L, 1L});
+        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+
+        RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
+                new RecognizeDancerRequest(null, "DANCE"), UserRole.USER);
+
+        assertTrue(resp.recognized());
+        assertNull(resp.replacedFrom(), "首次参与无换票");
+        assertEquals(List.of("DANCE"), resp.myTags(), "单票模型今日票 = 点击的表情");
+        verify(recognitionTagRepository).save(argThat(t -> t.getTag().equals("DANCE")));
+        verify(recognitionTagRepository, never()).save(argThat(t -> t.getTag().equals("EASY_TALK")));
+    }
+
+    @Test
+    void toggleRecognize_singleTag_sameTag_cancels() {
+        when(opsConfigService.isEnabled(anyString(), anyBoolean())).thenReturn(true); // 每日一票开
+        DancerRecognition existing = new DancerRecognition();
+        existing.setId(100L);
+        existing.setUserId(2L);
+        existing.setDancerId(1L);
+        existing.setRecognitionDate(LocalDate.now());
+
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(2L, 1L, LocalDate.now()))
+                .thenReturn(Optional.of(existing));
+        when(recognitionTagRepository.findTagsByRecognitionIds(List.of(100L)))
+                .thenReturn(Collections.singletonList(new Object[]{100L, "DANCE"}));
+        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
+        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+
+        RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
+                new RecognizeDancerRequest(null, "DANCE"), UserRole.USER);
+
+        assertFalse(resp.recognized(), "点自己今日的票 = 取消");
+        assertTrue(resp.myTags().isEmpty(), "取消后今日无票");
+        verify(recognitionTagRepository).deleteByRecognitionId(100L);
+        verify(recognitionRepository).deleteRecognitionById(100L); // 批量删除当日记录（@Modifying）
+        verify(recognitionTagRepository, never()).save(any());
+    }
+
+    @Test
+    void toggleRecognize_singleTag_differentTag_replaces() {
+        when(opsConfigService.isEnabled(anyString(), anyBoolean())).thenReturn(true); // 每日一票开
+        DancerRecognition existing = new DancerRecognition();
+        existing.setId(100L);
+        existing.setUserId(2L);
+        existing.setDancerId(1L);
+        existing.setRecognitionDate(LocalDate.now());
+
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(2L, 1L, LocalDate.now()))
+                .thenReturn(Optional.of(existing));
+        when(recognitionTagRepository.findTagsByRecognitionIds(List.of(100L)))
+                .thenReturn(Collections.singletonList(new Object[]{100L, "DANCE"}));
+        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{1L, 1L, 1L, 1L});
+        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+
+        RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
+                new RecognizeDancerRequest(null, "EASY_TALK"), UserRole.USER);
+
+        assertTrue(resp.recognized(), "换票后仍为已认可");
+        assertEquals("DANCE", resp.replacedFrom(), "换票返回被替换的旧票");
+        assertEquals(List.of("EASY_TALK"), resp.myTags(), "换票后今日票 = 新表情");
+        verify(recognitionTagRepository).deleteByRecognitionId(100L); // 旧标签清空
+        verify(recognitionTagRepository).save(argThat(t -> t.getTag().equals("EASY_TALK"))); // 新标签写入
+        verify(recognitionRepository, never()).deleteRecognitionById(anyLong()); // 认可记录本身不删（换票非取消）
+    }
+
+    // ─── 认可多选模式（2026-08-15：开关 dancer.recognition.daily.single 关闭） ─────
+
+    @Test
+    void toggleRecognize_multiMode_firstTime_createsWithSingleTag() {
+        when(opsConfigService.isEnabled(anyString(), anyBoolean())).thenReturn(false); // 多选
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(2L, 1L, LocalDate.now()))
+                .thenReturn(Optional.empty());
+        when(recognitionRepository.save(any(DancerRecognition.class))).thenAnswer(inv -> {
+            DancerRecognition r = inv.getArgument(0);
+            r.setId(100L);
+            return r;
+        });
+        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{1L, 1L, 1L, 1L});
+        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+
+        RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
+                new RecognizeDancerRequest(null, "DANCE"), UserRole.USER);
+
+        assertTrue(resp.recognized());
+        assertEquals(List.of("DANCE"), resp.myTags());
+        verify(recognitionTagRepository).save(argThat(t -> t.getTag().equals("DANCE")));
+    }
+
+    @Test
+    void toggleRecognize_multiMode_newTag_accumulates() {
+        when(opsConfigService.isEnabled(anyString(), anyBoolean())).thenReturn(false); // 多选
+        DancerRecognition existing = new DancerRecognition();
+        existing.setId(100L);
+        existing.setUserId(2L);
+        existing.setDancerId(1L);
+        existing.setRecognitionDate(LocalDate.now());
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(2L, 1L, LocalDate.now()))
+                .thenReturn(Optional.of(existing));
+        when(recognitionTagRepository.findTagsByRecognitionIds(List.of(100L)))
+                .thenReturn(Collections.singletonList(new Object[]{100L, "DANCE"}));
+        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{1L, 1L, 1L, 1L});
+        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+
+        RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
+                new RecognizeDancerRequest(null, "EASY_TALK"), UserRole.USER);
+
+        assertTrue(resp.recognized(), "多选模式点新表情 = 累加");
+        assertEquals(List.of("DANCE", "EASY_TALK"), resp.myTags(), "今日标签 = 旧票 + 新票");
+        verify(recognitionTagRepository, never()).deleteByRecognitionId(100L); // 不整组删除
+        verify(recognitionTagRepository).save(argThat(t -> t.getTag().equals("EASY_TALK")));
+        verify(recognitionRepository, never()).deleteRecognitionById(anyLong());
+    }
+
+    @Test
+    void toggleRecognize_multiMode_removeTag_keepsRecognition() {
+        when(opsConfigService.isEnabled(anyString(), anyBoolean())).thenReturn(false); // 多选
+        DancerRecognition existing = new DancerRecognition();
+        existing.setId(100L);
+        existing.setUserId(2L);
+        existing.setDancerId(1L);
+        existing.setRecognitionDate(LocalDate.now());
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(2L, 1L, LocalDate.now()))
+                .thenReturn(Optional.of(existing));
+        when(recognitionTagRepository.findTagsByRecognitionIds(List.of(100L)))
+                .thenReturn(Arrays.asList(new Object[]{100L, "DANCE"}, new Object[]{100L, "EASY_TALK"}));
+        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{1L, 1L, 1L, 1L});
+        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+
+        RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
+                new RecognizeDancerRequest(null, "DANCE"), UserRole.USER);
+
+        assertFalse(resp.recognized(), "点已选表情 = 移除该枚");
+        assertEquals(List.of("EASY_TALK"), resp.myTags(), "移除后仍保留其余票");
+        verify(recognitionTagRepository).deleteByRecognitionIdAndTag(100L, "DANCE");
+        verify(recognitionRepository, never()).deleteRecognitionById(anyLong()); // 仍有标签，认可保留
+    }
+
+    @Test
+    void toggleRecognize_multiMode_removeLastTag_deletesRecognition() {
+        when(opsConfigService.isEnabled(anyString(), anyBoolean())).thenReturn(false); // 多选
+        DancerRecognition existing = new DancerRecognition();
+        existing.setId(100L);
+        existing.setUserId(2L);
+        existing.setDancerId(1L);
+        existing.setRecognitionDate(LocalDate.now());
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(2L, 1L, LocalDate.now()))
+                .thenReturn(Optional.of(existing));
+        when(recognitionTagRepository.findTagsByRecognitionIds(List.of(100L)))
+                .thenReturn(Collections.singletonList(new Object[]{100L, "DANCE"}));
+        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
+        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+
+        RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
+                new RecognizeDancerRequest(null, "DANCE"), UserRole.USER);
+
+        assertFalse(resp.recognized());
+        assertTrue(resp.myTags().isEmpty(), "末枚移除 = 今日无票");
+        verify(recognitionTagRepository).deleteByRecognitionIdAndTag(100L, "DANCE");
+        verify(recognitionRepository).deleteRecognitionById(100L); // 标签清空 → 认可记录删除
+    }
+
+    @Test
+    void toggleRecognize_singleTag_invalidTag_throws() {
+        when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> dancerService.toggleRecognize(2L, 1L,
+                        new RecognizeDancerRequest(null, "NOT_IN_DICT"), UserRole.USER));
+        assertEquals(1001, ex.getCode());
+        verify(recognitionRepository, never()).save(any());
     }
 
     @Test
@@ -537,7 +737,7 @@ class DancerServiceTest {
                 .thenReturn(Optional.empty());
         when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
         when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
         when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
                 .thenReturn(Collections.emptyList());
 
@@ -564,7 +764,7 @@ class DancerServiceTest {
                 .thenReturn(Optional.empty());
         when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
         when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
         when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
                 .thenReturn(Collections.emptyList());
 
@@ -591,7 +791,7 @@ class DancerServiceTest {
                 .thenReturn(Optional.empty());
         when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
         when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
         when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
                 .thenReturn(Collections.emptyList());
 
@@ -705,7 +905,7 @@ class DancerServiceTest {
         when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
         when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
         when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
         when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
                 .thenReturn(List.of(pending, pub));
 
@@ -728,7 +928,7 @@ class DancerServiceTest {
         when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
         when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
         when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(1L)).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
         when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
                 .thenReturn(List.of(pending));
 
@@ -750,7 +950,7 @@ class DancerServiceTest {
         when(dancerVenueRepository.findByDancerIdAndRelationAndDeletedFalse(anyLong(), any()))
                 .thenReturn(Collections.emptyList());
         when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(anyLong())).thenReturn(Collections.emptyList());
+        when(recognitionTagRepository.aggregateByDancer(anyLong(), any(), any(), any())).thenReturn(Collections.emptyList());
         when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(anyLong()))
                 .thenReturn(Collections.emptyList());
         when(pointsService.receivedTotal(any(), anyLong())).thenReturn(0L);

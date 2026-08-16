@@ -41,5 +41,14 @@ public record DancerSummaryResponse(
         /** 今日是否已认可（登录用户；匿名恒 false） */
         boolean myRecognizedToday,
         /** Top 认可标签（最多 3 个，按计数倒序） */
-        List<DancerTagStat> topTags
+        List<DancerTagStat> topTags,
+        /**
+         * 累计浏览量（2026-08-15 新增，镜像门店 VenueResponse.viewCount）：
+         * qwt_dancer_views 行数（按天按来源去重 PV，含匿名，与 DancerStatsService
+         * viewTrend 同源同口径的全量版）。驱动舞伴列表卡片右下角「👁 浏览数」展示；
+         * 列表/收藏等卡片展示场景传真实值（批量查询见
+         * {@code DancerViewRepository#countByDancerIds}），禁止传默认 0
+         * （否则列表卡片浏览量恒为 0，同门店 isHot 历史缺陷模式）。
+         */
+        long viewCount
 ) {}

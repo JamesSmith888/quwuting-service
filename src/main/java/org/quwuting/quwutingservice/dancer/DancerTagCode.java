@@ -3,22 +3,27 @@ package org.quwuting.quwutingservice.dancer;
 /**
  * 舞伴标签字典（后台维护，不允许用户自由创建——与 ReactionCode / RatingDimensions 同模式）。
  * <p>
- * 标签来源 = 用户<b>认可行为</b>：认可舞伴时从本字典勾选（每次最多
- * {@link org.quwuting.quwutingservice.dancer.service.DancerService#MAX_TAGS_PER_RECOGNITION} 个），
- * 舞伴主页标签云 = 全部认可记录携带标签的聚合计数。
+ * 标签来源 = 用户<b>认可行为</b>：认可舞伴时点按一枚表情 chip（2026-08-15 单票换票模型，
+ * 每日至多一枚，语义与 venue Reaction 的每日一票一致），舞伴主页认可 chip 计数 =
+ * 全部认可记录携带标签的聚合。
  * <p>
  * <b>全部为正向信号（刻意设计）</b>：舞伴是真实个人，负向标签（如"态度差"）属于对个人的
  * 公开负面评价，存在诽谤/骚扰风险且难以核验——负面体验应走场所 feedback 等既有通道，
  * 不在个人主页开放。本字典只表达"认可的理由"，与产品定位（用户认可、非打赏/排行）一致。
+ * <p>
+ * <b>表情不复用（2026-08-15 明确）</b>：本字典 emoji 与 venue {@code ReactionCode} 枚举
+ * 互斥——舞伴认可 = 独立表情域，禁止复用门店反馈表情（2026-08-15 调整：DANCE 💃→🩰
+ * 与 PARTNER_ABUNDANT 💃 冲突、GOOD_VIBE 🔥→🎉 与 HOT 🔥 冲突）。emoji 由枚举派生
+ * 不下库，变更无需数据迁移。
  * <p>
  * emoji/label 是本字典的唯一来源（无管理后台 UI），后续新增/调整只需修改本枚举，
  * 前端通过接口返回的 emoji/label 自动同步（前端静态字典 constants/dancer-tags.ts 需同步镜像，
  * 见前端 AGENTS.md「舞伴生态体系」章节）。
  */
 public enum DancerTagCode {
-    DANCE("💃", "舞姿优秀"),
+    DANCE("🩰", "舞姿优秀"),
     EASY_TALK("😊", "容易交流"),
-    GOOD_VIBE("🔥", "氛围感强"),
+    GOOD_VIBE("🎉", "氛围感强"),
     BEGINNER_FRIENDLY("🌟", "新手友好"),
     PATIENT("🤝", "耐心带舞"),
     GENTLE("🎩", "有风度"),

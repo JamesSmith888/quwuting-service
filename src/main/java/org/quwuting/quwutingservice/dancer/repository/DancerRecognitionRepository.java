@@ -2,6 +2,7 @@ package org.quwuting.quwutingservice.dancer.repository;
 
 import org.quwuting.quwutingservice.dancer.entity.DancerRecognition;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -11,6 +12,24 @@ import java.util.List;
 import java.util.Optional;
 
 public interface DancerRecognitionRepository extends JpaRepository<DancerRecognition, Long> {
+
+    /**
+     * 事务级咨询锁：串行化同 (user, dancer, date) 的并发认可 toggle（2026-08-15 新增，
+     * 对齐 VenueReactionService 单票路径）——"查当日记录 → 删/换 → 插"若不串行化，
+     * 两个并发请求可能同时命中/新建，破坏"一日一枚表情"与删除幂等不变量。
+     * pg_advisory_xact_lock 事务提交/回滚自动释放。
+     */
+    @Query(value = "SELECT pg_advisory_xact_lock(hashtext(:lockKey))", nativeQuery = true)
+    void lockDailyTicket(@Param("lockKey") String lockKey);
+
+    /**
+     * 批量删除认可记录（2026-08-15 根因修复：与标签批量删除同语义——派生删除
+     * 的 SELECT+em.remove 延迟实体删除在并发/事务内 flush 场景会产生
+     * StaleObjectStateException；@Modifying 批量删除幂等且无实体管理状态）。
+     */
+    @Modifying(clearAutomatically = true)
+    @Query("DELETE FROM DancerRecognition r WHERE r.id = :id")
+    void deleteRecognitionById(@Param("id") Long id);
 
     /**
      * 精确命中"当日记录"（toggle 用，每日一记模型的核心查询）。

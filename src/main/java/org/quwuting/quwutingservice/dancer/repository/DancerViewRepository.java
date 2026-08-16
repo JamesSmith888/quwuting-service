@@ -8,6 +8,7 @@ import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.List;
 
 public interface DancerViewRepository extends JpaRepository<DancerView, Long> {
 
@@ -40,4 +41,20 @@ public interface DancerViewRepository extends JpaRepository<DancerView, Long> {
                    @Param("viewDate") LocalDate viewDate,
                    @Param("source") String source,
                    @Param("createdAt") LocalDateTime createdAt);
+
+    /**
+     * 批量累计浏览量（舞伴列表/收藏列表整页一次 IN 覆盖，避免 N+1）：
+     * 返回 (dancerId, count) 二元组数组，按 dancerId 分组聚合全量历史行数。
+     * 口径 = qwt_dancer_views 行数（按天按来源去重 PV，含匿名，与
+     * {@code DancerStatsService} viewTrend 同源同口径的全量版，仅去掉 30 天窗口；
+     * 镜像门店 {@code VenueViewRepository#countByVenueIds}）。
+     * 调用方判空（dancerIds 为空时 IN () 会触发 SQL 语法错误，参照门店
+     * countByVenueIds 的空集合防御模式）。
+     */
+    @Query("""
+            SELECT dv.dancerId, COUNT(dv) FROM DancerView dv
+            WHERE dv.dancerId IN :dancerIds
+            GROUP BY dv.dancerId
+            """)
+    List<Object[]> countByDancerIds(@Param("dancerIds") List<Long> dancerIds);
 }

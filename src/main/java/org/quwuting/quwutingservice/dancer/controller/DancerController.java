@@ -101,8 +101,11 @@ public class DancerController {
     }
 
     /**
-     * 认可 toggle（需登录）：今日未认可 → 认可（body.tags 可选字典标签 0-3 个）；
-     * 今日已认可 → 取消。返回最终参与态 + 最新四窗口统计（前端据此本地更新，无需整页刷新）。
+     * 认可 toggle（需登录，2026-08-15 单票换票模型）：body.tag = 单枚表情（今日唯一票）——
+     * 今日未认可 → 参与；今日同标签 → 取消；今日异标签 → 原子换票。
+     * 旧客户端 body.tags（0-3 列表）走兼容路径（未认可 → 参与，已认可 → 取消）。
+     * 返回最终参与态 + 被替换旧标签 + 今日标签 + 最新四窗口统计 + 标签聚合绝对快照
+     * （前端据此本地收敛，无需整页刷新）。
      */
     @PostMapping("/{id}/recognitions")
     public ApiResponse<RecognizeResponse> recognize(@PathVariable Long id,

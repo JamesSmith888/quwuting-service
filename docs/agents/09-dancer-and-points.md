@@ -74,12 +74,26 @@
 - 照片驳回**不新增站内信**（编辑页可见状态，本人自行删除重传；低风险 + 可自查，避免消息域扩散）。
 - `FileCategory` 新增 `DANCER_PHOTO` / `DANCER_AVATAR`（Supabase 直传凭证分类）。
 
-### 认可模型（每日一记，复用 Reaction 的 anti-刷票设计）
+### 认可模型（每日一记 → 2026-08-15 单票换票 + 可配置多选，复用 Reaction 的 anti-刷票设计）
 
 与 VenueReaction「每日一记」模型完全同源（2026-08 确立，见「Reaction 快速反馈系统」）：
 
-- 每次点击认可 = 插入一行 `recognitionDate = 今天`；取消 = **物理删除**当日记录 + **级联删除**其标签
+- 每次点击认可 = 插入一行 `recognitionDate = 今天`；取消 = **物理删除**当日记录 + **删除**其标签
 - UNIQUE(userId, dancerId, recognitionDate)：同一用户每天只能认可同一舞伴一次，次日自动恢复
+- **2026-08-15 单票换票**（认可交互从"标签选择器确认 0-3"改造为 Reaction 风格表情 chip
+  单票）：新客户端每次认可携带**单个 tag**（= 今日唯一票）——未认可 → 参与（写入该标签）；
+  今日同标签 → 取消；今日异标签 → **原子换票**（旧标签删除 + 新标签写入，`replacedFrom`
+  返回旧票；认可记录本身不删，四窗口计数不变）。**每日一票由运营开关
+  `dancer.recognition.daily.single`（V31 迁移，默认 true）控制**：关闭 = 多选模式
+  （每枚表情独立 toggle：累加 / 移除；今日标签清空 → 删除认可记录）。旧客户端 `tags`
+  列表（0-3）走兼容路径（未认可 → 参与写列表标签；已认可 → 取消）。
+- **并发与删除（2026-08-15 根因修复）**：单票路径以 `pg_advisory_xact_lock`
+  （"recognition:"+user+":"+dancer+":"+date）串行化同键并发（对齐 VenueReactionService）；
+  标签/认可删除一律 **@Modifying(clearAutomatically=true) 批量删除**（幂等、无实体管理
+  状态——旧 Spring Data 派生删除 SELECT+em.remove 延迟实体删除在事务内 flush + 同键并发
+  场景产生 StaleObjectStateException，见前端 09 文档「认可链路晚二轮」）；认可插入 23505
+  → entityManager.clear() 后重查复用；标签插入 23505（UNIQUE(recognitionId, tag)）→ 幂等忽略。
+  缓存失效 = 内联（响应统计新鲜）+ afterCommit/afterCompletion（回滚清污染）。
 - 窗口统计（countAll/countToday/count7d/count30d）锚点 = `createdAt`（真实"此刻"，与 Reaction
   同口径）；`recognitionDate` 只承载"每日唯一"语义；「最近认可」动态（昨天 +3 前天 +5）按
   `recognitionDate` 自然日聚合——两套时间语义职责分离，同 VenueReaction 的 reactionDate/createdAt 约定
@@ -88,9 +102,14 @@
 
 ### 标签字典（DancerTagCode，后台维护）
 
-标签来源 = 用户认可行为（认可时从字典勾选，每次最多 3 个）。与 ReactionCode 同模式：
-枚举是唯一事实源（emoji/label），前端静态镜像 `constants/dancer-tags.ts`，修改须两端同步。
-**全部正向**（产品定位 + 真实个人保护）。用户**不可自由创建**标签（防色情/攻击/广告/竞对刷评价）。
+标签来源 = 用户认可行为（2026-08-15 起**单票模型 = 每日一枚表情 chip**，每次认可恰写一个标签；
+legacy 多标签记录保留不迁移）。与 ReactionCode 同模式：枚举是唯一事实源（emoji/label），
+前端静态镜像 `constants/dancer-tags.ts`，修改须两端同步。**全部正向**（产品定位 + 真实个人
+保护）。用户**不可自由创建**标签（防色情/攻击/广告/竞对刷评价）。**表情不复用（2026-08-15
+明确）**：本字典 emoji 与 venue `ReactionCode` 枚举互斥（调整：DANCE 💃→🩰、GOOD_VIBE 🔥→🎉；
+emoji 由枚举派生不下库，无迁移）。**2026-08-15 晚 窗口化**：标签聚合 DancerTagStat 增加
+countToday/count7d/count30d（count = countAll 兼容列表 topTags），详情页认可 chip 默认
+展示近7天、可切近30天/全部。
 
 ### 可见性规则（隐私边界）
 
@@ -112,10 +131,10 @@
 | GET /dancers | 软鉴权 | 列表（仅 NORMAL；city 可选；按 count7d 倒序分页；登录含 myRecognizedToday；含 coverPhotoUrl） |
 | GET /dancers/cities | 软鉴权 | 常驻城市词表（聚合真实数据，2026-08-10 激活列表页城市筛选） |
 | POST /dancers | 登录 | 舞伴主动注册 → PENDING；返回新建 ID |
-| GET /dancers/{id} | 软鉴权 | 详情（可见性校验；登录含 isMine + myRecognizedToday + **favorite（2026-08-14 服务端权威收藏态）** + 四窗口统计 + 近7日每日认可 + 标签云 + 常去/出现舞厅 + 相册 photos（按身份过滤）） |
+| GET /dancers/{id} | 软鉴权 | 详情（可见性校验；登录含 isMine + myRecognizedToday + **myTags（2026-08-15 今日认可携带标签，chip 活跃态数据源）** + **favorite（2026-08-14 服务端权威收藏态）** + 四窗口统计 + 近7日每日认可 + **标签聚合（2026-08-15 四窗口：countAll/countToday/count7d/count30d）** + 常去/出现舞厅 + 相册 photos（按身份过滤）） |
 | PUT /dancers/{id} | 本人/管理员 | 编辑资料（全量覆盖；REJECTED → 自动 PENDING 重审；HOME 关系完整替换；返回更新后详情） |
-| GET /dancers/{id}/tags | 软鉴权 | 标签聚合（可见性校验） |
-| POST /dancers/{id}/recognitions | 登录 | 认可 toggle（body.tags 可选 0-3 字典标签；返回 RecognizeResponse{recognized, stats}） |
+| GET /dancers/{id}/tags | 软鉴权 | 标签聚合（四窗口，可见性校验） |
+| POST /dancers/{id}/recognitions | 登录 | 认可 toggle（**2026-08-15 单票换票：body.tag 单字典标签**——未认可参与 / 同标签取消 / 异标签原子换票；开关 dancer.recognition.daily.single 关闭 = 多选（累加/移除，清空删认可）；旧客户端 body.tags 0-3 列表走兼容路径；返回 RecognizeResponse{recognized, replacedFrom, myTags, stats, tags(四窗口)}） |
 | POST /dancers/{id}/photos | 本人/管理员 | 上传相册照片（body {urls}，插入即 PENDING，单次 ≤9） |
 | DELETE /dancers/{id}/photos/{photoId} | 本人/管理员 | 删除照片（软删） |
 | GET /users/me/dancer-recognitions | 登录 | 我的认可记录（同舞伴只取最近一条，按认可时间倒序） |
@@ -155,6 +174,11 @@ venue_id NOT NULL + UNIQUE(user_id, venue_id)、接口返回 VenueResponse。舞
   venue 详情页用 URL fav 参数传递收藏态的 hack（分享深链等无参数入口会丢失状态）。
 - **列表摘要构建复用**：listPublic 的行内 Object[] → DancerSummaryResponse 逻辑抽取为
   buildSummaries 私有方法，收藏列表（findFavoriteDancersByUserId 返回同构行）共用——DRY。
+- **列表摘要下发累计浏览量 viewCount（2026-08-15）**：DancerSummaryResponse 追加 viewCount
+  （全量历史 PV，含匿名——qwt_dancer_views 行数，与 DancerStatsService viewTrend 同源
+  同口径的全量版）；buildSummaries 与 listMyDancers 均经 `DancerViewRepository#countByDancerIds`
+  一次 IN + GROUP BY 批量填充（镜像门店 VenueViewRepository#countByVenueIds 模式，
+  避免逐条 COUNT 的 N+1）；驱动前端舞伴列表卡片右下角「👁 浏览数」展示。
 
 ### 舞伴官方认证（2026-08-14：「信息已核验」标识，V26 迁移）
 

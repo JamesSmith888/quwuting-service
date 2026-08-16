@@ -40,6 +40,13 @@ public class OpsConfigService {
      */
     public static final String KEY_REACTION_DAILY_SINGLE = "reaction.daily.single";
 
+    /**
+     * 舞伴认可「每日唯一表情」开关（2026-08-15，默认 true = 一票制生效；关闭恢复多选）：
+     * 同一用户对同一舞伴每天只能点一枚认可表情，点新表情 = 当日旧票原子换票
+     * （语义与 {@link #KEY_REACTION_DAILY_SINGLE} 完全对齐，见 V31 迁移注释）。
+     */
+    public static final String KEY_DANCER_RECOGNITION_DAILY_SINGLE = "dancer.recognition.daily.single";
+
     private final OpsConfigRepository opsConfigRepository;
 
     /** 单键配置缓存（LoadingCache + Optional 承载"键不存在"——Caffeine 禁 null 值） */

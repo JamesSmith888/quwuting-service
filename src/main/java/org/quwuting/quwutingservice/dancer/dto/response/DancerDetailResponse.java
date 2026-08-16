@@ -45,6 +45,12 @@ public record DancerDetailResponse(
         boolean isMine,
         boolean myRecognizedToday,
         /**
+         * 今日认可携带的标签（2026-08-15 单票模型：至多 1 个；旧多标签历史数据可能 >1；
+         * 未认可 = 空列表）。驱动详情页认可 chip 的活跃态——前端据此派生
+         * "我今日的票是哪一枚表情"，不参与计数展示（计数以 tags 聚合为准）。
+         */
+        List<String> myTags,
+        /**
          * 当前用户是否已收藏（2026-08-14 舞伴收藏）。
          * 服务端权威字段（登录时按收藏表实时判定；匿名/未收藏恒 false）——替代 venue 域
          * 详情页用 URL fav 参数传递收藏态的 hack（分享深链等无参数入口会丢失状态）。
