@@ -39,6 +39,7 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务，为去舞厅小程序
 | [`14-deployment-and-schema.md`](docs/agents/14-deployment-and-schema.md) | 配置管理、生产部署、连接池与数据库抖动韧性、Flyway Schema 演进与完整性 | 部署、Schema 变更 |
 | [`15-governance.md`](docs/agents/15-governance.md) | 禁止操作、AI 代理常见错误表、验证清单 | 每次修改后、提交前 |
 | [`16-ops-config.md`](docs/agents/16-ops-config.md) | 运营配置（feature flag）设施：qwt_ops_config 表、读写接口、管理端入口、键即代码契约 | 新增可配置产品规则时 |
+| [`17-group-chats.md`](docs/agents/17-group-chats.md) | 舞友群（V33：微信引流，平台无一键加群 API → 长按识别二维码；scope 三态维度互斥校验；公开分组读 + ADMIN CRUD；qr_code_url 挂 ImageContentValidator；GROUP_QR 存储分类，2026-08-17） | 群聊相关 |
 
 ---
 

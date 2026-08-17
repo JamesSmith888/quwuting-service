@@ -208,6 +208,12 @@ INSERT INTO qwt_venue_reactions (id, user_id, venue_id, reaction_code, reaction_
 (19, 2, 2, 'SWEET_PARTNER', '2026-08-02', '2026-08-02 16:00:00', '2026-08-02 16:00:00', false),
 (20, 3, 2, 'GOOD_SERVICE',  '2026-07-15', '2026-07-15 20:00:00', '2026-07-15 20:00:00', false);
 
+-- ── 舞友群（2026-08-17 新增，V33；二维码为本地占位 URL，仅开发展示用） ─────
+
+INSERT INTO qwt_group_chats (id, name, scope, city, region, qr_code_url, description, display_order, enabled, created_at, updated_at, deleted, updated_by) VALUES
+(1, '全国舞友交流群', 'NATIONWIDE', NULL, NULL, 'https://example.com/qr/nationwide.png', '全国舞友交流、组局、场地信息共享', 0, true, now(), now(), false, NULL),
+(2, '杭州舞友群',     'CITY',       '杭州市', NULL, 'https://example.com/qr/hangzhou.png', '杭州本地舞友交流群', 1, true, now(), now(), false, NULL);
+
 -- ── 重置 IDENTITY 序列（避免后续自增 ID 冲突） ───────────────────────────────
 
 SELECT setval('qwt_users_id_seq', (SELECT MAX(id) FROM qwt_users));
@@ -216,5 +222,6 @@ SELECT setval('qwt_venue_posts_id_seq', (SELECT MAX(id) FROM qwt_venue_posts));
 SELECT setval('qwt_favorites_id_seq', (SELECT MAX(id) FROM qwt_favorites));
 SELECT setval('qwt_tag_interactions_id_seq', (SELECT MAX(id) FROM qwt_tag_interactions));
 SELECT setval('qwt_venue_reactions_id_seq', (SELECT MAX(id) FROM qwt_venue_reactions));
+SELECT setval('qwt_group_chats_id_seq', (SELECT MAX(id) FROM qwt_group_chats));
 
 COMMIT;

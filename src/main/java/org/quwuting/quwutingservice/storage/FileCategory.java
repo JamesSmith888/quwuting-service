@@ -23,7 +23,9 @@ public enum FileCategory {
     /** 舞伴联系方式图片（2026-08-14 新增，二维码等；与 contact 同一门槛/遮挡语义） */
     DANCER_CONTACT_QR("dancer-contact-qr"),
     /** 门店认领营业执照（2026-08-11 新增，认领申请材料，仅管理端审核可见） */
-    VENUE_CLAIM_LICENSE("claim-licenses");
+    VENUE_CLAIM_LICENSE("claim-licenses"),
+    /** 舞友群群二维码（2026-08-17 新增，运营管理端上传；用户端长按识别加入群聊） */
+    GROUP_QR("group-qr");
 
     private final String pathPrefix;
 
