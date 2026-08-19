@@ -119,9 +119,10 @@ public class PointsService {
     private final DancerPhotoRepository dancerPhotoRepository;
     private final PointsProperties pointsProperties;
     private final org.quwuting.quwutingservice.venue.service.VenueHeatService venueHeatService;
-    /** 舞伴统计（2026-08-14：赠送礼物到 DANCER 改变收礼价值趋势 pointsTrend，
-     *  真实赠送后须失效——与 VENUE 分支同模式） */
-    private final org.quwuting.quwutingservice.dancer.service.DancerStatsService dancerStatsService;
+    /** 舞伴详情缓存失效入口（2026-08-19：赠送礼物到 DANCER 改变收到积分/收礼聚合、
+     *  设置 DANCER_CONTACT 门槛改变联系方式门槛值——经本入口级联失效内层统计缓存，
+     *  单一失效入口，见 DancerDetailCacheService javadoc） */
+    private final org.quwuting.quwutingservice.dancer.service.DancerDetailCacheService dancerDetailCacheService;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -150,28 +151,25 @@ public class PointsService {
      * 每日打卡（幂等：今日已打卡返回 checkedIn=false，不重复发分）。
      * 新增打卡路径：插 checkin（唯一约束兜底并发）→ 账户 +奖励 → 流水（唯一键幂等），
      * 同一事务原子完成；任一失败整体回滚（不会出现"打卡成功但没发分"）。
+     * <p>
+     * 并发（2026-08-19 根因修复）：零点集体打卡高频并发场景下「查打卡 → 插打卡」若
+     * 交错执行，后发请求的 INSERT 会撞唯一索引 23505——旧实现靠 catch + clear() 吞异常，
+     * 但 Hibernate flush 失败后事务可能已被标记 rollback-only，幂等返回实际变为 HTTP 500。
+     * 修复：按 user 粒度 pg_advisory_xact_lock 串行化整个打卡事务（一人一天只打一次，
+     * 串行正确），使 check-then-act 原子化、23505 路径变为不可达（唯一索引仍为纵深防御）。
      */
     @Transactional
     public CheckInResponse checkIn(Long userId) {
         int reward = pointsProperties.checkInReward();
         LocalDate today = LocalDate.now();
+        // 锁必须在打卡幂等检查之前获取（对齐 unlock() 同一并发范式）
+        checkinRepository.lockUserCheckin("checkin:" + userId);
         DailyCheckin checkin = checkinRepository.findByUserIdAndCheckinDate(userId, today)
                 .orElseGet(() -> {
                     DailyCheckin c = new DailyCheckin();
                     c.setUserId(userId);
                     c.setCheckinDate(today);
-                    try {
-                        return checkinRepository.save(c);
-                    } catch (DataIntegrityViolationException e) {
-                        if (!DbConstraintViolations.isUniqueViolation(e)) {
-                            throw e;
-                        }
-                        // 并发竞态：另一请求已打卡，幂等视为已打卡（flush 后回查）
-                        entityManager.clear();
-                        return checkinRepository.findByUserIdAndCheckinDate(userId, today)
-                                .orElseThrow(() -> new IllegalStateException(
-                                        "打卡唯一索引冲突但未找到记录: userId=" + userId));
-                    }
+                    return checkinRepository.save(c); // 串行化后 23505 不可达；唯一索引仍为纵深防御
                 });
         // 幂等发分：流水唯一键 (user, DAILY_CHECK_IN, checkinId) 保证只发一次
         if (transactionRepository.findByUserIdAndSourceTypeAndSourceId(
@@ -253,6 +251,10 @@ public class PointsService {
         }
         validateTarget(targetType, targetId, userId);
 
+        // 同一用户赠送事务串行化（2026-08-19 根因修复，同 unlock()/checkIn() 范式）：
+        // 「日/单目标日上限读检查 → 原子扣减 → 写流水」若并发交错，上限检查可同时通过、
+        // 实际扣减超过配置上限（读后写竞态）。锁必须在全部校验之前获取。
+        transactionRepository.lockUserGift("gift:" + userId);
         LocalDateTime dayStart = LocalDate.now().atStartOfDay();
         LocalDateTime dayEnd = dayStart.plusDays(1);
         if (transactionRepository.sumGiftedToday(userId, dayStart, dayEnd) + amount > limits.maxPerDay()) {
@@ -295,13 +297,14 @@ public class PointsService {
                         }
                     });
         } else if (targetType == PointsTargetType.DANCER) {
-            // 舞伴收礼价值趋势（pointsTrend）输入：真实赠送后失效舞伴统计缓存
-            // （同事务 afterCommit，与 VENUE 分支同模式）
+            // 舞伴收礼价值趋势（pointsTrend）+ 详情收礼/收到积分聚合输入：
+            // 真实赠送后失效详情缓存（同事务 afterCommit，与 VENUE 分支同模式；
+            // 2026-08-19 失效入口收敛到 DancerDetailCacheService，级联内层统计缓存）
             org.springframework.transaction.support.TransactionSynchronizationManager
                     .registerSynchronization(new org.springframework.transaction.support.TransactionSynchronization() {
                         @Override
                         public void afterCommit() {
-                            dancerStatsService.invalidate(targetId);
+                            dancerDetailCacheService.invalidate(targetId);
                         }
                     });
         }
@@ -532,6 +535,7 @@ public class PointsService {
                 gate.setDeleted(true);
                 gate.setUpdatedBy(userId);
                 gateRepository.save(gate);
+                invalidateDetailCacheAfterGateChange(targetType, targetId);
             }
             return; // 无门槛记录 = 本来就免费，幂等返回
         }
@@ -545,8 +549,20 @@ public class PointsService {
         gate.setCost(cost);
         gate.setUpdatedBy(userId);
         gateRepository.save(gate);
+        invalidateDetailCacheAfterGateChange(targetType, targetId);
         log.info("用户 {} 设置积分门槛 {}#{} = {} 积分（舞伴 {}）", userId, targetType, targetId, cost,
                 dancer.getId());
+    }
+
+    /**
+     * 门槛变更后的详情缓存失效（2026-08-19）：仅 DANCER_CONTACT 门槛值在详情公共缓存内
+     * （contactCost）；DANCER_PHOTO 门槛只影响相册（相册不在缓存内，每次请求实时组装），
+     * 无需失效。失效经 DancerDetailCacheService 唯一入口（级联内层统计缓存）。
+     */
+    private void invalidateDetailCacheAfterGateChange(PointsGateTargetType targetType, Long targetId) {
+        if (targetType == PointsGateTargetType.DANCER_CONTACT) {
+            dancerDetailCacheService.invalidate(targetId);
+        }
     }
 
     /**
@@ -557,8 +573,14 @@ public class PointsService {
      * <p>
      * 校验链：门槛存在（cost>0 且未软删）→ 目标对当前用户可见 → 幂等（已解锁
      * 直接返回内容，不重复扣费）→ 余额 → 原子扣减 → 写 UNLOCK 流水 → 写解锁记录。
-     * 并发：两请求同时解锁同一目标，唯一键 (user, target, targetId) 23505 兜底——
-     * 本事务整体回滚（含扣费），幂等返回已解锁内容，无重复扣费。
+     * <p>
+     * 并发（2026-08-19 根因修复）：旧实现靠唯一键 (user, target, targetId) 23505 +
+     * catch(entityManager.clear()) 兜底并发——但「查幂等 → 扣费 → 写解锁」若交错执行，
+     * 后发请求的解锁 INSERT 撞 23505 时，Hibernate flush 失败后事务可能已被标记
+     * rollback-only：幂等 200 实际变成 HTTP 500，且「扣费已执行、解锁未落库」的
+     * 事务边界完全依赖 JPA 不可靠行为。修复：按 user 粒度 pg_advisory_xact_lock
+     * 串行化整个解锁事务（一人同时解锁多目标无真实并发价值，串行正确），使
+     * check-then-act 原子化、23505 路径变为不可达（解锁记录仍保留唯一索引为纵深防御）。
      *
      * @return 解锁态 + 解锁后余额 + 解锁内容（照片原图 URL / 联系方式文本）
      */
@@ -570,7 +592,10 @@ public class PointsService {
         if (gate == null || gate.isDeleted()) {
             throw new BusinessException(1001, "该内容无需积分即可查看");
         }
-        // 幂等：已解锁 → 直接返回内容（不重复扣费）
+        // 同一用户并发解锁串行化（防「双请求同时通过幂等检查 → 双双扣费」；
+        // 锁必须在幂等检查之前获取，见 repository javadoc）
+        unlockRepository.lockUserUnlock("unlock:" + userId);
+        // 幂等：已解锁 → 直接返回内容（不重复扣费；串行化后此处判定确定可靠）
         if (unlockRepository.findByUserIdAndTargetTypeAndTargetId(userId, targetType, targetId).isPresent()) {
             return new UnlockResponse(true, currentBalance(userId), targetType, targetId, target.content(), target.contactImageUrl());
         }
@@ -599,18 +624,7 @@ public class PointsService {
         unlock.setTargetType(targetType);
         unlock.setTargetId(targetId);
         unlock.setTransactionId(savedTx.getId());
-        try {
-            unlockRepository.saveAndFlush(unlock);
-        } catch (DataIntegrityViolationException e) {
-            if (!DbConstraintViolations.isUniqueViolation(e)) {
-                throw e;
-            }
-            // 并发竞态：另一请求已解锁同一目标——本事务整体回滚（含扣费与流水），
-            // 幂等视为已解锁（与 earn() 撞唯一键同模式，无重复扣费）
-            log.debug("解锁并发冲突，幂等忽略: userId={}, target={}#{}", userId, targetType, targetId);
-            entityManager.clear();
-            return new UnlockResponse(true, currentBalance(userId), targetType, targetId, target.content(), target.contactImageUrl());
-        }
+        unlockRepository.save(unlock); // 串行化后 23505 不可达；唯一索引仍为纵深防御
         log.info("用户 {} 解锁 {}#{}，消耗 {} 积分（流水 {}）", userId, targetType, targetId, cost, savedTx.getId());
         return new UnlockResponse(true, newBalance, targetType, targetId, target.content(), target.contactImageUrl());
     }

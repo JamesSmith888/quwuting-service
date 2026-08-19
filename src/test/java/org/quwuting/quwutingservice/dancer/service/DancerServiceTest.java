@@ -9,6 +9,7 @@ import org.quwuting.quwutingservice.dancer.dto.request.RecognizeDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpdateDancerVerificationRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerDetailResponse;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerRecognitionStats;
 import org.quwuting.quwutingservice.dancer.dto.response.RecognizeResponse;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.entity.DancerPhoto;
@@ -70,9 +71,7 @@ class DancerServiceTest {
     @Mock
     private DancerPhotoRepository photoRepository;
     @Mock
-    private DancerAggregateService aggregateService;
-    @Mock
-    private DancerStatsService dancerStatsService;
+    private DancerDetailCacheService detailCacheService;
     @Mock
     private VenueLookupService venueLookupService;
     @Mock
@@ -94,13 +93,33 @@ class DancerServiceTest {
 
     private DancerService dancerService;
 
+    /** 详情缓存 stub（getDetail/toggleRecognize 响应组装用；仅聚合统计 + 联系方式门槛有值，其余空集） */
+    private void stubDetailCache(long[] agg) {
+        stubDetailCache(agg, 0);
+    }
+
+    private void stubDetailCache(long[] agg, int contactCost) {
+        when(detailCacheService.get(1L)).thenReturn(detailPart(agg, contactCost));
+    }
+
+    private void stubDetailCacheAny(long[] agg) {
+        when(detailCacheService.get(anyLong())).thenReturn(detailPart(agg, 0));
+    }
+
+    private static DancerDetailCacheService.PublicPart detailPart(long[] agg, int contactCost) {
+        return new DancerDetailCacheService.PublicPart(
+                new DancerRecognitionStats(agg[0], agg[1], agg[2], agg[3], Collections.emptyList()),
+                Collections.emptyList(), Collections.emptyList(), Collections.emptyList(),
+                Collections.emptyList(), 0L, 0L, contactCost, 0L);
+    }
+
     private Dancer dancer;
 
     @BeforeEach
     void setUp() {
         dancerService = new DancerService(dancerRepository, dancerCityRepository, dancerVenueRepository, recognitionRepository,
                 recognitionTagRepository, photoRepository, adViewRepository, verificationLogRepository,
-                dancerFavoriteRepository, dancerViewRepository, aggregateService, dancerStatsService, venueLookupService,
+                dancerFavoriteRepository, dancerViewRepository, detailCacheService, venueLookupService,
                 messageService, pointsService, imageValidator, new org.quwuting.quwutingservice.config.DancerAdProperties(""),
                 opsConfigService);
 
@@ -173,10 +192,7 @@ class DancerServiceTest {
     @Test
     void getDetail_normal_isPublicToEveryone() {
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{5L, 1L, 3L, 4L});
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
-        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
+        stubDetailCache(new long[]{5L, 1L, 3L, 4L});
 
         DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
 
@@ -199,12 +215,9 @@ class DancerServiceTest {
     void getDetail_pending_visibleToCreator() {
         dancer.setStatus(DancerStatus.PENDING);
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
+        stubDetailCache(new long[]{0L, 0L, 0L, 0L});
         when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(eq(1L), eq(1L), any()))
                 .thenReturn(Optional.empty());
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
-        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
 
         DancerDetailResponse resp = dancerService.getDetail(1L, 1L, UserRole.USER);
 
@@ -216,12 +229,9 @@ class DancerServiceTest {
     void getDetail_pending_visibleToAdmin() {
         dancer.setStatus(DancerStatus.HIDDEN);
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
+        stubDetailCache(new long[]{0L, 0L, 0L, 0L});
         when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(any(), eq(1L), any()))
                 .thenReturn(Optional.empty());
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
-        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
 
         DancerDetailResponse resp = dancerService.getDetail(1L, 99L, UserRole.ADMIN);
 
@@ -230,27 +240,25 @@ class DancerServiceTest {
 
     // ─── 联系方式遮挡（2026-08-14：默认遮挡 + 积分门槛正交） ─────────────────
 
-    /** getDetail 联系方式可见性测试的公共 stub（匿名视角，isUnlocked mock 默认 false） */
+    /** getDetail 联系方式可见性测试的公共 stub（匿名视角，isUnlocked mock 默认 false；
+     *  contactCost 由详情缓存 stub 提供——2026-08-19 getDetail 改为经 DancerDetailCacheService
+     *  读门槛，不再直调 pointsService.gateCost） */
     private void stubDetailForContact() {
+        stubDetailForContact(0);
+    }
+
+    private void stubDetailForContact(int contactCost) {
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{5L, 1L, 3L, 4L});
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
-        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
+        stubDetailCache(new long[]{5L, 1L, 3L, 4L}, contactCost);
         when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
                 .thenReturn(Collections.emptyList());
-        when(pointsService.receivedTotal(any(), anyLong())).thenReturn(0L);
-        when(pointsService.receivedSince(any(), anyLong(), any(), any())).thenReturn(0L);
-        when(pointsService.receivedGifts(any(), anyLong())).thenReturn(Collections.emptyList());
-        when(adViewRepository.countByDancerId(anyLong())).thenReturn(0L);
     }
 
     @Test
     void getDetail_hideContactDefaultTrue_withPaidGate_contactHiddenFromOthers() {
         dancer.setContact("wx:xiaoya");
         dancer.setHideContact(true); // 显式声明（实体默认即 true，此处防回归）
-        stubDetailForContact();
-        when(pointsService.gateCost(any(), eq(1L))).thenReturn(5);
+        stubDetailForContact(5);
         when(pointsService.isUnlocked(any(), any(), eq(1L))).thenReturn(false);
 
         DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
@@ -264,8 +272,7 @@ class DancerServiceTest {
     void getDetail_hideContactTrue_withFreeGate_contactDeliveredForFrontendMask() {
         dancer.setContact("wx:xiaoya");
         dancer.setHideContact(true);
-        stubDetailForContact();
-        when(pointsService.gateCost(any(), eq(1L))).thenReturn(0); // 免费（无门槛）
+        stubDetailForContact(0);
 
         DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
 
@@ -279,8 +286,7 @@ class DancerServiceTest {
     void getDetail_hideContactFalse_contactAlwaysDelivered() {
         dancer.setContact("wx:xiaoya");
         dancer.setHideContact(false);
-        stubDetailForContact();
-        when(pointsService.gateCost(any(), eq(1L))).thenReturn(5); // 残留门槛
+        stubDetailForContact(5); // 残留门槛
         when(pointsService.isUnlocked(any(), any(), eq(1L))).thenReturn(false);
 
         DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
@@ -293,8 +299,7 @@ class DancerServiceTest {
     void getDetail_hideContactTrue_ownerAlwaysSeesContact() {
         dancer.setContact("wx:xiaoya");
         dancer.setHideContact(true);
-        stubDetailForContact();
-        when(pointsService.gateCost(any(), eq(1L))).thenReturn(5);
+        stubDetailForContact(5);
         when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(any(), any(), any()))
                 .thenReturn(Optional.empty());
 
@@ -315,8 +320,7 @@ class DancerServiceTest {
             r.setId(100L);
             return r;
         });
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{1L, 1L, 1L, 1L});
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        stubDetailCache(new long[]{1L, 1L, 1L, 1L});
 
         RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
                 new RecognizeDancerRequest(List.of("DANCE", "EASY_TALK"), null), UserRole.USER);
@@ -326,7 +330,7 @@ class DancerServiceTest {
                 r.getUserId().equals(2L) && r.getRecognitionDate().equals(LocalDate.now())));
         verify(recognitionTagRepository).save(argThat(t -> t.getTag().equals("DANCE")));
         verify(recognitionTagRepository).save(argThat(t -> t.getTag().equals("EASY_TALK")));
-        verify(aggregateService).invalidate(1L);
+        verify(detailCacheService).invalidate(1L);
     }
 
     @Test
@@ -340,15 +344,14 @@ class DancerServiceTest {
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
         when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(2L, 1L, LocalDate.now()))
                 .thenReturn(Optional.of(existing));
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        stubDetailCache(new long[]{0L, 0L, 0L, 0L});
 
         RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L, null, UserRole.USER);
 
         assertFalse(resp.recognized(), "取消当天认可后 recognized=false");
         verify(recognitionTagRepository).deleteByRecognitionId(100L); // 级联删除当日标签
         verify(recognitionRepository).deleteRecognitionById(100L); // 批量删除当日记录（@Modifying）
-        verify(aggregateService).invalidate(1L);
+        verify(detailCacheService).invalidate(1L);
     }
 
     @Test
@@ -387,8 +390,7 @@ class DancerServiceTest {
             r.setId(100L);
             return r;
         });
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{1L, 1L, 1L, 1L});
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        stubDetailCache(new long[]{1L, 1L, 1L, 1L});
 
         dancerService.toggleRecognize(2L, 1L,
                 new RecognizeDancerRequest(List.of("DANCE", "DANCE", "EASY_TALK"), null), UserRole.USER);
@@ -410,8 +412,7 @@ class DancerServiceTest {
             r.setId(100L);
             return r;
         });
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{1L, 1L, 1L, 1L});
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        stubDetailCache(new long[]{1L, 1L, 1L, 1L});
 
         RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
                 new RecognizeDancerRequest(null, "DANCE"), UserRole.USER);
@@ -437,8 +438,7 @@ class DancerServiceTest {
                 .thenReturn(Optional.of(existing));
         when(recognitionTagRepository.findTagsByRecognitionIds(List.of(100L)))
                 .thenReturn(Collections.singletonList(new Object[]{100L, "DANCE"}));
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        stubDetailCache(new long[]{0L, 0L, 0L, 0L});
 
         RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
                 new RecognizeDancerRequest(null, "DANCE"), UserRole.USER);
@@ -464,8 +464,7 @@ class DancerServiceTest {
                 .thenReturn(Optional.of(existing));
         when(recognitionTagRepository.findTagsByRecognitionIds(List.of(100L)))
                 .thenReturn(Collections.singletonList(new Object[]{100L, "DANCE"}));
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{1L, 1L, 1L, 1L});
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        stubDetailCache(new long[]{1L, 1L, 1L, 1L});
 
         RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
                 new RecognizeDancerRequest(null, "EASY_TALK"), UserRole.USER);
@@ -491,8 +490,7 @@ class DancerServiceTest {
             r.setId(100L);
             return r;
         });
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{1L, 1L, 1L, 1L});
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        stubDetailCache(new long[]{1L, 1L, 1L, 1L});
 
         RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
                 new RecognizeDancerRequest(null, "DANCE"), UserRole.USER);
@@ -515,8 +513,7 @@ class DancerServiceTest {
                 .thenReturn(Optional.of(existing));
         when(recognitionTagRepository.findTagsByRecognitionIds(List.of(100L)))
                 .thenReturn(Collections.singletonList(new Object[]{100L, "DANCE"}));
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{1L, 1L, 1L, 1L});
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        stubDetailCache(new long[]{1L, 1L, 1L, 1L});
 
         RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
                 new RecognizeDancerRequest(null, "EASY_TALK"), UserRole.USER);
@@ -541,8 +538,7 @@ class DancerServiceTest {
                 .thenReturn(Optional.of(existing));
         when(recognitionTagRepository.findTagsByRecognitionIds(List.of(100L)))
                 .thenReturn(Arrays.asList(new Object[]{100L, "DANCE"}, new Object[]{100L, "EASY_TALK"}));
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{1L, 1L, 1L, 1L});
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        stubDetailCache(new long[]{1L, 1L, 1L, 1L});
 
         RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
                 new RecognizeDancerRequest(null, "DANCE"), UserRole.USER);
@@ -566,8 +562,7 @@ class DancerServiceTest {
                 .thenReturn(Optional.of(existing));
         when(recognitionTagRepository.findTagsByRecognitionIds(List.of(100L)))
                 .thenReturn(Collections.singletonList(new Object[]{100L, "DANCE"}));
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
+        stubDetailCache(new long[]{0L, 0L, 0L, 0L});
 
         RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
                 new RecognizeDancerRequest(null, "DANCE"), UserRole.USER);
@@ -732,12 +727,9 @@ class DancerServiceTest {
         when(dancerVenueRepository.findByDancerIdAndRelationAndDeletedFalse(1L, DancerVenueRelation.HOME))
                 .thenReturn(Collections.emptyList());
         // updateDancer 末尾调用 getDetail 组装返回：补齐其依赖
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
+        stubDetailCache(new long[]{0L, 0L, 0L, 0L});
         when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(eq(1L), eq(1L), any()))
                 .thenReturn(Optional.empty());
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
-        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
         when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
                 .thenReturn(Collections.emptyList());
 
@@ -759,12 +751,9 @@ class DancerServiceTest {
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
         when(dancerVenueRepository.findByDancerIdAndRelationAndDeletedFalse(1L, DancerVenueRelation.HOME))
                 .thenReturn(Collections.emptyList());
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
+        stubDetailCache(new long[]{0L, 0L, 0L, 0L});
         when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(eq(1L), eq(1L), any()))
                 .thenReturn(Optional.empty());
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
-        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
         when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
                 .thenReturn(Collections.emptyList());
 
@@ -786,12 +775,9 @@ class DancerServiceTest {
         when(dancerVenueRepository.findByDancerIdAndVenueIdAndRelationAndDeletedFalse(1L, 9L, DancerVenueRelation.HOME))
                 .thenReturn(Optional.empty());
         // getDetail 组装依赖
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
+        stubDetailCache(new long[]{0L, 0L, 0L, 0L});
         when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(eq(1L), eq(1L), any()))
                 .thenReturn(Optional.empty());
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
-        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
         when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
                 .thenReturn(Collections.emptyList());
 
@@ -902,10 +888,7 @@ class DancerServiceTest {
         pub.setUrl("https://cdn/pub.jpg");
         pub.setStatus(DancerPhotoStatus.PUBLIC);
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
-        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
+        stubDetailCache(new long[]{0L, 0L, 0L, 0L});
         when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
                 .thenReturn(List.of(pending, pub));
 
@@ -925,10 +908,7 @@ class DancerServiceTest {
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
         when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(eq(1L), eq(1L), any()))
                 .thenReturn(Optional.empty());
-        when(aggregateService.getAggregate(1L)).thenReturn(new long[]{0L, 0L, 0L, 0L});
-        when(recognitionRepository.countByDay(eq(1L), any())).thenReturn(Collections.emptyList());
-        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(eq(1L), any(), any(), any())).thenReturn(Collections.emptyList());
+        stubDetailCache(new long[]{0L, 0L, 0L, 0L});
         when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(1L))
                 .thenReturn(List.of(pending));
 
@@ -941,25 +921,17 @@ class DancerServiceTest {
 
     // ─── 信息核验（2026-08-14 官方认证：授予 / 撤销 / 编辑触发待复核） ───────────
 
-    /** updateDancer 尾部 getDetail 组装依赖（可选链统一 stub，避免各测试重复 12 行 mock） */
+    /** updateDancer 尾部 getDetail 组装依赖（可选链统一 stub，避免各测试重复 mock） */
     private void stubDetailDeps() {
-        when(aggregateService.getAggregate(anyLong())).thenReturn(new long[]{0L, 0L, 0L, 0L});
+        stubDetailCacheAny(new long[]{0L, 0L, 0L, 0L});
         when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(any(), any(), any()))
                 .thenReturn(Optional.empty());
-        when(recognitionRepository.countByDay(any(), any())).thenReturn(Collections.emptyList());
         when(dancerVenueRepository.findByDancerIdAndRelationAndDeletedFalse(anyLong(), any()))
                 .thenReturn(Collections.emptyList());
-        when(dancerVenueRepository.findVenueBriefsByDancerIds(anyList())).thenReturn(Collections.emptyList());
-        when(recognitionTagRepository.aggregateByDancer(anyLong(), any(), any(), any())).thenReturn(Collections.emptyList());
         when(photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(anyLong()))
                 .thenReturn(Collections.emptyList());
-        when(pointsService.receivedTotal(any(), anyLong())).thenReturn(0L);
-        when(pointsService.receivedSince(any(), anyLong(), any(), any())).thenReturn(0L);
-        when(pointsService.receivedGifts(any(), anyLong())).thenReturn(Collections.emptyList());
-        when(pointsService.gateCost(any(), anyLong())).thenReturn(0);
         // 注：不 stub pointsService.isUnlocked——updateDancer 测试均为本人/管理员视角，
         // getDetail 中 showAllPhotos=true 短路该调用（isUnlocked 仅非本人/非管理员路径使用）
-        when(adViewRepository.countByDancerId(anyLong())).thenReturn(0L);
     }
 
     @Test

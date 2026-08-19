@@ -59,6 +59,19 @@ public interface DancerRecognitionRepository extends JpaRepository<DancerRecogni
                                               @Param("date") LocalDate date);
 
     /**
+     * 批量舞伴内当前用户"今日认可记录"的 (recognitionId, dancerId)（列表页个人投票态，
+     * 2026-08-19 新增：列表卡片 reaction 区域 chip 活跃态数据源）。与
+     * {@link #findTodayRecognizedDancerIdsIn} 同过滤，但返回记录 ID 供关联标签查询
+     * （配合 {@code DancerRecognitionTagRepository#findTagsByRecognitionIds}），
+     * 避免按认可记录逐条查标签的 N+1。
+     */
+    @Query("SELECT r.id, r.dancerId FROM DancerRecognition r " +
+           "WHERE r.userId = :userId AND r.dancerId IN :dancerIds AND r.recognitionDate = :date")
+    List<Object[]> findTodayRecognitionIdsByDancerIds(@Param("userId") Long userId,
+                                                      @Param("dancerIds") List<Long> dancerIds,
+                                                      @Param("date") LocalDate date);
+
+    /**
      * 单舞伴四窗口认可聚合（详情页 / 我的认可页的聚合缓存 loader）。
      * 返回 Object[]{countAll, countToday, count7d, count30d}。
      * "今日/7天/30天"为真实时间窗口（锚点"此刻"，与 Reaction 统计口径一致，见

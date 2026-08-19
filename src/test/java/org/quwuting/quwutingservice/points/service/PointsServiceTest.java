@@ -10,7 +10,7 @@ import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
-import org.quwuting.quwutingservice.dancer.service.DancerStatsService;
+import org.quwuting.quwutingservice.dancer.service.DancerDetailCacheService;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.points.dto.CheckInResponse;
 import org.quwuting.quwutingservice.points.dto.GifterResponse;
@@ -77,14 +77,14 @@ class PointsServiceTest {
     @Mock
     private VenueHeatService venueHeatService;
     @Mock
-    private DancerStatsService dancerStatsService;
+    private DancerDetailCacheService dancerDetailCacheService;
 
     private PointsService pointsService;
     @BeforeEach
     void setUp() {
         pointsService = new PointsService(accountRepository, transactionRepository, checkinRepository,
                 gateRepository, unlockRepository, venueLookupService, dancerRepository,
-                dancerPhotoRepository, pointsProperties, venueHeatService, dancerStatsService);
+                dancerPhotoRepository, pointsProperties, venueHeatService, dancerDetailCacheService);
         // 各测试按需 stub（Mockito strict stubs：不使用的 stubbing 会在测试级报多余）
     }
 
@@ -193,7 +193,7 @@ class PointsServiceTest {
      */
     @Test
     void gift_success_deductsCatalogPriceAndPersistsGiftCode() {
-        // gift(DANCER) 在事务提交后回调 dancerStatsService.invalidate——纯 Mockito 无 Spring 事务，
+        // gift(DANCER) 在事务提交后回调 dancerDetailCacheService.invalidate——纯 Mockito 无 Spring 事务，
         // mockStatic 使 registerSynchronization 空操作（缓存失效回调不属于本用例断言范围）
         try (org.mockito.MockedStatic<org.springframework.transaction.support.TransactionSynchronizationManager> tsm =
                      mockStatic(org.springframework.transaction.support.TransactionSynchronizationManager.class)) {

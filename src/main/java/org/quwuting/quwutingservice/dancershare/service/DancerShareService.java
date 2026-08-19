@@ -10,6 +10,8 @@ import org.quwuting.quwutingservice.dancershare.repository.DancerShareRepository
 import org.quwuting.quwutingservice.venueshare.enums.ShareEventType;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.concurrent.TimeUnit;
 
@@ -41,9 +43,12 @@ public class DancerShareService {
             .build();
 
     private final DancerShareRepository dancerShareRepository;
-    /** 舞伴统计（2026-08-14：SHARE 事件是分享趋势 shareTrend 输入，真实记录后须失效；
-     *  OPEN 回流事件不输入分享趋势，不失效） */
-    private final org.quwuting.quwutingservice.dancer.service.DancerStatsService dancerStatsService;
+    /**
+     * 详情/统计缓存失效入口（2026-08-19 收敛到 DancerDetailCacheService 唯一入口，
+     * 级联失效内层 DancerStatsService）：SHARE 事件是分享趋势（shareTrend）输入，
+     * 真实记录后须失效；OPEN 回流事件不输入分享趋势，不失效。
+     */
+    private final org.quwuting.quwutingservice.dancer.service.DancerDetailCacheService dancerDetailCacheService;
 
     /**
      * 记录一次分享动作（SHARE 事件）。
@@ -63,8 +68,19 @@ public class DancerShareService {
         share.setEventType(ShareEventType.SHARE);
         share.setChannel(channel);
         dancerShareRepository.save(share);
-        // 分享趋势（shareTrend）输入真实写入后失效统计缓存（refresh-ahead 仅兜底）
-        dancerStatsService.invalidate(dancerId);
+        // 分享趋势（shareTrend）输入真实写入后失效统计缓存。2026-08-19 根因修复：
+        // 失效必须延后到事务提交后（项目「失效时机约束」）——提交前失效存在竞态窗口：
+        // 另一线程读到 cache miss → 回源重算 → 读不到本事务未提交数据 → 缓存陈旧值
+        // （对齐 DancerViewService / PointsService.gift 的 afterCommit 模式；
+        // 旧实现提交前内联失效，违反同一约束）。
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    dancerDetailCacheService.invalidate(dancerId);
+                }
+            });
+        }
     }
 
     /**

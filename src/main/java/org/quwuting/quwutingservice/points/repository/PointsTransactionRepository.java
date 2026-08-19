@@ -59,6 +59,17 @@ public interface PointsTransactionRepository extends JpaRepository<PointsTransac
                                 @Param("targetType") PointsTargetType targetType, @Param("targetId") Long targetId,
                                 @Param("since") LocalDateTime since, @Param("until") LocalDateTime until);
 
+    /**
+     * 赠送事务级串行化（2026-08-19 根因修复，与 unlock()/checkIn() 同并发范式）：
+     * 「日上限/单目标日上限读检查 → 原子扣减 → 写流水」若并发交错执行，两个请求可同时
+     * 通过上限检查并各自扣减——上限（app.points.gift.max-per-day / max-per-target-day）
+     * 在并发下失守。按 user 粒度 pg_advisory_xact_lock 串行化整个赠送事务（同一用户
+     * 的连续赠送本就应顺序执行，串行正确且无性能损失）。锁在全部校验之前获取，
+     * 事务提交/回滚自动释放。
+     */
+    @Query(value = "SELECT pg_advisory_xact_lock(hashtext(:lockKey))", nativeQuery = true)
+    void lockUserGift(@Param("lockKey") String lockKey);
+
     /** 目标收到积分（全量/窗口——热度公式积分项 / 详情展示 / 趋势序列同源口径） */
     @Query("""
             SELECT COALESCE(SUM(-pt.delta), 0) FROM PointsTransaction pt

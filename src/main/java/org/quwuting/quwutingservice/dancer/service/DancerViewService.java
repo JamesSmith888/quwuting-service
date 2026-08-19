@@ -53,11 +53,13 @@ public class DancerViewService {
     private final DancerViewRepository dancerViewRepository;
 
     /**
-     * 统计缓存失效入口。浏览数是统计响应（viewTrend / viewSourceTrend）的组成部分——
-     * 真实写入后必须失效，否则 refresh-ahead 缓存（60s）会让统计页在窗口内看不到
-     * 刚记录的浏览与来源分列（门店「浏览来源折线恒 0」根因教训，见 {@link #recordView}）。
+     * 详情/统计缓存失效入口。浏览数是统计响应（viewTrend / viewSourceTrend）与详情
+     * 公共缓存（stats）的组成部分——真实写入后必须失效，否则 refresh-ahead 缓存（60s）
+     * 会让统计页在窗口内看不到刚记录的浏览与来源分列（门店「浏览来源折线恒 0」根因教训，
+     * 见 {@link #recordView}）。2026-08-19 失效入口收敛到 DancerDetailCacheService
+     * （唯一入口，级联失效内层 DancerStatsService——详情缓存重算会回读它的值）。
      */
-    private final DancerStatsService dancerStatsService;
+    private final DancerDetailCacheService dancerDetailCacheService;
 
     /**
      * 记录一次浏览（匿名用户最多 60s 一条，已登录用户由 upsert 按天按来源去重，恒 1 次 DB 往返）。
@@ -90,7 +92,7 @@ public class DancerViewService {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
-                    dancerStatsService.invalidate(dancerId);
+                    dancerDetailCacheService.invalidate(dancerId);
                 }
             });
         }

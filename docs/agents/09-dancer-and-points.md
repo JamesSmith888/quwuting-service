@@ -128,12 +128,12 @@ countToday/count7d/count30d（count = countAll 兼容列表 topTags），详情�
 
 | 接口 | 鉴权 | 说明 |
 |---|---|---|
-| GET /dancers | 软鉴权 | 列表（仅 NORMAL；city 可选；按 count7d 倒序分页；登录含 myRecognizedToday；含 coverPhotoUrl） |
+| GET /dancers | 软鉴权 | 列表（仅 NORMAL；city 可选；按 count7d 倒序分页；登录含 myRecognizedToday + **myTags（2026-08-19 今日投票 code，列表 reaction 区域 chip 活跃态）**；topTags **全量下发**（2026-08-19 去截断）；含 coverPhotoUrl） |
 | GET /dancers/cities | 软鉴权 | 常驻城市词表（聚合真实数据，2026-08-10 激活列表页城市筛选） |
 | POST /dancers | 登录 | 舞伴主动注册 → PENDING；返回新建 ID |
 | GET /dancers/{id} | 软鉴权 | 详情（可见性校验；登录含 isMine + myRecognizedToday + **myTags（2026-08-15 今日认可携带标签，chip 活跃态数据源）** + **favorite（2026-08-14 服务端权威收藏态）** + 四窗口统计 + 近7日每日认可 + **标签聚合（2026-08-15 四窗口：countAll/countToday/count7d/count30d）** + 常去/出现舞厅 + 相册 photos（按身份过滤）） |
 | PUT /dancers/{id} | 本人/管理员 | 编辑资料（全量覆盖；REJECTED → 自动 PENDING 重审；HOME 关系完整替换；返回更新后详情） |
-| GET /dancers/{id}/tags | 软鉴权 | 标签聚合（四窗口，可见性校验） |
+| GET /dancers/{id}/tags | 软鉴权 | 标签聚合（**2026-08-19 扩展为 `DancerTagsResponse{tags, myTags}`**：tags 四窗口用户无关走详情公共缓存；myTags = 当前用户今日认可携带标签（个人态恒实时，明细页行活跃态数据源，镜像门店 ReactionStatsResponse.reactedByMe 语义）；可见性校验） |
 | POST /dancers/{id}/recognitions | 登录 | 认可 toggle（**2026-08-15 单票换票：body.tag 单字典标签**——未认可参与 / 同标签取消 / 异标签原子换票；开关 dancer.recognition.daily.single 关闭 = 多选（累加/移除，清空删认可）；旧客户端 body.tags 0-3 列表走兼容路径；返回 RecognizeResponse{recognized, replacedFrom, myTags, stats, tags(四窗口)}） |
 | POST /dancers/{id}/photos | 本人/管理员 | 上传相册照片（body {urls}，插入即 PENDING，单次 ≤9） |
 | DELETE /dancers/{id}/photos/{photoId} | 本人/管理员 | 删除照片（软删） |
@@ -478,3 +478,66 @@ TA（完整观看计入收益），收益由平台**线下转账**结算（MVP �
 
 ---
 
+
+### 2026-08-19 舞伴域根因修复批量记录（性能/并发/安全/约定对齐）
+
+> 本轮为舞伴系统全面根因审计后的修复沉淀（前端 + 后端联动），修复项与根因如下；
+> 治理级约束已同步至 `15-governance.md`「AI 代理常见错误表」。
+
+**1. 详情接口 ~15 次顺序 DB 往返（性能根因）→ DancerDetailCacheService 聚合缓存**
+- 根因：`getDetail` 对每个请求顺序执行统计/标签/场所/城市/收礼/收到积分×2/广告计数/
+  门槛/解锁等 ~15 次跨洲往返（单次 300~500ms），详情接口 3~7s 慢；绝大多数查询与
+  当前请求用户无关，却在每请求重复执行。
+- 修复：新增 `DancerDetailCacheService`——用户无关公共部分（认可统计/标签/场所/城市/
+  收礼/收到积分/联系方式门槛/广告计数）整体打包为 Caffeine LoadingCache（60s
+  refresh-ahead + 30min 过期 + 500 条），60s 窗口内详情往返 ~15 次 → ~6 次。
+  用户相关态（isMine/今日认可/收藏/解锁/相册过滤）恒实时查询、严禁进缓存
+  （对齐「个人状态禁入聚合缓存」治理约束）。
+- **失效纪律**：`invalidate(dancerId)` 是唯一失效入口，必须**级联失效内层**
+  DancerAggregateService 与 DancerStatsService（详情重算会回读它们的值，只清外层
+  会让内层 60s 陈旧值泄漏）。写路径失效矩阵：认可 toggle / 收藏 add·remove /
+  浏览记录 / 礼物赠送(DANCER) / 分享 SHARE / 资料编辑（城市子表）/ DANCER_CONTACT
+  门槛设置；照片增删审（不在缓存）与状态流转（主表字段）无需失效。
+- 积分读侧直连仓库（PointsTransactionRepository/PointsGateRepository）而非
+  PointsService——避免「PointsService → 缓存服务 → PointsService」构造循环依赖；
+  与写路径通过 invalidate 解耦。
+
+**2. 23505 异常控制流不可靠（并发根因）→ 原子 upsert / advisory lock**
+- 根因：多处「查 → 插 + catch 23505 吞异常」把幂等语义建立在 JPA 不可靠行为上——
+  Hibernate flush 失败后持久化上下文状态未定义、事务可能已被标记 rollback-only：
+  注释声称的「幂等 200」实际会变 HTTP 500；unlock 场景「扣费已执行、解锁未落库」的
+  事务边界完全依赖 provider 行为。
+- 修复（确定性写法，禁再 catch+clear 表达幂等）：
+  - `recordAdView` → `INSERT ... ON CONFLICT (user_id,dancer_id,view_date) DO NOTHING`
+    返回 affected 行数（恒 1 次往返零异常）；
+  - 舞伴 `addFavorite` → `INSERT ... ON CONFLICT (user_id,dancer_id) DO UPDATE SET
+    deleted=false`（插入/restore/幂等三分支原子覆盖，created_at 不变）；
+  - 门店 `FavoriteService.addFavorite` 同根因同修复（跨域一致性）；
+  - `unlock` / `checkIn` → `pg_advisory_xact_lock` 按 user 粒度串行化 check-then-act
+    （对齐认可域 lockDailyTicket 先例；一人一天/一目标无真实并发价值，串行正确）；
+  - 唯一索引/约束保留为纵深防御，但不再作为业务路径依赖。
+
+**3. HTTP 方法约定违反（治理根因）→ 全部迁移 POST**
+- 根因：早期 venue 域确立「只允许 GET 和 POST」（12-api-conventions.md），后续
+  dancer 域与 venuestatuswatcher 域直接用了 RESTful PUT/DELETE，未经约定评审，
+  漂移静默积累（同域内 favorite 用 POST 而 update/删除用 PUT/DELETE，风格分裂）。
+- 修复：`PUT /dancers/{id}` → `POST /dancers/{id}/update`；`DELETE
+  /dancers/{id}/photos/{photoId}` → `POST .../remove`；admin 三接口 PUT → POST；
+  `PUT/DELETE /venues/{id}/status-watch` → `POST` + `POST /cancel`。前端
+  `services/dancer.ts` / `services/statusWatch.ts` 同步迁移。
+
+**4. 其他修复**
+- `replaceHomeVenue` 早退 bug：循环内 return 跳过「其余旧 HOME 兜底清除」（注释
+  自相矛盾，数据异常时无法自愈）→ 改为「跳过目标行、删除其余行」完整替换；
+- `addPhotos`：单次数量上限 9（与前端 maxCount 对齐，后端独立校验防绕过）；
+  **blurUrl 落库挂 ImageContentValidator**（08-12 安全约定：新增图片 URL 落库字段
+  必须挂载内容校验——此前仅校验 http 前缀，可塞入任意外部 URL 绕过存储桶防线）；
+- `maxSortOrder`：全量加载取 max → `COALESCE(MAX(sort_order),0)` 单值聚合；
+- 分页参数归一：page<0 / size<1 会令 PageRequest 抛 IllegalArgumentException →
+  HTTP 500，统一 `sanePage`（Math.max 0 / Math.max 1 / cap 50）；
+- `DancerShareService.recordShare`：缓存失效从「事务内内联」改为 afterCommit——
+  违反「失效时机约束」（提交前失效存在回源竞态窗口），对齐 DancerViewService/PointsService；
+- `DancerStatsRepository` mega-query：qwt_dancer_views 四来源子查询各扫一次 → 单
+  子查询 + FILTER 条件聚合（同一窗口 1 次扫描，省 3/4 IO）。
+
+---

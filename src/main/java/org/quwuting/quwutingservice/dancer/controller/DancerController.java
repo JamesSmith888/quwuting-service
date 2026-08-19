@@ -12,7 +12,7 @@ import org.quwuting.quwutingservice.dancer.dto.response.DancerDetailResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerPhotoResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerStatsResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerSummaryResponse;
-import org.quwuting.quwutingservice.dancer.dto.response.DancerTagStat;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerTagsResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.RecognizeResponse;
 import org.quwuting.quwutingservice.dancer.service.DancerService;
 import org.quwuting.quwutingservice.dancer.service.DancerStatsService;
@@ -35,11 +35,13 @@ import java.util.List;
  *   <li>POST /dancers/{id}/favorite/remove — 取消收藏（登录，幂等）</li>
  *   <li>POST /dancers — 舞伴主动注册（登录，status=PENDING 待认证）</li>
  *   <li>GET /dancers/{id} — 舞伴详情（公开，可见性规则见 DancerService）</li>
- *   <li>PUT /dancers/{id} — 编辑本人/管理舞伴资料（全量覆盖；REJECTED → 自动重审）</li>
+ *   <li>POST /dancers/{id}/update — 编辑本人/管理舞伴资料（全量覆盖；REJECTED → 自动重审，
+ *       2026-08-19 由 PUT /dancers/{id} 迁移对齐「只允许 GET 和 POST」约定）</li>
  *   <li>GET /dancers/{id}/tags — 舞伴标签聚合（公开）</li>
  *   <li>POST /dancers/{id}/recognitions — 认可 toggle（登录）</li>
  *   <li>POST /dancers/{id}/photos — 本人/管理员上传相册（插入即 PENDING 待审）</li>
- *   <li>DELETE /dancers/{id}/photos/{photoId} — 本人/管理员删除照片</li>
+ *   <li>POST /dancers/{id}/photos/{photoId}/remove — 本人/管理员删除照片
+ *       （2026-08-19 由 DELETE 迁移对齐「只允许 GET 和 POST」约定）</li>
  * </ul>
  * 认可体系语义（产品定位）：用户认可/支持/点赞，不含打赏、礼物、虚拟币等金钱/排行概念。
  */
@@ -77,8 +79,12 @@ public class DancerController {
     /**
      * 编辑舞伴资料（本人 createdBy 匹配 或 管理员）：全量覆盖可编辑字段；
      * REJECTED 资料编辑后自动回到 PENDING（重新送审）。返回更新后详情。
+     * <p>
+     * 2026-08-19：HTTP 方法对齐项目「只允许 GET 和 POST」约定——由 PUT /dancers/{id}
+     * 迁移为 POST /dancers/{id}/update（原 PUT 路径已废弃；与门店 favorite 的
+     * POST 幂等写先例一致，见 12-api-conventions.md）。
      */
-    @PutMapping("/{id}")
+    @PostMapping("/{id}/update")
     public ApiResponse<DancerDetailResponse> update(@PathVariable Long id,
                                                     @Valid @RequestBody UpsertDancerRequest request) {
         Long userId = UserContext.requireAuth();
@@ -94,9 +100,10 @@ public class DancerController {
         return ApiResponse.ok(dancerService.getDetail(id, UserContext.getCurrentUserId(), UserContext.getCurrentRole()));
     }
 
-    /** 舞伴标签聚合（公开；标签来源 = 用户认可行为） */
+    /** 舞伴标签聚合（公开软鉴权；2026-08-19 扩展：响应含 myTags——当前用户今日
+     *  投票，舞伴认可明细页行活跃态数据源，见 DancerTagsResponse） */
     @GetMapping("/{id}/tags")
-    public ApiResponse<List<DancerTagStat>> getTags(@PathVariable Long id) {
+    public ApiResponse<DancerTagsResponse> getTags(@PathVariable Long id) {
         return ApiResponse.ok(dancerService.getTags(id, UserContext.getCurrentUserId(), UserContext.getCurrentRole()));
     }
 
@@ -215,8 +222,13 @@ public class DancerController {
                 UserContext.requireAuth(), id, UserContext.getCurrentRole()));
     }
 
-    /** 本人/管理员删除照片（软删；普通用户不可调用） */
-    @DeleteMapping("/{id}/photos/{photoId}")
+    /**
+     * 本人/管理员删除照片（软删；普通用户不可调用）。
+     * 2026-08-19：HTTP 方法对齐「只允许 GET 和 POST」约定——由 DELETE /dancers/{id}/photos/{photoId}
+     * 迁移为 POST /dancers/{id}/photos/{photoId}/remove（逻辑删除 = POST 动作路径先例，
+     * 同 POST /venues/{id}/disable）。
+     */
+    @PostMapping("/{id}/photos/{photoId}/remove")
     public ApiResponse<Void> removePhoto(@PathVariable Long id, @PathVariable Long photoId) {
         Long userId = UserContext.requireAuth();
         dancerService.removePhoto(userId, id, photoId, UserContext.getCurrentRole());

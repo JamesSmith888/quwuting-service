@@ -2,6 +2,7 @@ package org.quwuting.quwutingservice.dancer.repository;
 
 import org.quwuting.quwutingservice.dancer.entity.DancerFavorite;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -16,6 +17,29 @@ public interface DancerFavoriteRepository extends JpaRepository<DancerFavorite, 
      * 软删行可被重新收藏复用——restore 语义，同门店收藏恢复逻辑）。
      */
     Optional<DancerFavorite> findByUserIdAndDancerId(Long userId, Long dancerId);
+
+    /**
+     * 原子收藏 upsert（2026-08-19 根因修复：替代「find 判断 → save + 23505 异常吞掉」的
+     * 不可靠并发幂等——Hibernate flush 失败后持久化上下文状态未定义，catch 后继续用同一
+     * 事务提交可能抛 UnexpectedRollbackException（HTTP 500）或残留脏上下文）。本写法恒 1
+     * 次 DB 往返、零异常，语义完整覆盖原三分支：
+     * <ul>
+     *   <li>无记录 → INSERT（deleted=false，created_at=now，新收藏趋势点）；</li>
+     *   <li>软删行 → DO UPDATE SET deleted=false（restore 复用，created_at 不变——
+     *       收藏趋势按 created_at 分组，恢复不新增趋势点，与 V27 决策一致）；</li>
+     *   <li>活跃行 → DO UPDATE SET deleted=false（幂等 no-op）。</li>
+     * </ul>
+     * 冲突目标用列清单推断（qwt_uk_dancer_fav_user_dancer 为唯一索引，非约束）。
+     */
+    @Modifying
+    @Query(value = "INSERT INTO qwt_dancer_favorites (user_id, dancer_id, created_at, updated_at, deleted) " +
+                   "VALUES (:userId, :dancerId, :now, :now, false) " +
+                   "ON CONFLICT (user_id, dancer_id) " +
+                   "DO UPDATE SET deleted = false, updated_at = EXCLUDED.updated_at",
+           nativeQuery = true)
+    int upsertFavorite(@Param("userId") Long userId,
+                       @Param("dancerId") Long dancerId,
+                       @Param("now") LocalDateTime now);
 
     /**
      * 当前用户收藏的舞伴列表（按收藏时间倒序，2026-08-14 舞伴收藏）。

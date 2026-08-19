@@ -21,12 +21,14 @@ import org.springframework.web.bind.annotation.*;
  * <ul>
  *   <li>GET /admin/dancers — 审核列表（含全部状态，status 可选筛选，按提交时间倒序）</li>
  *   <li>POST /admin/dancers — 后台创建舞伴资料（可信来源直通 status=NORMAL，无需再认证）</li>
- *   <li>PUT /admin/dancers/{id}/status — 状态切换（审核通过 PENDING→NORMAL / 驳回
+ *   <li>POST /admin/dancers/{id}/status — 状态切换（审核通过 PENDING→NORMAL / 驳回
  *       PENDING→REJECTED / 下架恢复 NORMAL↔HIDDEN；body.reason 可选操作说明，
- *       随站内信通知创建人，2026-08-08 新增）</li>
+ *       随站内信通知创建人，2026-08-08 新增；2026-08-19 由 PUT 迁移对齐「只允许
+ *       GET 和 POST」约定）</li>
  *   <li>GET /admin/dancers/statuses — 状态字典回显</li>
  *   <li>GET /admin/dancers/photos — 相册照片审核列表（status 可选，按上传时间倒序）</li>
- *   <li>PUT /admin/dancers/photos/{photoId}/status — 照片审核（PENDING → PUBLIC / REJECTED）</li>
+ *   <li>POST /admin/dancers/photos/{photoId}/status — 照片审核（PENDING → PUBLIC / REJECTED，
+ *       2026-08-19 由 PUT 迁移对齐「只允许 GET 和 POST」约定）</li>
  * </ul>
  * 认证是"先认证、后展示"隐私边界的管理员侧落点：舞伴主动注册的资料必须经本接口
  * 审核（PENDING → NORMAL / REJECTED）后才公开或明确驳回，审核结果经站内信
@@ -60,8 +62,9 @@ public class AdminDancerController {
         return ApiResponse.ok(dancerService.createDancer(adminId, request, true));
     }
 
-    /** 舞伴状态切换（审核通过 / 驳回 / 隐藏 / 恢复；状态变化即站内信通知创建人） */
-    @PutMapping("/{id}/status")
+    /** 舞伴状态切换（审核通过 / 驳回 / 隐藏 / 恢复；状态变化即站内信通知创建人。
+     *  2026-08-19：PUT → POST 对齐「只允许 GET 和 POST」约定） */
+    @PostMapping("/{id}/status")
     public ApiResponse<Void> updateStatus(@PathVariable Long id,
                                           @Valid @RequestBody UpdateDancerStatusRequest request) {
         UserContext.requireAdmin();
@@ -82,8 +85,9 @@ public class AdminDancerController {
      * 站内信通知创建人）；UNVERIFY = 撤销（VERIFIED / PENDING_REVIEW → UNVERIFIED，
      * reason 必填——撤销必须留痕理由，随站内信通知舞伴）。
      * 全部变迁写审计日志（qwt_dancer_verification_logs），见 AGENTS.md「舞伴官方认证」。
+     * 2026-08-19：PUT → POST 对齐「只允许 GET 和 POST」约定。
      */
-    @PutMapping("/{id}/verification")
+    @PostMapping("/{id}/verification")
     public ApiResponse<Void> updateVerification(@PathVariable Long id,
                                                 @Valid @RequestBody UpdateDancerVerificationRequest request) {
         Long adminId = UserContext.requireAdmin();
@@ -104,8 +108,9 @@ public class AdminDancerController {
         return ApiResponse.ok(dancerService.listAdminPhotos(status, page, size));
     }
 
-    /** 照片审核（仅 ADMIN）：PENDING → PUBLIC（通过）/ REJECTED（驳回，reason 可选审计） */
-    @PutMapping("/photos/{photoId}/status")
+    /** 照片审核（仅 ADMIN）：PENDING → PUBLIC（通过）/ REJECTED（驳回，reason 可选审计）。
+     *  2026-08-19：PUT → POST 对齐「只允许 GET 和 POST」约定） */
+    @PostMapping("/photos/{photoId}/status")
     public ApiResponse<Void> updatePhotoStatus(@PathVariable Long photoId,
                                                @Valid @RequestBody UpdateDancerPhotoStatusRequest request) {
         Long adminId = UserContext.requireAdmin();

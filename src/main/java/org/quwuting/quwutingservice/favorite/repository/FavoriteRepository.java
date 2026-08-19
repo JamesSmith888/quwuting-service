@@ -3,15 +3,35 @@ package org.quwuting.quwutingservice.favorite.repository;
 import org.quwuting.quwutingservice.favorite.entity.Favorite;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
 public interface FavoriteRepository extends JpaRepository<Favorite, Long> {
 
     Optional<Favorite> findByUserIdAndVenueId(Long userId, Long venueId);
+
+    /**
+     * 原子收藏 upsert（2026-08-19 根因修复：替代首次收藏路径的「save + 23505 异常吞掉」——
+     * Hibernate flush 失败后事务可能已被标记 rollback-only，并发重复收藏的幂等返回实际变为
+     * HTTP 500）。本写法恒 1 次往返、零异常：冲突（含软删行）时 DO UPDATE 复位
+     * deleted=false 并清空 unfavorited_at（restore 语义与取消趋势口径：清空后该行不再
+     * 被计为一次取消，与 FavoriteService.removeFavorite 的唯一写方约定一致）。
+     * 冲突目标用列清单推断（qwt_uk_fav_user_venue 为唯一约束，列推断同样适用）。
+     */
+    @Modifying
+    @Query(value = "INSERT INTO qwt_favorites (user_id, venue_id, created_at, updated_at, deleted) " +
+                   "VALUES (:userId, :venueId, :now, :now, false) " +
+                   "ON CONFLICT (user_id, venue_id) " +
+                   "DO UPDATE SET deleted = false, unfavorited_at = NULL, updated_at = EXCLUDED.updated_at",
+           nativeQuery = true)
+    int upsertFavorite(@Param("userId") Long userId,
+                       @Param("venueId") Long venueId,
+                       @Param("now") LocalDateTime now);
 
     /**
      * 用户收藏的场所列表（按收藏时间倒序），收藏与场所两表联查、单次 DB 往返。

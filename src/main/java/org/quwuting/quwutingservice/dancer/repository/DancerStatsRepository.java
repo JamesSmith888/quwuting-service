@@ -77,9 +77,9 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
                    COALESCE(pt.cnt, 0) AS points,
                    COALESCE(s.cnt, 0) AS sharecount,
                    COALESCE(v.cnt, 0) AS viewcount,
-                   COALESCE(vl.cnt, 0) AS viewlistcount,
-                   COALESCE(vs.cnt, 0) AS viewsharecount,
-                   COALESCE(vq.cnt, 0) AS viewsearchcount
+                   COALESCE(v.list_cnt, 0) AS viewlistcount,
+                   COALESCE(v.share_cnt, 0) AS viewsharecount,
+                   COALESCE(v.search_cnt, 0) AS viewsearchcount
             FROM (SELECT generate_series(CAST(:sinceDate AS timestamp), CAST(:asOfDate AS timestamp), interval '1 day')::date AS day) AS d
             LEFT JOIN (SELECT recognition_date AS day, COUNT(*) AS cnt
                        FROM qwt_dancer_recognitions
@@ -101,29 +101,20 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
                        WHERE dancer_id = :dancerId AND event_type = 'SHARE'
                          AND created_at >= :windowSince AND created_at < :windowUntil
                        GROUP BY 1) s ON s.day = d.day
-            LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
-                       FROM qwt_dancer_views
-                       WHERE dancer_id = :dancerId
-                         AND view_date >= :sinceDate AND view_date < :untilDate
-                       GROUP BY 1) v ON v.day = d.day
-            LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
-                       FROM qwt_dancer_views
-                       WHERE dancer_id = :dancerId
-                         AND source = 'LIST'
-                         AND view_date >= :sinceDate AND view_date < :untilDate
-                       GROUP BY 1) vl ON vl.day = d.day
-            LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
-                       FROM qwt_dancer_views
-                       WHERE dancer_id = :dancerId
-                         AND source = 'SHARE'
-                         AND view_date >= :sinceDate AND view_date < :untilDate
-                       GROUP BY 1) vs ON vs.day = d.day
-            LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
-                       FROM qwt_dancer_views
-                       WHERE dancer_id = :dancerId
-                         AND source = 'SEARCH'
-                         AND view_date >= :sinceDate AND view_date < :untilDate
-                       GROUP BY 1) vq ON vq.day = d.day
+            -- 2026-08-19：qwt_dancer_views 四来源（全量/LIST/SHARE/SEARCH）从 4 个独立
+            -- 子查询各扫一次收敛为单子查询 + FILTER 条件聚合（同一窗口 1 次扫描）——
+            -- 来源是行内列，FILTER 语义与 COUNT 独立分组完全等价（视图扫描量大时省 3/4 IO）
+            LEFT JOIN (
+                SELECT view_date AS day,
+                       COUNT(*) AS cnt,
+                       COUNT(*) FILTER (WHERE source = 'LIST') AS list_cnt,
+                       COUNT(*) FILTER (WHERE source = 'SHARE') AS share_cnt,
+                       COUNT(*) FILTER (WHERE source = 'SEARCH') AS search_cnt
+                FROM qwt_dancer_views
+                WHERE dancer_id = :dancerId
+                  AND view_date >= :sinceDate AND view_date < :untilDate
+                GROUP BY 1
+            ) v ON v.day = d.day
             ORDER BY d.day
             """, nativeQuery = true)
     List<DailyTrendRow> countDancerDailyTrends(@Param("dancerId") Long dancerId,

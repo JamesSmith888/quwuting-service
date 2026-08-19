@@ -21,6 +21,18 @@
 | 场所状态上报 | POST | `POST /venues/{venueId}/status-reports`（需登录，body 可空=快速上报） |
 | 撤销状态上报 | POST | `POST /venues/{venueId}/status-reports/cancel`（需登录） |
 
+> **2026-08-19 约定对齐（历史遗留漂移修复）**：舞伴域与门店状态关注曾违反本约定使用
+> PUT/DELETE（`PUT /dancers/{id}`、`DELETE /dancers/{id}/photos/{photoId}`、
+> `PUT /admin/dancers/...`、`PUT/DELETE /venues/{id}/status-watch`），现已全部迁移为
+> POST 动作路径，端点示例：
+>
+> | 场景 | 方法 | 示例 |
+> |------|------|------|
+> | 编辑舞伴资料（全量覆盖，REJECTED 自动重审） | POST | `POST /dancers/{id}/update` |
+> | 删除舞伴照片（软删） | POST | `POST /dancers/{id}/photos/{photoId}/remove` |
+> | 管理端状态切换 / 照片审核 / 信息核验 | POST | `POST /admin/dancers/{id}/status`、`POST /admin/dancers/photos/{photoId}/status`、`POST /admin/dancers/{id}/verification` |
+> | 开启 / 关闭关注门店状态 | POST | `POST /venues/{id}/status-watch`、`POST /venues/{id}/status-watch/cancel` |
+
 URL 使用复数名词，全小写，单词间用 `-` 连接：`/job-posts`、`/venue-tags`。
 
 ---

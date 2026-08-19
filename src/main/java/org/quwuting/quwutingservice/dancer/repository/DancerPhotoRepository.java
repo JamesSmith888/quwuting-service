@@ -17,6 +17,12 @@ public interface DancerPhotoRepository extends JpaRepository<DancerPhoto, Long> 
 
     Optional<DancerPhoto> findByIdAndDeletedFalse(Long id);
 
+    /** 当前最大展示顺序（新照片 sortOrder = max + 1；无照片返回 0）。
+     *  2026-08-19：单值聚合替代「全量加载后流式取 max」（省一次跨洲往返与全表行传输） */
+    @Query("SELECT COALESCE(MAX(p.sortOrder), 0) FROM DancerPhoto p " +
+           "WHERE p.dancerId = :dancerId AND p.deleted = false")
+    int findMaxSortOrder(@Param("dancerId") Long dancerId);
+
     /**
      * 批量舞伴封面照片：每个舞伴取展示顺序最小的一张 PUBLIC（列表页/我的舞伴主页封面，
      * 一次 IN 查询覆盖整页舞伴，规避 N+1）。返回 Object[]{dancerId, url}。

@@ -15,7 +15,6 @@ import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -155,15 +154,10 @@ public class FavoriteService {
         if (isToggleLimited(userId, venueId)) {
             return;
         }
-        Favorite fav = new Favorite();
-        fav.setUserId(userId);
-        fav.setVenueId(venueId);
-        try {
-            favoriteRepository.save(fav);
-        } catch (DataIntegrityViolationException e) {
-            // 并发竞态：另一请求已插入，幂等忽略
-            log.debug("addFavorite 并发冲突，幂等忽略: userId={}, venueId={}", userId, venueId);
-        }
+        // 2026-08-19 根因修复：原子 upsert（ON CONFLICT DO UPDATE）替代「save + 23505
+        // 异常吞掉」——Hibernate flush 失败后事务可能已被标记 rollback-only，并发重复
+        // 收藏的幂等返回实际变为 HTTP 500（与 DancerService.addFavorite 同根因同修复）
+        favoriteRepository.upsertFavorite(userId, venueId, java.time.LocalDateTime.now());
         venueHeatService.invalidate(venueId);
     }
 

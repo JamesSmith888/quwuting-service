@@ -103,6 +103,8 @@
 | Reaction 时间窗口套用「统计口径：截至昨日」 | Reaction 窗口锚点为真实"此刻"（今天0点/7天前/30天前），与热度滚动窗口是两套独立时间语义 |
 | 实体删除字段后不同步迁移脚本处理遗留列（javadoc 写"已移除"但列仍在） | `ddl-auto: update` 不删列/不取消 NOT NULL、`validate` 不校验列级 NOT NULL → 遗留 NOT NULL 列在运行期插入时才爆炸且被 DataIntegrityViolation 兜底误吞。实体删字段必须同步 `db/migrate-*.sql` 迁移，注释写真实状态（见「Schema 完整性与数据库迁移规范 → 实体字段移除 ≠ 列被删除」） |
 | `catch (DataIntegrityViolationException)` 整类吞掉当"并发幂等" | 只允许吞唯一键竞态（SQLState 23505，见 `TagInteractionService.isUniqueViolation`）；NOT NULL/列约束/外键违规必须上抛，否则真实根因被静默掩盖成 200 + 业务码（2026-08-05 liked 列事故） |
+| 有唯一约束的幂等写入「先 SELECT 再 INSERT + catch 23505 吞异常」，且 catch 后继续用同一事务查/提交 | Hibernate flush 失败后持久化上下文状态未定义、事务可能已被标记 rollback-only——"幂等 200"实际会变 HTTP 500，且「扣费已执行、解锁未落库」等事务边界完全依赖 JPA 不可靠行为。确定性写法二选一：① `INSERT ... ON CONFLICT DO NOTHING/DO UPDATE`（原子 upsert，恒 1 次往返零异常，见 `DancerFavoriteRepository.upsertFavorite` / `DancerAdViewRepository.upsertAdView`）；② `pg_advisory_xact_lock` 按关键维度串行化 check-then-act（见 `PointsService.unlock` / `checkIn`，对齐认可域 `lockDailyTicket` 先例）。禁止再用 catch+clear 表达幂等 |
+| 详情接口逐项查询串成 ~15 次跨洲往返（统计/标签/场所/城市/收礼/积分/广告/门槛各一次） | 用户无关聚合整体缓存（refresh-ahead + 写路径显式失效，见 `DancerDetailCacheService`）：60s 窗口内重复进详情，往返 ~15 次 → ~6 次；个人状态（认可/收藏/解锁/相册过滤）恒实时查询、严禁进缓存。失效必须走单一入口 `invalidate`（级联失效内层聚合缓存，防「只清外层、内层 60s 陈旧值泄漏」） |
 
 ---
 

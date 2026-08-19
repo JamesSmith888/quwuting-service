@@ -9,7 +9,7 @@ import java.util.List;
  * 舞伴列表条目（列表页卡片数据源）。
  * <p>
  * 卡片信息层级（AGENTS.md「舞伴生态体系」）：头像 + 昵称（身份）、"常去"（场所锚点）、
- * 认可数（❤️ N 人认可，展示 countAll——累计总量）、Top 标签（最多 3 个，认可理由）。
+ * 认可数（❤️ N 人认可，展示 countAll——累计总量）、认可标签聚合（2026-08-19 起全量，列表 reaction 区域 chips）。
  * 排序由后端完成（近7天认可倒序），前端不重复排序。
  * <p>
  * status 仅对有权限者有意义（公开列表恒为 NORMAL；「我的舞伴主页」含 PENDING/HIDDEN），
@@ -40,7 +40,16 @@ public record DancerSummaryResponse(
         long recognitionCountToday,
         /** 今日是否已认可（登录用户；匿名恒 false） */
         boolean myRecognizedToday,
-        /** Top 认可标签（最多 3 个，按计数倒序） */
+        /**
+         * 当前用户今日认可携带的标签（2026-08-19 新增：列表卡片 reaction 区域 chip
+         * 活跃态数据源，镜像门店 ReactionBadge.reactedByMe 语义）。个人态实时查询
+         * 不缓存；每日一票默认至多 1 枚，多选模式可多枚；未登录/未认可 = 空列表。
+         */
+        List<String> myTags,
+        /**
+         * 认可标签聚合（2026-08-19 起<b>全量</b>：列表卡片 reaction 区域 chips 数据源，
+         * 同门店 topReactions 无截断契约；前端按近7天计数过滤展示）。
+         */
         List<DancerTagStat> topTags,
         /**
          * 累计浏览量（2026-08-15 新增，镜像门店 VenueResponse.viewCount）：
