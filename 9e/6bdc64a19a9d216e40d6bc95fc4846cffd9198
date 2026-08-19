@@ -1,0 +1,24 @@
+src/main/java/org/quwuting/quwutingservice/favorite/repository/FavoriteRepository.java
+  s_b255e28bbc00c8::t_8a39e252dcfd57 35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.40-trip",
+  "base_commit_sha": "9e6bdc64a19a9d216e40d6bc95fc4846cffd9198",
+  "prompts": {},
+  "humans": {
+    "h_fbb9b8e239a0dd": {
+      "author": "James Smith(杨鑫) <xin.y@trip.com>"
+    }
+  },
+  "sessions": {
+    "s_b255e28bbc00c8": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "444e6273-84f0-4d30-9133-b68bffdc6680",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": null
+    }
+  }
+}
