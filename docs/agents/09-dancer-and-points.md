@@ -377,7 +377,7 @@ Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
-| POST | `/points/check-in` | 登录 | 每日打卡（幂等：今日已打卡返回 checkedIn=false） |
+| POST | `/points/check-in` | 登录 | 每日打卡（幂等：今日已打卡返回 checkedIn=false；2026-08-20 起由前端登录自动触发——启动/登录成功后调用，无手动入口，本接口幂等语义与并发防护不变） |
 | GET | `/points/me` | 登录 | 概览（余额/今日挣赠/打卡态/规则文案 rules——合规文案后端唯一事实源） |
 | GET | `/points/transactions` | 登录 | 流水分页（type=ALL/EARN/GIFT） |
 | POST | `/points/gift` | 登录 | 赠送礼物（body `{"targetType","targetId","giftCode"}`，2026-08-12 礼物化；价格 GiftCatalog 权威，上限/自赠校验见上） |
