@@ -34,6 +34,10 @@ public interface VenuePostRepository extends JpaRepository<VenuePost, Long> {
      * 活跃计数归零但个人标记恒真，详情页"已报告·补充"永不还原（用户必须手动撤销）。
      * 所有活跃判定查询点必须经参数传入同一 now，禁止在 SQL 中自行定义时间窗。
      * <p>
+     * <b>处置口径（2026-08-20 修正）</b>：EXISTS 子查询另加 {@code admin_action IS NULL}
+     * ——管理端采纳（ADOPTED）的记录保留展示但不再是"我的活跃报告"，用户侧重置为
+     * 「待报告」可再次上报（新记录）；与热度/管理端/摘要的活跃判定点同口径。
+     * <p>
      * 跨表说明：主表为 qwt_venue_posts，qwt_venue_status_reports 仅作只读标量子查询引用。
      * 使用原生 SQL：JPQL 无法在单条投影中表达 EXISTS + COUNT 两个标量子查询。
      */
@@ -42,7 +46,7 @@ public interface VenuePostRepository extends JpaRepository<VenuePost, Long> {
                    "  WHERE p.venue_id = :venueId AND p.deleted = false) AS postcount, " +
                    "(SELECT EXISTS(SELECT 1 FROM qwt_venue_status_reports r " +
                    "  WHERE r.user_id = :userId AND r.venue_id = :venueId AND r.deleted = false " +
-                   "    AND r.expires_at > :now)) AS hasmyreport",
+                   "    AND r.admin_action IS NULL AND r.expires_at > :now)) AS hasmyreport",
            nativeQuery = true)
     DetailStats findDetailStats(@Param("venueId") Long venueId,
                                 @Param("userId") Long userId,

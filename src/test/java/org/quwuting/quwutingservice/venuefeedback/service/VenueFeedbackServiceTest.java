@@ -15,6 +15,7 @@ import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
+import org.quwuting.quwutingservice.venue.service.VenueService;
 import org.quwuting.quwutingservice.venuefeedback.dto.request.CreateFeedbackRequest;
 import org.quwuting.quwutingservice.venuefeedback.dto.request.HandleReportRequest;
 import org.quwuting.quwutingservice.venuefeedback.dto.response.VenueFeedbackResponse;
@@ -48,6 +49,9 @@ class VenueFeedbackServiceTest {
     private PointsService pointsService;
     @Mock
     private MessageService messageService;
+    /** 状态类反馈采纳联动（2026-08-20：SUSPENDED/RESUMED 采纳时联动门店营业状态） */
+    @Mock
+    private VenueService venueService;
 
     private VenueFeedbackService service;
 
@@ -59,7 +63,7 @@ class VenueFeedbackServiceTest {
         //（2026-08-13 远端合并：VenueFeedbackService 构造器新增 PointsProperties 参数）
         service = new VenueFeedbackService(venueFeedbackRepository, venueRepository,
                 new ReportsProperties(3), new PointsProperties(0, 0, 0, 0, null, null),
-                pointsService, messageService);
+                pointsService, messageService, venueService);
         UserContext.set(99L, UserRole.ADMIN);
 
         feedback = new VenueFeedback();
@@ -235,6 +239,50 @@ class VenueFeedbackServiceTest {
         verify(venueFeedbackRepository).save(argThat(f -> f.getStatus() == ReportStatus.DISMISSED));
         verify(messageService).create(eq(2L), eq(MessageType.FEEDBACK_RESULT),
                 eq("上报已忽略"), contains("上报已忽略"), eq("VENUE"), eq(5L));
+    }
+
+    // ─── 状态类采纳联动（2026-08-20：历史/直调 SUSPENDED/RESUMED 反馈采纳时联动门店营业状态） ─
+
+    @Test
+    void adoptReport_suspendedStatus_linksVenueMarkSuspended() {
+        feedback.setType(FeedbackType.SUSPENDED);
+        when(venueFeedbackRepository.findById(1L)).thenReturn(Optional.of(feedback));
+        mockVenueName();
+
+        service.adoptReport(1L, new HandleReportRequest(null, true));
+
+        // 状态流转 ADOPTED + 状态类联动（markSuspendedByReport，与 status-reports 采纳同一通道）+ 发分
+        verify(venueFeedbackRepository).save(argThat(f -> f.getStatus() == ReportStatus.ADOPTED));
+        verify(venueService).markSuspendedByReport(5L, 99L);
+        verify(pointsService).rewardFeedback(2L, 1L);
+    }
+
+    @Test
+    void adoptReport_resumedStatus_linksVenueReopen() {
+        feedback.setType(FeedbackType.RESUMED);
+        when(venueFeedbackRepository.findById(1L)).thenReturn(Optional.of(feedback));
+        mockVenueName();
+
+        service.adoptReport(1L, new HandleReportRequest(null, true));
+
+        verify(venueFeedbackRepository).save(argThat(f -> f.getStatus() == ReportStatus.ADOPTED));
+        verify(venueService).reopenByReport(5L, 99L);
+        verify(pointsService).rewardFeedback(2L, 1L);
+    }
+
+    @Test
+    void adoptReport_closedDownStatus_noStatusLink() {
+        // CLOSED_DOWN 停业认定较重：不自动联动（管理员经 updateVenue 手动执行）
+        feedback.setType(FeedbackType.CLOSED_DOWN);
+        when(venueFeedbackRepository.findById(1L)).thenReturn(Optional.of(feedback));
+        mockVenueName();
+
+        service.adoptReport(1L, new HandleReportRequest(null, true));
+
+        verify(venueFeedbackRepository).save(argThat(f -> f.getStatus() == ReportStatus.ADOPTED));
+        verify(venueService, never()).markSuspendedByReport(anyLong(), anyLong());
+        verify(venueService, never()).reopenByReport(anyLong(), anyLong());
+        verify(pointsService).rewardFeedback(2L, 1L);
     }
 
     // ─── 幂等：终态重复操作不重复发信 / 发分 ──────────────────────────────────

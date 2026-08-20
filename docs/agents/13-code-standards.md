@@ -231,7 +231,8 @@ try {
 }
 ```
 
-实例：`FavoriteService.addFavorite`（软删恢复）、`TagInteractionService.score`（冷却检查）、`VenueReactionService.toggle`（软删恢复/切换）、`StatusReportService.submitReport`（软删恢复 + TTL 续期，catch 后必须 `entityManager.clear()`）。若 INSERT 后还需后续操作（如 toggle），冲突时应重新查询已有记录再执行后续逻辑。
+实例：`FavoriteService.addFavorite`（软删恢复）、`TagInteractionService.score`（冷却检查）、`VenueReactionService.toggle`（软删恢复/切换）。若 INSERT 后还需后续操作（如 toggle），冲突时应重新查询已有记录再执行后续逻辑。
+<b>注意（2026-08-20 起）</b>：`StatusReportService.submitReport` 已迁出本模式（V34 追加式 + `insertReport` 原子 upsert，见 07-feedback-and-reporting）——旧指引「catch 后必须 `entityManager.clear()`」已废止（PG 语句失败后事务中止 25P02，catch 后同事务查询必然 500，见 15-governance 错误表）。新代码禁止再用 catch+clear 表达幂等。
 
 ---
 

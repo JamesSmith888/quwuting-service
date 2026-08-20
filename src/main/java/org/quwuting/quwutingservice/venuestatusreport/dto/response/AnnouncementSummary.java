@@ -8,9 +8,10 @@ import java.time.LocalDateTime;
 /**
  * 详情页紧急公告区聚合项（GET /venues/{venueId}/announcements，公开读，2026-08-11 新增）。
  * <p>
- * 公告区展示 = 活跃信号（deleted=false）+ 已采纳信号（deleted=true 且 adminAction=
- * ADOPTED，保留展示至 TTL 过期并带"已核实"标记）的<b>按类型聚簇摘要</b>——每类型
- * 一条，消费方（前端紧急公告卡）按 severity 排序渲染。
+ * 公告区展示 = 活跃信号（deleted=false 且 admin_action IS NULL）+ 已采纳信号
+ * （adminAction=ADOPTED，保留展示带"已核实"标记）的<b>按类型聚簇摘要</b>——每类型
+ * 一条，消费方（前端紧急公告卡/公告页列表）按后端排序渲染（2026-08-20 起时间倒序
+ * 为主、严重级为次级，见 StatusReportService.listAnnouncements）。
  * <p>
  * 契约：
  * <ul>

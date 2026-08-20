@@ -96,6 +96,10 @@ public class VenueFeedbackService {
     private final PointsProperties pointsProperties;
     private final org.quwuting.quwutingservice.points.service.PointsService pointsService;
     private final org.quwuting.quwutingservice.message.service.MessageService messageService;
+    /** 状态类反馈采纳联动：门店营业状态变更 + 状态变迁日志 + 场所/热门缓存逐出
+     *  （markSuspendedByReport / reopenByReport，2026-08-20 兜底接入，与
+     *   StatusReportService.adoptReport 同一联动通道） */
+    private final org.quwuting.quwutingservice.venue.service.VenueService venueService;
 
     /**
      * 提交上报（匿名可提交，不强推登录）。
@@ -284,7 +288,7 @@ public class VenueFeedbackService {
     }
 
     /**
-     * 采纳上报（2026-08-10 V2 新增，需 ADMIN）。
+     * 采纳上报（2026-08-10 V2 新增，需 ADMIN；2026-08-20 状态类联动兜底）。
      * <p>
      * 采纳 = 管理员核实并采用该上报（区别于"已处理"——处理但不采纳不发奖励）。
      * <b>发分与状态流转同一事务</b>（状态变更 + 积分发放原子，失败整体回滚，
@@ -294,13 +298,32 @@ public class VenueFeedbackService {
      * 奖励开关（2026-08-10 管理端三动作定稿）：request.reward() 为 true / null（缺省）
      * = 采纳并奖励（终态 ADOPTED，同事务发分）；false = 采纳不奖励（终态
      * ADOPTED_NO_REWARD，不发分）——管理员对"有效但贡献有限"的上报可采纳而不发分，
-     * 上报者可见「已采纳·未奖励」，与 RESOLVED（核实后未采纳）语义区分。
+     * 上报者可见「已采纳·未奖励」，与 RESOLVED（核实后未处理）语义区分。
+     * <p>
+     * 状态类联动（2026-08-20 兜底，根因见 AGENTS.md「统一用户上报 → 状态类类型下线」）：
+     * 前端「报告暂停/恢复营业」已统一收敛到 venuestatusreport 实时信号通道（采纳联动
+     * 由 StatusReportService.adoptReport 完成）；本方法对 <b>venuefeedback 历史状态类
+     * 记录与 API 直调</b>做对称兜底——SUSPENDED 采纳经 markSuspendedByReport、
+     * RESUMED 采纳经 reopenByReport（同事务，写状态变迁日志 + 逐出缓存），保证
+     * 「采纳 = 门店状态生效」语义全通道一致，杜绝同一类型两处处置行为分裂。
+     * CLOSED_DOWN（已关门/停业）属较重停业认定，不自动联动（管理员经 updateVenue
+     * 手动执行），保持信息纠错语义。
      */
     @Transactional
     public void adoptReport(Long id, HandleReportRequest request) {
         boolean reward = request == null || request.reward() == null || request.reward();
         VenueFeedback feedback = handleByAdmin(id, reward ? ReportStatus.ADOPTED : ReportStatus.ADOPTED_NO_REWARD, request);
-        if (reward && feedback != null && feedback.getUserId() != null) {
+        if (feedback == null) {
+            return; // 终态幂等：不重复联动、不重复发分、不重复发信
+        }
+        // 状态类联动（与 StatusReportService.adoptReport 同一联动通道，见类注释）
+        FeedbackType type = feedback.getType();
+        if (type == FeedbackType.SUSPENDED) {
+            venueService.markSuspendedByReport(feedback.getVenueId(), feedback.getHandledBy());
+        } else if (type == FeedbackType.RESUMED) {
+            venueService.reopenByReport(feedback.getVenueId(), feedback.getHandledBy());
+        }
+        if (reward && feedback.getUserId() != null) {
             pointsService.rewardFeedback(feedback.getUserId(), feedback.getId());
         }
     }

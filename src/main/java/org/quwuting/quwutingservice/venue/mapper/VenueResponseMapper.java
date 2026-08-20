@@ -80,16 +80,30 @@ public class VenueResponseMapper {
      *                     传默认 0（否则列表卡片浏览量恒为 0，同 isHot 历史缺陷模式）。
      */
     public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot, long viewCount) {
+        return toResponse(v, topReactions, isHot, viewCount, null);
+    }
+
+    /**
+     * 五参重载（2026-08-20 门店照片域新增）：photos 由调用方批量查询后注入
+     * （见 {@code VenueService.loadPublicPhotosByVenueIds}，一次 IN 覆盖整页规避 N+1）。
+     * <p>
+     * photos 为 null 时回退实体 JSON 列（venue.photos）——仅存量兼容路径（V35 迁移后
+     * JSON 列恒空），新写路径一律显式传照片列表；调用方禁止在列表/详情消费场景
+     * 传 null（否则照片恒空，同 isHot 历史缺陷模式）。
+     */
+    public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot, long viewCount,
+                                    List<String> photos) {
         List<String> customTags = deserializeStringList(v.getTags(), "tags");
         List<String> effectiveTags = defaultsConfig.merge(customTags);
         List<String> defaultTags = defaultsConfig.tags();
+        List<String> effectivePhotos = photos != null ? photos : deserializeStringList(v.getPhotos(), "photos");
         return new VenueResponse(
                 v.getId(),
                 v.getName(),
                 v.getStatus(),
                 v.getStatus().getDisplayName(),
                 v.getImageUrl(),
-                deserializeStringList(v.getPhotos(), "photos"),
+                effectivePhotos,
                 v.getDescription(),
                 v.getCity(),
                 v.getDistrict(),

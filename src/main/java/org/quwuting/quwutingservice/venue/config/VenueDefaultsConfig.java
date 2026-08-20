@@ -13,6 +13,10 @@ import java.util.List;
  * 由各消费方在读取时注入合并——保证配置变更对所有门店即时生效。
  * <p>
  * 配置键：{@code venue.default.tags}（YAML 列表）。
+ * <p>
+ * <b>2026-08-20 停用</b>：YAML 配置已置空列表（原「交谊舞/舞厅」默认注入被判定无用），
+ * 空配置下 {@link #merge} 恒等于自定义标签、{@link #filterCustomOnly} 原样返回——
+ * 机制与消费方代码保持不变，未来如需恢复默认标签只改 YAML 即可。
  */
 @ConfigurationProperties(prefix = "venue.default")
 public record VenueDefaultsConfig(List<String> tags) {

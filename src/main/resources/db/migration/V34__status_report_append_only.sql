@@ -1,0 +1,32 @@
+-- ============================================================================
+-- V34: 突发事件上报从「每用户每门店一条（upsert 覆盖）」改为「每次上报一条新记录」
+--
+-- 背景（2026-08-20，需求见 AGENTS.md「门店突发事件列表」）：
+-- 旧模型 UNIQUE(user_id, venue_id)（V1 qwt_uk_status_report_user_venue）使同一用户
+-- 对同一门店永远只有一条物理记录——再次上报 = 覆盖更新（含恢复软删记录），导致：
+-- ① 「同用户、同门店，上报数据库只有一条记录不断更新」，每次上报动作无法留痕
+--    （各自独立的 id / created_at / 处置结果）；
+-- ② 管理员采纳/撤销后该记录只是 soft delete，用户侧「已报告」态长期不重置。
+--
+-- 新模型（追加式）：每次新上报（无活跃记录时）= INSERT 新行，历史多条；「补充
+-- 详情」= 更新当前活跃行（不产生新记录）；被采纳/撤销/已过期的记录不再被恢复。
+-- 同一用户同一门店<b>同时至多一条活跃报告</b>的并发约束由 <b>应用层
+-- pg_advisory_xact_lock(user_id, venue_id)</b> 串行化保证（2026-08-19 定则方案②，
+-- 见 StatusReportService.submitReport）——本迁移<b>不再创建</b>「活跃记录」维度的
+-- 部分唯一索引：PG 禁止部分索引谓词使用非 IMMUTABLE 函数，而"活跃"判定依赖
+-- expires_at > now()（now() 为 STABLE，2026-08-20 实证报错
+-- "functions in index predicate must be marked IMMUTABLE"）。
+--
+-- 形态兼容说明（2026-08-20 线上实证 2BP01）：qwt_uk_status_report_user_venue 在
+-- 生产库是 <b>UNIQUE CONSTRAINT</b> 形态（PG 中约束自带同名索引）——直接 DROP INDEX
+-- 报 "cannot drop index ... because constraint ... requires it"。正确顺序：先 DROP
+-- CONSTRAINT（连带删除其背后索引），再 DROP INDEX IF EXISTS 兜底历史环境为独立索引
+-- 形态的情况（约束不存在时约束删除静默跳过、索引兜底删除；约束存在时约束删除已
+-- 连带删索引，后续 DROP INDEX IF EXISTS 因不存在静默跳过）。
+--
+-- 存量数据无需迁移：现有每用户每店一条（含已处置/软删）即历史记录，语义兼容。
+-- ============================================================================
+
+-- ① 删除旧的全量唯一约束（同一用户同一门店任意状态仅一条）
+ALTER TABLE qwt_venue_status_reports DROP CONSTRAINT IF EXISTS qwt_uk_status_report_user_venue;
+DROP INDEX IF EXISTS qwt_uk_status_report_user_venue;

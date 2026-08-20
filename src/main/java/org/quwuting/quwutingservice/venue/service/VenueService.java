@@ -1,9 +1,11 @@
 package org.quwuting.quwutingservice.venue.service;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.common.text.TextSanitizer;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.venuereaction.ReactionCode;
@@ -14,16 +16,21 @@ import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.config.VenueDefaultsConfig;import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
 import org.quwuting.quwutingservice.venue.dto.request.CreateVenueRequest;
+import org.quwuting.quwutingservice.venue.dto.response.AdminVenuePhotoResponse;
 import org.quwuting.quwutingservice.venue.dto.response.CityStatsResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueDetailResponse;
+import org.quwuting.quwutingservice.venue.dto.response.VenuePhotoResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
+import org.quwuting.quwutingservice.venue.entity.VenuePhoto;
 import org.quwuting.quwutingservice.venue.entity.VenueStatusLog;
 import org.quwuting.quwutingservice.venue.enums.PartnerFeeUnit;
 import org.quwuting.quwutingservice.venue.enums.TicketType;
+import org.quwuting.quwutingservice.venue.enums.VenuePhotoStatus;
 import org.quwuting.quwutingservice.venue.enums.VenueSortMode;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
+import org.quwuting.quwutingservice.venue.repository.VenuePhotoRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
@@ -35,16 +42,20 @@ import org.quwuting.quwutingservice.venueclaim.enums.ClaimStatus;
 import org.quwuting.quwutingservice.venueclaim.repository.VenueClaimRepository;
 import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.storage.ImageContentValidator;
+import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Caching;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import tools.jackson.databind.ObjectMapper;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -58,6 +69,25 @@ import java.util.stream.Collectors;
 public class VenueService {
 
     private static final int MAX_PAGE_SIZE = 50;
+
+    // ===== 门店照片域（2026-08-20，见 AGENTS.md「门店照片域」） =====
+
+    /** 单次照片上传数量上限（与前端 image-upload maxCount=9 对齐——后端独立校验防绕过） */
+    private static final int MAX_PHOTOS_PER_UPLOAD = 9;
+
+    /**
+     * UGC 照片上传频控（2026-08-20）：普通用户同 user+venue 60s 窗口内最多放行
+     * {@value #UPLOAD_RATE_LIMIT_PER_WINDOW} 次提交（每次 ≤9 张）——与 FavoriteService
+     * toggle 频控同族（内存 Caffeine 单机近似，压制脚本连点刷相册）；门店管理方
+     * （canManage）上传直发公开属可信写者，不受频控。
+     */
+    private static final int UPLOAD_RATE_LIMIT_PER_WINDOW = 3;
+    private static final long UPLOAD_RATE_LIMIT_SECONDS = 60;
+
+    /** 管理端审核列表门店名占位（门店已软删时回退，审核页仍可辨识来源） */
+    private static final String PHOTO_VENUE_GONE_NAME = "门店已删除";
+    /** 管理端审核列表上传者占位（存量导入 created_by=0 / 用户已软删时回退） */
+    private static final String PHOTO_UPLOADER_GONE_NAME = "未知用户";
 
     /**
      * 列表排序/热门标记的「行为热度」公式所需的正向 Reaction code 列表
@@ -82,6 +112,16 @@ public class VenueService {
     private final VenueStatusWatcherService venueStatusWatcherService;
     /** 图片内容校验（2026-08-12 恶意文件防线：业务提交时对图片 URL 做内容级校验） */
     private final ImageContentValidator imageValidator;
+    /** 门店相册照片（2026-08-20 门店照片域：独立表 + PENDING 先审后发，见 AGENTS.md「门店照片域」） */
+    private final VenuePhotoRepository venuePhotoRepository;
+    /** 场所实体缓存显式逐出（照片写方法 key 依赖查询结果，@CacheEvict 无法表达，见 VenueClaimService 同款先例） */
+    private final CacheManager cacheManager;
+
+    /** UGC 照片上传频控（普通用户 user:venue 60s 窗口阈值，见常量注释；管理方直发不受控） */
+    private final Cache<String, Integer> venuePhotoUploadLimiter = Caffeine.newBuilder()
+            .maximumSize(10_000)
+            .expireAfterWrite(UPLOAD_RATE_LIMIT_SECONDS, TimeUnit.SECONDS)
+            .build();
 
     /**
      * 详情接口「公共部分」缓存（2026-08-13 新增，性能优化：详情接口 DB 往返 5→2 次）。
@@ -113,6 +153,13 @@ public class VenueService {
             .expireAfterWrite(10, TimeUnit.MINUTES)
             .build(this::computeVenueDetailPublic);
 
+    /**
+     * 新增场所（仅管理员）。
+     * <p>
+     * 2026-08-20 门店照片域：photos 不再写入 venue.photos JSON 列（V35 起该列废弃、
+     * 读路径整体切换 qwt_venue_photos 独立表）——创建表单携带的照片由本方法转存
+     * 独立表并直发 PUBLIC（创建者为管理方可信写者，保留旧 JSON 列直写公开语义）。
+     */
     @Transactional
     @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
     public VenueResponse createVenue(CreateVenueRequest req) {
@@ -124,7 +171,6 @@ public class VenueService {
         venue.setName(req.name());
         venue.setStatus(req.status() != null ? req.status() : VenueStatus.OPEN);
         venue.setImageUrl(req.imageUrl());
-        venue.setPhotos(serializeStringList(req.photos()));
         venue.setDescription(req.description());
         // 城市必填、区县选填（2026-08-08 放宽：行政区非业务必填），须来自前端 region
         // picker 的标准行政区划名（与列表筛选共用同一词表，精确匹配）
@@ -148,7 +194,13 @@ public class VenueService {
         initialLog.setToStatus(saved.getStatus());
         initialLog.setChangedBy(UserContext.getCurrentUserId());
         venueStatusLogRepository.save(initialLog);
-        return venueResponseMapper.toResponse(saved);
+        // 创建表单携带的照片转存独立表（直发 PUBLIC，见方法 javadoc）
+        List<String> photos = req.photos() == null ? List.of() : req.photos();
+        if (!photos.isEmpty()) {
+            persistPhotosDirect(saved.getId(), UserContext.getCurrentUserId(), photos, VenuePhotoStatus.PUBLIC);
+        }
+        return venueResponseMapper.toResponse(saved, Collections.emptyList(), false, 0L,
+                loadPublicPhotosByVenueIds(List.of(saved.getId())).getOrDefault(saved.getId(), List.of()));
     }
 
     /**
@@ -156,6 +208,10 @@ public class VenueService {
      * <p>
      * 全量覆盖可编辑字段（与 CreateVenueRequest 同结构），claimedBy 不在此接口变更。
      * 权限校验：{@link UserContext#requireManageOrAdmin(Long)}——ADMIN 或 claimedBy 匹配。
+     * <p>
+     * 2026-08-20 门店照片域：<b>忽略 req.photos()</b>——照片改由独立接口逐张管理
+     * （POST /venues/{id}/photos 上传、/photos/{photoId}/remove 删除），编辑表单不再
+     * 全量覆盖（JSON 列全量覆盖会误删他人 UGC 照片，见 AGENTS.md「门店照片域」）。
      */
     @Transactional
     @Caching(evict = {
@@ -168,7 +224,6 @@ public class VenueService {
         UserContext.requireManageOrAdmin(venue.getClaimedBy());
         validateTickets(req.tickets());
         imageValidator.validate(req.imageUrl());
-        imageValidator.validateAll(req.photos());
         imageValidator.validate(req.wechatQr());
 
         venue.setName(req.name());
@@ -188,7 +243,6 @@ public class VenueService {
         }
         venue.setStatus(newStatus);
         venue.setImageUrl(req.imageUrl());
-        venue.setPhotos(serializeStringList(req.photos()));
         venue.setDescription(req.description());
         venue.setCity(req.city().trim());
         venue.setDistrict(req.district() == null ? null : req.district().trim());
@@ -202,7 +256,9 @@ public class VenueService {
         venue.setWechatQr(req.wechatQr());
         venue.setTags(serializeStringList(defaultsConfig.filterCustomOnly(req.tags())));
         venue.setSortWeight(req.sortWeight() != null ? req.sortWeight() : venue.getSortWeight());
-        VenueResponse response = venueResponseMapper.toResponse(venueRepository.save(venue));
+        VenueResponse response = venueResponseMapper.toResponse(venueRepository.save(venue),
+                Collections.emptyList(), false, 0L,
+                loadPublicPhotosByVenueIds(List.of(id)).getOrDefault(id, List.of()));
         // 场所编辑影响热度响应的输出（status/状态日志 → currentStatus / currentStatusDays）——
         // 显式逐出，与其余写路径一致
         venueHeatService.invalidate(id);
@@ -210,6 +266,219 @@ public class VenueService {
         // statusUpdatedAt/claimed 快照）必须立即重算（2026-08-13 新增）
         invalidateDetailPublic(id);
         return response;
+    }
+
+    // ─── 门店相册照片（2026-08-20 门店照片域：独立表 + PENDING 先审后发） ────────────
+    //
+    // 根因（AGENTS.md「门店照片域」）：旧 venue.photos JSON 列只能经"创建/编辑门店"
+    // 整表提交全量覆盖（写权限 = 认领人/管理员），普通到店用户（最大照片贡献来源）
+    // 零通道，且无逐张审核闸门不敢开放 UGC → 照片趋零。本组方法把门店照片升级为
+    // 独立资产域（V35 qwt_venue_photos），完整复用舞伴照片（DancerPhoto）模式：
+    // 上传即落独立表（管理方 canManage 直发 PUBLIC / 普通用户 PENDING 先审后发）、
+    // sortOrder 上传序、管理端逐张审核、读路径只含 PUBLIC。
+    //
+    // 可见性规则（fetchVenuePhotos 管理入口回显用）：
+    //   - PUBLIC：所有人可见；
+    //   - PENDING / REJECTED：仅上传者本人（createdBy）与门店管理方（canManage）/管理员可见。
+
+    /**
+     * 上传门店照片（POST /venues/{id}/photos，登录即可——UGC 通道）。
+     * <p>
+     * 状态分派：门店管理方（canManage，认领人/管理员）上传直发 PUBLIC（可信写者，
+     * 保留旧 JSON 列直写公开语义，不给 ADMIN 增加审核负担）；普通用户上传 PENDING
+     * 先审后发（防低俗/广告/垃圾图直发）。普通用户受同 user+venue 60s 窗口阈值频控。
+     * <p>
+     * 返回本人视角全量照片（PUBLIC 全部 + 本人 PENDING/REJECTED），供管理入口回显。
+     * 写路径失效公共缓存（PUBLIC 直发时详情/列表照片已变化，见 {@link #invalidateDetailPublic}）。
+     */
+    @Transactional
+    public List<VenuePhotoResponse> addVenuePhotos(Long userId, Long venueId, List<String> urls) {
+        Venue venue = venueLookupService.findById(venueId);
+        if (urls == null || urls.isEmpty()) {
+            throw new BusinessException(1001, "请至少选择一张照片");
+        }
+        if (urls.size() > MAX_PHOTOS_PER_UPLOAD) {
+            throw new BusinessException(1001, "单次最多上传 " + MAX_PHOTOS_PER_UPLOAD + " 张照片");
+        }
+        boolean canManage = computeCanManage(venue);
+        // UGC 频控：仅普通用户受控（管理方直发可信）；超阈值幂等忽略（同 FavoriteService toggle 频控语义）
+        if (!canManage && isUploadLimited(userId, venueId)) {
+            throw new BusinessException(1003, "上传太频繁，请稍后再试");
+        }
+        VenuePhotoStatus status = canManage ? VenuePhotoStatus.PUBLIC : VenuePhotoStatus.PENDING;
+        persistPhotosDirect(venueId, userId, urls, status);
+        if (status == VenuePhotoStatus.PUBLIC) {
+            // 公开照片变化：详情/列表公共缓存立即失效（key 为事务内已确定的 venueId，显式逐出）
+            evictVenueEntityCache(venueId);
+            invalidateDetailPublic(venueId);
+        }
+        return fetchVenuePhotos(venueId, userId);
+    }
+
+    /**
+     * 删除门店照片（软删；POST /venues/{id}/photos/{photoId}/remove）。
+     * 权限：上传者本人（仅可删自己的 PENDING/REJECTED，防删除他人公开贡献）或门店
+     * 管理方（canManage，门店负责人对门店相册有管理权，可删任意含 PUBLIC）或管理员。
+     * 写路径失效公共缓存（删除公开照片后详情/列表变化）。
+     */
+    @Transactional
+    public void removeVenuePhoto(Long userId, Long venueId, Long photoId) {
+        VenuePhoto photo = venuePhotoRepository.findByIdAndDeletedFalse(photoId)
+                .orElseThrow(() -> new BusinessException(1001, "照片不存在"));
+        if (!photo.getVenueId().equals(venueId)) {
+            throw new BusinessException(1001, "照片不属于该门店");
+        }
+        boolean canManage = computeCanManage(venueLookupService.findById(venueId));
+        boolean isOwnerOfNonPublic = photo.getCreatedBy().equals(userId)
+                && photo.getStatus() != VenuePhotoStatus.PUBLIC;
+        if (!canManage && !isOwnerOfNonPublic) {
+            throw new BusinessException(1003, "仅上传者或门店管理方可删除照片");
+        }
+        photo.setDeleted(true);
+        venuePhotoRepository.save(photo);
+        if (photo.getStatus() == VenuePhotoStatus.PUBLIC) {
+            evictVenueEntityCache(venueId);
+            invalidateDetailPublic(venueId);
+        }
+    }
+
+    // ─── 管理端照片审核（仅 ADMIN，仿 DancerService#listAdminPhotos/updatePhotoStatus） ───
+
+    /**
+     * 管理端门店照片审核列表（仅 ADMIN，含全部状态，按上传时间倒序——新照片优先审核）。
+     * status 可选过滤（缺省全部，管理员从「待审核」筛选进入待办）。
+     */
+    @Transactional(readOnly = true)
+    public Page<AdminVenuePhotoResponse> listAdminPhotos(VenuePhotoStatus status, int page, int size) {
+        Pageable pageable = PageRequest.of(Math.max(0, page), Math.min(Math.max(1, size), MAX_PAGE_SIZE));
+        Page<Object[]> rows = venuePhotoRepository.findAdminPage(status == null ? null : status.name(), pageable);
+        List<AdminVenuePhotoResponse> content = rows.getContent().stream()
+                .map(r -> new AdminVenuePhotoResponse(
+                        (Long) r[0], (String) r[1], VenuePhotoStatus.valueOf((String) r[2]),
+                        (Long) r[3], r[4] != null ? (String) r[4] : PHOTO_VENUE_GONE_NAME,
+                        (Long) r[5], r[6] != null ? (String) r[6] : PHOTO_UPLOADER_GONE_NAME,
+                        (LocalDateTime) r[7]))
+                .toList();
+        return new PageImpl<>(content, pageable, rows.getTotalElements());
+    }
+
+    /**
+     * 管理端门店照片审核（仅 ADMIN）：PENDING → PUBLIC（通过，公开）/ PENDING → REJECTED
+     * （驳回，reason 可选仅服务端审计日志——上传者本人在管理入口可见 REJECTED 状态后
+     * 自行删除重传，不新增站内信，见 AGENTS.md「门店照片域 · 审核」）。
+     * 已审核照片重复提交幂等返回；PENDING → PUBLIC 时失效详情/列表缓存（照片对外可见变化）。
+     */
+    @Transactional
+    public void updateVenuePhotoStatus(Long adminId, Long photoId, VenuePhotoStatus status, String reason) {
+        VenuePhoto photo = venuePhotoRepository.findByIdAndDeletedFalse(photoId)
+                .orElseThrow(() -> new BusinessException(1001, "照片不存在"));
+        if (photo.getStatus() == status) {
+            return; // 幂等：目标状态相同直接返回
+        }
+        if (photo.getStatus() != VenuePhotoStatus.PENDING) {
+            throw new BusinessException(1003, "仅待审核照片可审核");
+        }
+        photo.setStatus(status);
+        venuePhotoRepository.save(photo);
+        if (status == VenuePhotoStatus.PUBLIC) {
+            // 待审 → 公开：照片对外可见变化，详情/列表公共缓存立即失效
+            // （key 依赖事务内查询结果，显式 CacheManager.evict 而非 @CacheEvict）
+            evictVenueEntityCache(photo.getVenueId());
+            invalidateDetailPublic(photo.getVenueId());
+        }
+        log.info("管理员 {} 审核门店照片 {} → {}（门店 {}）{}", adminId, photoId, status,
+                photo.getVenueId(), reason == null || reason.isBlank() ? "" : "，说明：" + TextSanitizer.sanitize(reason, 200));
+    }
+
+    /** 场所实体缓存显式逐出（照片写方法共用；key 依赖查询结果，见 VenueClaimService 同款先例） */
+    private void evictVenueEntityCache(Long venueId) {
+        // 全限定类型名：避免与频控字段的 caffeine Cache import 简名冲突
+        org.springframework.cache.Cache cache = cacheManager.getCache(CacheConfig.CACHE_VENUE);
+        if (cache != null) {
+            cache.evict(venueId);
+        }
+    }
+
+    // ─── 照片读取（批量公开加载 / 管理入口本人视角） ────────────────────────────────
+
+    /**
+     * 批量加载门店公开照片（PUBLIC，按 sortOrder 升序），返回 venueId → URL 列表。
+     * 列表/详情/收藏消费统一入口：一次 IN 查询覆盖整页门店（同徽标/浏览量批量模式），
+     * 规避 N+1。空集合返回空 Map（调用方 getOrDefault 兜底）。
+     */
+    public Map<Long, List<String>> loadPublicPhotosByVenueIds(List<Long> venueIds) {
+        if (venueIds == null || venueIds.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        List<Object[]> rows = venuePhotoRepository.findPublicUrlsByVenueIds(venueIds);
+        Map<Long, List<String>> grouped = new java.util.HashMap<>();
+        for (Object[] row : rows) {
+            Long venueId = (Long) row[0];
+            grouped.computeIfAbsent(venueId, k -> new ArrayList<>()).add((String) row[1]);
+        }
+        return grouped;
+    }
+
+    /**
+     * 门店照片列表（本人视角回显，GET /venues/{id}/photos，登录可选）：
+     * PUBLIC 全部 + 本人（或管理方）的 PENDING/REJECTED——普通用户看不到他人的
+     * 待审/驳回照片。管理入口（venue-create 编辑模式照片区）据此回显状态与删除。
+     */
+    @Transactional(readOnly = true)
+    public List<VenuePhotoResponse> listVenuePhotos(Long venueId) {
+        return fetchVenuePhotos(venueId, UserContext.getCurrentUserId());
+    }
+
+    /** 管理入口照片回显（本人视角可见性）：PUBLIC 全部 + 本人（或管理方/管理员）的
+     * PENDING/REJECTED——普通用户看不到他人的待审/驳回照片。按 sortOrder 升序。
+     */
+    public List<VenuePhotoResponse> fetchVenuePhotos(Long venueId, Long userId) {
+        boolean canManage = computeCanManage(venueLookupService.findById(venueId));
+        return venuePhotoRepository.findByVenueIdAndDeletedFalseOrderBySortOrderAscIdAsc(venueId).stream()
+                .filter(p -> p.getStatus() == VenuePhotoStatus.PUBLIC
+                        || canManage
+                        || (userId != null && p.getCreatedBy().equals(userId)))
+                .map(p -> new VenuePhotoResponse(p.getId(), p.getUrl(), p.getStatus()))
+                .toList();
+    }
+
+    /**
+     * 照片直插（校验 + 落库，上传/创建共用）：URL 逐个过 ImageContentValidator
+     * （08-12 安全约定：图片 URL 落库字段必须挂载内容级校验，防外部 URL 绕过存储桶
+     * 防线）；sortOrder 从当前最大 +1 追加，维持上传序。status 由调用方按写者身份分派。
+     */
+    private void persistPhotosDirect(Long venueId, Long userId, List<String> urls, VenuePhotoStatus status) {
+        int nextOrder = venuePhotoRepository.findMaxSortOrder(venueId) + 1;
+        for (String raw : urls) {
+            String clean = TextSanitizer.sanitize(raw, 500);
+            if (clean.isEmpty() || !clean.startsWith("http")) {
+                throw new BusinessException(1001, "照片地址不合法");
+            }
+            imageValidator.validate(clean);
+            VenuePhoto photo = new VenuePhoto();
+            photo.setVenueId(venueId);
+            photo.setUrl(clean);
+            photo.setStatus(status);
+            photo.setCreatedBy(userId);
+            photo.setSortOrder(nextOrder++);
+            venuePhotoRepository.save(photo);
+        }
+    }
+
+    /**
+     * UGC 上传频控判定（调用即计数）：窗口内已达阈值返回 true（本次拒绝）；
+     * 否则计数 +1 返回 false。key = user:venue（同一用户对同一门店的上传行为）。
+     * 仅普通用户路径调用（管理方直发不受控）。
+     */
+    private boolean isUploadLimited(Long userId, Long venueId) {
+        String key = userId + ":" + venueId;
+        Integer count = venuePhotoUploadLimiter.getIfPresent(key);
+        if (count != null && count >= UPLOAD_RATE_LIMIT_PER_WINDOW) {
+            log.debug("venue photo upload 频控拒绝: userId={}, venueId={}", userId, venueId);
+            return true;
+        }
+        venuePhotoUploadLimiter.put(key, (count != null ? count : 0) + 1);
+        return false;
     }
 
     /**
@@ -351,7 +620,9 @@ public class VenueService {
         // 累计浏览量（全量历史口径，单店 COUNT 命中 (venue_id, view_date) 索引，毫秒级）：
         // viewCount 是 VenueResponse 事实字段，详情基础响应同样传真实值（见 Mapper 四参重载 javadoc）
         long viewCount = venueViewRepository.countByVenueId(id);
-        VenueResponse base = venueResponseMapper.toResponse(venue, topReactions, false, viewCount);
+        // 2026-08-20 门店照片域：详情基础响应照片改读独立表 PUBLIC（JSON 列废弃）
+        List<String> photos = loadPublicPhotosByVenueIds(List.of(id)).getOrDefault(id, List.of());
+        VenueResponse base = venueResponseMapper.toResponse(venue, topReactions, false, viewCount, photos);
         return new VenueDetailPublic(base,
                 venueStatusLogRepository.findLatestStatusChangeTime(id),
                 venue.getClaimedBy() != null);
@@ -450,10 +721,13 @@ public class VenueService {
                         .collect(Collectors.toMap(
                                 row -> (Long) row[0],
                                 row -> ((Number) row[1]).longValue()));
+        // 批量公开照片（2026-08-20 门店照片域：一次 IN 覆盖整页，规避 N+1，同徽标/浏览量批量模式）
+        Map<Long, List<String>> photosByVenue = loadPublicPhotosByVenueIds(venueIds);
         return result.map(v -> venueResponseMapper.toResponse(
                 v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
                 hotVenueIds.contains(v.getId()),
-                viewCounts.getOrDefault(v.getId(), 0L)));
+                viewCounts.getOrDefault(v.getId(), 0L),
+                photosByVenue.getOrDefault(v.getId(), List.of())));
     }
 
     /**

@@ -25,8 +25,12 @@ import java.time.LocalDateTime;
  *       判定统一判 {@code expiresAt > now()}）；</li>
  *   <li>{@code adminAction}：管理端处置标记（ADOPTED/REMOVED），null = 活跃信号。</li>
  * </ul>
- * 联合唯一约束 (userId, venueId)：同一用户对同一场所只保留一条活跃报告，
- * 再次报告为 upsert（覆盖更新 type/occurredAt/note，刷新 createdAt + expiresAt）。
+ * 2026-08-20 追加式模型（V34）：<b>每次上报 = 一条新记录</b>（无活跃报告时 INSERT
+ * 新行，历史多条）；同一用户对同一门店<b>同时至多一条活跃报告</b>（并发约束由应用层
+ * pg_advisory_xact_lock 串行化保证，见 StatusReportService.submitReport）——「补充
+ * 详情」= 更新该活跃行（不产生新记录），已被采纳/撤销/已过期的记录不再被恢复，
+ * 用户可再次上报产生新行。旧 upsert 模型（UNIQUE(user_id, venue_id) 覆盖更新/恢复
+ * 软删）已废弃。
  */
 @Getter
 @Setter
@@ -35,8 +39,6 @@ import java.time.LocalDateTime;
         @Index(name = "qwt_idx_status_reports_venue_created", columnList = "venueId, createdAt"),
         @Index(name = "qwt_idx_status_reports_venue_expires", columnList = "venueId, expiresAt"),
         @Index(name = "qwt_idx_status_reports_user", columnList = "userId")
-}, uniqueConstraints = {
-        @UniqueConstraint(name = "qwt_uk_status_report_user_venue", columnNames = {"userId", "venueId"})
 })
 public class VenueStatusReport extends BaseEntity {
 
@@ -68,7 +70,8 @@ public class VenueStatusReport extends BaseEntity {
     /**
      * 管理端处置标记（2026-08-11 新增，可空）：null = 活跃信号；ADOPTED = 已采纳
      * （公告区保留展示至 TTL 过期，带"已核实"标记）；REMOVED = 已移除（公开视图
-     * 即时消失）。用户重新上报（upsert 恢复软删记录）时重置为 null。
+     * 即时消失）。处置后该记录 soft delete（V34 追加式模型），用户再次上报 =
+     * 新记录（本条不再被恢复）。
      */
     @Enumerated(EnumType.STRING)
     @Column(length = 20)

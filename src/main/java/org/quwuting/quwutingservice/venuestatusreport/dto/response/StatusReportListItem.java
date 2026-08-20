@@ -18,6 +18,11 @@ import java.time.LocalDateTime;
  * 直接消费，禁止前端自行映射）。
  * 2026-08-12 新增 {@code expired}：TTL 过期只代表信号失效，不代表报告事实消失——
  * 过期记录仍展示并标注（与「我的上报记录」active 标注同一语义，见 AGENTS.md）。
+ * 2026-08-20 新增 {@code adopted}：管理端已采纳（admin_action='ADOPTED'）的记录
+ * <b>保留展示</b>（不再 soft delete，采纳 = 处置标记而非删除行）并带"已核实"标注
+ * （与公告区聚合 adopted 同一语义，根因见 AGENTS.md「门店突发事件列表」）；
+ * 已采纳记录不参与「活跃」判定（hasMyReport/热度/管理端队列均排除），用户侧重置
+ * 为「待报告」可再次上报（新记录）。被移除（REMOVED）的记录仍 soft delete 不展示。
  * <p>
  * 隐私：{@code reporterName} 为脱敏昵称（首字 + "**"，无昵称回退「舞友」），
  * 不暴露完整用户身份；{@code mine} 供前端高亮"我"的报告。
@@ -46,5 +51,8 @@ public record StatusReportListItem(
         boolean expired,
 
         /** 是否当前登录用户的上报（未登录恒为 false） */
-        boolean mine
+        boolean mine,
+
+        /** 是否已被管理端采纳（admin_action='ADOPTED'，记录保留展示带"已核实"标注；不参与活跃判定） */
+        boolean adopted
 ) {}

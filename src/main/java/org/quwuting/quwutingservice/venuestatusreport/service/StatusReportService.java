@@ -50,10 +50,16 @@ import java.util.Map;
  * 写操作即时失效热度缓存（{@link VenueHeatService#invalidate}），确保其他用户很快
  * 看到最新活跃报告数——与 TagInteractionService / FavoriteService 的显式失效模式一致。
  * <p>
- * Upsert 恢复模式：撤销（soft delete）后再次上报时，恢复已软删的记录（设 deleted=false、
- * 重置 adminAction=null、刷新 createdAt + expiresAt 续期 TTL），而非 INSERT 新行。
- * UNIQUE(userId, venueId) 约束使软删记录仍占用唯一槽位，INSERT 会冲突。此模式与
- * {@link org.quwuting.quwutingservice.favorite.service.FavoriteService#addFavorite} 一致。
+ * <b>追加式模型（2026-08-20，V34）</b>：每次上报 = 一条新记录（无活跃报告时
+ * INSERT 新行，历史多条；"我的上报记录"与「最近的突发事件」列表按行展示每次上报）。
+ * 同一用户对同一门店<b>同时至多一条活跃报告</b>——并发约束由<b>应用层
+ * pg_advisory_xact_lock(user_id, venue_id) 串行化</b>保证（2026-08-19 定则方案②；
+ * 曾尝试「活跃记录」维度的部分唯一索引，谓词含 now() 被 PG 拒绝——IMMUTABLE 限制，
+ * 2026-08-20 实证）——「补充详情」= 更新该活跃行（type/occurredAt/note + 续期 TTL，
+ * 不产生新记录）；已被管理员采纳/移除、用户撤销、或 TTL 过期的记录不再被恢复，
+ * 用户可再次上报产生新行（旧行保留为历史）。旧 upsert 模型（UNIQUE(user_id, venue_id)
+ * 覆盖更新 + 恢复软删记录）已废弃——正是它导致"同用户同门店只有一条记录不断更新"
+ * 与"管理员采纳后用户侧仍残留已报告态"（采纳只 soft delete，用户再次提交即恢复）。
  */
 @Slf4j
 @Service
@@ -78,9 +84,21 @@ public class StatusReportService {
     private final MessageService messageService;
 
     /**
-     * 提交或更新突发事件报告（upsert 语义）。
-     * 同一用户对同一场所只保留一条物理记录，再次报告覆盖更新（含换类型）。
-     * 撤销后再次上报 = 恢复软删记录（不 INSERT，避免 UNIQUE 约束冲突）。
+     * 提交突发事件报告（需登录；2026-08-20 追加式模型 V34 改造，替代旧 upsert 语义）。
+     * <p>
+     * 分支语义：
+     * <ul>
+     *   <li><b>已有活跃报告（未删未过期）→ 「补充详情」</b>：更新该活跃行
+     *       （type/occurredAt/note，含换类型），续期 TTL（经 renewReport 直写时间列），
+     *       <b>不产生新记录</b>——完善当前报告不构成新上报；</li>
+     *   <li><b>无活跃报告 → 「新上报」</b>：INSERT 新行（每次上报一条新记录，
+     *       历史多条；曾被采纳/移除/撤销或已过期的旧记录不再被恢复）。
+     *       并发首报竞态由 <b>pg_advisory_xact_lock(user_id, venue_id) 串行化 +
+     *       锁内重查</b>收口（2026-08-19 定则方案②；部分唯一索引方案被 PG 拒绝——
+     *       谓词含 now() 非 IMMUTABLE，2026-08-20 实证）。</li>
+     * </ul>
+     * 效果闭环：管理员采纳后该条 soft delete → 用户侧 hasMyReport 归零 → 报告页
+     * 重置为「待报告」，可再次上报（新记录）；补充/撤销/采纳均按行留痕。
      * <p>
      * 2026-08-11 泛化守卫（状态类 vs 事件类，与前端报告操作状态机同源语义）：
      * <ul>
@@ -93,7 +111,9 @@ public class StatusReportService {
      *       约束（非营业门店同样可能突发检查/清场）。</li>
      * </ul>
      * SITUATION_UNCLEAR（情况不明）信息量最低、噪音高危：提交必须携带补充说明
-     * （业务错误 1011）。限频检查置于守卫之后——无效请求快速失败，不消耗限频额度。
+     * （业务错误 1011）。<b>限频</b>仅作用于「新上报」分支（无活跃记录时——补充已有
+     * 报告属完善行为不限频，同旧语义）；守卫置于限频之前——无效请求快速失败，
+     * 不消耗限频额度。
      */
     @Transactional
     public ActiveReportSummary submitReport(Long venueId, SubmitReportRequest req) {
@@ -118,39 +138,49 @@ public class StatusReportService {
             throw new BusinessException(1012, "该门店当前营业中，无需报告恢复营业");
         }
 
-        // 查找任何状态的已有记录（含软删），用于判断是更新、恢复还是新建
-        var existing = statusReportRepository.findByUserIdAndVenueId(userId, venueId);
+        LocalDateTime now = LocalDateTime.now();
+        // 查我的活跃报告（未删未过期，最新一条）——决定「补充（更新）」还是「新上报（INSERT）」
+        var active = statusReportRepository
+                .findFirstByUserIdAndVenueIdAndDeletedFalseAndAdminActionIsNullAndExpiresAtAfterOrderByCreatedAtDesc(
+                        userId, venueId, now);
 
-        if (existing.isPresent()) {
-            VenueStatusReport report = existing.get();
-            boolean wasDeleted = report.isDeleted();
-            // 恢复软删记录 = 新报告行为，需检查频率限制（更新活跃记录不限频）
-            if (wasDeleted) {
-                checkRateLimit(userId);
-            }
+        if (active.isPresent()) {
+            // 补充详情：更新活跃行（含换类型），不产生新记录
+            VenueStatusReport report = active.get();
             report.setType(type);
             report.setOccurredAt(req.occurredAt());
             report.setNote(TextSanitizer.sanitize(req.note()));
-            report.setDeleted(false);
-            // 用户重新上报（含此前被采纳/移除的软删记录）：重置处置标记为活跃
-            report.setAdminAction(null);
             statusReportRepository.save(report);
             // 续期 TTL：@CreationTimestamp 不可变属性，实体 setter 被静默忽略（HHH000502）——
             // 必须经 JPQL 批量更新直写 created_at + expires_at（见 renewReport 根因注记）
-            LocalDateTime now = LocalDateTime.now();
             statusReportRepository.renewReport(report.getId(), now,
                     now.plusHours(type.getTtlHours()));
         } else {
-            // 首次上报，检查频率限制
-            checkRateLimit(userId);
-            LocalDateTime now = LocalDateTime.now();
-            // 并发首报竞态收口：UNIQUE(user_id, venue_id) 索引 + 原子 upsert
-            // （2026-08-20 根因修复：替代「save + catch 23505 + 同事务继续查询」——
-            // PG 语句失败后事务中止（25P02），catch 后 getActiveReportSummary 必然
-            // HTTP 500；ON CONFLICT DO NOTHING 恒 1 次往返零异常，冲突 = 另一请求
-            // 已插入，幂等忽略本请求数据，与旧 catch 语义一致）
-            statusReportRepository.upsertReport(venueId, userId, type.name(), req.occurredAt(),
-                    TextSanitizer.sanitize(req.note()), now.plusHours(type.getTtlHours()), now);
+            // 新上报：并发首报串行化 + 锁内重查 + INSERT 新记录。
+            // V34 去掉全量 UNIQUE(user_id, venue_id) 后无 DB 唯一约束兜底并发；
+            // 「活跃记录」维度的部分唯一索引被 PG 拒绝（谓词含 now() 非 IMMUTABLE，
+            // 2026-08-20 实证）——按 2026-08-19 定则方案②改用 pg_advisory_xact_lock
+            // 事务级咨询锁：锁内重查（另一请求可能已插入活跃记录）→ 已有则走补充
+            // 更新（不产生新记录），无则限频 + 普通 INSERT（无唯一约束可冲突）。
+            statusReportRepository.lockUserVenue(userId, venueId);
+            var activeAfterLock = statusReportRepository
+                    .findFirstByUserIdAndVenueIdAndDeletedFalseAndAdminActionIsNullAndExpiresAtAfterOrderByCreatedAtDesc(
+                            userId, venueId, now);
+            if (activeAfterLock.isPresent()) {
+                // 锁内重查命中（并发请求已插入活跃记录）：按补充语义更新该活跃行
+                VenueStatusReport report = activeAfterLock.get();
+                report.setType(type);
+                report.setOccurredAt(req.occurredAt());
+                report.setNote(TextSanitizer.sanitize(req.note()));
+                statusReportRepository.save(report);
+                statusReportRepository.renewReport(report.getId(), now,
+                        now.plusHours(type.getTtlHours()));
+            } else {
+                // 确认无活跃记录：限频（每次新上报消耗额度）后 INSERT 新记录
+                checkRateLimit(userId);
+                statusReportRepository.insertReport(venueId, userId, type.name(), req.occurredAt(),
+                        TextSanitizer.sanitize(req.note()), now.plusHours(type.getTtlHours()), now);
+            }
         }
 
         // 活跃报告数是热度接口的输出之一：显式失效热度缓存（写路径逐出，refresh 周期仅兜底）
@@ -161,12 +191,16 @@ public class StatusReportService {
     /**
      * 撤销当前用户对某场所的报告（soft delete）。
      * 撤销不写 adminAction（撤销是用户主动收回，与管理端处置语义独立）。
+     * 2026-08-20（V34 追加式模型）：撤销作用于当前活跃报告（未删未过期，最新一条）
+     * ——撤销后该条不再被恢复（用户再次上报 = INSERT 新记录）；无活跃记录时无操作。
      */
     @Transactional
     public ActiveReportSummary cancelReport(Long venueId) {
         Long userId = UserContext.requireAuth();
 
-        statusReportRepository.findByUserIdAndVenueIdAndDeletedFalse(userId, venueId)
+        statusReportRepository
+                .findFirstByUserIdAndVenueIdAndDeletedFalseAndAdminActionIsNullAndExpiresAtAfterOrderByCreatedAtDesc(
+                        userId, venueId, LocalDateTime.now())
                 .ifPresent(report -> {
                     report.setDeleted(true);
                     statusReportRepository.save(report);
@@ -218,6 +252,9 @@ public class StatusReportService {
                     ReportType type = ReportType.valueOf(row.getType());
                     // 活跃判定全局口径：expires_at > now 为活跃，否则视为已过期（含边界相等）
                     boolean expired = !row.getExpiresat().isAfter(now);
+                    // 已采纳（ADOPTED）记录保留展示带"已核实"标注（2026-08-20 修正：
+                    // 采纳 = 处置标记而非删除行；active 判定由 admin_action IS NULL 排除）
+                    boolean adopted = AdminAction.ADOPTED.name().equals(row.getAdminaction());
                     return new StatusReportListItem(
                             row.getId(),
                             maskNickname(row.getNickname()),
@@ -226,23 +263,29 @@ public class StatusReportService {
                             type.getSeverity().getCode(),
                             row.getCreatedat(),
                             expired,
-                            currentUserId != null && currentUserId.equals(row.getUserid()));
+                            currentUserId != null && currentUserId.equals(row.getUserid()),
+                            adopted);
                 })
                 .toList();
     }
 
     /**
-     * 门店紧急公告区聚合（公开读，无需登录，2026-08-11 新增，2026-08-20 分窗参数化）。
+     * 门店紧急公告区聚合（公开读，无需登录，2026-08-11 新增，2026-08-20 分窗参数化，
+     * 2026-08-20 排序修正）。
      * <p>
      * 公告区展示 = 活跃信号 + 已采纳信号（带"已核实"标记）按类型聚簇；移除信号不展示。
-     * 返回按严重级降序（HIGH→MEDIUM→LOW→RECOVERY，恢复营业语义上最后呈现），
-     * 每类型一条摘要。不返回 note（审核安全约定"note 仅管理端可见"）。
+     * <b>排序 = 时间倒序（latestAt 降序，最新信号在前）为主，严重级为同时间次级排序</b>
+     * ——2026-08-20 用户实证修正：状态类信号（暂停/恢复营业）存在"相互覆盖"语义，
+     * 最新采纳的「恢复营业」代表门店当前事实，不得被旧的「已采纳暂停营业」（严重级
+     * 更高）压过（详情页公告条与公告页列表首条都因此错误显示暂停营业）；严重级改由
+     * 前端色点表达（色阶不随排序丢失）。每类型一条摘要。不返回 note（审核安全约定
+     * "note 仅管理端可见"）。
      * <p>
      * 时间窗口由 {@code includeExpired} 参数化（双消费方分窗，根因见
      * AGENTS.md「紧急公告区」）：
      * <ul>
      *   <li>false（默认）= 活跃视图：仅 TTL 窗口内信号——详情页单行公告条消费
-     *       （"当前紧急信号"语义，过时信号不得误导为当前紧急）；</li>
+     *       （"当前信号"语义，过时信号不得误导为当前紧急）；</li>
      *   <li>true = 历史视图：全部未撤销 + 已采纳记录（含已过期）——公告专属页
      *       「紧急公告」列表消费（"历史事实摘要"语义，时效由 latestAt 相对时间传达）。</li>
      * </ul>
@@ -258,7 +301,13 @@ public class StatusReportService {
                             type.getSeverity().getCode(), count, adopted, row.getLatestat());
                 })
                 .sorted((a, b) -> {
-                    // 严重级降序：HIGH(0) → MEDIUM(1) → LOW(2) → RECOVERY(3)
+                    // 2026-08-20 修正：时间倒序为主（最新信号在前——状态类信号相互覆盖，
+                    // 最新采纳的恢复营业是门店当前事实，不得被旧反向信号压过）；
+                    // 同时间（聚簇粒度罕见）退化为严重级降序兜底，色点仍表达紧急度
+                    int byTime = b.latestAt().compareTo(a.latestAt());
+                    if (byTime != 0) {
+                        return byTime;
+                    }
                     return Integer.compare(severityOrder(a.severity()), severityOrder(b.severity()));
                 })
                 .toList();
@@ -392,7 +441,8 @@ public class StatusReportService {
      * <p>
      * 移除 = 平台清理虚假/失效信号：soft delete + adminAction=REMOVED 后所有"活跃"
      * 查询（热度计数/公开列表/管理端列表/公告区聚合）立即过滤掉该报告——公开视图
-     * 即时消失，无需等 TTL 过期。移除后失效 venueHeat 缓存（活跃报告数是热度输出之一）。
+     * 即时消失，无需等 TTL 过期（与采纳 ADOPTED 保留展示的语义区分，2026-08-20 修正）。
+     * 移除后失效 venueHeat 缓存（活跃报告数是热度输出之一）。
      * <p>
      * 与用户自撤（{@link #cancelReport}）的差异：操作者是管理员而非上报者本人；
      * 与采纳（{@link #adoptReport}）的差异：移除 = 虚假/失效信号清理（无副作用），
@@ -403,8 +453,8 @@ public class StatusReportService {
         UserContext.requireAdmin();
         VenueStatusReport report = statusReportRepository.findById(id)
                 .orElseThrow(() -> new BusinessException(1008, "上报不存在"));
-        if (report.isDeleted()) {
-            return; // 幂等：已处置直接返回（不重复失效缓存）
+        if (report.getAdminAction() != null) {
+            return; // 幂等：已处置（采纳/移除）直接返回（不重复失效缓存）
         }
         report.setDeleted(true);
         report.setAdminAction(AdminAction.REMOVED);
@@ -433,14 +483,22 @@ public class StatusReportService {
      *   <li><b>处理结果站内信</b>——经 {@link #notifyAdopted} 通知上报者（匿名不通知，
      *       与积分同一匿名边界，见 {@link VenueFeedbackService}「处理结果站内信」约定）。</li>
      * </ol>
-     * 已处置（软删）或不存在幂等返回：不重复改状态/发分/发信。
+     * 已处置（admin_action 非空）或不存在幂等返回：不重复改状态/发分/发信。
+     * <p>
+     * <b>2026-08-20 修正（采纳 ≠ 删除行）</b>：采纳<b>不再 soft delete</b>——记录
+     * 保留展示（「最近的突发事件」明细带"已核实"标注，公告区聚合同源），仅置
+     * {@code admin_action=ADOPTED} 使所有"活跃"判定（hasMyReport/热度/管理端队列/
+     * 提交摘要）排除该记录：用户侧状态重置为「待报告」可再次上报（新记录），
+     * 但上报事实与处置结果不消失。根因：旧实现 soft delete 导致明细列表查不到
+     * （findRecentByVenue 只查 deleted=false），用户误以为记录被删除。
+     * 移除（{@link #removeReport}）语义不变：清理虚假信号仍 soft delete。
      */
     @Transactional
     public void adoptReport(Long id) {
         Long adminId = UserContext.requireAdmin();
         VenueStatusReport report = statusReportRepository.findById(id)
                 .orElseThrow(() -> new BusinessException(1008, "上报不存在"));
-        if (report.isDeleted()) {
+        if (report.getAdminAction() != null) {
             return; // 幂等：已处置（采纳/移除）直接返回
         }
         ReportType type = report.getType();
@@ -450,8 +508,8 @@ public class StatusReportService {
         } else if (type == ReportType.RESUMED) {
             venueService.reopenByReport(report.getVenueId(), adminId);
         }
-        // 2. 报告处置：软删 + 采纳标记（公告区保留展示至 TTL 过期，带"已核实"标记）
-        report.setDeleted(true);
+        // 2. 报告处置：仅打采纳标记，不 soft delete（记录保留展示，带"已核实"标注；
+        //    活跃判定已排除 admin_action 非空记录，见各活跃查询点）
         report.setAdminAction(AdminAction.ADOPTED);
         statusReportRepository.save(report);
         // 3. 积分奖励（同事务；匿名不发、流水幂等键兜底并发；情况不明不设奖励）

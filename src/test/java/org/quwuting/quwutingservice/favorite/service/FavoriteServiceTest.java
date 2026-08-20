@@ -13,6 +13,7 @@ import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
 import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
+import org.quwuting.quwutingservice.venue.service.VenueService;
 import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
 
@@ -60,6 +61,9 @@ class FavoriteServiceTest {
     private VenueHeatService venueHeatService;
     @Mock
     private VenueViewRepository venueViewRepository;
+    /** 门店公开照片批量加载（2026-08-20 门店照片域新增依赖） */
+    @Mock
+    private VenueService venueService;
 
     private FavoriteService service;
 
@@ -67,7 +71,7 @@ class FavoriteServiceTest {
     void setUp() {
         service = new FavoriteService(favoriteRepository, venueResponseMapper,
                 venueReactionService, venueLookupService, venueHeatService,
-                venueViewRepository);
+                venueViewRepository, venueService);
     }
 
     private static Venue venue(Long id) {
@@ -101,7 +105,9 @@ class FavoriteServiceTest {
         when(venueReactionService.batchGetBadges(anyList(), eq(42L), eq(ReactionWindow.DAYS_7)))
                 .thenReturn(Collections.emptyMap());
         when(venueLookupService.getHotVenueIds()).thenReturn(Set.of(1L));
-        when(venueResponseMapper.toResponse(any(Venue.class), anyList(), anyBoolean(), anyLong()))
+        // 门店照片域（2026-08-20）：无公开照片时返回空 Map（调用方 getOrDefault 兜底）
+        when(venueService.loadPublicPhotosByVenueIds(anyList())).thenReturn(Collections.emptyMap());
+        when(venueResponseMapper.toResponse(any(Venue.class), anyList(), anyBoolean(), anyLong(), anyList()))
                 .thenAnswer(inv -> response(
                         ((Venue) inv.getArgument(0)).getId(), inv.getArgument(2)));
 
@@ -110,9 +116,9 @@ class FavoriteServiceTest {
         assertEquals(2, result.size());
         assertTrue(result.get(0).isHot(), "热门集合内的场所收藏列表必须展示热门标记");
         assertFalse(result.get(1).isHot(), "非热门集合内的场所不得误标热门");
-        // 防回归：必须走四参重载（双参重载 isHot 恒 false 是本缺陷根因）
-        verify(venueResponseMapper).toResponse(hot, Collections.emptyList(), true, 0L);
-        verify(venueResponseMapper).toResponse(cold, Collections.emptyList(), false, 0L);
+        // 防回归：必须走五参重载（双参重载 isHot 恒 false 是本缺陷根因；五参携带照片列表）
+        verify(venueResponseMapper).toResponse(hot, Collections.emptyList(), true, 0L, Collections.emptyList());
+        verify(venueResponseMapper).toResponse(cold, Collections.emptyList(), false, 0L, Collections.emptyList());
     }
 
     /** 收藏列表为空时短路返回，不触发热门集合查询（无意义往返） */

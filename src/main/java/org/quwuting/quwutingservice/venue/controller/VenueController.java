@@ -4,11 +4,13 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.venue.dto.request.AddVenuePhotosRequest;
 import org.quwuting.quwutingservice.venue.dto.request.CreateVenueRequest;
 import org.quwuting.quwutingservice.venue.dto.request.RecordViewRequest;
 import org.quwuting.quwutingservice.venue.dto.response.CityStatsResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueDetailResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueHeatResponse;
+import org.quwuting.quwutingservice.venue.dto.response.VenuePhotoResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.enums.ViewSource;
@@ -49,6 +51,41 @@ public class VenueController {
             @Valid @RequestBody CreateVenueRequest request
     ) {
         return ApiResponse.ok(venueService.updateVenue(id, request));
+    }
+
+    /**
+     * 门店照片列表（本人视角回显，登录可选）：PUBLIC 全部 + 本人待审/驳回——
+     * 管理入口（编辑模式照片区）据此回显状态与删除，见 VenueService#listVenuePhotos。
+     * GET /venues/{id}/photos
+     */
+    @GetMapping("/{id}/photos")
+    public ApiResponse<List<VenuePhotoResponse>> listPhotos(@PathVariable Long id) {
+        return ApiResponse.ok(venueService.listVenuePhotos(id));
+    }
+
+    /**
+     * 上传门店照片（需登录——UGC 通道，2026-08-20 门店照片域）。
+     * 管理方（认领人/管理员）上传直发 PUBLIC；普通用户上传 PENDING 先审后发
+     * （管理端审核，见 /admin/venues/photos）。返回本人视角全量照片（含待审/驳回）。
+     * POST /venues/{id}/photos
+     */
+    @PostMapping("/{id}/photos")
+    public ApiResponse<List<VenuePhotoResponse>> addPhotos(@PathVariable Long id,
+                                                           @Valid @RequestBody AddVenuePhotosRequest request) {
+        Long userId = UserContext.requireAuth();
+        return ApiResponse.ok(venueService.addVenuePhotos(userId, id, request.urls()));
+    }
+
+    /**
+     * 删除门店照片（软删）：上传者本人（仅自己未公开照片）/ 门店管理方 / 管理员。
+     * POST /venues/{id}/photos/{photoId}/remove
+     * （2026-08-19 HTTP 方法约定：动作端点走 POST 路径，同 dancer 照片删除先例）
+     */
+    @PostMapping("/{id}/photos/{photoId}/remove")
+    public ApiResponse<Void> removePhoto(@PathVariable Long id, @PathVariable Long photoId) {
+        Long userId = UserContext.requireAuth();
+        venueService.removeVenuePhoto(userId, id, photoId);
+        return ApiResponse.ok(null);
     }
 
     /**

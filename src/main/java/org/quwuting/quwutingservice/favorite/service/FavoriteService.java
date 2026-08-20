@@ -12,6 +12,7 @@ import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
 import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
+import org.quwuting.quwutingservice.venue.service.VenueService;
 import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
@@ -37,6 +38,8 @@ public class FavoriteService {
     private final VenueHeatService venueHeatService;
     /** 浏览记录（收藏列表响应组装累计浏览量 viewCount 用，2026-08-12 新增） */
     private final VenueViewRepository venueViewRepository;
+    /** 门店公开照片批量加载（2026-08-20 门店照片域：收藏卡片轮播照片数据源；无循环依赖——VenueService 不依赖本模块） */
+    private final VenueService venueService;
 
     // ── 收藏/取消收藏写操作频控（2026-08-13 防刷） ──────────────────────────
     // 根因（用户反馈："频繁/恶意点击取消收藏、收藏，统计图怎么表现才合理"）：
@@ -112,11 +115,14 @@ public class FavoriteService {
                         .collect(Collectors.toMap(
                                 row -> (Long) row[0],
                                 row -> ((Number) row[1]).longValue()));
+        // 批量公开照片（2026-08-20 门店照片域：一次 IN 覆盖整页，同列表页批量模式）
+        Map<Long, List<String>> photosByVenue = venueService.loadPublicPhotosByVenueIds(venueIds);
         return venues.stream()
                 .map(v -> venueResponseMapper.toResponse(
                         v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
                         hotVenueIds.contains(v.getId()),
-                        viewCounts.getOrDefault(v.getId(), 0L)))
+                        viewCounts.getOrDefault(v.getId(), 0L),
+                        photosByVenue.getOrDefault(v.getId(), List.of())))
                 .toList();
     }
 

@@ -467,9 +467,11 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
               (SELECT MAX(l.created_at) FROM qwt_venue_status_logs l
                 WHERE l.venue_id = :venueId) AS lateststatuslogtime,
               (SELECT COUNT(*) FROM qwt_venue_status_reports r
-                WHERE r.venue_id = :venueId AND r.deleted = false AND r.expires_at > :now) AS reportcount,
+                WHERE r.venue_id = :venueId AND r.deleted = false
+                  AND r.admin_action IS NULL AND r.expires_at > :now) AS reportcount,
               (SELECT MAX(r.created_at) FROM qwt_venue_status_reports r
-                WHERE r.venue_id = :venueId AND r.deleted = false AND r.expires_at > :now) AS latestreporttime,
+                WHERE r.venue_id = :venueId AND r.deleted = false
+                  AND r.admin_action IS NULL AND r.expires_at > :now) AS latestreporttime,
               (SELECT COALESCE(SUM(-pt.delta), 0) FROM qwt_points_transactions pt
                 WHERE pt.target_type = 'VENUE' AND pt.target_id = :venueId AND pt.delta < 0) AS pointsreceivedtotal,
               (SELECT COALESCE(SUM(-pt.delta), 0) FROM qwt_points_transactions pt

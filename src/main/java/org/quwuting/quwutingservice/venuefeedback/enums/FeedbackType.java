@@ -11,25 +11,30 @@ package org.quwuting.quwutingservice.venuefeedback.enums;
  * <p>
  * 与 venuestatusreport（实时 4h TTL 众包信号）的边界保持：本模块是异步管理员
  * 审核流程，实时信号职责不在此承担（见 AGENTS.md「场所状态上报」章节）。
+ * <p>
+ * <b>状态类类型下线（2026-08-20）</b>：SUSPENDED/CLOSED_DOWN/RESUMED 的<b>提交入口</b>
+ * 已随前端反馈面板白名单收敛而关闭——「报告暂停营业/报告恢复营业」统一走
+ * venuestatusreport 实时信号通道（ReportType.SUSPENDED/RESUMED，提交即回显、
+ * 采纳联动门店状态）。本枚举保留三类值仅用于<b>历史数据兼容</b>（「我的上报记录」/
+ * 管理端列表仍能识别与处置）；处置兜底：SUSPENDED/RESUMED 采纳时联动门店营业状态
+ * （{@code VenueFeedbackService.adoptReport}，与 status-reports 采纳同一联动通道），
+ * CLOSED_DOWN 停业认定较重，由管理员经 updateVenue 手动执行。新增状态类上报场景
+ * 禁止回到本通道（见 AGENTS.md「报告操作状态机」根因链）。
  */
 public enum FeedbackType {
+    /** 门店已关门/停业（状态类，2026-08-20 提交入口下线，仅历史数据兼容；停业认定由管理员经 updateVenue 手动执行） */
     CLOSED_DOWN("门店已关门/停业"),
+    /** 门店暂停营业（状态类，2026-08-20 提交入口下线，仅历史数据兼容；采纳联动 markSuspendedByReport） */
     SUSPENDED("门店暂停营业"),
     /**
-     * 门店已恢复营业（2026-08-10 新增，与 CLOSED_DOWN/SUSPENDED 相反的纠正信号；
-     * 2026-08-11 触发场景泛化）：与 CLOSED_DOWN/SUSPENDED 相反的纠正信号。
+     * 门店已恢复营业（2026-08-10 新增；2026-08-20 提交入口下线，仅历史数据兼容）。
      * <p>
-     * 触发场景 = 门店存储态**声称非营业**（RENOVATING/CLOSED/SUSPENDED/CEASED——
-     * 2026-08-11 根因修复：原文档只写「已停业」CEASED，实现亦只对 CEASED 翻转，
-     * 遗漏其余非营业态，暂停营业门店 chip 仍显示「报告暂停营业」）时，用户现场确认
-     * 已重新开业——详情页报告操作 chip 翻转为「报告恢复营业」，提交本类型走异步
-     * 管理员审核，管理员核实后可经 updateVenue 将状态改回 OPEN（恢复通道 = 既有
-     * updateVenue，与暂停报采纳 markSuspendedByReport 对称）。
-     * <p>
-     * 为什么走 venuefeedback 而非 venuestatusreport：纠正的是**存储态**
-     * （非营业→OPEN），属异步审核职责；4h TTL 实时信号层对"已声称非营业"门店无
-     * 决策意义（venuestatusreport.submitReport 已按同一语义拒绝非营业门店的暂停报，
-     * 见 StatusReportService；详情见前端 AGENTS.md「报告操作状态机」）。
+     * 历史语义：门店存储态**声称非营业**（RENOVATING/CLOSED/SUSPENDED/CEASED）时
+     * 用户提交本类型纠正存储态（非营业→OPEN）。2026-08-20 起该场景统一走
+     * venuestatusreport 实时信号通道（ReportType.RESUMED，采纳联动 reopenByReport）——
+     * 根因：旧异步通道与公告页「最近的突发事件」（status-reports 表）互不相通，
+     * 提交后无回显、采纳不改门店状态（见 AGENTS.md「报告操作状态机」根因链）；
+     * 本类型采纳时仍做 reopenByReport 兜底联动（防御历史数据与 API 直调）。
      */
     RESUMED("门店已恢复营业"),
     INACCURATE("信息有误"),

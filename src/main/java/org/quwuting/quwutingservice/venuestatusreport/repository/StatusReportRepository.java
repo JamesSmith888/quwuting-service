@@ -16,48 +16,43 @@ import java.util.Optional;
 
 public interface StatusReportRepository extends JpaRepository<VenueStatusReport, Long> {
 
-    /** 查找用户对某场所的活跃报告（未逻辑删除） */
-    Optional<VenueStatusReport> findByUserIdAndVenueIdAndDeletedFalse(Long userId, Long venueId);
-
     /**
-     * 查找用户对某场所的报告（含逻辑删除的记录）。
-     * 用于 upsert 恢复逻辑：撤销（soft delete）后再次上报时，
-     * 需找到已软删的记录并恢复，而非 INSERT 新行（UNIQUE 约束会冲突）。
-     * 与 FavoriteService.findByUserIdAndVenueId 同模式。
+     * 查找用户对某场所的<b>活跃报告</b>（未逻辑删除、<b>未处置（admin_action IS
+     * NULL）</b>且未过期，最新一条）。
+     * 2026-08-20 追加式模型（V34）：同一用户同一门店同时至多一条活跃报告（并发
+     * 约束由应用层 pg_advisory_xact_lock 保证）；本查询供「补充详情」定位（有活跃 =
+     * 更新该行，不产生新记录）与「撤销」定位。
+     * 2026-08-20 修正：活跃判定排除已处置记录（admin_action IS NULL）——被采纳
+     * （ADOPTED）的记录保留展示但不再是活跃报告，用户侧重置「待报告」可再次上报
+     * （新记录），补充/撤销也不得作用于已采纳记录。
      */
-    Optional<VenueStatusReport> findByUserIdAndVenueId(Long userId, Long venueId);
+    Optional<VenueStatusReport> findFirstByUserIdAndVenueIdAndDeletedFalseAndAdminActionIsNullAndExpiresAtAfterOrderByCreatedAtDesc(
+            Long userId, Long venueId, LocalDateTime now);
 
     /**
-     * 首次上报的<b>确定性原子写入</b>（2026-08-20 根因修复：替代
-     * 「save + catch 23505 + 同事务继续查询」的不可靠并发幂等）。
+     * 新上报的<b>确定性写入</b>（2026-08-20 追加式模型 V34）。
      * <p>
-     * 根因（与 {@code VenueFeedbackService.createFeedback} 同源，详见 15-governance
-     * 错误表）：PostgreSQL 中语句失败（SQLState 23505）后整个事务进入 aborted 状态
-     * （25P02），catch 内 {@code entityManager.clear()} 只清理 session、无法恢复已中止
-     * 的 DB 事务——catch 后同一事务内的 {@code getActiveReportSummary} 必然抛
-     * 「current transaction is aborted」→ JpaSystemException → HTTP 500。
-     * <p>
-     * 本写法恒 1 次 DB 往返、零异常：并发首报竞争同一
-     * {@code qwt_uk_status_report_user_venue}（UNIQUE(user_id, venue_id)，唯一索引
-     * 用列清单推断）时 DO NOTHING，语义与旧 catch 分支一致（冲突 = 另一请求已插入，
-     * 幂等忽略本请求数据），随后调用方照常失效热度缓存并组装活跃摘要。
+     * 2026-08-20 演进：初版基于全量 UNIQUE(user_id, venue_id) 的 upsert 语义（ON
+     * CONFLICT 推断），后计划升级为「活跃记录」维度的部分唯一索引
+     * （WHERE deleted = false AND expires_at > now()）——<b>被 PG 拒绝</b>：部分索引
+     * 谓词必须 IMMUTABLE，now() 是 STABLE（"functions in index predicate must be
+     * marked IMMUTABLE"）。最终方案：并发首报由 <b>应用层 pg_advisory_xact_lock
+     * (user_id, venue_id) 串行化</b>保证（2026-08-19 定则方案②，见
+     * {@code StatusReportService.submitReport}）——本方法为<b>普通 INSERT</b>
+     * （无唯一约束可冲突，无 ON CONFLICT 子句）。
      * <p>
      * <b>enum 参数必须传 name() 字符串（2026-08-20 根因修复）</b>：原生 SQL 绑定
-     * enum 无 JPA 元数据 → 默认 {@code EnumType.ORDINAL}（{@code EnumJavaType.sqlType}
-     * 回退分支）→ {@code type} 列落库序号而非类型名，而实体派生查询按
-     * {@code @Enumerated(STRING)} name() 匹配——两侧不一致（与
-     * {@code VenueFeedbackRepository.upsertPending*} 同源，详见 15-governance 错误表）。
+     * enum 无 JPA 元数据 → 默认 {@code EnumType.ORDINAL} 落库序号而非类型名，实体
+     * 派生查询按 {@code @Enumerated(STRING)} name() 匹配 → 两侧不一致（同
+     * {@code VenueFeedbackRepository.upsertPending*}，详见 15-governance 错误表）。
      * 调用方传 {@code type.name()}。
-     *
-     * @return 受影响行数（1 = 新插入；0 = 并发竞态已有记录，幂等跳过）
      */
     @Modifying
     @Query(value = "INSERT INTO qwt_venue_status_reports " +
                    "(venue_id, user_id, type, occurred_at, note, expires_at, admin_action, created_at, updated_at, deleted) " +
-                   "VALUES (:venueId, :userId, :type, :occurredAt, :note, :expiresAt, NULL, :now, :now, false) " +
-                   "ON CONFLICT (user_id, venue_id) DO NOTHING",
+                   "VALUES (:venueId, :userId, :type, :occurredAt, :note, :expiresAt, NULL, :now, :now, false)",
            nativeQuery = true)
-    int upsertReport(@Param("venueId") Long venueId,
+    int insertReport(@Param("venueId") Long venueId,
                      @Param("userId") Long userId,
                      @Param("type") String type,
                      @Param("occurredAt") LocalDateTime occurredAt,
@@ -66,13 +61,35 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
                      @Param("now") LocalDateTime now);
 
     /**
+     * 事务级咨询锁：按 (userId, venueId) 维度串行化「新上报」check-then-act
+     * （2026-08-20 追加式模型引入，2026-08-19 定则方案②）。
+     * <p>
+     * 背景：V34 去掉全量 UNIQUE(user_id, venue_id) 后无 DB 唯一约束兜底并发首报；
+     * 「活跃记录」维度的部分唯一索引被 PG 拒绝（谓词含 now() 非 IMMUTABLE）。
+     * 本锁保证同一用户对同一门店的并发上报串行执行：锁内重查「我的活跃报告」，
+     * 已存在 → 走补充更新（不产生新记录）；不存在 → INSERT 新行。锁随事务提交/
+     * 回滚自动释放（pg_advisory_xact_lock 语义），无残留。
+     * <p>
+     * 实现注意：两参 pg_advisory_xact_lock(int, int) 参数为 32 位 int——id 超 2^31
+     * 截断仅导致不同 id 对碰撞（过度串行化，不影响正确性），故用单参 bigint 版
+     * 组合键（userId * 1000003 + venueId，乘法让相邻 id 对尽量分散到不同锁）。
+     * 返回 List 仅为让 Spring Data 走 getResultList 执行（void 返回会走
+     * executeUpdate，对 SELECT 依赖驱动行为，不够稳）。
+     */
+    @Query(value = "SELECT pg_advisory_xact_lock(CAST(:uid AS bigint) * 1000003 + CAST(:vid AS bigint))",
+           nativeQuery = true)
+    List<Object> lockUserVenue(@Param("uid") Long userId, @Param("vid") Long venueId);
+
+    /**
      * 活跃报告聚合：合并 COUNT + MAX(createdAt) 为 1 次往返。
-     * 活跃 = 未删除且 expiresAt > now（TTL 唯一事实源 = expires_at 列，2026-08-11
-     * 由 created_at >= since 迁移，now 由 Service 层传入）。
+     * 活跃 = 未删除、<b>未处置（admin_action IS NULL）</b>且 expiresAt > now
+     * （TTL 唯一事实源 = expires_at 列，2026-08-11 由 created_at >= since 迁移，
+     * now 由 Service 层传入；2026-08-20 排除已处置——被采纳记录不再是活跃信号）。
      */
     @Query("SELECT COUNT(r) as activeCount, MAX(r.createdAt) as latestTime " +
            "FROM VenueStatusReport r " +
-           "WHERE r.venueId = :venueId AND r.deleted = false AND r.expiresAt > :now")
+           "WHERE r.venueId = :venueId AND r.deleted = false AND r.adminAction IS NULL " +
+           "  AND r.expiresAt > :now")
     ActiveReportStats countActiveAndLatestTime(@Param("venueId") Long venueId,
                                                 @Param("now") LocalDateTime now);
 
@@ -143,8 +160,9 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
      * {@code .limit()} 施加（防无限增长，见 {@code StatusReportService#RECENT_REPORT_LIST_LIMIT}）。
      * 详见 AGENTS.md「门店突发事件列表」。
      * <p>
-     * 已撤销/已处置（deleted=true）记录不进历史明细（撤销是用户主动收回，处置含
-     * 采纳/移除均属内部语义，公告区聚合单独消费，见 {@link #findAnnouncementsByVenue}）。
+     * 已撤销（deleted=true）与已移除（REMOVED，deleted=true）记录不进历史明细；
+     * <b>已采纳（ADOPTED）记录保留展示</b>（2026-08-20 修正：采纳 = 处置标记而非
+     * 删除行，记录作为"已核实"事实继续可见，Service 层逐行标注 adopted）。
      * 取报告者脱敏昵称需要 JOIN qwt_users（LEFT JOIN：用户被删等异常态回退匿名，
      * 不因关联缺失丢行）。
      * <p>
@@ -154,14 +172,14 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
      */
     @Query(value = "SELECT r.id AS id, r.venue_id AS venueid, r.user_id AS userid, " +
                    "       r.type AS type, r.created_at AS createdat, r.expires_at AS expiresat, " +
-                   "       u.nickname AS nickname " +
+                   "       r.admin_action AS adminaction, u.nickname AS nickname " +
                    "FROM qwt_venue_status_reports r " +
                    "LEFT JOIN qwt_users u ON u.id = r.user_id " +
                    "WHERE r.venue_id = :venueId AND r.deleted = false " +
                    "ORDER BY r.created_at DESC", nativeQuery = true)
     List<VenueReportRow> findRecentByVenue(@Param("venueId") Long venueId);
 
-    /** 投影接口：门店最近突发事件行（含报告者昵称与过期时刻，供 GET /venues/{id}/status-reports 使用） */
+    /** 投影接口：门店最近突发事件行（含报告者昵称、过期时刻与处置标记，供 GET /venues/{id}/status-reports 使用） */
     interface VenueReportRow {
         Long getId();
         Long getVenueid();
@@ -169,15 +187,18 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
         String getType();
         LocalDateTime getCreatedat();
         LocalDateTime getExpiresat();
+        String getAdminaction();
         String getNickname();
     }
 
     /**
      * 管理端活跃突发事件列表（需 ADMIN，跨场所全量）。
      * <p>
-     * 范围：TTL 窗口内（expires_at > now）全部未处置（deleted=false）报告，按时间
-     * 倒序分页——管理端「上报管理 → 突发事件」tab 数据源。窗口判定由 Service 层传入
-     * now（TTL 唯一事实源 = expires_at 列，SQL 不自行定义时间窗）。
+     * 范围：TTL 窗口内（expires_at > now）全部<b>未处置</b>（deleted=false 且
+     * admin_action IS NULL）报告，按时间倒序分页——管理端「上报管理 → 突发事件」
+     * tab 数据源（处置后记录移出待办队列，2026-08-20 修正：ADOPTED 仅打标记不软删，
+     * 但不再算"待处置活跃"）。窗口判定由 Service 层传入 now（TTL 唯一事实源 =
+     * expires_at 列，SQL 不自行定义时间窗）。
      * <p>
      * 与公开列表 {@link #findRecentByVenue} 的差异：① 管理端上下文**不做昵称脱敏**
      * （返回真实昵称 + userId，管理员需识别上报者）；② 返回 {@code note}（补充说明，
@@ -195,11 +216,11 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
                    "FROM qwt_venue_status_reports r " +
                    "JOIN qwt_venues v ON v.id = r.venue_id " +
                    "LEFT JOIN qwt_users u ON u.id = r.user_id " +
-                   "WHERE r.deleted = false AND r.expires_at > :now " +
+                   "WHERE r.deleted = false AND r.admin_action IS NULL AND r.expires_at > :now " +
                    "  AND (:type IS NULL OR r.type = :type) " +
                    "ORDER BY r.created_at DESC",
            countQuery = "SELECT COUNT(*) FROM qwt_venue_status_reports r " +
-                        "WHERE r.deleted = false AND r.expires_at > :now " +
+                        "WHERE r.deleted = false AND r.admin_action IS NULL AND r.expires_at > :now " +
                         "  AND (:type IS NULL OR r.type = :type)",
            nativeQuery = true)
     Page<AdminReportRow> findActiveReports(@Param("now") LocalDateTime now,
@@ -208,11 +229,12 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
 
     /**
      * 管理端活跃突发事件计数（需 ADMIN，跨场所全量）。
-     * 活跃 = 未删除且 expiresAt > now（TTL 唯一事实源 = 列）——FAB「上报管理」
-     * 红点聚合数据源之一（与 venuefeedback PENDING 计数合并为管理端上报待办总数）。
+     * 活跃 = 未删除、<b>未处置（admin_action IS NULL）</b>且 expiresAt > now（TTL
+     * 唯一事实源 = 列）——FAB「上报管理」红点聚合数据源之一（与 venuefeedback
+     * PENDING 计数合并为管理端上报待办总数）。
      */
     @Query("SELECT COUNT(r) FROM VenueStatusReport r " +
-           "WHERE r.deleted = false AND r.expiresAt > :now")
+           "WHERE r.deleted = false AND r.adminAction IS NULL AND r.expiresAt > :now")
     long countActiveReports(@Param("now") LocalDateTime now);
 
     /** 投影接口：管理端活跃突发事件行（含上报者身份 + 场所名 + note，供 /admin/status-reports 使用） */
@@ -243,7 +265,7 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
     int disposeById(@Param("id") Long id, @Param("action") AdminAction action);
 
     /**
-     * 续期 + 换类型：upsert 覆盖路径直写 created_at / expires_at / type / note / occurred_at。
+     * 续期 + 换类型：补充/更新路径直写 created_at / expires_at / type / note / occurred_at。
      * <p>
      * <b>根因（2026-08-10 修复，2026-08-11 扩展）</b>：{@code BaseEntity.createdAt} 标注
      * {@code @CreationTimestamp}，Hibernate 将其视为<b>不可变属性</b>——实体 setter
@@ -252,12 +274,14 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
      * 行为时间）与 expiresAt（过期时刻 = now + 类型 TTL，Java 侧算好传入）；type 由
      * 实体 setter 更新（非不可变属性），本 JPQL 只负责两个时间列。
      * <p>
-     * 幂等：只更新目标记录（id 定位），无并发冲突风险（与 upsert 的单行语义一致）。
-     * 调用方必须在 upsert 实体保存之后调用（保证行存在）。
+     * 幂等：只更新目标记录（id 定位），无并发冲突风险（补充路径在 Service 层已先取
+     * 活跃记录、串行更新同一行）。续期后该行仍在活跃唯一索引内（deleted=false 且新
+     * expiresAt > now），不触发唯一性冲突。
      * <p>
-     * <b>flushAutomatically = true 是正确性前提</b>：调用方在 bulk 更新前已对实体
-     * setDeleted/setType 等做脏修改（save 挂起），若不先 flush，clearAutomatically
-     * 会把未落库的实体修改一并清掉；flush 先行保证实体更新先落库、再直写时间列。
+     * 调用方必须在实体 save 之后调用（保证行存在）。<b>flushAutomatically = true 是
+     * 正确性前提</b>：调用方在 bulk 更新前已对实体 setType 等做脏修改（save 挂起），
+     * 若不先 flush，clearAutomatically 会把未落库的实体修改一并清掉；flush 先行保证
+     * 实体更新先落库、再直写时间列。
      */
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("UPDATE VenueStatusReport r SET r.createdAt = :createdAt, r.expiresAt = :expiresAt " +
@@ -270,14 +294,15 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
      * 同类型聚簇计数（管理端「N人报」显示，2026-08-11 新增）。
      * <p>
      * 管理端队列按 (venue_id, type) 聚簇显示：同店同类型多条活跃信号 = 众报置信度，
-     * 管理员处置一条时看到"已有多人报同一事件"。仅统计活跃（未删除 + expires_at >
-     * now）信号，与主列表同一活跃窗口（now 由 Service 层统一传入）。
+     * 管理员处置一条时看到"已有多人报同一事件"。仅统计活跃（未删除 + <b>未处置
+     * （admin_action IS NULL）</b> + expires_at > now）信号，与主列表同一活跃窗口
+     * （now 由 Service 层统一传入）。
      * <p>
      * 原生 SQL + 投影接口，别名必须全小写（PG 折叠未引用标识符，既定模式）。
      */
     @Query(value = "SELECT r.venue_id AS venueid, r.type AS type, COUNT(*) AS cnt " +
                    "FROM qwt_venue_status_reports r " +
-                   "WHERE r.deleted = false AND r.expires_at > :now " +
+                   "WHERE r.deleted = false AND r.admin_action IS NULL AND r.expires_at > :now " +
                    "GROUP BY r.venue_id, r.type", nativeQuery = true)
     List<TypeClusterRow> countClustersByVenueAndType(@Param("now") LocalDateTime now);
 
