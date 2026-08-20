@@ -75,15 +75,6 @@ public class VenueService {
     /** 单次照片上传数量上限（与前端 image-upload maxCount=9 对齐——后端独立校验防绕过） */
     private static final int MAX_PHOTOS_PER_UPLOAD = 9;
 
-    /**
-     * UGC 照片上传频控（2026-08-20）：普通用户同 user+venue 60s 窗口内最多放行
-     * {@value #UPLOAD_RATE_LIMIT_PER_WINDOW} 次提交（每次 ≤9 张）——与 FavoriteService
-     * toggle 频控同族（内存 Caffeine 单机近似，压制脚本连点刷相册）；门店管理方
-     * （canManage）上传直发公开属可信写者，不受频控。
-     */
-    private static final int UPLOAD_RATE_LIMIT_PER_WINDOW = 3;
-    private static final long UPLOAD_RATE_LIMIT_SECONDS = 60;
-
     /** 管理端审核列表门店名占位（门店已软删时回退，审核页仍可辨识来源） */
     private static final String PHOTO_VENUE_GONE_NAME = "门店已删除";
     /** 管理端审核列表上传者占位（存量导入 created_by=0 / 用户已软删时回退） */
@@ -116,12 +107,6 @@ public class VenueService {
     private final VenuePhotoRepository venuePhotoRepository;
     /** 场所实体缓存显式逐出（照片写方法 key 依赖查询结果，@CacheEvict 无法表达，见 VenueClaimService 同款先例） */
     private final CacheManager cacheManager;
-
-    /** UGC 照片上传频控（普通用户 user:venue 60s 窗口阈值，见常量注释；管理方直发不受控） */
-    private final Cache<String, Integer> venuePhotoUploadLimiter = Caffeine.newBuilder()
-            .maximumSize(10_000)
-            .expireAfterWrite(UPLOAD_RATE_LIMIT_SECONDS, TimeUnit.SECONDS)
-            .build();
 
     /**
      * 详情接口「公共部分」缓存（2026-08-13 新增，性能优化：详情接口 DB 往返 5→2 次）。
@@ -282,14 +267,15 @@ public class VenueService {
     //   - PENDING / REJECTED：仅上传者本人（createdBy）与门店管理方（canManage）/管理员可见。
 
     /**
-     * 上传门店照片（POST /venues/{id}/photos，登录即可——UGC 通道）。
+     * 上传门店照片（POST /venues/{id}/photos，仅平台管理员——2026-08-20 深夜收口）。
      * <p>
-     * 状态分派：门店管理方（canManage，认领人/管理员）上传直发 PUBLIC（可信写者，
-     * 保留旧 JSON 列直写公开语义，不给 ADMIN 增加审核负担）；普通用户上传 PENDING
-     * 先审后发（防低俗/广告/垃圾图直发）。普通用户受同 user+venue 60s 窗口阈值频控。
+     * 原为登录即可的 UGC 通道（管理方直发 PUBLIC / 普通用户 PENDING 先审后发），
+     * 因个人主体小程序未开放「社交服务」类目被审核驳回——普通用户/认领人上传照片属
+     * 用户自行生成内容发布，与已下架「发布动态」同判（见 AGENTS.md「门店照片域」）。
+     * 收口后 admin 上传直发 PUBLIC（可信写者，保留旧 JSON 列直写公开语义）。
      * <p>
-     * 返回本人视角全量照片（PUBLIC 全部 + 本人 PENDING/REJECTED），供管理入口回显。
-     * 写路径失效公共缓存（PUBLIC 直发时详情/列表照片已变化，见 {@link #invalidateDetailPublic}）。
+     * 返回本人视角全量照片（PUBLIC 全部）。写路径失效公共缓存（详情/列表照片已变化，
+     * 见 {@link #invalidateDetailPublic}）。
      */
     @Transactional
     public List<VenuePhotoResponse> addVenuePhotos(Long userId, Long venueId, List<String> urls) {
@@ -300,18 +286,10 @@ public class VenueService {
         if (urls.size() > MAX_PHOTOS_PER_UPLOAD) {
             throw new BusinessException(1001, "单次最多上传 " + MAX_PHOTOS_PER_UPLOAD + " 张照片");
         }
-        boolean canManage = computeCanManage(venue);
-        // UGC 频控：仅普通用户受控（管理方直发可信）；超阈值幂等忽略（同 FavoriteService toggle 频控语义）
-        if (!canManage && isUploadLimited(userId, venueId)) {
-            throw new BusinessException(1003, "上传太频繁，请稍后再试");
-        }
-        VenuePhotoStatus status = canManage ? VenuePhotoStatus.PUBLIC : VenuePhotoStatus.PENDING;
-        persistPhotosDirect(venueId, userId, urls, status);
-        if (status == VenuePhotoStatus.PUBLIC) {
-            // 公开照片变化：详情/列表公共缓存立即失效（key 为事务内已确定的 venueId，显式逐出）
-            evictVenueEntityCache(venueId);
-            invalidateDetailPublic(venueId);
-        }
+        persistPhotosDirect(venueId, userId, urls, VenuePhotoStatus.PUBLIC);
+        // 公开照片变化：详情/列表公共缓存立即失效（key 为事务内已确定的 venueId，显式逐出）
+        evictVenueEntityCache(venueId);
+        invalidateDetailPublic(venueId);
         return fetchVenuePhotos(venueId, userId);
     }
 
@@ -463,22 +441,6 @@ public class VenueService {
             photo.setSortOrder(nextOrder++);
             venuePhotoRepository.save(photo);
         }
-    }
-
-    /**
-     * UGC 上传频控判定（调用即计数）：窗口内已达阈值返回 true（本次拒绝）；
-     * 否则计数 +1 返回 false。key = user:venue（同一用户对同一门店的上传行为）。
-     * 仅普通用户路径调用（管理方直发不受控）。
-     */
-    private boolean isUploadLimited(Long userId, Long venueId) {
-        String key = userId + ":" + venueId;
-        Integer count = venuePhotoUploadLimiter.getIfPresent(key);
-        if (count != null && count >= UPLOAD_RATE_LIMIT_PER_WINDOW) {
-            log.debug("venue photo upload 频控拒绝: userId={}, venueId={}", userId, venueId);
-            return true;
-        }
-        venuePhotoUploadLimiter.put(key, (count != null ? count : 0) + 1);
-        return false;
     }
 
     /**

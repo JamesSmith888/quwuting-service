@@ -1,7 +1,11 @@
-# 门店照片域（qwt_venue_photos 独立表 + UGC 先审后发）
+# 门店照片域（qwt_venue_photos 独立表;2026-08-20 深夜收口 = 仅 ADMIN 上传)
 
 > 2026-08-20 确立。前端交互/根因链见前端 `docs/agents/19-venue-photos.md`；本文档只讲后端实现细节。
 > 设计模式对齐舞伴照片域（`qwt_dancer_photos`，V7）：独立表 + PENDING 先审后发 + sortOrder 上传序 + 管理端逐张审核。
+> **2026-08-20 深夜收口**：`POST /venues/{id}/photos` 由「登录即可」收为「仅 ADMIN」——原普通用户
+> PENDING 先审后发 UGC 通道因个人主体无「社交服务」类目被审核驳回（与「发布动态」同判）。
+> admin 上传直发 PUBLIC；UGC 频控（`isUploadLimited`/`venuePhotoUploadLimiter`/`UPLOAD_RATE_LIMIT_*`）已删。
+> 审核链路（PENDING → PUBLIC/REJECTED）与 `admin-venue-photos` 保留——存量 PENDING 照片仍可处理。
 
 ## 背景（为什么弃用 venue.photos JSON 列）
 
@@ -15,19 +19,20 @@
 - 存量迁移：`jsonb_array_elements_text(venue.photos) WITH ORDINALITY` 一次性灌入（`status=PUBLIC`、`created_by=COALESCE(claimed_by,0)`、数组序为 sort_order）；仅迁移"数组开头"合法 JSON 兜底脏数据；JSON 列残留保留可回滚。
 - 新写路径禁止再写 JSON 列（`createVenue` 的 photos 转存新表直发 PUBLIC；`updateVenue` **忽略 photos**——JSON 列全量覆盖会误删他人 UGC 照片）。
 
-## 权限与状态分派
+## 权限与状态分派（2026-08-20 深夜收口 = 仅 ADMIN）
 
 | 写者 | 上传状态 | 校验 |
 |------|---------|------|
-| canManage（认领人/管理员） | PUBLIC 直发 | 可信写者；不受频控 |
-| 普通登录用户 | PENDING | UGC 频控：同 `user:venue` 60s 窗口 ≤3 次（Caffeine 内存单机近似，同 FavoriteService toggle 频控模式）；单次 ≤9 张（`MAX_PHOTOS_PER_UPLOAD`，与前端 image-upload maxCount 对齐） |
+| **ADMIN（唯一写者）** | **PUBLIC 直发** | `UserContext.requireAdmin()`（controller 收口）；单次 ≤9 张（`MAX_PHOTOS_PER_UPLOAD`，与前端 image-upload maxCount 对齐） |
+| ~~canManage（认领人/管理员）~~ | ~~PUBLIC 直发~~ | ~~已收口~~（前端编辑模式照片区整行隐藏，后端 403） |
+| ~~普通登录用户~~ | ~~PENDING~~ | ~~已收口~~（UGC 频控全删） |
 
 删除：上传者本人（仅自己的 PENDING/REJECTED）/ canManage（任意含 PUBLIC）/ ADMIN。软删。
 
 ## 接口与实现要点
 
 - `GET /venues/{id}/photos`：本人视角回显（`listVenuePhotos` → `fetchVenuePhotos`：PUBLIC 全部 + 本人/管理方的 PENDING/REJECTED），编辑表单照片区回显/删除用。
-- `POST /venues/{id}/photos`：`addVenuePhotos`——URL 逐个 `ImageContentValidator`（08-12 安全约定：图片 URL 落库字段必须挂载内容级校验）+ `TextSanitizer`；sortOrder = 当前 max +1 追加。
+- `POST /venues/{id}/photos`：`addVenuePhotos`（**仅 ADMIN**，2026-08-20 深夜收口）——admin 直发 PUBLIC（去掉 canManage 分派与 UGC 频控）；URL 逐个 `ImageContentValidator`（08-12 安全约定：图片 URL 落库字段必须挂载内容级校验）+ `TextSanitizer`；sortOrder = 当前 max +1 追加。
 - `POST /venues/{id}/photos/{photoId}/remove`：`removeVenuePhoto`（POST 动作路径符合「只允许 GET 和 POST」）。
 - `GET /admin/venues/photos`：`listAdminPhotos`——LEFT JOIN qwt_venues 取门店名（软删回退"门店已删除"）、LEFT JOIN qwt_users 取上传者昵称（存量导入/用户软删回退"未知用户"）；status 可选过滤，上传时间倒序。
 - `POST /admin/venues/photos/{photoId}/status`：`updateVenuePhotoStatus`——仅 PENDING 可审、目标状态相同幂等返回；reason 可选仅审计日志；**审核结果不新增站内信**（上传者管理入口可见 REJECTED 后自行删除重传，同舞伴照片规则）。

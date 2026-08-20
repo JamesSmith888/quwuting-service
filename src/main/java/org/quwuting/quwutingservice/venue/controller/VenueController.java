@@ -64,15 +64,16 @@ public class VenueController {
     }
 
     /**
-     * 上传门店照片（需登录——UGC 通道，2026-08-20 门店照片域）。
-     * 管理方（认领人/管理员）上传直发 PUBLIC；普通用户上传 PENDING 先审后发
-     * （管理端审核，见 /admin/venues/photos）。返回本人视角全量照片（含待审/驳回）。
+     * 上传门店照片（仅平台管理员——2026-08-20 深夜收口：原为登录即可的 UGC 通道，
+     * 因个人主体小程序未开放「社交服务」类目被审核驳回，普通用户/认领人上传照片属
+     * 用户自行生成内容发布，与已下架「发布动态」同判；admin 上传直发 PUBLIC。
+     * 返回本人视角全量照片（PUBLIC 全部）。
      * POST /venues/{id}/photos
      */
     @PostMapping("/{id}/photos")
     public ApiResponse<List<VenuePhotoResponse>> addPhotos(@PathVariable Long id,
                                                            @Valid @RequestBody AddVenuePhotosRequest request) {
-        Long userId = UserContext.requireAuth();
+        Long userId = UserContext.requireAdmin();
         return ApiResponse.ok(venueService.addVenuePhotos(userId, id, request.urls()));
     }
 

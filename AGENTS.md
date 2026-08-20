@@ -40,7 +40,7 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务，为去舞厅小程序
 | [`15-governance.md`](docs/agents/15-governance.md) | 禁止操作、AI 代理常见错误表、验证清单 | 每次修改后、提交前 |
 | [`16-ops-config.md`](docs/agents/16-ops-config.md) | 运营配置（feature flag）设施：qwt_ops_config 表、读写接口、管理端入口、键即代码契约 | 新增可配置产品规则时 |
 | [`17-group-chats.md`](docs/agents/17-group-chats.md) | 舞友群（V33：微信引流，平台无一键加群 API → 长按识别二维码；scope 三态维度互斥校验；公开分组读 + ADMIN CRUD；qr_code_url 挂 ImageContentValidator；GROUP_QR 存储分类，2026-08-17） | 群聊相关 |
-| [`18-venue-photos.md`](docs/agents/18-venue-photos.md) | 门店照片域（V35 `qwt_venue_photos` 独立表 + UGC 先审后发：管理方直发 PUBLIC / 普通用户 PENDING + 频控；本人视角回显、管理端逐张审核；**读路径批量注入五参重载 + PUBLIC 变化显式缓存失效；updateVenue 忽略 photos 禁全量覆盖**，2026-08-20） | 门店照片/相册相关 |
+| [`18-venue-photos.md`](docs/agents/18-venue-photos.md) | 门店照片域（V35 `qwt_venue_photos` 独立表；**2026-08-20 深夜收口：仅 ADMIN 上传直发 PUBLIC**——原普通用户 PENDING UGC 通道 + 频控因个人主体无「社交服务」类目被审核驳回而删除；本人视角回显、管理端逐张审核（保留处理存量 PENDING）；读路径批量注入五参重载 + PUBLIC 变化显式缓存失效；updateVenue 忽略 photos 禁全量覆盖） | 门店照片/相册相关 |
 
 ---
 
