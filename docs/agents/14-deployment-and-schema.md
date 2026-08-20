@@ -215,7 +215,7 @@ DB 迁近区时用 DataGrip「全选表 → 拖拽到目标库」方式迁移：
 - 兜底字段的 javadoc 必须描述真实库表状态（**禁止把"意图移除"写成"已移除"**——注释必须与库表事实一致）
 - 仅当冗余列影响可维护性时，才走「无法避免清单」的手动删列（一次性，不新增迁移脚本文件）
 - 现有遗留列：`qwt_tag_interactions.liked`（Java 零引用，NOT NULL 已由 `db/migrate-drop-liked-not-null.sql` 取消）、`qwt_users.avatar_url`（Java 零引用，可空）、`qwt_venue_feedbacks.handled`（状态机引入前遗留，实体 @Deprecated 映射兜底）
-- `catch (DataIntegrityViolationException)` **只允许吞唯一键并发竞态（SQLState 23505）**，其余完整性错误（NOT NULL/列约束/外键）必须继续抛出——参考 `TagInteractionService.isUniqueViolation()` 的判定写法；吞异常必须带具体 SQLState 判定，禁止整类静默吞掉。**Reaction toggle（2026-08-08 收敛）**：`VenueReactionService.toggle` 曾整类吞掉 `DataIntegrityViolationException`（venue 存在性虽已前置校验，但外键/NOT NULL 等新错误形态会同样被静默吞成"已参与"），已改为 `DbConstraintViolations.isUniqueViolation(e)` 判定、非 23505 一律上抛
+- `catch (DataIntegrityViolationException)` **只允许吞唯一键并发竞态（SQLState 23505）**，其余完整性错误（NOT NULL/列约束/外键）必须继续抛出——统一经 `DbConstraintViolations.isUniqueViolation` 判定（2026-08-20 起全库写路径已确定性化为原子 upsert / advisory lock，该 catch 模式只存在于防御性兜底，禁止新增 catch+clear 表达幂等，见 15-governance 错误表）；吞异常必须带具体 SQLState 判定，禁止整类静默吞掉。**Reaction toggle（2026-08-08 收敛）**：`VenueReactionService.toggle` 曾整类吞掉 `DataIntegrityViolationException`（venue 存在性虽已前置校验，但外键/NOT NULL 等新错误形态会同样被静默吞成"已参与"），已改为 `DbConstraintViolations.isUniqueViolation(e)` 判定、非 23505 一律上抛
 
 ---
 

@@ -2,6 +2,7 @@ package org.quwuting.quwutingservice.taginteraction.repository;
 
 import org.quwuting.quwutingservice.taginteraction.entity.TagInteraction;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -12,6 +13,28 @@ import java.util.Optional;
 public interface TagInteractionRepository extends JpaRepository<TagInteraction, Long> {
 
     Optional<TagInteraction> findByUserIdAndVenueIdAndTag(Long userId, Long venueId, String tag);
+
+    /**
+     * 首次评分记录的<b>确定性原子写入</b>（2026-08-20 根因修复：替代
+     * 「save + catch 23505 + 幂等忽略」——PG 语句失败后事务中止（25P02），旧 catch
+     * 分支吞掉冲突后同事务继续提交（commit-on-aborted = 静默回滚）依赖 JPA 不可靠
+     * 行为；ON CONFLICT DO NOTHING 恒 1 次往返零异常，语义与旧分支一致：并发
+     * 竞态（另一请求已创建同 (user,venue,tag) 行）时丢弃本请求行，赢家行保留）。
+     * 冲突目标 = 列清单（{@code qwt_uk_ti_user_venue_tag} 为唯一约束）。
+     *
+     * @return 受影响行数：1 = 新记录；0 = 并发竞态已有记录（幂等跳过）
+     */
+    @Modifying
+    @Query(value = "INSERT INTO qwt_tag_interactions " +
+                   "(user_id, venue_id, tag, score, created_at, updated_at, deleted) " +
+                   "VALUES (:userId, :venueId, :tag, :score, :now, :now, false) " +
+                   "ON CONFLICT (user_id, venue_id, tag) DO NOTHING",
+           nativeQuery = true)
+    int upsertScore(@Param("userId") Long userId,
+                    @Param("venueId") Long venueId,
+                    @Param("tag") String tag,
+                    @Param("score") int score,
+                    @Param("now") LocalDateTime now);
 
     /** 统计场所各维度的评分均值和人数（score 非空且未删除），返回 Object[]{tag, avgScore, count} */
     @Query("SELECT ti.tag, AVG(ti.score), COUNT(ti) FROM TagInteraction ti " +

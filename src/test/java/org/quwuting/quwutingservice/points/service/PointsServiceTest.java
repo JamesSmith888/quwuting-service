@@ -40,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -166,12 +167,19 @@ class PointsServiceTest {
         account.setBalance(0L);
         when(accountRepository.findByUserId(1L)).thenReturn(Optional.of(account));
         when(accountRepository.addBalance(1L, 2L)).thenReturn(1);
+        // 2026-08-20：挣取流水改确定性原子 upsert（替代 saveAndFlush + catch 23505）——
+        // 首写返回 1 行（真实发放），无需回查；sourceType 传 name()（原生 SQL enum 绑定修复）
+        when(transactionRepository.upsertEarn(eq(1L), eq(2L), eq(2L),
+                eq(PointsSourceType.DAILY_CHECK_IN.name()), eq(99L), any(), any(LocalDateTime.class)))
+                .thenReturn(1);
 
         CheckInResponse resp = pointsService.checkIn(1L);
 
         assertEquals(true, resp.checkedIn(), "首次打卡应返回 checkedIn=true");
         assertEquals(2, resp.reward(), "奖励来自配置（2 分）");
-        verify(transactionRepository).saveAndFlush(any());
+        verify(transactionRepository).upsertEarn(eq(1L), eq(2L), eq(2L),
+                eq(PointsSourceType.DAILY_CHECK_IN.name()), eq(99L), any(), any(LocalDateTime.class));
+        verify(transactionRepository, never()).saveAndFlush(any());
     }
 
     // ─── 礼物赠送（2026-08-12 礼物化：载荷 giftCode，价格 GiftCatalog 权威） ───

@@ -38,7 +38,9 @@
 **双防线（分层收口）**：
 
 1. **应用层 60s 冷却**（`VenueFeedbackService` 内嵌 Caffeine，与 VenueViewService / VenueShareService 同模式）：key = `venueId:type:field:identity`（**field 维度 2026-08-10 加入**——结构化纠错后语义单位 = (type, field)，用户报完"门票价格"紧接着报"联系电话"（不同字段）属正常连续纠错，不应被冷却误伤；同字段连点仍被压制），identity 登录取 `u{userId}`、匿名取 `ip:{ClientIpResolver.resolve()}`——同身份对同场所同类型同字段在窗口内重复提交抛 1006。尽力而为（多 IP 分布式刷无法拦截），与 view/share 频控同语义。
-2. **库内 PENDING 部分唯一索引**（`db/migration/V2__feedback_pending_dedup.sql` + `V8__feedback_correction_fields.sql` 拆分）：**去重单位（2026-08-10 升级）**——旧索引 `UNIQUE (user_id, venue_id, type) WHERE user_id IS NOT NULL AND status = 'PENDING'` 的去重单位是 type，与字段级纠错的语义单位 (type, field) 不匹配（同场所同类型报两个字段会被幂等吞掉）。V8 拆为两条部分唯一索引：① `UNIQUE (user_id, venue_id, type, field) WHERE user_id IS NOT NULL AND status = 'PENDING' AND field IS NOT NULL`——每字段一条 PENDING（同字段重复提交仍去重，跨字段互不阻塞）；② `UNIQUE (user_id, venue_id, type) WHERE user_id IS NOT NULL AND status = 'PENDING' AND field IS NULL`——非纠错场景（field 不填）保持 V2 原语义。管理员处理后旧行移出索引，可再次上报；匿名行不参与（NULL 无法身份归因）。并发/多实例竞争窗口内撞唯一键时，应用层 catch `DataIntegrityViolationException`（SQLState 23505，经 `DbConstraintViolations.isUniqueViolation`）**按去重单位回查**（纠错场景 `findByUserIdAndVenueIdAndTypeAndFieldAndStatus`，否则 `findByUserIdAndVenueIdAndTypeAndStatus`）幂等返回已有 PENDING 记录（与 StatusReportService 并发模式一致）。V2 迁移先清理存量重复（保留每组最早一条）再建索引；V8 拆分时存量行 field 均为 NULL 只落索引②，无需清理。
+2. **库内 PENDING 部分唯一索引**（`db/migration/V2__feedback_pending_dedup.sql` + `V8__feedback_correction_fields.sql` 拆分）：**去重单位（2026-08-10 升级）**——旧索引 `UNIQUE (user_id, venue_id, type) WHERE user_id IS NOT NULL AND status = 'PENDING'` 的去重单位是 type，与字段级纠错的语义单位 (type, field) 不匹配（同场所同类型报两个字段会被幂等吞掉）。V8 拆为两条部分唯一索引：① `UNIQUE (user_id, venue_id, type, field) WHERE user_id IS NOT NULL AND status = 'PENDING' AND field IS NOT NULL`——每字段一条 PENDING（同字段重复提交仍去重，跨字段互不阻塞）；② `UNIQUE (user_id, venue_id, type) WHERE user_id IS NOT NULL AND status = 'PENDING' AND field IS NULL`——非纠错场景（field 不填）保持 V2 原语义。管理员处理后旧行移出索引，可再次上报；匿名行不参与（NULL 无法身份归因）。并发/多实例竞争窗口内撞唯一键时（**2026-08-20 确定性化，根因见下**），登录用户经**原子 upsert**（`INSERT ... ON CONFLICT ... DO NOTHING`，冲突目标 = 列清单 + 完整索引谓词，`VenueFeedbackRepository.upsertPendingWithField` / `upsertPendingWithoutField`）单次往返收口，随后**同一事务内按去重单位回查**（纠错场景 `findByUserIdAndVenueIdAndTypeAndFieldAndStatus`，否则 `findByUserIdAndVenueIdAndTypeAndStatus`）幂等返回胜出行（新插入或已存在）；匿名无索引冲突面，走 save 原路径（60s IP 冷却兜底）。V2 迁移先清理存量重复（保留每组最早一条）再建索引；V8 拆分时存量行 field 均为 NULL 只落索引②，无需清理。
+
+**幂等确定性化根因（2026-08-20 线上实证：报告恢复营业连点报 500）**：旧实现为「save（INSERT）+ catch `DataIntegrityViolationException`（23505）+ `entityManager.clear()` + 同事务回查」——PostgreSQL 中语句失败（SQLState 23505）后整个事务进入 **aborted 状态（25P02）**，catch 内 clear 只清理 session、无法恢复已中止的 DB 事务，catch 后的回查必然抛 `JpaSystemException`「current transaction is aborted」→ 未捕获 → GlobalExceptionHandler → HTTP 500。触发路径：首次提交成功创建 PENDING 记录 → 60s 冷却窗口外再次点击 → INSERT 撞唯一索引 → 500（日志中 `qwt_uk_feedbacks_user_venue_type_pending` 23505 与紧随其后的 25P02 即此链）。这是 2026-08-19「23505 并发幂等确定性化」治理的遗漏点（当时按问题域只覆盖 dancer 域），本次与 `StatusReportService.submitReport`（同类模式）一并收敛，长期规则见 15-governance 错误表「有唯一约束的幂等写入」。**禁止再引入 catch+clear 表达幂等。**
 
 ### 接口
 
@@ -116,12 +118,12 @@
 
 - `VenueRepository.countHeatCounters` 的 `reportcount` / `latestreporttime`（热度聚合，`now` 参数）
 - `StatusReportRepository.countActiveAndLatestTime`（提交/撤销响应摘要）
-- `StatusReportRepository.findAnnouncementsByVenue`（详情页紧急公告区聚合，`now` 参数，2026-08-11）
+- `StatusReportRepository.findAnnouncementsByVenue`（**详情页单行公告条**聚合，`now` + `includeExpired` 参数——2026-08-20 分窗参数化后仅 `includeExpired=false`（活跃视图）属本清单；`includeExpired=true`（公告页历史视图）不在此列，见「紧急公告区」）
 - `VenuePostRepository.findDetailStats` 的 `hasmyreport` EXISTS（详情页个人已报告标记）——**历史实现只过滤 `deleted = false` 漏 TTL 过滤**，与热度聚合口径不一致：TTL 过期后 `activeReportCount` 归零但 `hasMyStatusReport` 恒真，详情页"已报告·补充"按钮永不还原（用户必须手动撤销）。此为修复根因，新增活跃判定查询时必须对照本清单。
 - `StatusReportRepository.findActiveReports` / `countActiveReports`（管理端列表/计数，`now` 参数）
 - `StatusReportRepository.countClustersByVenueAndType`（同类型聚簇计数，`now` 参数，2026-08-11）
 
-**例外（2026-08-12 明确）**：`StatusReportRepository.findRecentByVenue`（门店突发事件列表）**不在此清单**——它是"事实明细"而非"活跃信号"视图：过期报告仍需展示（`expired` 标注），过滤条件为展示窗口 `created_at >= cutoff`（cutoff 按 `app.status-report.recent-history-hours` 由 Service 层传入），过期判定（`!expires_at.isAfter(now)`）在 Service 层逐行完成。凡新增"活跃视图"查询对照本清单，凡"明细/历史视图"查询不得套用活跃判定（详见「门店突发事件列表」根因）。
+**例外（2026-08-12 明确，2026-08-20 扩展）**：`StatusReportRepository.findRecentByVenue`（门店突发事件列表）**不在此清单**——它是"事实明细"而非"活跃信号"视图：过期报告仍需展示（`expired` 标注）。**2026-08-20 起该查询无任何时间窗口**（旧实现曾以展示窗口 `created_at >= now - recent-history-hours` 裁剪，超窗历史不可见——2026-08-12 修复了 TTL 硬套但保留了窗口，属半成品，本次移除），范围 = 未撤销（deleted=false）的全部报告，时间维度由 Service 层逐行按 `expires_at` 列标注过期。凡新增"活跃视图"查询对照本清单，凡"明细/历史视图"查询不得套用活跃判定、不得引入时间窗口（详见「门店突发事件列表」根因）。
 
 ### 接口
 
@@ -129,8 +131,8 @@
 |------|------|------|------|
 | POST | `/venues/{venueId}/status-reports` | 需登录 | 上报突发事件（body 可空=快速上报默认 SUSPENDED，或含 type/occurredAt/note；**2026-08-11 守卫**：SUSPENDED 对非营业门店拒绝 1010、RESUMED 对营业中门店拒绝 1012、SITUATION_UNCLEAR 必填 note 拒绝 1011，事件类不受存储态约束，见下「提交守卫」） |
 | POST | `/venues/{venueId}/status-reports/cancel` | 需登录 | 撤销我的上报（软删除） |
-| GET | `/venues/{venueId}/status-reports` | 公开 | 门店最近突发事件列表（展示窗口内所有用户报告，含已过期带 `expired` 标注，倒序，2026-08-10，见下「门店突发事件列表」） |
-| GET | `/venues/{venueId}/status-reports/announcements` | 公开 | 紧急公告聚合（活跃 + 已采纳按类型聚簇，严重级降序；详情页入口条 + 公告专属页列表共用，2026-08-11，见下「紧急公告区」） |
+| GET | `/venues/{venueId}/status-reports` | 公开 | 门店最近突发事件列表（**无时间窗口**：全部未撤销报告含已过期带 `expired` 标注，倒序上限 20，2026-08-10 新增 / 2026-08-12 含过期 / 2026-08-20 移除展示窗口，见下「门店突发事件列表」） |
+| GET | `/venues/{venueId}/status-reports/announcements?includeExpired=` | 公开 | 紧急公告聚合（活跃 + 已采纳按类型聚簇，严重级降序；`includeExpired=false`（默认）= 活跃视图（详情页入口条），`true` = 历史视图（公告专属页列表，含已过期），2026-08-11 新增 / 2026-08-20 分窗参数化，见下「紧急公告区」） |
 | GET | `/status-reports/mine?venueId=` | 需登录 | 我的全部突发事件上报（用户级资源，顶层路径；venueId 可选，2026-08-06，见下「我的上报记录」） |
 | GET | `/admin/status-reports?page=&size=&type=` | ADMIN | 活跃突发事件列表（跨场所分页倒序，type 可选筛选，2026-08-10，见下「管理端可见性」） |
 | POST | `/admin/status-reports/{id}/remove` | ADMIN | 移除突发事件（soft delete + REMOVED 标记，公开视图即时消失，幂等） |
@@ -155,22 +157,27 @@
 - **移除不通知上报者**（2026-08-10 决策）：与用户自撤同语义（记录从「我的上报」消失，无回传通道）；误报清理属运营动作，若需"移除告知"后续按「处理结果站内信」约定补发。**采纳必须通知**（`STATUS_REPORT_RESULT` 站内信）——上报被核实采纳且用户获得积分，属「状态流转对用户有结果」范畴，与 feedback 采纳通知同一长期约定
 - **仅活跃报告入管理视图**：TTL 过期信号已自动从公开视图消失，无需管理处置（不展示历史/已过期列表）
 
-### 门店突发事件列表（GET /venues/{venueId}/status-reports，2026-08-10 新增，2026-08-11 泛化）
+### 门店突发事件列表（GET /venues/{venueId}/status-reports，2026-08-10 新增，2026-08-11 泛化，2026-08-20 去窗口）
 
-详情页「报告突发事件」弹层的默认内容（公开读，无需登录）。**根因（需求 2026-08-10）**：报告是社区信号动作，用户报告前需要看到"已有多人报告"的明细才能建立信任——原实现只有聚合计数（`activeReportCount`）没有明细，前端系统弹窗只能承载纯文本确认、无法展示列表。本接口补齐"门店级报告的公开读路径"。
+公告页「最近的突发事件」明细数据源（公开读，无需登录）。**根因（需求 2026-08-10）**：报告是社区信号动作，用户报告前需要看到"已有多人报告"的明细才能建立信任——原实现只有聚合计数（`activeReportCount`）没有明细，前端系统弹窗只能承载纯文本确认、无法展示列表。本接口补齐"门店级报告的公开读路径"。
 
-**根因（2026-08-12 修复）**：旧实现把**活跃判定**（`expires_at > now`，TTL 语义）错误复用于**事实明细列表**——TTL 过期只代表信号失效（不计入活跃计数/公告区聚合），不代表报告事实消失。硬套活跃判定后，报告 4h 过期即从列表消失，用户回看时看到空列表：无法区分「从未有人报」与「报过但已过期」，社区信任信号丢失；且与「我的上报记录」（含已过期 + `active` 标注）的既有契约口径不一致——两处对"过期报告是否可见"的决策不同，属 2026-08-11 泛化重构时遗漏的不一致。**修复：列表展示 = 未撤销的报告事实（活跃 + 近期过期），过期由 `expired` 字段标注；活跃/过期判定仍在 Service 层按 `expires_at` 列完成（TTL 唯一事实源 = 列）。**
+**根因链（2026-08-12 → 2026-08-20 两轮修复）**：
+- **2026-08-12**：旧实现把**活跃判定**（`expires_at > now`，TTL 语义）错误复用于**事实明细列表**——TTL 过期只代表信号失效（不计入活跃计数/当前公告区），不代表报告事实消失。硬套活跃判定后，报告过期即从列表消失，用户回看时看到空列表：无法区分「从未有人报」与「报过但已过期」，社区信任信号丢失；且与「我的上报记录」（含已过期 + `active` 标注）的既有契约口径不一致。**修复：列表展示 = 未撤销的报告事实（活跃 + 近期过期），过期由 `expired` 字段标注。**
+- **2026-08-20（本次）**：上述修复保留了展示窗口 `created_at >= now - recentHistoryHours`（默认 48h）——窗口外历史事实仍被裁剪，门店（如测试门店）记录全部超窗时列表依旧全空，与"公告页 = 报告事实历史视图"语义冲突（用户回看社区历史必须可见全部记录）。**根因**：把"信号新鲜度"维度（TTL/展示窗口）错误套在"事实历史"视图上——历史事实只应被「非事实」（撤销/处置）裁剪，时间维度逐行标注即可。**修复：移除时间窗口，范围 = 未撤销（deleted=false）全部报告（含已过期与超窗历史），倒序，Service 层 `.limit(RECENT_REPORT_LIST_LIMIT=20)` 防无限增长（SQL 不写 LIMIT，避免方言绑定）；过期判定仍在 Service 层按 `expires_at` 列完成（TTL 唯一事实源 = 列）。**
 
-- **范围**：展示窗口 = 报告行为时间 `created_at >= now - app.status-report.recent-history-hours`（`config/StatusReportProperties`，默认 48h，窗口必须 ≥ 最大类型 TTL 24h，否则最长 TTL 信号一过期即脱窗，"过期仍可见"语义落空）内全部用户的报告，按 `createdAt` 倒序，Service 层 `.limit(RECENT_REPORT_LIST_LIMIT=20)`（SQL 不写 LIMIT，窗口收敛数据量小，避免方言绑定）；**含已过期（TTL 外）报告**——`expired = !expires_at.isAfter(now)`（活跃判定全局口径：`expires_at > now` 为活跃，边界相等视为过期），前端灰显 + 「已过期」徽标。已撤销/已处置（`deleted=true`）记录不进列表（撤销是用户主动收回、处置属内部语义，公告区聚合单独消费）
-- **实现**：`StatusReportRepository.findRecentByVenue(venueId, cutoff)` 原生 SQL LEFT JOIN `qwt_users` 取昵称（LEFT JOIN：用户异常态回退匿名，不因关联缺失丢行），投影含 `expires_at`（供 Service 判过期；cutoff 由 Service 层按配置计算传入，SQL 层禁止自行定义时间窗）；`mine` 标记由 `UserContext.getCurrentUserId()`（可空，未登录恒 false）对比行 `user_id` 得出
+- **范围**：无时间窗口的全部未撤销报告（撤销是用户主动收回、处置属内部语义，已撤销/已处置 `deleted=true` 不进列表，公告区聚合单独消费），按 `createdAt` 倒序，上限 20 条；`expired = !expires_at.isAfter(now)`（活跃判定全局口径：`expires_at > now` 为活跃，边界相等视为过期），前端灰显 + 「已过期」徽标
+- **实现**：`StatusReportRepository.findRecentByVenue(venueId)` 原生 SQL LEFT JOIN `qwt_users` 取昵称（LEFT JOIN：用户异常态回退匿名，不因关联缺失丢行），投影含 `expires_at`（供 Service 判过期）；`mine` 标记由 `UserContext.getCurrentUserId()`（可空，未登录恒 false）对比行 `user_id` 得出
 - **隐私**：`reporterName` 脱敏（`maskNickname`：首字 + "**"，无昵称回退「舞友」）——保护用户身份隐私的同时保留"社区已有多人报告"的信任信号
 - **响应**：`StatusReportListItem`（id/reporterName/type/typeDisplay/severity/createdAt/**expired**/mine），typeDisplay/severity 取自 `ReportType` 枚举（前端不再自持文案/色阶映射）
+- **死配置清理**：`app.status-report.recent-history-hours` 与 `StatusReportProperties`（唯一字段即该窗口）随窗口移除一并删除（禁死配置/死代码）
 
-### 紧急公告区（GET /venues/{venueId}/status-reports/announcements，2026-08-11 新增）
+### 紧急公告区（GET /venues/{venueId}/status-reports/announcements，2026-08-11 新增，2026-08-20 分窗参数化）
 
-详情页「紧急公告」入口条与公告专属页（`pages/venue-announcements`）列表数据源（公开读，无需登录）。展示 = **活跃信号（deleted=false）+ 已采纳信号（deleted=true 且 adminAction=ADOPTED，保留展示至 TTL 过期并带"已核实"标记）** 按类型聚簇摘要；移除（REMOVED）信号不展示。2026-08-11 前端拆页：同一聚合接口被两处消费——详情页取首条派生单行入口条（severity 色点 + 「紧急公告 · 最紧急类型摘要」），公告专属页全量渲染列表（列表层）+ 最近突发事件明细（详情层，`GET /venues/{id}/status-reports`）。
+详情页「紧急公告」入口条与公告专属页（`pages/venue-announcements`）列表数据源（公开读，无需登录）。展示 = **活跃信号（deleted=false）+ 已采纳信号（deleted=true 且 adminAction=ADOPTED，带"已核实"标记）** 按类型聚簇摘要；移除（REMOVED）信号不展示。2026-08-11 前端拆页：同一聚合接口被两处消费——详情页取首条派生单行入口条（severity 色点 + 「紧急公告 · 最紧急类型摘要」），公告专属页全量渲染列表（列表层）+ 最近突发事件明细（详情层，`GET /venues/{id}/status-reports`）。
 
-- **聚合**：`StatusReportRepository.findAnnouncementsByVenue` 按 `(venue_id, type)` 聚簇（COUNT / 已采纳数 / MAX(createdAt)），Service 层组摘要 `AnnouncementSummary`（type/typeDisplay/severity/count/adopted/latestAt），**按严重级降序**（HIGH→MEDIUM→LOW→RECOVERY，恢复营业语义上最后呈现）
+**根因（2026-08-20 分窗参数化）**：同一接口的两处消费方对时间窗口的语义要求**相反**——详情页公告条 = "当前紧急信号"（过时信号不得误导为当前紧急，应只看 TTL 窗口内）；公告专属页①区 = "历史事实摘要"（用户回看社区历史必须含已过期记录）。旧实现把 TTL 窗口（`expires_at > now`）硬套在整接口上：门店信号全部过期时公告页①区恒空，与"历史所有记录可见"语义冲突（同「门店突发事件列表」根因：信号新鲜度 ≠ 事实历史）。**修复：`includeExpired` 参数化**——`false`（默认）= 活跃视图（仅 TTL 窗口内，详情页公告条）；`true` = 历史视图（全部未撤销 + 已采纳，含已过期，公告页①区）。**长期规则：凡"同一接口被活跃视图 + 历史视图双消费"，时间窗口必须由消费方显式选择（参数化），禁止按单方语义硬编码。**
+
+- **聚合**：`StatusReportRepository.findAnnouncementsByVenue(venueId, now, includeExpired)` 按 `(venue_id, type)` 聚簇（COUNT / 已采纳数 / MAX(createdAt)），Service 层组摘要 `AnnouncementSummary`（type/typeDisplay/severity/count/adopted/latestAt），**按严重级降序**（HIGH→MEDIUM→LOW→RECOVERY，恢复营业语义上最后呈现）；`includeExpired=true` 时聚簇含过期记录（类型枚举有限，摘要条数有界，无无限增长风险），时效由 `latestAt` 相对时间传达
 - **契约**：**不返回 note**（审核安全约定"note 仅管理端可见"，公开响应禁止携带——公告区不展示用户自由文本，规避微信审核风险）；`adopted` 驱动前端「已核实」标记；空结果 = 前端入口条/列表空态（详情页整行隐藏）
 
 ### 我的上报记录（GET /status-reports/mine，2026-08-05 新增，2026-08-06 收敛）
@@ -195,13 +202,13 @@
 
 1. 找到**活跃记录**（`deleted=false`）→ 更新字段（reason/occurredAt/note）
 2. 找到**软删记录**（`deleted=true`）→ 恢复：设 `deleted=false`、刷新 `createdAt = now` 续期 TTL、更新字段。频率限制检查仅在恢复时触发（恢复 = 新报告行为）
-3. 未找到 → 新建 INSERT，catch `DataIntegrityViolationException` 处理并发竞态
+3. 未找到 → 新建 INSERT，并发首报竞态由 `UNIQUE(user_id, venue_id)` 索引 + **原子 upsert**（`StatusReportRepository.upsertReport`，`INSERT ... ON CONFLICT (user_id, venue_id) DO NOTHING`）收口——恒 1 次往返零异常，冲突 = 另一请求已插入，幂等忽略本请求数据（2026-08-20 确定性化，替代旧「save + catch 23505 + 同事务继续查询」：PG 语句失败后事务中止 25P02，catch 后 `getActiveReportSummary` 必然 HTTP 500，与 venuefeedback 同源修复，见 15-governance 错误表）
 
 **根因（为什么不查 `findByUserIdAndVenueIdAndDeletedFalse`）**：UNIQUE 约束 `qwt_uk_status_report_user_venue` 在 `(userId, venueId)` 上，不含 `deleted` 列——软删记录仍占用唯一槽位。若仅查活跃记录，撤销后再次上报会走到 INSERT 分支，与软删记录冲突。`FavoriteService` 的 `findByUserIdAndVenueId`（含软删）+ 恢复模式是标准做法，此模块此前遗漏了此模式导致 `AssertionFailure` 崩溃。
 
-**`@CreationTimestamp` 属性不可变，TTL 续期必须经 JPQL 批量更新（2026-08-10 根因修复）**：`BaseEntity.createdAt` 标注 `@CreationTimestamp`，Hibernate 将其视为**不可变属性**——实体 setter（`report.setCreatedAt(now)`）在 UPDATE 时被静默忽略（WARN HHH000502，UPDATE 语句不含 `created_at` 列）。原实现"手动 setCreatedAt 刷新 TTL"从未生效：旧 `createdAt` 超出 4h TTL 窗口后，详情页 `hasMyStatusReport`（EXISTS 带 TTL 过滤）为 false、公开列表（TTL 过滤）查不到 → 用户"刚报告的记录消失"。**正确做法**：经 `StatusReportRepository.renewCreatedAt(id, now)`（`@Modifying(flushAutomatically=true, clearAutomatically=true)` 的 JPQL 批量更新）直写 `created_at` 列——批量更新不走实体生命周期，不受不可变约束；`flushAutomatically` 保证实体脏修改（deleted/reason 等）先落库再续期。**长期规则：`@CreationTimestamp` 字段禁止用实体 setter 改，需"续期"语义（如 TTL 刷新）时必须走批量更新**。
+**`@CreationTimestamp` 属性不可变，TTL 续期必须经 JPQL 批量更新（2026-08-10 根因修复）**：`BaseEntity.createdAt` 标注 `@CreationTimestamp`，Hibernate 将其视为**不可变属性**——实体 setter（`report.setCreatedAt(now)`）在 UPDATE 时被静默忽略（WARN HHH000502，UPDATE 语句不含 `created_at` 列）。原实现"手动 setCreatedAt 刷新 TTL"从未生效：旧 `createdAt` 超出 4h TTL 窗口后，详情页 `hasMyStatusReport`（EXISTS 带 TTL 过滤）为 false、公开列表（TTL 过滤）查不到 → 用户"刚报告的记录消失"。**正确做法**：经 `StatusReportRepository.renewReport(id, now, now+ttl)`（`@Modifying(flushAutomatically=true, clearAutomatically=true)` 的 JPQL 批量更新）直写 `created_at` + `expires_at` 两列——批量更新不走实体生命周期，不受不可变约束；`flushAutomatically` 保证实体脏修改（deleted/reason 等）先落库再续期。**长期规则：`@CreationTimestamp` 字段禁止用实体 setter 改，需"续期"语义（如 TTL 刷新）时必须走批量更新**。
 
-**`DataIntegrityViolationException` catch 后必须 `entityManager.clear()`**：`save()` 失败后 Hibernate session 拋留 id=null 的脏实体，后续 JPQL 查询触发 auto-flush 时抛 `AssertionFailure: Entry for instance has a null identifier`。`entityManager.clear()` 清除脏实体后，`getActiveReportSummary` 的查询才能正常执行。
+**首次上报 INSERT 分支的并发收口（2026-08-20 更新，旧「catch 23505 后必须 `entityManager.clear()`」指引已废止）**：旧写法在 `save()` 失败后 `entityManager.clear()` 清脏实体再继续同事务查询——这只能解决 Hibernate session 的 `AssertionFailure`，无法恢复 PostgreSQL 已中止（25P02）的 DB 事务，`getActiveReportSummary` 必然 HTTP 500。**现一律走 `upsertReport` 原子 upsert**（`INSERT ... ON CONFLICT (user_id, venue_id) DO NOTHING`，`qwt_uk_status_report_user_venue` 为唯一索引，列清单推断即可），不产生任何异常路径，无 session/事务状态恢复问题。
 
 ### 防刷机制
 

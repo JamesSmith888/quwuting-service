@@ -1,11 +1,8 @@
 package org.quwuting.quwutingservice.venuestatusreport.service;
 
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.text.TextSanitizer;
-import org.quwuting.quwutingservice.config.StatusReportProperties;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.message.service.MessageService;
@@ -27,7 +24,6 @@ import org.quwuting.quwutingservice.venuestatusreport.entity.VenueStatusReport;
 import org.quwuting.quwutingservice.venuestatusreport.enums.AdminAction;
 import org.quwuting.quwutingservice.venuestatusreport.enums.ReportType;
 import org.quwuting.quwutingservice.venuestatusreport.repository.StatusReportRepository;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
@@ -70,7 +66,7 @@ public class StatusReportService {
     /** 每日上报上限：每用户每日报告总次数（2026-08-11 新增，与滑动窗口互补兜底批量刷） */
     private static final int MAX_REPORTS_PER_DAY = 10;
 
-    /** 门店突发事件列表最大返回条数（展示窗口内倒序取最近 N 条，详情页弹层消费） */
+    /** 门店突发事件历史明细列表最大返回条数（全量历史倒序取最近 N 条，防无限增长；公告页消费） */
     private static final int RECENT_REPORT_LIST_LIMIT = 20;
 
     private final StatusReportRepository statusReportRepository;
@@ -80,11 +76,6 @@ public class StatusReportService {
     private final VenueService venueService;
     private final PointsService pointsService;
     private final MessageService messageService;
-    /** 展示窗口配置（门店「最近突发事件」列表的 created_at 裁剪窗口，禁业务硬编码） */
-    private final StatusReportProperties statusReportProperties;
-
-    @PersistenceContext
-    private EntityManager entityManager;
 
     /**
      * 提交或更新突发事件报告（upsert 语义）。
@@ -152,21 +143,14 @@ public class StatusReportService {
         } else {
             // 首次上报，检查频率限制
             checkRateLimit(userId);
-            VenueStatusReport report = new VenueStatusReport();
-            report.setVenueId(venueId);
-            report.setUserId(userId);
-            report.setType(type);
-            report.setOccurredAt(req.occurredAt());
-            report.setNote(TextSanitizer.sanitize(req.note()));
-            report.setExpiresAt(LocalDateTime.now().plusHours(type.getTtlHours()));
-            try {
-                statusReportRepository.save(report);
-            } catch (DataIntegrityViolationException e) {
-                // 并发竞态：另一请求已创建同一 (userId, venueId) 记录
-                // 必须清除 session 中的脏实体（null id），否则后续查询的 auto-flush 会抛 AssertionFailure
-                log.debug("submitReport 并发冲突，幂等忽略: userId={}, venueId={}", userId, venueId);
-                entityManager.clear();
-            }
+            LocalDateTime now = LocalDateTime.now();
+            // 并发首报竞态收口：UNIQUE(user_id, venue_id) 索引 + 原子 upsert
+            // （2026-08-20 根因修复：替代「save + catch 23505 + 同事务继续查询」——
+            // PG 语句失败后事务中止（25P02），catch 后 getActiveReportSummary 必然
+            // HTTP 500；ON CONFLICT DO NOTHING 恒 1 次往返零异常，冲突 = 另一请求
+            // 已插入，幂等忽略本请求数据，与旧 catch 语义一致）
+            statusReportRepository.upsertReport(venueId, userId, type.name(), req.occurredAt(),
+                    TextSanitizer.sanitize(req.note()), now.plusHours(type.getTtlHours()), now);
         }
 
         // 活跃报告数是热度接口的输出之一：显式失效热度缓存（写路径逐出，refresh 周期仅兜底）
@@ -208,18 +192,18 @@ public class StatusReportService {
     }
 
     /**
-     * 某门店最近突发事件列表（公开读，无需登录）。
+     * 某门店突发事件历史明细列表（公开读，无需登录）。
      * <p>
-     * 详情页「报告突发事件」弹层的默认内容：展示窗口（报告行为时间
-     * {@code created_at >= now - recentHistoryHours}，配置键
-     * {@code app.status-report.recent-history-hours}）内全部用户的报告，按时间倒序，
-     * 最多 {@value #RECENT_REPORT_LIST_LIMIT} 条——<b>含已过期（TTL 外）报告</b>，
-     * 由 {@code expired} 标注（2026-08-12 根因修复：TTL 过期只代表信号失效，不代表
-     * 报告事实消失；旧实现把活跃判定 {@code expires_at > now} 硬套在本列表上，过期后
-     * 列表空无上下文，用户无法回看"之前已有人（含我）报告过"的社区信号）。活跃/过期
-     * 判定由本方法按 {@code expires_at} 列与 now 比较（TTL 唯一事实源 = 列，SQL 不
-     * 自行定义时间窗）。报告者昵称脱敏（首字 + "**"，无昵称回退「舞友」）——保护
-     * 用户身份隐私的同时保留"社区已有多人报告"的信任信号。
+     * 公告页「最近的突发事件」数据源：该门店<b>全部未撤销（deleted=false）报告</b>
+     * 按时间倒序，最多 {@value #RECENT_REPORT_LIST_LIMIT} 条——<b>无时间窗口</b>，
+     * 含已过期（TTL 外）与超出任何展示窗口的历史记录，由 {@code expired} 标注
+     * （2026-08-12 起：TTL 过期只代表信号失效，不代表报告事实消失；2026-08-20 起
+     * 移除展示窗口：历史视图只裁剪「非事实」（撤销/处置），时间维度逐行标注——
+     * 旧实现先硬套活跃判定 {@code expires_at > now}、后设 created_at 展示窗口，均
+     * 让用户回看社区历史时只见空列表，无法区分「从未有人报」与「报过但已过期」）。
+     * 活跃/过期判定由本方法按 {@code expires_at} 列与 now 比较（TTL 唯一事实源 =
+     * 列，SQL 不自行定义时间窗）。报告者昵称脱敏（首字 + "**"，无昵称回退「舞友」）
+     * ——保护用户身份隐私的同时保留"社区已有多人报告"的信任信号。
      * <p>
      * {@code mine} 标记当前登录用户的报告（未登录时 UserContext.getCurrentUserId() 为
      * null，恒 false），供前端高亮"我"的上报行。
@@ -228,8 +212,7 @@ public class StatusReportService {
     public List<StatusReportListItem> listRecentReports(Long venueId) {
         Long currentUserId = UserContext.getCurrentUserId();
         LocalDateTime now = LocalDateTime.now();
-        LocalDateTime cutoff = now.minusHours(statusReportProperties.recentHistoryHours());
-        return statusReportRepository.findRecentByVenue(venueId, cutoff).stream()
+        return statusReportRepository.findRecentByVenue(venueId).stream()
                 .limit(RECENT_REPORT_LIST_LIMIT)
                 .map(row -> {
                     ReportType type = ReportType.valueOf(row.getType());
@@ -249,15 +232,24 @@ public class StatusReportService {
     }
 
     /**
-     * 详情页紧急公告区聚合（公开读，无需登录，2026-08-11 新增）。
+     * 门店紧急公告区聚合（公开读，无需登录，2026-08-11 新增，2026-08-20 分窗参数化）。
      * <p>
-     * 公告区展示 = 活跃信号 + 已采纳信号（保留至 TTL 过期，带"已核实"标记）按类型
-     * 聚簇；移除信号不展示。返回按严重级降序（HIGH→MEDIUM→LOW→RECOVERY，恢复营业
-     * 语义上最后呈现），每类型一条摘要。不返回 note（审核安全约定"note 仅管理端可见"）。
+     * 公告区展示 = 活跃信号 + 已采纳信号（带"已核实"标记）按类型聚簇；移除信号不展示。
+     * 返回按严重级降序（HIGH→MEDIUM→LOW→RECOVERY，恢复营业语义上最后呈现），
+     * 每类型一条摘要。不返回 note（审核安全约定"note 仅管理端可见"）。
+     * <p>
+     * 时间窗口由 {@code includeExpired} 参数化（双消费方分窗，根因见
+     * AGENTS.md「紧急公告区」）：
+     * <ul>
+     *   <li>false（默认）= 活跃视图：仅 TTL 窗口内信号——详情页单行公告条消费
+     *       （"当前紧急信号"语义，过时信号不得误导为当前紧急）；</li>
+     *   <li>true = 历史视图：全部未撤销 + 已采纳记录（含已过期）——公告专属页
+     *       「紧急公告」列表消费（"历史事实摘要"语义，时效由 latestAt 相对时间传达）。</li>
+     * </ul>
      */
     @Transactional(readOnly = true)
-    public List<AnnouncementSummary> listAnnouncements(Long venueId) {
-        return statusReportRepository.findAnnouncementsByVenue(venueId, LocalDateTime.now()).stream()
+    public List<AnnouncementSummary> listAnnouncements(Long venueId, boolean includeExpired) {
+        return statusReportRepository.findAnnouncementsByVenue(venueId, LocalDateTime.now(), includeExpired).stream()
                 .map(row -> {
                     ReportType type = ReportType.valueOf(row.getType());
                     int count = row.getCnt() != null ? row.getCnt().intValue() : 0;

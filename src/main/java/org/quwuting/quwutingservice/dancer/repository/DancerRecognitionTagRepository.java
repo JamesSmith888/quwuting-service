@@ -35,6 +35,30 @@ public interface DancerRecognitionTagRepository extends JpaRepository<DancerReco
     void deleteByRecognitionIdAndTag(@Param("recognitionId") Long recognitionId, @Param("tag") String tag);
 
     /**
+     * 认可标签的<b>确定性原子写入</b>（2026-08-20 根因修复：替代
+     * 「save + catch 23505 + clear + 继续循环」——撞 UNIQUE(recognition_id, tag) 后
+     * 事务已中止（25P02），循环内后续标签的 save 必然抛 JpaSystemException → HTTP 500）。
+     * <p>
+     * 命中 V1 唯一索引 {@code qwt_uk_drt_recognition_tag}（UNIQUE(recognition_id,
+     * tag)，列清单推断）时 DO NOTHING 返回 0 行——幂等忽略重复标签（去重先于
+     * 本写入：legacy 路径 {@code validateAndDedupeTags} 已去重，本 upsert 收口
+     * 并发/边界重复）。
+     *
+     * @return 受影响行数：1 = 新标签；0 = 该认可已带此标签（幂等跳过）
+     */
+    @Modifying
+    @Query(value = "INSERT INTO qwt_dancer_recognition_tags " +
+                   "(recognition_id, dancer_id, user_id, tag, created_at, updated_at, deleted) " +
+                   "VALUES (:recognitionId, :dancerId, :userId, :tag, :now, :now, false) " +
+                   "ON CONFLICT (recognition_id, tag) DO NOTHING",
+           nativeQuery = true)
+    int upsertRecognitionTag(@Param("recognitionId") Long recognitionId,
+                             @Param("dancerId") Long dancerId,
+                             @Param("userId") Long userId,
+                             @Param("tag") String tag,
+                             @Param("now") LocalDateTime now);
+
+    /**
      * 按认可记录 ID 批量取标签（我的认可明细用）。
      * 返回 Object[]{recognitionId, tag}。
      */

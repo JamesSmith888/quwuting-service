@@ -2,11 +2,8 @@ package org.quwuting.quwutingservice.venuefeedback.service;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.quwuting.quwutingservice.common.db.DbConstraintViolations;
 import org.quwuting.quwutingservice.common.text.TextSanitizer;
 import org.quwuting.quwutingservice.common.web.ClientIpResolver;
 import org.quwuting.quwutingservice.config.PointsProperties;
@@ -26,7 +23,6 @@ import org.quwuting.quwutingservice.venuefeedback.enums.FeedbackField;
 import org.quwuting.quwutingservice.venuefeedback.enums.FeedbackType;
 import org.quwuting.quwutingservice.venuefeedback.enums.ReportStatus;
 import org.quwuting.quwutingservice.venuefeedback.repository.VenueFeedbackRepository;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -101,9 +97,6 @@ public class VenueFeedbackService {
     private final org.quwuting.quwutingservice.points.service.PointsService pointsService;
     private final org.quwuting.quwutingservice.message.service.MessageService messageService;
 
-    @PersistenceContext
-    private EntityManager entityManager;
-
     /**
      * 提交上报（匿名可提交，不强推登录）。
      * 校验场所存在（逻辑删除的场所不允许上报）后创建记录；
@@ -116,12 +109,18 @@ public class VenueFeedbackService {
      * 管理端无法机器可读核对纠错建议的问题（根因见 AGENTS.md「统一用户上报 →
      * 结构化纠错载荷」）。其余类型忽略这两个字段（不落库）。
      * <p>
-     * 防刷（2026-08-07 补齐，根因见 AGENTS.md「统一用户上报 → 防刷」）：
+     * 防刷（2026-08-07 补齐 + 2026-08-20 幂等确定性化，根因见 AGENTS.md
+     * 「统一用户上报 → 防刷」）：
      * ① 60s 冷却：同身份对同场所同类型同字段（field 为 null 时仅类型）在窗口内
      * 重复提交抛 1006；
      * ② 库内 PENDING 部分唯一索引兜底（V2/V8 迁移）：并发/多实例竞争窗口内撞唯一
-     * 键时按去重单位（纠错场景含 field）幂等返回已有待处理记录（不重复插入），
-     * 与 StatusReportService 并发模式一致。
+     * 键时，登录用户（user_id IS NOT NULL）走<b>确定性原子 upsert</b>
+     * （{@link VenueFeedbackRepository#upsertPendingWithField} /
+     * {@link VenueFeedbackRepository#upsertPendingWithoutField}，INSERT ...
+     * ON CONFLICT DO NOTHING）按去重单位幂等返回已有待处理记录——恒 1 次往返
+     * 零异常，替代 2026-08-07 的「catch 23505 + 同事务回查」不可靠模式
+     * （PG 语句失败后事务中止 25P02，catch 内回查必然 HTTP 500，08-20 线上实证）；
+     * 匿名行不参与唯一索引（无身份归因），由 60s IP 冷却兜底，save 原路径。
      */
     @Transactional
     public VenueFeedbackResponse createFeedback(Long venueId, CreateFeedbackRequest request) {
@@ -133,9 +132,46 @@ public class VenueFeedbackService {
         if (isRateLimited(venueId, request.type(), request.field(), userId)) {
             throw new BusinessException(1006, "操作过于频繁，请稍后再试");
         }
+        VenueFeedback feedback = buildFeedback(venueId, userId, request);
+        // 匿名决策：未登录 → userId = null（trackable=false），登录 → 落库可追踪
+        if (userId == null) {
+            // 匿名行不进入 PENDING 部分唯一索引（谓词 user_id IS NOT NULL），无冲突面；
+            // 60s IP 冷却尽力而为兜底（多 IP 分布式刷无法拦截，与 view/share 同语义）
+            VenueFeedback saved = venueFeedbackRepository.save(feedback);
+            return toResponse(saved, maintenanceHint());
+        }
+        // 登录用户：确定性原子幂等（2026-08-20 根因修复，替代「save + catch 23505 +
+        // 同事务回查」——PG 语句失败后事务中止（25P02），catch 内回查必然 500）
+        LocalDateTime now = LocalDateTime.now();
+        if (feedback.getField() != null) {
+            // 纠错场景（field IS NOT NULL）：命中 V8 唯一索引则 DO NOTHING。
+            // enum 传 name()（原生 SQL 绑定 enum 默认 ORDINAL，传枚举会落库序号，
+            // 回查按 name() 匹配 0 条 → 500，2026-08-20 实证，见 Repository javadoc）
+            venueFeedbackRepository.upsertPendingWithField(venueId, userId, request.type().name(),
+                    feedback.getField().name(), feedback.getNote(), feedback.getCorrectedValue(), now);
+        } else {
+            // 非纠错场景（field IS NULL）：命中 V2 唯一索引则 DO NOTHING
+            venueFeedbackRepository.upsertPendingWithoutField(venueId, userId, request.type().name(),
+                    feedback.getNote(), now);
+        }
+        // 同事务回查（ON CONFLICT DO NOTHING 不中止事务，回查安全）——按去重单位取
+        // 胜出行（新插入 或 已存在），PENDING 唯一索引保证至多一行、冲突必有记录
+        VenueFeedback existing = (feedback.getField() != null
+                ? venueFeedbackRepository.findByUserIdAndVenueIdAndTypeAndFieldAndStatus(
+                        userId, venueId, request.type(), feedback.getField(), ReportStatus.PENDING)
+                : venueFeedbackRepository.findByUserIdAndVenueIdAndTypeAndStatus(
+                        userId, venueId, request.type(), ReportStatus.PENDING))
+                .orElseThrow(() -> new IllegalStateException(
+                        "PENDING 唯一索引 upsert 后未找到对应记录: venueId=" + venueId
+                                + ", userId=" + userId + ", type=" + request.type()
+                                + (feedback.getField() != null ? ", field=" + feedback.getField() : "")));
+        return toResponse(existing, maintenanceHint());
+    }
+
+    /** 上报实体组装（结构化纠错载荷仅 INACCURATE 承载；自由文本统一经 TextSanitizer 清洗） */
+    private VenueFeedback buildFeedback(Long venueId, Long userId, CreateFeedbackRequest request) {
         VenueFeedback feedback = new VenueFeedback();
         feedback.setVenueId(venueId);
-        // 匿名决策：未登录 → userId = null（trackable=false），登录 → 落库可追踪
         feedback.setUserId(userId);
         feedback.setType(request.type());
         feedback.setNote(TextSanitizer.sanitize(request.note()));
@@ -145,38 +181,7 @@ public class VenueFeedbackService {
                 ? null
                 : TextSanitizer.sanitize(request.correctedValue()));
         feedback.setStatus(ReportStatus.PENDING);
-        try {
-            VenueFeedback saved = venueFeedbackRepository.save(feedback);
-            return toResponse(saved, maintenanceHint());
-        } catch (DataIntegrityViolationException e) {
-            // PENDING 部分唯一索引兜底：仅吞唯一键并发竞态（SQLState 23505），
-            // 其余完整性错误必须继续抛出（见 DbConstraintViolations 约定）。
-            if (!DbConstraintViolations.isUniqueViolation(e)) {
-                throw e;
-            }
-            // 必须清除 session 中的脏实体（null id），否则后续查询的 auto-flush 会抛 AssertionFailure
-            entityManager.clear();
-            log.debug("createFeedback 并发冲突，幂等返回已有 PENDING 记录: venueId={}, userId={}, type={}, field={}",
-                    venueId, userId, request.type(), request.field());
-            // 回查按去重单位匹配：纠错场景（field 非空）按 (type, field)，否则按 type
-            // ——避免把"同场所同类型但不同字段"的纠错误当成重复上报吞掉（V8 拆分索引根因）。
-            VenueFeedback existing = feedback.getField() != null
-                    ? venueFeedbackRepository
-                            .findByUserIdAndVenueIdAndTypeAndFieldAndStatus(
-                                    userId, venueId, request.type(), feedback.getField(), ReportStatus.PENDING)
-                            .orElseThrow(() -> new IllegalStateException(
-                                    "PENDING 唯一索引冲突但未找到对应记录: venueId=" + venueId
-                                            + ", userId=" + userId + ", type=" + request.type()
-                                            + ", field=" + feedback.getField()))
-                    : venueFeedbackRepository
-                            .findByUserIdAndVenueIdAndTypeAndStatus(
-                                    userId, venueId, request.type(), ReportStatus.PENDING)
-                            // 冲突必有对应记录；状态异常直接抛 IllegalStateException（事务回滚，fail-fast）
-                            .orElseThrow(() -> new IllegalStateException(
-                                    "PENDING 唯一索引冲突但未找到对应记录: venueId=" + venueId
-                                            + ", userId=" + userId + ", type=" + request.type()));
-            return toResponse(existing, maintenanceHint());
-        }
+        return feedback;
     }
 
     /**

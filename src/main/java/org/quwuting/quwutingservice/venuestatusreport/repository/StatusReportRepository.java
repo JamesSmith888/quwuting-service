@@ -2,6 +2,7 @@ package org.quwuting.quwutingservice.venuestatusreport.repository;
 
 import org.quwuting.quwutingservice.venuestatusreport.entity.VenueStatusReport;
 import org.quwuting.quwutingservice.venuestatusreport.enums.AdminAction;
+import org.quwuting.quwutingservice.venuestatusreport.enums.ReportType;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -25,6 +26,44 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
      * 与 FavoriteService.findByUserIdAndVenueId 同模式。
      */
     Optional<VenueStatusReport> findByUserIdAndVenueId(Long userId, Long venueId);
+
+    /**
+     * 首次上报的<b>确定性原子写入</b>（2026-08-20 根因修复：替代
+     * 「save + catch 23505 + 同事务继续查询」的不可靠并发幂等）。
+     * <p>
+     * 根因（与 {@code VenueFeedbackService.createFeedback} 同源，详见 15-governance
+     * 错误表）：PostgreSQL 中语句失败（SQLState 23505）后整个事务进入 aborted 状态
+     * （25P02），catch 内 {@code entityManager.clear()} 只清理 session、无法恢复已中止
+     * 的 DB 事务——catch 后同一事务内的 {@code getActiveReportSummary} 必然抛
+     * 「current transaction is aborted」→ JpaSystemException → HTTP 500。
+     * <p>
+     * 本写法恒 1 次 DB 往返、零异常：并发首报竞争同一
+     * {@code qwt_uk_status_report_user_venue}（UNIQUE(user_id, venue_id)，唯一索引
+     * 用列清单推断）时 DO NOTHING，语义与旧 catch 分支一致（冲突 = 另一请求已插入，
+     * 幂等忽略本请求数据），随后调用方照常失效热度缓存并组装活跃摘要。
+     * <p>
+     * <b>enum 参数必须传 name() 字符串（2026-08-20 根因修复）</b>：原生 SQL 绑定
+     * enum 无 JPA 元数据 → 默认 {@code EnumType.ORDINAL}（{@code EnumJavaType.sqlType}
+     * 回退分支）→ {@code type} 列落库序号而非类型名，而实体派生查询按
+     * {@code @Enumerated(STRING)} name() 匹配——两侧不一致（与
+     * {@code VenueFeedbackRepository.upsertPending*} 同源，详见 15-governance 错误表）。
+     * 调用方传 {@code type.name()}。
+     *
+     * @return 受影响行数（1 = 新插入；0 = 并发竞态已有记录，幂等跳过）
+     */
+    @Modifying
+    @Query(value = "INSERT INTO qwt_venue_status_reports " +
+                   "(venue_id, user_id, type, occurred_at, note, expires_at, admin_action, created_at, updated_at, deleted) " +
+                   "VALUES (:venueId, :userId, :type, :occurredAt, :note, :expiresAt, NULL, :now, :now, false) " +
+                   "ON CONFLICT (user_id, venue_id) DO NOTHING",
+           nativeQuery = true)
+    int upsertReport(@Param("venueId") Long venueId,
+                     @Param("userId") Long userId,
+                     @Param("type") String type,
+                     @Param("occurredAt") LocalDateTime occurredAt,
+                     @Param("note") String note,
+                     @Param("expiresAt") LocalDateTime expiresAt,
+                     @Param("now") LocalDateTime now);
 
     /**
      * 活跃报告聚合：合并 COUNT + MAX(createdAt) 为 1 次往返。
@@ -87,36 +126,40 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
                                             @Param("venueId") Long venueId);
 
     /**
-     * 某门店最近突发事件列表（公开读，供详情页「报告突发事件」弹层默认内容）。
+     * 某门店突发事件历史明细列表（公开读，公告页「最近的突发事件」数据源）。
      * <p>
-     * 范围：未撤销（deleted=false）的全部用户报告，按时间倒序；展示窗口 =
-     * 报告行为时间 {@code created_at >= :cutoff}（cutoff 由 Service 层按
-     * {@code app.status-report.recent-history-hours} 计算传入——SQL 层禁止自行
-     * 定义时间窗）。窗口内报告<b>含已过期（TTL 外）</b>：TTL 过期只代表信号失效
-     * （不计入活跃计数/公告区），不代表报告事实消失——过期标注由 Service 层按
-     * {@code expires_at} 列判定（TTL 唯一事实源 = 列），本查询投影该列供其消费
-     * （2026-08-12 根因修复：旧实现把活跃判定 {@code expires_at > :now} 硬套在
-     * 明细列表上，TTL 过期后列表空无上下文，且与「我的上报记录」含过期记录的
-     * 既有契约口径不一致，见 AGENTS.md「门店突发事件列表」）。
+     * 范围：未撤销（deleted=false）的全部用户报告，按时间倒序——<b>无时间窗口</b>，
+     * 含已过期（TTL 外）与超出任何展示窗口的历史记录。TTL 过期只代表信号失效
+     * （不计入活跃计数/当前公告区），不代表报告事实消失——过期标注由 Service 层按
+     * {@code expires_at} 列判定（TTL 唯一事实源 = 列），本查询投影该列供其消费。
      * <p>
-     * 已撤销/已处置（deleted=true）记录不进"最近报告"明细（撤销是用户主动收回，
-     * 处置含采纳/移除均属内部语义，公告区聚合单独消费，见 {@link #findAnnouncementsByVenue}）。
+     * 根因（2026-08-20 修复，承接 2026-08-12）：旧实现曾先后用「活跃判定
+     * {@code expires_at > :now}」与「展示窗口 {@code created_at >= now - recentHistoryHours}」
+     * 裁剪本列表——前者让 TTL 过期即消失，后者让超出窗口的旧记录不可见，均与
+     * "公告页 = 报告事实历史视图"的语义冲突（用户回看社区历史时只见空列表，无法
+     * 区分「从未有人报」与「报过但已过期」）。2026-08-12 修复了前者但保留了窗口
+     * （半成品）；2026-08-20 移除窗口：<b>历史视图只裁剪「非事实」</b>（撤销/处置），
+     * 时间维度由 Service 层逐行标注 expired，行数上限由 Service 层
+     * {@code .limit()} 施加（防无限增长，见 {@code StatusReportService#RECENT_REPORT_LIST_LIMIT}）。
+     * 详见 AGENTS.md「门店突发事件列表」。
+     * <p>
+     * 已撤销/已处置（deleted=true）记录不进历史明细（撤销是用户主动收回，处置含
+     * 采纳/移除均属内部语义，公告区聚合单独消费，见 {@link #findAnnouncementsByVenue}）。
      * 取报告者脱敏昵称需要 JOIN qwt_users（LEFT JOIN：用户被删等异常态回退匿名，
      * 不因关联缺失丢行）。
      * <p>
      * 原生 SQL + 投影接口，别名必须全小写（PG 折叠未引用标识符，见
      * {@link #findMyReportsByUserId} 注释的既定模式）。LIMIT 由 Service 层
-     * {@code .limit()} 施加（列表页仅需最近 N 条，避免大结果集全量传输）。
+     * {@code .limit()} 施加（避免大结果集全量传输）。
      */
     @Query(value = "SELECT r.id AS id, r.venue_id AS venueid, r.user_id AS userid, " +
                    "       r.type AS type, r.created_at AS createdat, r.expires_at AS expiresat, " +
                    "       u.nickname AS nickname " +
                    "FROM qwt_venue_status_reports r " +
                    "LEFT JOIN qwt_users u ON u.id = r.user_id " +
-                   "WHERE r.venue_id = :venueId AND r.deleted = false AND r.created_at >= :cutoff " +
+                   "WHERE r.venue_id = :venueId AND r.deleted = false " +
                    "ORDER BY r.created_at DESC", nativeQuery = true)
-    List<VenueReportRow> findRecentByVenue(@Param("venueId") Long venueId,
-                                           @Param("cutoff") LocalDateTime cutoff);
+    List<VenueReportRow> findRecentByVenue(@Param("venueId") Long venueId);
 
     /** 投影接口：门店最近突发事件行（含报告者昵称与过期时刻，供 GET /venues/{id}/status-reports 使用） */
     interface VenueReportRow {
@@ -246,12 +289,20 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
     }
 
     /**
-     * 详情页紧急公告区聚合（2026-08-11 新增，公开读）。
+     * 门店紧急公告区聚合（2026-08-11 新增，公开读）。
      * <p>
      * 公告区展示 = 活跃信号（deleted=false）+ 已采纳信号（deleted=true 且
-     * admin_action='ADOPTED'，公告保留展示至 TTL 过期并带"已核实"标记）——移除的
-     * 信号（REMOVED）不展示。范围均限 TTL 窗口（expires_at > now）。
-     * <p>
+     * admin_action='ADOPTED'，带"已核实"标记）按类型聚簇——移除的信号（REMOVED）
+     * 不展示。时间窗口由 {@code includeExpired} 参数化（2026-08-20 新增，双消费方
+     * 分窗语义，见 AGENTS.md「紧急公告区」）：
+     * <ul>
+     *   <li>{@code includeExpired=false}（默认）= <b>活跃视图</b>：仅 TTL 窗口内
+     *       （expires_at > now）信号——详情页单行公告条消费（"当前紧急信号"语义，
+     *       过时信号不得误导为当前紧急）；</li>
+     *   <li>{@code includeExpired=true} = <b>历史视图</b>：全部未撤销 + 已采纳记录
+     *       （含已过期）——公告专属页「紧急公告」列表消费（"历史事实摘要"语义，
+     *       用户回看社区历史需可见，时效由 latestAt 相对时间传达）。</li>
+     * </ul>
      * 按 (venue_id, type) 聚簇返回，Service 层聚合为每类型一条摘要（count /
      * adopted / latestAt）。不返回 note（审核安全约定"note 仅管理端可见"）。
      * <p>
@@ -262,11 +313,13 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
                    "       COUNT(*) FILTER (WHERE r.admin_action = 'ADOPTED') AS adoptedcnt, " +
                    "       MAX(r.created_at) AS latestat " +
                    "FROM qwt_venue_status_reports r " +
-                   "WHERE r.venue_id = :venueId AND r.expires_at > :now " +
+                   "WHERE r.venue_id = :venueId " +
+                   "  AND (:includeExpired = true OR r.expires_at > :now) " +
                    "  AND (r.deleted = false OR r.admin_action = 'ADOPTED') " +
                    "GROUP BY r.type", nativeQuery = true)
     List<AnnouncementRow> findAnnouncementsByVenue(@Param("venueId") Long venueId,
-                                                   @Param("now") LocalDateTime now);
+                                                   @Param("now") LocalDateTime now,
+                                                   @Param("includeExpired") boolean includeExpired);
 
     /** 投影接口：公告区聚合行（每类型一条：计数 / 已采纳数 / 最新时间） */
     interface AnnouncementRow {

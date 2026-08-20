@@ -7,7 +7,6 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.quwuting.quwutingservice.config.StatusReportProperties;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.message.service.MessageService;
@@ -21,6 +20,7 @@ import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueService;
 import org.quwuting.quwutingservice.venuestatusreport.dto.request.SubmitReportRequest;
 import org.quwuting.quwutingservice.venuestatusreport.dto.response.AdminStatusReportResponse;
+import org.quwuting.quwutingservice.venuestatusreport.dto.response.AnnouncementSummary;
 import org.quwuting.quwutingservice.venuestatusreport.dto.response.StatusReportListItem;
 import org.quwuting.quwutingservice.venuestatusreport.entity.VenueStatusReport;
 import org.quwuting.quwutingservice.venuestatusreport.enums.AdminAction;
@@ -30,7 +30,6 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 
-import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -92,7 +91,7 @@ class StatusReportServiceTest {
         // entityManager 为 @PersistenceContext 字段注入，不参与构造；测试路径不触发
         // DataIntegrityViolationException 分支，无 entityManager 依赖
         service = new StatusReportService(statusReportRepository, venueRepository, venueHeatService,
-                venueService, pointsService, messageService, new StatusReportProperties(48));
+                venueService, pointsService, messageService);
         UserContext.set(USER_ID, UserRole.USER);
     }
 
@@ -202,6 +201,26 @@ class StatusReportServiceTest {
         verify(statusReportRepository, never()).renewReport(any(Long.class), any(), any());
     }
 
+    /**
+     * 2026-08-20 根因回归：首次上报必须走确定性原子 upsert（INSERT ... ON CONFLICT
+     * DO NOTHING），替代「save + catch 23505 + 同事务继续查询」——PG 语句失败后事务
+     * 中止（25P02），catch 后 getActiveReportSummary 必然 HTTP 500（与
+     * VenueFeedbackService.createFeedback 同源修复，见 15-governance 错误表）。
+     */
+    @Test
+    void submitReport_newReport_usesAtomicUpsert() {
+        stubCommon(stats(1, LocalDateTime.now()));
+        when(statusReportRepository.findByUserIdAndVenueId(USER_ID, VENUE_ID))
+                .thenReturn(Optional.empty());
+
+        service.submitReport(VENUE_ID, new SubmitReportRequest(null, null, null));
+
+        verify(statusReportRepository).upsertReport(
+                eq(VENUE_ID), eq(USER_ID), eq(ReportType.SUSPENDED.name()),
+                isNull(), any(), any(LocalDateTime.class), any(LocalDateTime.class));
+        verify(statusReportRepository, never()).save(any());
+    }
+
     /** 摘要返回：upsert 后返回更新后的活跃摘要（activeCount/latestReportTime 透传） */
     @Test
     void submitReport_returnsActiveSummary() {
@@ -283,7 +302,8 @@ class StatusReportServiceTest {
         assertEquals(1, summary.activeCount());
     }
 
-    // ─── 门店最近突发事件列表（2026-08-12 根因修复：含已过期 + expired 标注） ────────
+    // ─── 门店最近突发事件列表（2026-08-12 根因修复：含已过期 + expired 标注；
+    //     2026-08-20 移除展示窗口：全量未撤销历史，无 created_at 裁剪） ────────
 
     /** 构造门店列表行投影 mock（含过期时刻，供 expired 判定观测） */
     private StatusReportRepository.VenueReportRow venueReportRow(Long id, Long userId, String nickname,
@@ -301,9 +321,10 @@ class StatusReportServiceTest {
     }
 
     /**
-     * 根因回归（2026-08-12）：TTL 过期后列表不得消失——「最近的突发事件」= 未撤销的
-     * 报告事实（活跃 + 已过期），已过期行必须带 expired 标注（与「我的上报记录」
-     * active 标注同一语义）。同时校验 mine 高亮与昵称脱敏（首字 + "**"，无昵称「舞友」）。
+     * 根因回归（2026-08-12 + 2026-08-20）：TTL 过期后列表不得消失，且<b>无展示窗口</b>
+     * ——「最近的突发事件」= 未撤销的报告事实（活跃 + 已过期 + 超窗历史），已过期行
+     * 必须带 expired 标注（与「我的上报记录」active 标注同一语义）。同时校验 mine
+     * 高亮与昵称脱敏（首字 + "**"，无昵称「舞友」）。
      */
     @Test
     void listRecentReports_marksExpiredAndActive() {
@@ -316,12 +337,16 @@ class StatusReportServiceTest {
         StatusReportRepository.VenueReportRow activeRow = venueReportRow(
                 2L, 99L, null, ReportType.SUDDEN_INSPECTION,
                 now.minusMinutes(30), now.plusHours(5));
-        when(statusReportRepository.findRecentByVenue(eq(VENUE_ID), any(LocalDateTime.class)))
-                .thenReturn(List.of(expiredRow, activeRow));
+        // 2026-08-20：超出 48h 展示窗口的旧记录同样必须可见（历史视图无时间窗裁剪）
+        StatusReportRepository.VenueReportRow staleRow = venueReportRow(
+                3L, 5L, "老张", ReportType.SUDDEN_EVICTION,
+                now.minusDays(7), now.minusDays(7).plusHours(2));
+        when(statusReportRepository.findRecentByVenue(eq(VENUE_ID)))
+                .thenReturn(List.of(expiredRow, activeRow, staleRow));
 
         List<StatusReportListItem> rows = service.listRecentReports(VENUE_ID);
 
-        assertEquals(2, rows.size());
+        assertEquals(3, rows.size(), "超窗历史（7 天前）与过期记录必须全部可见，列表无时间窗口");
         StatusReportListItem expired = rows.get(0);
         assertEquals("阿**", expired.reporterName(), "昵称必须脱敏（首字 + **）");
         assertTrue(expired.expired(), "TTL 过期（expires_at < now）的报告必须标注已过期");
@@ -330,23 +355,86 @@ class StatusReportServiceTest {
         assertEquals("舞友", active.reporterName(), "无昵称回退「舞友」");
         assertTrue(!active.expired(), "活跃（expires_at > now）报告不得标注已过期");
         assertTrue(!active.mine(), "他人报告不得标记 mine");
+        StatusReportListItem stale = rows.get(2);
+        assertTrue(stale.expired(), "超窗历史记录（TTL 已过）必须标注已过期");
+        assertEquals("老**", stale.reporterName(), "超窗历史同样脱敏展示");
     }
 
-    /** 展示窗口传参契约：cutoff = now - recentHistoryHours（配置化窗口，SQL 层不自定义时间窗） */
+    /**
+     * 2026-08-20 回归：列表查询不得携带任何时间窗口（cutoff）参数——findRecentByVenue
+     * 以 venueId 单参数调用，历史全量由 Service 层 limit 上限保护（防无限增长），
+     * 禁止 SQL/查询层恢复 created_at 裁剪（历史视图只裁剪"非事实"）。
+     */
     @Test
-    void listRecentReports_passesConfiguredCutoff() {
-        LocalDateTime now = LocalDateTime.now();
-        when(statusReportRepository.findRecentByVenue(eq(VENUE_ID), any(LocalDateTime.class)))
+    void listRecentReports_callsRepositoryWithoutTimeWindow() {
+        when(statusReportRepository.findRecentByVenue(eq(VENUE_ID)))
                 .thenReturn(List.of());
 
         service.listRecentReports(VENUE_ID);
 
-        ArgumentCaptor<LocalDateTime> cutoffCaptor = ArgumentCaptor.forClass(LocalDateTime.class);
-        verify(statusReportRepository).findRecentByVenue(eq(VENUE_ID), cutoffCaptor.capture());
-        // 毫秒级容差（service 内 now 比测试捕获的 now 晚几毫秒）：cutoff ≈ now - 48h
-        long diffMillis = Math.abs(
-                Duration.between(cutoffCaptor.getValue(), now.minusHours(48)).toMillis());
-        assertTrue(diffMillis < 5000, "cutoff 必须 ≈ now - 配置窗口（48h），实际偏差 " + diffMillis + "ms");
+        verify(statusReportRepository).findRecentByVenue(eq(VENUE_ID));
+    }
+
+    // ─── 紧急公告聚合（2026-08-11 新增，2026-08-20 includeExpired 分窗参数化） ──
+
+    /** 构造公告聚合行投影 mock（count / adoptedcnt / latestat 供 Service 组装摘要） */
+    private StatusReportRepository.AnnouncementRow announcementRow(ReportType type, Long cnt,
+                                                                   Long adoptedCnt, LocalDateTime latestAt) {
+        StatusReportRepository.AnnouncementRow row =
+                mock(StatusReportRepository.AnnouncementRow.class);
+        when(row.getType()).thenReturn(type.name());
+        when(row.getCnt()).thenReturn(cnt);
+        when(row.getAdoptedcnt()).thenReturn(adoptedCnt);
+        when(row.getLatestat()).thenReturn(latestAt);
+        return row;
+    }
+
+    /** includeExpired 透传契约：公告页（true）与详情页公告条（false）请求同一仓储方法 */
+    @Test
+    void listAnnouncements_passesIncludeExpiredFlag() {
+        when(statusReportRepository.findAnnouncementsByVenue(eq(VENUE_ID),
+                any(LocalDateTime.class), eq(true)))
+                .thenReturn(List.of());
+        when(statusReportRepository.findAnnouncementsByVenue(eq(VENUE_ID),
+                any(LocalDateTime.class), eq(false)))
+                .thenReturn(List.of());
+
+        service.listAnnouncements(VENUE_ID, true);
+        service.listAnnouncements(VENUE_ID, false);
+
+        verify(statusReportRepository).findAnnouncementsByVenue(eq(VENUE_ID),
+                any(LocalDateTime.class), eq(true));
+        verify(statusReportRepository).findAnnouncementsByVenue(eq(VENUE_ID),
+                any(LocalDateTime.class), eq(false));
+    }
+
+    /**
+     * 2026-08-20 历史视图回归：includeExpired=true 时，全过期的门店仍返回按类型聚簇
+     * 摘要（用户回看社区历史可见），count/adopted/latestAt 组装正确。
+     */
+    @Test
+    void listAnnouncements_includeExpired_returnsHistoricalSummaries() {
+        LocalDateTime now = LocalDateTime.now();
+        // 行投影须在外层 when 之前构建（thenReturn 参数求值中 stubbing 其他 mock
+        // 会中断外层 stubbing → UnfinishedStubbing，见 listRecentReports 同模式）
+        StatusReportRepository.AnnouncementRow suspended =
+                announcementRow(ReportType.SUSPENDED, 2L, 1L, now.minusDays(8));
+        StatusReportRepository.AnnouncementRow inspection =
+                announcementRow(ReportType.SUDDEN_INSPECTION, 1L, 0L, now.minusHours(1));
+        when(statusReportRepository.findAnnouncementsByVenue(eq(VENUE_ID),
+                any(LocalDateTime.class), eq(true)))
+                .thenReturn(List.of(suspended, inspection));
+
+        List<AnnouncementSummary> rows = service.listAnnouncements(VENUE_ID, true);
+
+        // 严重级降序：SUSPENDED(medium) 在 SUDDEN_INSPECTION(high) 之前
+        assertEquals(2, rows.size());
+        assertEquals(ReportType.SUDDEN_INSPECTION, rows.get(0).type(), "历史视图含全过期类型摘要");
+        assertEquals(1, rows.get(0).count());
+        assertEquals(ReportType.SUSPENDED, rows.get(1).type());
+        assertEquals(2, rows.get(1).count());
+        assertTrue(rows.get(1).adopted(), "已采纳记录驱动「已核实」标记（过期仍保留事实）");
+        assertTrue(!rows.get(0).adopted());
     }
 
     // ─── 管理端：列表 / 计数 / 移除（2026-08-10 新增，需 ADMIN） ─────────────────

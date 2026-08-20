@@ -2,7 +2,6 @@ package org.quwuting.quwutingservice.taginteraction.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.quwuting.quwutingservice.common.db.DbConstraintViolations;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.taginteraction.RatingDimensions;
 import org.quwuting.quwutingservice.taginteraction.dto.response.DimensionScoreStats;
@@ -12,7 +11,6 @@ import org.quwuting.quwutingservice.taginteraction.entity.TagInteraction;
 import org.quwuting.quwutingservice.taginteraction.repository.TagInteractionRepository;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -77,25 +75,11 @@ public class TagInteractionService {
             return;
         }
 
-        // 首次评分：创建新记录
-        TagInteraction ti = new TagInteraction();
-        ti.setUserId(userId);
-        ti.setVenueId(venueId);
-        ti.setTag(tag);
-        ti.setScore(score);
-        try {
-            tagInteractionRepository.save(ti);
-        } catch (DataIntegrityViolationException e) {
-            // 仅吞"唯一键并发竞态"（SQLState 23505：另一请求已创建同 (user,venue,tag) 行）。
-            // 其余数据完整性错误（列约束/NOT NULL/外键等）必须继续抛出——
-            // 2026-08-05 事故：liked 列 NOT NULL 违规曾被此处误吞，事务 rollback-only 后
-            // commit 抛 UnexpectedRollbackException，接口 200 + code=5000 表面成功实为失败，
-            // 真实根因（schema 漂移）被掩盖数周。见 AGENTS.md「schema 变更纪律」。
-            if (!DbConstraintViolations.isUniqueViolation(e)) {
-                throw e;
-            }
-            log.debug("score 并发冲突，幂等忽略: userId={}, venueId={}, tag={}", userId, venueId, tag);
-        }
+        // 首次评分：创建新记录（确定性原子 upsert，2026-08-20 根因修复——替代
+        // 「save + catch 23505 + 幂等忽略」：PG 语句失败后事务中止（25P02），旧 catch
+        // 分支依赖 commit-on-aborted 静默回滚的 JPA 不可靠行为；ON CONFLICT DO NOTHING
+        // 恒 1 次往返零异常，冲突 = 并发竞态已有行，幂等跳过，见 15-governance 错误表）
+        tagInteractionRepository.upsertScore(userId, venueId, tag, score, LocalDateTime.now());
         invalidateVenueAggregates(venueId);
     }
 

@@ -1,7 +1,5 @@
 package org.quwuting.quwutingservice.dancer.service;
 
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.text.TextSanitizer;
@@ -40,7 +38,6 @@ import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
 import org.quwuting.quwutingservice.storage.ImageContentValidator;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
@@ -118,9 +115,6 @@ public class DancerService {
     private final DancerAdProperties dancerAdProperties;
     /** 运营配置（2026-08-15 认可「每日一票」开关：dancer.recognition.daily.single） */
     private final OpsConfigService opsConfigService;
-
-    @PersistenceContext
-    private EntityManager entityManager;
 
     // ─── 创建（两条通道：主动注册 → PENDING；后台创建 → NORMAL） ─────────────────
 
@@ -783,43 +777,33 @@ public class DancerService {
 
     /**
      * 插入今日认可记录，返回记录 ID。
-     * 23505 并发冲突（另一请求已创建今日记录）→ entityManager.clear() 后重查复用
-     * （幂等视为已认可；clear 丢弃失败 save 遗留的托管实体，同 VenueReactionService）。
+     * <p>
+     * 2026-08-20 确定性化（根因修复，替代「save + catch 23505 + clear + 同事务回查」：
+     * PG 语句失败后事务中止（25P02），catch 内回查必然 HTTP 500）：先经
+     * {@code upsertRecognition} 原子 upsert（命中 UNIQUE(user, dancer, date) 则
+     * DO NOTHING，恒 1 次往返零异常），再按唯一键回查复用——新插入或并发赢家行
+     * 均可取得，语义与旧 catch 分支完全一致但无异常路径。每日一票主路径已由
+     * {@code lockDailyTicket} 咨询锁串行化（2026-08-15），本 upsert 收口多选/旧
+     * 客户端路径的并发首写。
      */
     private long insertRecognition(Long userId, Long dancerId, LocalDate today) {
-        DancerRecognition recognition = new DancerRecognition();
-        recognition.setUserId(userId);
-        recognition.setDancerId(dancerId);
-        recognition.setRecognitionDate(today);
-        try {
-            return recognitionRepository.save(recognition).getId();
-        } catch (DataIntegrityViolationException e) {
-            log.debug("toggle 认可并发冲突，幂等复用: userId={}, dancerId={}", userId, dancerId);
-            entityManager.clear();
-            return recognitionRepository
-                    .findByUserIdAndDancerIdAndRecognitionDate(userId, dancerId, today)
-                    .orElseThrow(() -> e)
-                    .getId();
-        }
+        recognitionRepository.upsertRecognition(dancerId, userId, today, LocalDateTime.now());
+        return recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(userId, dancerId, today)
+                .orElseThrow(() -> new IllegalStateException(
+                        "认可 upsert 后未找到记录: userId=" + userId + ", dancerId=" + dancerId
+                                + ", date=" + today))
+                .getId();
     }
 
     /**
-     * 写入认可标签（循环 save；23505 UNIQUE(recognitionId, tag) 并发冲突幂等忽略——
-     * clear 丢弃失败 save 遗留的托管实体）。
+     * 写入认可标签（循环 upsert；2026-08-20 确定性化——撞 UNIQUE(recognitionId, tag)
+     * 后事务已中止，旧「catch 23505 + clear + 继续循环」会让后续标签的 save 抛
+     * 25P02 → HTTP 500；ON CONFLICT DO NOTHING 恒零异常，重复标签幂等忽略）。
      */
     private void insertRecognitionTags(Long recognitionId, Long dancerId, Long userId, List<String> tags) {
+        LocalDateTime now = LocalDateTime.now();
         for (String tag : tags) {
-            DancerRecognitionTag t = new DancerRecognitionTag();
-            t.setRecognitionId(recognitionId);
-            t.setDancerId(dancerId);
-            t.setUserId(userId);
-            t.setTag(tag);
-            try {
-                recognitionTagRepository.save(t);
-            } catch (DataIntegrityViolationException e) {
-                log.debug("认可标签并发冲突，幂等忽略: recognitionId={}, tag={}", recognitionId, tag);
-                entityManager.clear();
-            }
+            recognitionTagRepository.upsertRecognitionTag(recognitionId, dancerId, userId, tag, now);
         }
     }
 

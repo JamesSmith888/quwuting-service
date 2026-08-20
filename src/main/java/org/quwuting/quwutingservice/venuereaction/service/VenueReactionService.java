@@ -1,10 +1,7 @@
 package org.quwuting.quwutingservice.venuereaction.service;
 
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.quwuting.quwutingservice.common.db.DbConstraintViolations;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
@@ -17,7 +14,6 @@ import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionStatsResp
 import org.quwuting.quwutingservice.venuereaction.dto.response.ToggleReactionResult;
 import org.quwuting.quwutingservice.venuereaction.entity.VenueReaction;
 import org.quwuting.quwutingservice.venuereaction.repository.VenueReactionRepository;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -69,9 +65,6 @@ public class VenueReactionService {
     private final VenueLookupService venueLookupService;
     private final VenueHeatService venueHeatService;
     private final OpsConfigService opsConfigService;
-
-    @PersistenceContext
-    private EntityManager entityManager;
 
     /**
      * 切换 Reaction 参与状态（toggle：今日未参与→参与，今日已参与→取消）。
@@ -156,25 +149,14 @@ public class VenueReactionService {
         return new ToggleReactionResult(true, null);
     }
 
-    /** 插入今日 Reaction 记录（23505 唯一冲突幂等化为已参与——并发兜底，见调用方注释） */
+    /**
+     * 插入今日 Reaction 记录（确定性原子 upsert，2026-08-20 根因修复：替代
+     * 「save + catch 23505 + entityManager.clear()」——PG 语句失败后事务中止
+     * （25P02），吞掉冲突后继续使用同一事务依赖 JPA 不可靠行为；ON CONFLICT
+     * DO NOTHING 恒 1 次往返零异常，命中 V1 唯一索引即幂等视为已参与）。
+     */
     private void insertReaction(Long userId, Long venueId, String code, LocalDate today) {
-        VenueReaction reaction = new VenueReaction();
-        reaction.setUserId(userId);
-        reaction.setVenueId(venueId);
-        reaction.setReactionCode(code);
-        reaction.setReactionDate(today);
-        try {
-            venueReactionRepository.save(reaction);
-        } catch (DataIntegrityViolationException e) {
-            if (!DbConstraintViolations.isUniqueViolation(e)) {
-                // 非唯一键冲突（NOT NULL/列约束/外键）不能当并发竞态吞掉——
-                // 项目统一约定（见 AGENTS.md「并发与幂等」）：只允许吞 SQLState 23505
-                throw e;
-            }
-            // 并发竞态：另一请求已创建今日记录，幂等视为已参与
-            log.debug("toggle Reaction 并发冲突，幂等忽略: userId={}, venueId={}, code={}", userId, venueId, code);
-            entityManager.clear();
-        }
+        venueReactionRepository.upsertReaction(userId, venueId, code, today, LocalDateTime.now());
     }
 
     /**

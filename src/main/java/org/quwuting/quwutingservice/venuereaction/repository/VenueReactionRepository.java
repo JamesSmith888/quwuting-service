@@ -2,6 +2,7 @@ package org.quwuting.quwutingservice.venuereaction.repository;
 
 import org.quwuting.quwutingservice.venuereaction.entity.VenueReaction;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -11,6 +12,31 @@ import java.util.List;
 import java.util.Optional;
 
 public interface VenueReactionRepository extends JpaRepository<VenueReaction, Long> {
+
+    /**
+     * 今日 Reaction 记录的<b>确定性原子写入</b>（2026-08-20 根因修复：替代
+     * 「save + catch 23505 + entityManager.clear()」——PG 语句失败后事务中止
+     * （25P02），catch 后同事务继续执行（或提交被当作回滚）均依赖 JPA 不可靠行为；
+     * 且旧 catch 分支吞掉冲突后本事务整体静默回滚，赢家记录虽在但语义依赖巧合）。
+     * <p>
+     * 命中 V1 唯一索引 {@code qwt_uk_vr_user_venue_code_date}（同一用户同一场所
+     * 同一 code 同一日）时 DO NOTHING 返回 0 行——幂等视为已参与（每日一记模型的
+     * 并发竞态收口；每日一票的"一人一日一票"不变量仍由应用层
+     * {@link #lockDailyTicket} 咨询锁承载，V22 决策，本 upsert 不改变）。
+     *
+     * @return 受影响行数：1 = 新记录；0 = 当日该 code 已参与（幂等跳过）
+     */
+    @Modifying
+    @Query(value = "INSERT INTO qwt_venue_reactions " +
+                   "(user_id, venue_id, reaction_code, reaction_date, created_at, updated_at, deleted) " +
+                   "VALUES (:userId, :venueId, :code, :reactionDate, :now, :now, false) " +
+                   "ON CONFLICT (user_id, venue_id, reaction_code, reaction_date) DO NOTHING",
+           nativeQuery = true)
+    int upsertReaction(@Param("userId") Long userId,
+                       @Param("venueId") Long venueId,
+                       @Param("code") String code,
+                       @Param("reactionDate") LocalDate reactionDate,
+                       @Param("now") LocalDateTime now);
 
     /**
      * 精确命中"当日记录"（toggle 用，每日一记模型的核心查询）。

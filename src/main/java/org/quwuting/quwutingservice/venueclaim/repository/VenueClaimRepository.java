@@ -6,7 +6,11 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -14,9 +18,9 @@ import java.util.Optional;
  * 门店认领申请工单仓储。
  * <p>
  * 防重复申请的强约束在库内（V12 部分唯一索引 (user_id, venue_id) WHERE
- * status='PENDING'），应用层通过 {@code findByUserIdAndVenueIdAndStatus}
- * 先行幂等 + 冲突时 catch DataIntegrityViolationException（23505）回查，
- * 与 venuefeedback 的 V2/V8 去重模式一致。
+ * status='PENDING'），应用层经原子 upsert（{@link #upsertPending}）收口并发
+ * （2026-08-20 确定性化，替代旧「save + catch 23505 + 同事务回查」：PG 语句失败
+ * 后事务中止 25P02，catch 内回查必然 HTTP 500，见 15-governance 错误表）。
  */
 public interface VenueClaimRepository extends JpaRepository<VenueClaim, Long>, JpaSpecificationExecutor<VenueClaim> {
 
@@ -29,6 +33,32 @@ public interface VenueClaimRepository extends JpaRepository<VenueClaim, Long>, J
     /** 用户对某门店处于待审核的申请（幂等 / 菜单态判定用） */
     Optional<VenueClaim> findFirstByUserIdAndVenueIdAndStatusOrderByCreatedAtDesc(
             Long userId, Long venueId, ClaimStatus status);
+
+    /**
+     * PENDING 认领工单的<b>确定性原子写入</b>（2026-08-20 根因修复）。
+     * 命中 V12 部分唯一索引 {@code qwt_uk_claims_user_venue_pending}（同一用户对
+     * 同一门店最多一条 PENDING 申请）时 DO NOTHING，调用方随后回查幂等返回既有
+     * 工单——恒 1 次往返零异常，替代「save + catch 23505 + 同事务回查」的不可靠
+     * 模式。冲突目标 = 列清单 + 完整索引谓词（部分唯一索引推断要求）。
+     *
+     * @return 受影响行数：1 = 新工单；0 = 已有 PENDING 工单（幂等跳过）
+     */
+    @Modifying
+    @Query(value = "INSERT INTO qwt_venue_claims " +
+                   "(venue_id, user_id, real_name, contact_phone, contact_wechat, license_urls, note, " +
+                   " status, handled_by, handle_note, handled_at, created_at, updated_at, deleted) " +
+                   "VALUES (:venueId, :userId, :realName, :contactPhone, :contactWechat, :licenseUrls, :note, " +
+                   " 'PENDING', NULL, NULL, NULL, :now, :now, false) " +
+                   "ON CONFLICT (user_id, venue_id) WHERE status = 'PENDING' DO NOTHING",
+           nativeQuery = true)
+    int upsertPending(@Param("venueId") Long venueId,
+                      @Param("userId") Long userId,
+                      @Param("realName") String realName,
+                      @Param("contactPhone") String contactPhone,
+                      @Param("contactWechat") String contactWechat,
+                      @Param("licenseUrls") String licenseUrls,
+                      @Param("note") String note,
+                      @Param("now") LocalDateTime now);
 
     /** 管理端分页列表（Specification 组合状态筛选） */
     Page<VenueClaim> findAll(org.springframework.data.jpa.domain.Specification<VenueClaim> spec, Pageable pageable);

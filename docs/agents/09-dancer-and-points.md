@@ -87,12 +87,15 @@
   `dancer.recognition.daily.single`（V31 迁移，默认 true）控制**：关闭 = 多选模式
   （每枚表情独立 toggle：累加 / 移除；今日标签清空 → 删除认可记录）。旧客户端 `tags`
   列表（0-3）走兼容路径（未认可 → 参与写列表标签；已认可 → 取消）。
-- **并发与删除（2026-08-15 根因修复）**：单票路径以 `pg_advisory_xact_lock`
+- **并发与删除（2026-08-15 根因修复 + 2026-08-20 幂等确定性化）**：单票路径以 `pg_advisory_xact_lock`
   （"recognition:"+user+":"+dancer+":"+date）串行化同键并发（对齐 VenueReactionService）；
   标签/认可删除一律 **@Modifying(clearAutomatically=true) 批量删除**（幂等、无实体管理
   状态——旧 Spring Data 派生删除 SELECT+em.remove 延迟实体删除在事务内 flush + 同键并发
-  场景产生 StaleObjectStateException，见前端 09 文档「认可链路晚二轮」）；认可插入 23505
-  → entityManager.clear() 后重查复用；标签插入 23505（UNIQUE(recognitionId, tag)）→ 幂等忽略。
+  场景产生 StaleObjectStateException，见前端 09 文档「认可链路晚二轮」）；**认可/标签插入
+  一律原子 upsert**（`DancerRecognitionRepository.upsertRecognition` / 
+  `DancerRecognitionTagRepository.upsertRecognitionTag`，`INSERT ... ON CONFLICT DO NOTHING`，
+  2026-08-20 替代「save + catch 23505 + clear + 同事务回查/继续循环」——PG 语句失败后
+  事务中止（25P02），旧 catch 路径在并发下必然 HTTP 500，见 15-governance 错误表）。
   缓存失效 = 内联（响应统计新鲜）+ afterCommit/afterCompletion（回滚清污染）。
 - 窗口统计（countAll/countToday/count7d/count30d）锚点 = `createdAt`（真实"此刻"，与 Reaction
   同口径）；`recognitionDate` 只承载"每日唯一"语义；「最近认可」动态（昨天 +3 前天 +5）按

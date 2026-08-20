@@ -40,6 +40,30 @@ public interface DancerRecognitionRepository extends JpaRepository<DancerRecogni
             Long userId, Long dancerId, LocalDate recognitionDate);
 
     /**
+     * 今日认可记录的<b>确定性原子写入</b>（2026-08-20 根因修复：替代
+     * 「save + catch 23505 + 同事务回查」——PG 语句失败后事务中止（25P02），catch
+     * 内回查必然 HTTP 500，且 Hibernate flush 失败后持久化上下文状态未定义）。
+     * <p>
+     * 命中 V1 唯一索引 {@code qwt_uk_dr_user_dancer_date}（UNIQUE(user_id, dancer_id,
+     * recognition_date)，列清单推断即可）时 DO NOTHING 返回 0 行——调用方随后按
+     * {@link #findByUserIdAndDancerIdAndRecognitionDate} 回查复用（新插入或赢家行，
+     * 唯一索引保证至多一行）。与 2026-08-15 {@link #lockDailyTicket} 咨询锁互为纵深
+     * 防御：主路径（每日一票）已串行化，本 upsert 收口多选/旧客户端路径的并发首写。
+     *
+     * @return 受影响行数：1 = 新记录；0 = 当日已认可（并发竞态，幂等复用）
+     */
+    @Modifying
+    @Query(value = "INSERT INTO qwt_dancer_recognitions " +
+                   "(dancer_id, user_id, recognition_date, created_at, updated_at, deleted) " +
+                   "VALUES (:dancerId, :userId, :recognitionDate, :now, :now, false) " +
+                   "ON CONFLICT (user_id, dancer_id, recognition_date) DO NOTHING",
+           nativeQuery = true)
+    int upsertRecognition(@Param("dancerId") Long dancerId,
+                          @Param("userId") Long userId,
+                          @Param("recognitionDate") LocalDate recognitionDate,
+                          @Param("now") LocalDateTime now);
+
+    /**
      * 当前用户"今日已认可"的舞伴 ID 集合（个人状态，实时查询不缓存）。
      * "已认可"语义 = 今日存在该记录——次日自动恢复可认可状态。
      */

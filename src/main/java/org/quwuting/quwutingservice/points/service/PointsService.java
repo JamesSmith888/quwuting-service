@@ -1,10 +1,7 @@
 package org.quwuting.quwutingservice.points.service;
 
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.quwuting.quwutingservice.common.db.DbConstraintViolations;
 import org.quwuting.quwutingservice.config.PointsProperties;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.entity.DancerPhoto;
@@ -31,7 +28,6 @@ import org.quwuting.quwutingservice.points.repository.PointsUnlockRepository;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
@@ -123,9 +119,6 @@ public class PointsService {
      *  设置 DANCER_CONTACT 门槛改变联系方式门槛值——经本入口级联失效内层统计缓存，
      *  单一失效入口，见 DancerDetailCacheService javadoc） */
     private final org.quwuting.quwutingservice.dancer.service.DancerDetailCacheService dancerDetailCacheService;
-
-    @PersistenceContext
-    private EntityManager entityManager;
 
     // ─── 账户（懒创建） ─────────────────────────────────────────────────────
 
@@ -342,28 +335,23 @@ public class PointsService {
         PointsAccount account = getOrCreateAccount(userId);
         accountRepository.addBalance(userId, delta);
         long newBalance = account.getBalance() + delta;
-        PointsTransaction tx = new PointsTransaction();
-        tx.setUserId(userId);
-        tx.setDelta(delta);
-        tx.setBalanceAfter(newBalance);
-        tx.setSourceType(sourceType);
-        tx.setSourceId(sourceId);
-        tx.setRemark(remark);
-        try {
-            transactionRepository.saveAndFlush(tx);
-        } catch (DataIntegrityViolationException e) {
-            if (!DbConstraintViolations.isUniqueViolation(e)) {
-                throw e;
-            }
+        // 挣取流水幂等写入（2026-08-20 确定性化）：命中挣取唯一索引则 DO NOTHING 返回 0 行——
+        // 0 = 该来源已发过（幂等，回查该来源流水的余额快照返回），1 = 真实发放。
+        // 替代旧「saveAndFlush + catch 23505 + 同事务回查」：PG 语句失败后事务中止
+        // （25P02），catch 内回查必然 HTTP 500（见 15-governance 错误表）。
+        // sourceType 传 name()：原生 SQL 绑定 enum 默认 ORDINAL（落库序号），
+        // 回查 findByUserIdAndSourceTypeAndSourceId 按 name() 匹配必然 0 条（2026-08-20 实证）
+        int rows = transactionRepository.upsertEarn(userId, delta, newBalance, sourceType.name(), sourceId, remark,
+                LocalDateTime.now());
+        if (rows == 0) {
             // 重复发放竞态：唯一键冲突 = 已有同来源流水，幂等返回该来源的余额快照
-            // （本事务因异常整体回滚，上面 addBalance 的累加一并回滚，无副作用）
-            entityManager.clear();
-            PointsTransaction existing = transactionRepository
+            // （addBalance 的累加随本事务回滚，无副作用）
+            return transactionRepository
                     .findByUserIdAndSourceTypeAndSourceId(userId, sourceType, sourceId)
                     .orElseThrow(() -> new IllegalStateException(
                             "积分发放唯一键冲突但未找到记录: userId=" + userId
-                                    + ", sourceType=" + sourceType + ", sourceId=" + sourceId));
-            return existing.getBalanceAfter();
+                                    + ", sourceType=" + sourceType + ", sourceId=" + sourceId))
+                    .getBalanceAfter();
         }
         return newBalance;
     }

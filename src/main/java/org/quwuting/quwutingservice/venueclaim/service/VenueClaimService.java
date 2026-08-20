@@ -1,10 +1,7 @@
 package org.quwuting.quwutingservice.venueclaim.service;
 
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.quwuting.quwutingservice.common.db.DbConstraintViolations;
 import org.quwuting.quwutingservice.common.text.TextSanitizer;
 import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.exception.BusinessException;
@@ -22,7 +19,6 @@ import org.quwuting.quwutingservice.venueclaim.enums.ClaimStatus;
 import org.quwuting.quwutingservice.venueclaim.repository.VenueClaimRepository;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -86,9 +82,6 @@ public class VenueClaimService {
     /** 图片内容校验（2026-08-12 恶意文件防线：营业执照图片 URL 落库前做内容级校验） */
     private final org.quwuting.quwutingservice.storage.ImageContentValidator imageValidator;
 
-    @PersistenceContext
-    private EntityManager entityManager;
-
     /**
      * 提交认领申请（需登录）。校验：
      * <ol>
@@ -108,34 +101,24 @@ public class VenueClaimService {
         if (venue.getClaimedBy() != null) {
             throw new BusinessException(1019, "该店已被认领");
         }
-        VenueClaim claim = new VenueClaim();
-        claim.setVenueId(venueId);
-        claim.setUserId(userId);
-        claim.setRealName(TextSanitizer.sanitize(request.realName()));
-        claim.setContactPhone(request.contactPhone());
-        claim.setContactWechat(TextSanitizer.sanitize(request.contactWechat()));
+        String realName = TextSanitizer.sanitize(request.realName());
+        String contactPhone = request.contactPhone();
+        String contactWechat = TextSanitizer.sanitize(request.contactWechat());
+        // 营业执照图片内容校验（URL 白名单前缀 + 尺寸/魔数防解压炸弹，见 11-storage.md）
         imageValidator.validateAll(request.licenseUrls());
-        claim.setLicenseUrls(serializeStringList(request.licenseUrls()));
-        claim.setNote(TextSanitizer.sanitize(request.note()));
-        claim.setStatus(ClaimStatus.PENDING);
-        try {
-            VenueClaim saved = venueClaimRepository.save(claim);
-            log.info("venue claim submitted: venueId={}, userId={}, claimId={}", venueId, userId, saved.getId());
-            return toResponse(saved, venue);
-        } catch (DataIntegrityViolationException e) {
-            // PENDING 部分唯一索引兜底：仅吞唯一键并发竞态（SQLState 23505）
-            if (!DbConstraintViolations.isUniqueViolation(e)) {
-                throw e;
-            }
-            // 清除 session 中的脏实体（null id），否则后续查询 auto-flush 抛 AssertionFailure
-            entityManager.clear();
-            log.debug("submitClaim 并发冲突，幂等返回已有 PENDING 记录: venueId={}, userId={}", venueId, userId);
-            return venueClaimRepository
-                    .findFirstByUserIdAndVenueIdAndStatusOrderByCreatedAtDesc(userId, venueId, ClaimStatus.PENDING)
-                    .map(saved -> toResponse(saved, venue))
-                    .orElseThrow(() -> new IllegalStateException(
-                            "PENDING 唯一索引冲突但未找到对应记录: venueId=" + venueId + ", userId=" + userId));
-        }
+        String licenseUrls = serializeStringList(request.licenseUrls());
+        String note = TextSanitizer.sanitize(request.note());
+        // 确定性原子写入（2026-08-20 根因修复，替代「save + catch 23505 + 同事务回查」：
+        // PG 语句失败后事务中止（25P02），catch 内回查必然 HTTP 500）——命中 V12
+        // PENDING 部分唯一索引则 DO NOTHING，随后回查幂等返回既有工单
+        venueClaimRepository.upsertPending(venueId, userId, realName, contactPhone,
+                contactWechat, licenseUrls, note, LocalDateTime.now());
+        VenueClaim saved = venueClaimRepository
+                .findFirstByUserIdAndVenueIdAndStatusOrderByCreatedAtDesc(userId, venueId, ClaimStatus.PENDING)
+                .orElseThrow(() -> new IllegalStateException(
+                        "PENDING 唯一索引 upsert 后未找到对应工单: venueId=" + venueId + ", userId=" + userId));
+        log.info("venue claim submitted: venueId={}, userId={}, claimId={}", venueId, userId, saved.getId());
+        return toResponse(saved, venue);
     }
 
     /**

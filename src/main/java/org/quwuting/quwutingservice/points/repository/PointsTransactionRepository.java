@@ -6,6 +6,7 @@ import org.quwuting.quwutingservice.points.enums.PointsTargetType;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -17,6 +18,43 @@ public interface PointsTransactionRepository extends JpaRepository<PointsTransac
 
     /** 挣取幂等查询：同一来源是否已发分（唯一索引冲突前的软检查，冲突时仍靠 23505 兜底） */
     Optional<PointsTransaction> findByUserIdAndSourceTypeAndSourceId(Long userId, PointsSourceType sourceType, Long sourceId);
+
+    /**
+     * 挣取流水的<b>确定性原子写入</b>（2026-08-20 根因修复：替代「saveAndFlush +
+     * catch 23505 + 同事务回查」的不可靠并发幂等——PG 语句失败后事务中止（25P02），
+     * catch 内回查必然 HTTP 500；且旧注释"异常整体回滚"在 catch 内不成立，回滚只
+     * 发生在异常向外传播时）。
+     * <p>
+     * 命中挣取幂等部分唯一索引 {@code qwt_uk_pts_tx_earn_dedup}（(user_id,
+     * source_type, source_id) WHERE delta &gt; 0 AND source_id IS NOT NULL）时
+     * DO NOTHING，返回 0 行——调用方按受影响行数判定：0 = 已发过（幂等，回查该来源
+     * 流水的余额快照返回），1 = 真实发放。冲突目标 = 列清单 + 完整索引谓词（部分
+     * 唯一索引推断要求，禁止省略）。
+     * <p>
+     * <b>enum 参数必须传 name() 字符串（2026-08-20 根因修复）</b>：原生 SQL 绑定
+     * enum 无 JPA 元数据 → 默认 {@code EnumType.ORDINAL}（{@code EnumJavaType.sqlType}
+     * 回退分支）→ {@code source_type} 列落库序号而非枚举名，而实体派生回查
+     * {@link #findByUserIdAndSourceTypeAndSourceId}（{@code @Enumerated(STRING)}）
+     * 按 name() 匹配——两侧不一致必然「回查 0 条」（与
+     * {@code VenueFeedbackRepository.upsertPending*} 同源，详见 15-governance 错误表）。
+     * 调用方传 {@code sourceType.name()}。
+     *
+     * @return 受影响行数：1 = 发放成功；0 = 该来源已发过（幂等跳过）
+     */
+    @Modifying
+    @Query(value = "INSERT INTO qwt_points_transactions " +
+                   "(created_at, user_id, delta, balance_after, source_type, source_id, target_type, target_id, remark) " +
+                   "VALUES (:now, :userId, :delta, :balanceAfter, :sourceType, :sourceId, NULL, NULL, :remark) " +
+                   "ON CONFLICT (user_id, source_type, source_id) " +
+                   "WHERE delta > 0 AND source_id IS NOT NULL DO NOTHING",
+           nativeQuery = true)
+    int upsertEarn(@Param("userId") Long userId,
+                   @Param("delta") long delta,
+                   @Param("balanceAfter") long balanceAfter,
+                   @Param("sourceType") String sourceType,
+                   @Param("sourceId") Long sourceId,
+                   @Param("remark") String remark,
+                   @Param("now") LocalDateTime now);
 
     /**
      * 用户流水分页（最近在前）。delta &gt; 0 = 挣取，delta &lt; 0 = 赠送；

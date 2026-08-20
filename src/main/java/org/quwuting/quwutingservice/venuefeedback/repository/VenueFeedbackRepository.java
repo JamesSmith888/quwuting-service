@@ -6,7 +6,11 @@ import org.quwuting.quwutingservice.venuefeedback.enums.FeedbackType;
 import org.quwuting.quwutingservice.venuefeedback.enums.ReportStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -54,4 +58,80 @@ public interface VenueFeedbackRepository extends JpaRepository<VenueFeedback, Lo
      */
     Optional<VenueFeedback> findByUserIdAndVenueIdAndTypeAndFieldAndStatus(
             Long userId, Long venueId, FeedbackType type, FeedbackField field, ReportStatus status);
+
+    /**
+     * 登录用户 PENDING 反馈的<b>确定性原子写入</b>（纠错场景，field IS NOT NULL，
+     * 2026-08-20 根因修复：替代「save + catch 23505 + 同事务回查」的不可靠并发幂等）。
+     * <p>
+     * 根因（与 {@link #upsertPendingWithoutField} 同源，详见 15-governance 错误表）：
+     * PostgreSQL 中语句失败（SQLState 23505）后整个事务进入 aborted 状态（25P02），
+     * Hibernate {@code save()} 立即执行 INSERT（IDENTITY 生成策略），catch 内
+     * {@code entityManager.clear()} 只清理 session、无法恢复已中止的 DB 事务——catch
+     * 后同一事务内的回查必然抛「current transaction is aborted」→ JpaSystemException
+     * → HTTP 500（2026-08-20 线上实证：报告恢复营业连点报 500）。
+     * <p>
+     * 本写法恒 1 次 DB 往返、零异常：命中 V8 部分唯一索引
+     * {@code qwt_uk_feedbacks_user_venue_type_field_pending}（同一用户对同一场所
+     * 同一类型同一字段的 PENDING 记录）时 DO NOTHING，调用方随后按去重单位回查
+     * 幂等返回胜出行（新插入或已存在，PENDING 唯一索引保证至多一行）。
+     * <p>
+     * 冲突目标：列清单 + 完整索引谓词（部分唯一索引推断要求推断谓词与索引谓词
+     * 逻辑一致，禁止省略——否则计划期报「no unique or exclusion constraint matching」）。
+     * <p>
+     * <b>enum 参数必须传 name() 字符串（2026-08-20 根因修复）</b>：Hibernate 对原生
+     * SQL（native query）参数无 JPA 映射元数据，enum 参数默认按
+     * {@code EnumType.ORDINAL} 绑定（见 {@code EnumJavaType.sqlType}：enumeratedType
+     * 为 null 时回退 ORDINAL）——直接传 {@code FeedbackType}/{@code FeedbackField}
+     * 枚举会把 ordinal 数字落库（type 列存 "2" 而非 "RESUMED"），而实体派生查询
+     * 按 {@code @Enumerated(STRING)} 的 name() 匹配，回查必然 0 条 → IllegalStateException
+     * → HTTP 500（2026-08-20 线上实证「确认已恢复营业 500」）。调用方传
+     * {@code enum.name()}（如 {@code FeedbackType.RESUMED.name()}）即绑定正确字符串。
+     *
+     * @return 受影响行数（1 = 新插入；0 = 已存在 PENDING 记录，幂等跳过）
+     */
+    @Modifying
+    @Query(value = "INSERT INTO qwt_venue_feedbacks " +
+                   "(venue_id, user_id, type, note, field, corrected_value, status, handled, deleted, created_at, updated_at) " +
+                   "VALUES (:venueId, :userId, :type, :note, :field, :correctedValue, 'PENDING', false, false, :now, :now) " +
+                   "ON CONFLICT (user_id, venue_id, type, field) " +
+                   "WHERE user_id IS NOT NULL AND status = 'PENDING' AND field IS NOT NULL DO NOTHING",
+           nativeQuery = true)
+    int upsertPendingWithField(@Param("venueId") Long venueId,
+                               @Param("userId") Long userId,
+                               @Param("type") String type,
+                               @Param("field") String field,
+                               @Param("note") String note,
+                               @Param("correctedValue") String correctedValue,
+                               @Param("now") LocalDateTime now);
+
+    /**
+     * 登录用户 PENDING 反馈的<b>确定性原子写入</b>（非纠错场景，field IS NULL，
+     * 2026-08-20 根因修复，语义与 {@link #upsertPendingWithField} 完全对称）。
+     * <p>
+     * 命中 V2 部分唯一索引 {@code qwt_uk_feedbacks_user_venue_type_pending}
+     * （同一用户对同一场所同一类型的 PENDING 记录，V8 拆分后仅覆盖 field IS NULL
+     * 行）时 DO NOTHING，调用方随后按去重单位回查幂等返回胜出行。
+     * <p>
+     * 非纠错场景 field/corrected_value 恒 NULL（后端对非 INACCURATE 类型不落库，
+     * 见 VenueFeedbackService 约定），故 SQL 内直接写 NULL，无需传参。
+     * <p>
+     * <b>enum 参数必须传 name() 字符串（2026-08-20 根因修复）</b>：与
+     * {@link #upsertPendingWithField} 同源——原生 SQL 绑定 enum 默认 ORDINAL，
+     * 传 {@code FeedbackType} 枚举会把序号落库、回查（name() 匹配）必然 0 条报 500。
+     * 调用方传 {@code request.type().name()}。
+     *
+     * @return 受影响行数（1 = 新插入；0 = 已存在 PENDING 记录，幂等跳过）
+     */
+    @Modifying
+    @Query(value = "INSERT INTO qwt_venue_feedbacks " +
+                   "(venue_id, user_id, type, note, field, corrected_value, status, handled, deleted, created_at, updated_at) " +
+                   "VALUES (:venueId, :userId, :type, :note, NULL, NULL, 'PENDING', false, false, :now, :now) " +
+                   "ON CONFLICT (user_id, venue_id, type) " +
+                   "WHERE user_id IS NOT NULL AND status = 'PENDING' AND field IS NULL DO NOTHING",
+           nativeQuery = true)
+    int upsertPendingWithoutField(@Param("venueId") Long venueId,
+                                  @Param("userId") Long userId,
+                                  @Param("type") String type,
+                                  @Param("note") String note,
+                                  @Param("now") LocalDateTime now);
 }

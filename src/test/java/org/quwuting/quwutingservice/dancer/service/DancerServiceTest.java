@@ -313,23 +313,26 @@ class DancerServiceTest {
     @Test
     void toggleRecognize_firstTime_insertsRecognitionAndTags() {
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        // 2026-08-20 确定性化：首查空（走插入）→ 原子 upsert → 回查复用（两段式 stub）
+        DancerRecognition created = new DancerRecognition();
+        created.setId(100L);
+        created.setUserId(2L);
+        created.setDancerId(1L);
+        created.setRecognitionDate(LocalDate.now());
         when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(2L, 1L, LocalDate.now()))
-                .thenReturn(Optional.empty());
-        when(recognitionRepository.save(any(DancerRecognition.class))).thenAnswer(inv -> {
-            DancerRecognition r = inv.getArgument(0);
-            r.setId(100L);
-            return r;
-        });
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(created));
         stubDetailCache(new long[]{1L, 1L, 1L, 1L});
 
         RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
                 new RecognizeDancerRequest(List.of("DANCE", "EASY_TALK"), null), UserRole.USER);
 
         assertTrue(resp.recognized());
-        verify(recognitionRepository).save(argThat(r ->
-                r.getUserId().equals(2L) && r.getRecognitionDate().equals(LocalDate.now())));
-        verify(recognitionTagRepository).save(argThat(t -> t.getTag().equals("DANCE")));
-        verify(recognitionTagRepository).save(argThat(t -> t.getTag().equals("EASY_TALK")));
+        // 认可插入走确定性原子 upsert（UNIQUE(user, dancer, date) DO NOTHING）+ 回查复用
+        verify(recognitionRepository).upsertRecognition(eq(1L), eq(2L), eq(LocalDate.now()), any(LocalDateTime.class));
+        verify(recognitionRepository, never()).save(any());
+        verify(recognitionTagRepository).upsertRecognitionTag(eq(100L), eq(1L), eq(2L), eq("DANCE"), any(LocalDateTime.class));
+        verify(recognitionTagRepository).upsertRecognitionTag(eq(100L), eq(1L), eq(2L), eq("EASY_TALK"), any(LocalDateTime.class));
         verify(detailCacheService).invalidate(1L);
     }
 
@@ -383,20 +386,22 @@ class DancerServiceTest {
     @Test
     void toggleRecognize_duplicateTags_deduplicated() {
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        // 2026-08-20 确定性化：首查空（走插入）→ 原子 upsert → 回查复用（两段式 stub）
+        DancerRecognition created = new DancerRecognition();
+        created.setId(100L);
+        created.setUserId(2L);
+        created.setDancerId(1L);
+        created.setRecognitionDate(LocalDate.now());
         when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(2L, 1L, LocalDate.now()))
-                .thenReturn(Optional.empty());
-        when(recognitionRepository.save(any(DancerRecognition.class))).thenAnswer(inv -> {
-            DancerRecognition r = inv.getArgument(0);
-            r.setId(100L);
-            return r;
-        });
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(created));
         stubDetailCache(new long[]{1L, 1L, 1L, 1L});
 
         dancerService.toggleRecognize(2L, 1L,
                 new RecognizeDancerRequest(List.of("DANCE", "DANCE", "EASY_TALK"), null), UserRole.USER);
 
-        verify(recognitionTagRepository, times(1)).save(argThat(t -> t.getTag().equals("DANCE")));
-        verify(recognitionTagRepository, times(1)).save(argThat(t -> t.getTag().equals("EASY_TALK")));
+        verify(recognitionTagRepository, times(1)).upsertRecognitionTag(eq(100L), eq(1L), eq(2L), eq("DANCE"), any(LocalDateTime.class));
+        verify(recognitionTagRepository, times(1)).upsertRecognitionTag(eq(100L), eq(1L), eq(2L), eq("EASY_TALK"), any(LocalDateTime.class));
     }
 
     // ─── 认可单票换票（2026-08-15 交互模型变更：Reaction 风格 chip 单票） ────────
@@ -405,13 +410,15 @@ class DancerServiceTest {
     void toggleRecognize_singleTag_firstTime_createsWithSingleTag() {
         when(opsConfigService.isEnabled(anyString(), anyBoolean())).thenReturn(true); // 每日一票开
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        // 2026-08-20 确定性化：首查空（走插入）→ 原子 upsert → 回查复用（两段式 stub）
+        DancerRecognition created = new DancerRecognition();
+        created.setId(100L);
+        created.setUserId(2L);
+        created.setDancerId(1L);
+        created.setRecognitionDate(LocalDate.now());
         when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(2L, 1L, LocalDate.now()))
-                .thenReturn(Optional.empty());
-        when(recognitionRepository.save(any(DancerRecognition.class))).thenAnswer(inv -> {
-            DancerRecognition r = inv.getArgument(0);
-            r.setId(100L);
-            return r;
-        });
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(created));
         stubDetailCache(new long[]{1L, 1L, 1L, 1L});
 
         RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
@@ -420,8 +427,8 @@ class DancerServiceTest {
         assertTrue(resp.recognized());
         assertNull(resp.replacedFrom(), "首次参与无换票");
         assertEquals(List.of("DANCE"), resp.myTags(), "单票模型今日票 = 点击的表情");
-        verify(recognitionTagRepository).save(argThat(t -> t.getTag().equals("DANCE")));
-        verify(recognitionTagRepository, never()).save(argThat(t -> t.getTag().equals("EASY_TALK")));
+        verify(recognitionTagRepository).upsertRecognitionTag(eq(100L), eq(1L), eq(2L), eq("DANCE"), any(LocalDateTime.class));
+        verify(recognitionTagRepository, never()).upsertRecognitionTag(eq(100L), eq(1L), eq(2L), eq("EASY_TALK"), any(LocalDateTime.class));
     }
 
     @Test
@@ -473,7 +480,7 @@ class DancerServiceTest {
         assertEquals("DANCE", resp.replacedFrom(), "换票返回被替换的旧票");
         assertEquals(List.of("EASY_TALK"), resp.myTags(), "换票后今日票 = 新表情");
         verify(recognitionTagRepository).deleteByRecognitionId(100L); // 旧标签清空
-        verify(recognitionTagRepository).save(argThat(t -> t.getTag().equals("EASY_TALK"))); // 新标签写入
+        verify(recognitionTagRepository).upsertRecognitionTag(eq(100L), eq(1L), eq(2L), eq("EASY_TALK"), any(LocalDateTime.class)); // 新标签写入
         verify(recognitionRepository, never()).deleteRecognitionById(anyLong()); // 认可记录本身不删（换票非取消）
     }
 
@@ -483,13 +490,15 @@ class DancerServiceTest {
     void toggleRecognize_multiMode_firstTime_createsWithSingleTag() {
         when(opsConfigService.isEnabled(anyString(), anyBoolean())).thenReturn(false); // 多选
         when(dancerRepository.findByIdAndDeletedFalse(1L)).thenReturn(Optional.of(dancer));
+        // 2026-08-20 确定性化：首查空（走插入）→ 原子 upsert → 回查复用（两段式 stub）
+        DancerRecognition created = new DancerRecognition();
+        created.setId(100L);
+        created.setUserId(2L);
+        created.setDancerId(1L);
+        created.setRecognitionDate(LocalDate.now());
         when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(2L, 1L, LocalDate.now()))
-                .thenReturn(Optional.empty());
-        when(recognitionRepository.save(any(DancerRecognition.class))).thenAnswer(inv -> {
-            DancerRecognition r = inv.getArgument(0);
-            r.setId(100L);
-            return r;
-        });
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(created));
         stubDetailCache(new long[]{1L, 1L, 1L, 1L});
 
         RecognizeResponse resp = dancerService.toggleRecognize(2L, 1L,
@@ -497,7 +506,7 @@ class DancerServiceTest {
 
         assertTrue(resp.recognized());
         assertEquals(List.of("DANCE"), resp.myTags());
-        verify(recognitionTagRepository).save(argThat(t -> t.getTag().equals("DANCE")));
+        verify(recognitionTagRepository).upsertRecognitionTag(eq(100L), eq(1L), eq(2L), eq("DANCE"), any(LocalDateTime.class));
     }
 
     @Test
@@ -521,7 +530,7 @@ class DancerServiceTest {
         assertTrue(resp.recognized(), "多选模式点新表情 = 累加");
         assertEquals(List.of("DANCE", "EASY_TALK"), resp.myTags(), "今日标签 = 旧票 + 新票");
         verify(recognitionTagRepository, never()).deleteByRecognitionId(100L); // 不整组删除
-        verify(recognitionTagRepository).save(argThat(t -> t.getTag().equals("EASY_TALK")));
+        verify(recognitionTagRepository).upsertRecognitionTag(eq(100L), eq(1L), eq(2L), eq("EASY_TALK"), any(LocalDateTime.class));
         verify(recognitionRepository, never()).deleteRecognitionById(anyLong());
     }
 

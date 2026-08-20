@@ -46,10 +46,10 @@ public class StatusReportController {
      * 某门店最近突发事件列表（公开读，无需登录）。
      * GET /venues/{venueId}/status-reports
      * <p>
-     * 公告页「最近的突发事件」明细：展示窗口（报告行为时间，配置
-     * {@code app.status-report.recent-history-hours}）内全部用户对该门店的报告，
-     * 按时间倒序（最多 20 条），<b>含已过期报告</b>（{@code expired} 标注，2026-08-12
-     * 根因修复：TTL 过期只代表信号失效，不代表报告事实消失），报告者昵称脱敏；
+     * 公告页「最近的突发事件」明细：该门店<b>全部未撤销报告</b>（含已过期，
+     * {@code expired} 标注——2026-08-12 根因修复：TTL 过期只代表信号失效，不代表
+     * 报告事实消失；2026-08-20 移除展示窗口：历史视图只裁剪"非事实"（撤销/处置），
+     * 时间维度逐行标注 expired），按时间倒序（最多 20 条），报告者昵称脱敏；
      * mine 标记当前登录用户的上报。未登录访问同样可用（社区信号公开可见）。
      */
     @GetMapping
@@ -59,15 +59,20 @@ public class StatusReportController {
 
     /**
      * 某门店紧急公告区聚合（公开读，无需登录）。
-     * GET /venues/{venueId}/announcements
+     * GET /venues/{venueId}/status-reports/announcements?includeExpired=false
      * <p>
-     * 详情页「紧急公告」区域数据源（2026-08-11 新增）：活跃信号 + 已采纳信号按类型
-     * 聚簇摘要（每类型一条：计数/已核实标记/最新时间），按严重级降序。移除信号不展示；
-     * 不返回 note（审核安全约定"note 仅管理端可见"）。
+     * 活跃信号 + 已采纳信号按类型聚簇摘要（每类型一条：计数/已核实标记/最新时间），
+     * 按严重级降序。移除信号不展示；不返回 note（审核安全约定"note 仅管理端可见"）。
+     * <p>
+     * {@code includeExpired}（2026-08-20 双消费方分窗参数化，根因见 AGENTS.md
+     * 「紧急公告区」）：false（默认）= 活跃视图（仅 TTL 窗口内，详情页单行公告条）；
+     * true = 历史视图（全部未撤销 + 已采纳，含已过期，公告专属页「紧急公告」列表）。
      */
     @GetMapping("/announcements")
-    public ApiResponse<List<AnnouncementSummary>> listAnnouncements(@PathVariable Long venueId) {
-        return ApiResponse.ok(statusReportService.listAnnouncements(venueId));
+    public ApiResponse<List<AnnouncementSummary>> listAnnouncements(
+            @PathVariable Long venueId,
+            @RequestParam(defaultValue = "false") boolean includeExpired) {
+        return ApiResponse.ok(statusReportService.listAnnouncements(venueId, includeExpired));
     }
 
     /**
