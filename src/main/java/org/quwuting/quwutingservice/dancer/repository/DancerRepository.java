@@ -39,12 +39,21 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
      * 2026-08-14 多城市（V29 迁移）：词表改从 qwt_dancer_cities 子表聚合
      * （dancer.city 是主城市 = 子表首个的冗余，从子表聚合可覆盖全量城市；
      * 存量回填后旧数据无缝覆盖）。
+     * <p>
+     * 2026-08-21（V38 迁移）：按 qwt_city_key 规范化键去重 + MAX 优先保留带「市」
+     * 标准形态——历史手填「南通」与标准「南通市」归一后只出一个 chip
+     * （MAX 字符串比较：'南通市' > '南通'，恒取带市形态）；查询改 nativeQuery
+     * （JPQL 无法引用 PG 自定义函数）。
      */
-    @Query("SELECT DISTINCT c.city FROM DancerCity c " +
-            "JOIN Dancer d ON d.id = c.dancerId " +
-            "WHERE c.city IS NOT NULL AND c.city <> '' AND c.deleted = false " +
-            "AND d.status = 'NORMAL' AND d.deleted = false " +
-            "ORDER BY c.city")
+    @Query(value = """
+            SELECT MAX(c.city)
+            FROM qwt_dancer_cities c
+            JOIN qwt_dancers d ON d.id = c.dancer_id
+            WHERE c.city IS NOT NULL AND c.city <> '' AND c.deleted = false
+              AND d.status = 'NORMAL' AND d.deleted = false
+            GROUP BY qwt_city_key(c.city)
+            ORDER BY MAX(c.city)
+            """, nativeQuery = true)
     List<String> findPublicCities();
 
     /**
@@ -62,6 +71,10 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
      * 2026-08-14 多城市（V29 迁移）：城市筛选升级为"主城市 OR 子表命中"——
      * 舞伴可常驻最多 3 个城市，按任意城市筛选都应命中（EXISTS 子查询，走
      * qwt_idx_dancer_cities_dancer/city 索引）。
+     * <p>
+     * 2026-08-21（V38 迁移）：城市匹配升级为「精确相等 OR qwt_city_key 归一相等」
+     * ——历史手填「南通」与标准「南通市」互相命中（匹配层防御：即使未来绕过表单
+     * 的写入再次产生不带「市」城市值，同城筛选/门店同城舞伴入口也不失效）。
      */
     @Query(value = """
             SELECT d.id, d.nickname, d.avatar_url, d.bio, d.gender, d.city,
@@ -84,17 +97,21 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
                 GROUP BY target_id
             ) p ON p.dancer_id = d.id
             WHERE d.status = 'NORMAL' AND d.deleted = false
-              AND (:city IS NULL OR d.city = :city OR EXISTS (
-                    SELECT 1 FROM qwt_dancer_cities c
-                    WHERE c.dancer_id = d.id AND c.city = :city AND c.deleted = false))
+              AND (:city IS NULL OR d.city = :city OR qwt_city_key(d.city) = qwt_city_key(:city)
+                   OR EXISTS (
+                        SELECT 1 FROM qwt_dancer_cities c
+                        WHERE c.dancer_id = d.id AND c.deleted = false
+                          AND (c.city = :city OR qwt_city_key(c.city) = qwt_city_key(:city))))
             ORDER BY COALESCE(a.cnt7, 0) DESC, COALESCE(p.points30d, 0) DESC, d.id DESC
             """,
             countQuery = """
             SELECT COUNT(*) FROM qwt_dancers d
             WHERE d.status = 'NORMAL' AND d.deleted = false
-              AND (:city IS NULL OR d.city = :city OR EXISTS (
-                    SELECT 1 FROM qwt_dancer_cities c
-                    WHERE c.dancer_id = d.id AND c.city = :city AND c.deleted = false))
+              AND (:city IS NULL OR d.city = :city OR qwt_city_key(d.city) = qwt_city_key(:city)
+                   OR EXISTS (
+                        SELECT 1 FROM qwt_dancer_cities c
+                        WHERE c.dancer_id = d.id AND c.deleted = false
+                          AND (c.city = :city OR qwt_city_key(c.city) = qwt_city_key(:city))))
             """,
             nativeQuery = true)
     Page<Object[]> findPublicPage(@Param("city") String city,

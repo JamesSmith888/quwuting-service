@@ -9,6 +9,10 @@ package org.quwuting.quwutingservice.venue.enums;
  *       解析到 share_from 为判据；与 qwt_venue_shares 的 OPEN 事件同源）</li>
  *   <li>SEARCH — 列表页搜索结果进入（关键词激活态下点击搜索结果卡片，前端以 onLoad
  *       解析到 from=search 参数为判据——2026-08-13 晚新增，来源图第三折线）</li>
+ *   <li>VENUE — 门店详情页「同城舞伴」入口进入（2026-08-21 新增，舞伴域专属来源：
+ *       门店详情页 Top3 头像点击跳转舞伴详情，前端以 onLoad 解析到 from=venue 参数
+ *       为判据——舞伴浏览来源图第四折线；门店域自身不产生本来源，对门店统计无影响，
+ *       舞伴域复用本共享枚举为跨域复用先例）</li>
  *   <li>OTHER — 其他来源（收藏页无快照直进、深链、旧版本客户端未上报等，兜底默认）</li>
  * </ul>
  * 语义约定（V21 起）：
@@ -25,5 +29,6 @@ public enum ViewSource {
     LIST,
     SHARE,
     SEARCH,
+    VENUE,
     OTHER
 }

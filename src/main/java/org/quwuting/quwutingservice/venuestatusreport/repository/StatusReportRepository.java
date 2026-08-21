@@ -271,7 +271,7 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
      * {@code @CreationTimestamp}，Hibernate 将其视为<b>不可变属性</b>——实体 setter
      * 在 UPDATE 时被静默忽略（WARN HHH000502）。原实现意图"刷新 createdAt 续期 4h TTL"
      * 从未生效。2026-08-11 TTL 迁移到 expires_at 列后，续期 = 同时刷新 createdAt（报告
-     * 行为时间）与 expiresAt（过期时刻 = now + 类型 TTL，Java 侧算好传入）；type 由
+     * 行为时间）与 expiresAt（过期时刻 = now + 统一公示期 2 天，Java 侧算好传入）；type 由
      * 实体 setter 更新（非不可变属性），本 JPQL 只负责两个时间列。
      * <p>
      * 幂等：只更新目标记录（id 定位），无并发冲突风险（补充路径在 Service 层已先取

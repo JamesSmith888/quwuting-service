@@ -92,7 +92,7 @@ venuefeedback/  ← 统一用户上报模块（原"场所信息纠错反馈"，2
   enums/        ← FeedbackType（CLOSED_DOWN / SUSPENDED / RESUMED / INACCURATE / MISSING_INFO / PRICE / OTHER）
                   ReportStatus（PENDING / ADOPTED / ADOPTED_NO_REWARD / RESOLVED / DISMISSED 状态机）
 
-venuestatusreport/  ← 场所状态众包上报模块（实时暂停信号，4h TTL）
+venuestatusreport/  ← 场所状态众包上报模块（实时暂停信号，公示期 2 天）
   controller/   ← StatusReportController（POST /venues/{venueId}/status-reports, POST .../cancel）
   service/      ← StatusReportService（upsert 上报、撤销、活跃统计、频率限制、@CacheEvict 热度缓存）
   entity/       ← VenueStatusReport 实体（qwt_venue_status_reports）

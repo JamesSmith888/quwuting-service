@@ -5,13 +5,16 @@ import com.github.benmanes.caffeine.cache.LoadingCache;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerStatsResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTrendPoint;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerUnlockStat;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerViewSourceTrendPoint;
 import org.quwuting.quwutingservice.dancer.repository.DancerStatsRepository;
+import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -24,7 +27,8 @@ import java.util.concurrent.TimeUnit;
  *   <li>{@code refreshAfterWrite(60s)}：条目写入 60s 后，下一次访问立即返回旧值并
  *       异步回源刷新（单飞：同键并发只触发一次回源）——统计页高频滚动浏览场景下
  *       返回旧值可接受，回源期间不阻塞调用方；</li>
- *   <li>新鲜度主保障是写路径显式 {@link #invalidate}（浏览/认可/收藏/礼物/分享），
+ *   <li>新鲜度主保障是写路径显式 {@link #invalidate}（浏览/认可/收藏/礼物/分享/
+ *       解锁，2026-08-21 解锁入矩阵——解锁改变 unlockStats 输入），
  *       与门店「写路径缓存失效」矩阵同约定——refresh-ahead 只是兜底；</li>
  *   <li>不校验舞伴存在性/可见性：统计接口由详情页进入（详情已校验），冷门舞伴
  *       统计为空序列属正常（空图恒渲染，前端承接）；对不存在的舞伴返回全零序列，
@@ -102,20 +106,62 @@ public class DancerStatsService {
             pointsTrend.add(new DancerTrendPoint(day, orZero(row.getPoints())));
             shareTrend.add(new DancerTrendPoint(day, orZero(row.getSharecount())));
             viewTrend.add(new DancerTrendPoint(day, orZero(row.getViewcount())));
-            // other = 全量 - list - share - search（同源口径交叉校验；直接 COUNT 亦可，减法省一次扫描）
+            // other = 全量 - list - share - search - venue（同源口径交叉校验；直接 COUNT 亦可，减法省一次扫描）
             viewSourceTrend.add(new DancerViewSourceTrendPoint(
                     day,
                     orZero(row.getViewlistcount()),
                     orZero(row.getViewsharecount()),
                     orZero(row.getViewsearchcount()),
+                    orZero(row.getViewvenuecount()),
                     Math.max(0L, orZero(row.getViewcount())
                             - orZero(row.getViewlistcount())
                             - orZero(row.getViewsharecount())
-                            - orZero(row.getViewsearchcount()))));
+                            - orZero(row.getViewsearchcount())
+                            - orZero(row.getViewvenuecount()))));
         }
+        // 用户解锁信息分类聚合（2026-08-21 追加）：独立一条往返（合并 SQL 见
+        // DancerStatsRepository#countDancerUnlockStats），非时间序列；repository
+        // 已按人次降序且过滤 0 记录类别。
+        List<DancerUnlockStat> unlockStats = new ArrayList<>();
+        for (DancerStatsRepository.UnlockStatRow row : dancerStatsRepository.countDancerUnlockStats(dancerId)) {
+            PointsGateTargetType targetType = safeTargetType(row.getTargettype());
+            unlockStats.add(new DancerUnlockStat(
+                    targetType,
+                    unlockLabel(targetType),
+                    orZero(row.getUnlockcount()),
+                    orZero(row.getUniqueusers()),
+                    row.getCost() != null ? row.getCost() : 0));
+        }
+        unlockStats.sort(Comparator.comparingLong(DancerUnlockStat::unlockCount).reversed());
         return new DancerStatsResponse(
                 recognitionTrend, favoriteTrend, pointsTrend, shareTrend,
-                viewTrend, viewSourceTrend, asOfDate.toString());
+                viewTrend, viewSourceTrend, unlockStats, asOfDate.toString());
+    }
+
+    /**
+     * 内容类型展示名（新增内容类型 = 加枚举值 + 本映射项，前端免改动）。
+     * 未知类型回退枚举名（防御性：新枚举已上线而本映射漏更时仍可读）。
+     */
+    private static String unlockLabel(PointsGateTargetType targetType) {
+        if (targetType == null) {
+            return "其他";
+        }
+        return switch (targetType) {
+            case DANCER_PHOTO -> "照片";
+            case DANCER_CONTACT -> "联系方式";
+        };
+    }
+
+    /** 枚举名 → 枚举（未知/异常回退 null，上游按 null 兜底展示「其他」） */
+    private static PointsGateTargetType safeTargetType(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        try {
+            return PointsGateTargetType.valueOf(name);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     private static long orZero(Long value) {

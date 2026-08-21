@@ -4,8 +4,12 @@ package org.quwuting.quwutingservice.venuestatusreport.enums;
  * 突发事件（紧急公告）类型——实时信号层的事件维度，2026-08-11 泛化替代原 {@code ReportReason}。
  * <p>
  * 详情页「紧急公告」区域展示的门店突发事件 8 类枚举（用户确认清单）。每类携带
- * 展示文案 / 严重级（前端色阶）/ 是否影响营业状态（采纳联动）/ TTL 小时数
- * （expires_at 写入时 = createdAt + 本值）。
+ * 展示文案 / 严重级（前端色阶）/ 是否影响营业状态（采纳联动）。
+ * <p>
+ * 公示期（2026-08-21 起）：expires_at = created_at + 统一公示期（2 天，常量
+ * {@link org.quwuting.quwutingservice.venuestatusreport.service.StatusReportService#ANNOUNCEMENT_DISPLAY_DAYS}），
+ * 按类型分级 TTL（旧 2~24h）退役——公示期后公告从活跃视图撤下、收入详情页公告卡片，
+ * 历史由相对时间传达（时限语义从「系统按类型内定」收敛为「统一默认公示期」）。
  * <p>
  * 语义边界：
  * <ul>
@@ -23,32 +27,30 @@ package org.quwuting.quwutingservice.venuestatusreport.enums;
 public enum ReportType {
 
     /** 突然检查（临检/整顿）——高严重、纯事件 */
-    SUDDEN_INSPECTION("突然检查", Severity.HIGH, false, 6),
+    SUDDEN_INSPECTION("突然检查", Severity.HIGH, false),
     /** 情况不明——低严重、噪音高危（提交必须附补充说明，采纳不奖励） */
-    SITUATION_UNCLEAR("情况不明", Severity.LOW, false, 2),
+    SITUATION_UNCLEAR("情况不明", Severity.LOW, false),
     /** 暂停营业——状态类，采纳联动门店 → SUSPENDED（沿用原暂停报采纳流） */
-    SUSPENDED("暂停营业", Severity.MEDIUM, true, 4),
+    SUSPENDED("暂停营业", Severity.MEDIUM, true),
     /** 舞池不开——部分限流、纯事件 */
-    DANCE_FLOOR_CLOSED("舞池不开", Severity.MEDIUM, false, 6),
+    DANCE_FLOOR_CLOSED("舞池不开", Severity.MEDIUM, false),
     /** 突然清场——高严重、纯事件 */
-    SUDDEN_EVICTION("突然清场", Severity.HIGH, false, 6),
+    SUDDEN_EVICTION("突然清场", Severity.HIGH, false),
     /** 恢复营业——状态类，采纳联动门店 → OPEN，同时承担"解除信号"角色 */
-    RESUMED("恢复营业", Severity.RECOVERY, true, 24),
+    RESUMED("恢复营业", Severity.RECOVERY, true),
     /** 突然关门——高严重、纯事件（CLOSED 存储态语义为"休息中"，不联动） */
-    SUDDEN_CLOSURE("突然关门", Severity.HIGH, false, 6),
+    SUDDEN_CLOSURE("突然关门", Severity.HIGH, false),
     /** 禁龙——限制性规定、纯事件 */
-    NO_PARTNER_DANCE("禁龙", Severity.MEDIUM, false, 6);
+    NO_PARTNER_DANCE("禁龙", Severity.MEDIUM, false);
 
     private final String displayName;
     private final Severity severity;
     private final boolean affectsStatus;
-    private final int ttlHours;
 
-    ReportType(String displayName, Severity severity, boolean affectsStatus, int ttlHours) {
+    ReportType(String displayName, Severity severity, boolean affectsStatus) {
         this.displayName = displayName;
         this.severity = severity;
         this.affectsStatus = affectsStatus;
-        this.ttlHours = ttlHours;
     }
 
     public String getDisplayName() {
@@ -62,11 +64,6 @@ public enum ReportType {
     /** 采纳时是否联动门店营业状态（状态类） */
     public boolean isAffectsStatus() {
         return affectsStatus;
-    }
-
-    /** 该类型的信号 TTL（小时），expires_at 写入时使用 */
-    public int getTtlHours() {
-        return ttlHours;
     }
 
     /**

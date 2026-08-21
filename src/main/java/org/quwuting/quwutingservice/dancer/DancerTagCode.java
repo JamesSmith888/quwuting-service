@@ -26,7 +26,6 @@ public enum DancerTagCode {
     GOOD_VIBE("🎉", "氛围感强"),
     BEGINNER_FRIENDLY("🌟", "新手友好"),
     PATIENT("🤝", "耐心带舞"),
-    GENTLE("🎩", "有风度"),
     FUNNY("😄", "风趣幽默"),
     PUNCTUAL("⏰", "守时靠谱");
 

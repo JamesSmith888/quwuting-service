@@ -229,9 +229,11 @@ charts 数组模板 + chart-brush + 图例开关 + 空图恒渲染 + y 轴全量
 
 **接口**：
 - `GET /dancers/{id}/stats`（**仅本人 + 管理员**）：`DancerStatsResponse{recognitionTrend,
-  favoriteTrend, pointsTrend, shareTrend, viewTrend, viewSourceTrend, statsAsOfDate}`——
+  favoriteTrend, pointsTrend, shareTrend, viewTrend, viewSourceTrend, unlockStats,
+  statsAsOfDate}`——
   六组近30天每日时间序列（含今日，骨架 31 天，generate_series 补零；与门店 countDailyTrends
-  同骨架，见下）。**鉴权**：Controller `requireAuth()`（未登录 → HTTP 401，前端触发登录）
+  同骨架，见下）+ **解锁信息分类聚合**（unlockStats，2026-08-21 追加，横向条形图，见后）。
+  **鉴权**：Controller `requireAuth()`（未登录 → HTTP 401，前端触发登录）
   + `DancerService.checkStatsAccess`（已登录非本人/非管理员 → 业务错 1003「仅舞伴本人可查看
   统计数据」）。缓存 = 内嵌 Caffeine LoadingCache（60s refresh-ahead / 30min 过期，对齐
   VenueHeatService 模式）。
@@ -268,11 +270,65 @@ generate_series 显式 ::timestamp 重载 + ::date 收口——门店时区链�
 频控命中）不失效。
 
 **来源判定（前端单一判定点 = dancer-detail.onLoad）**：share_from 参数 → SHARE；from=list
-参数（dancers.onTapDancer 列表页跳转携带）→ LIST；其余（深链/收藏 Tab）→ OTHER。舞伴域
-**无搜索入口与快照机制**——LIST 判定走 URL 参数而非门店式 storeVenueSnapshot。
+参数（dancers.onTapDancer 列表页跳转携带）→ LIST；from=venue 参数（门店详情页「同城舞伴」
+入口跳转携带，2026-08-21 新增）→ VENUE；其余（深链/收藏 Tab）→ OTHER。舞伴域**无搜索
+入口与快照机制**——LIST 判定走 URL 参数而非门店式 storeVenueSnapshot。
 
 **历史局限**：浏览埋点自 V29 上线日起积累（存量无浏览数据）；分享趋势自 V20（分享事件
 日志）起积累。
+
+### 城市值一致性契约（2026-08-21 根因修复 V38）
+
+**根因**：门店 city 恒为标准行政区划名（picker region 输出「南通市」），而舞伴城市存在
+历史手填形态「南通」（2026-08-14 城市选择器改造前存量，主城市与子表均受影响）。列表
+筛选/同城匹配是字符串精确匹配（`d.city = :city OR 子表 EXISTS`），「南通市」≠「南通」
+→ 同城筛选与门店详情页「同城舞伴」入口查 0 条（2026-08-21 线上实证）。
+
+**三层修复（禁止只修表面）**：
+1. **存量数据归一（V38 迁移）**：数据驱动、零硬编码城市名——存在门店城市
+   `v.city = 舞伴城市 || '市'` 时，把舞伴主城市与子表城市归一为门店标准行政区划名
+   （映射从 qwt_venues 推导）；幂等（已带「市」恒不命中）。
+2. **规范化键 `qwt_city_key(city)`（V38 建函数，IMMUTABLE）**：仅去掉**尾部**「市」
+   （`CASE WHEN RIGHT(city,1)='市' THEN LEFT(city,-1) ELSE city END`）——禁 REPLACE
+   全替换（'津市市' 会被 REPLACE 全删成 '津'，必须尾部去一）。
+3. **匹配/词表防御（DancerRepository）**：`findPublicPage` 城市条件升级「精确相等 OR
+   qwt_city_key 相等」（主查询 + countQuery 同源）；`findPublicCities` 按 qwt_city_key
+   GROUP BY 去重 + `MAX(city)` 优先保留带市形态（JPQL → nativeQuery，JPQL 无法引用
+   PG 自定义函数）。未来绕过表单的写入（管理端 API/直写库）再次产生不带「市」值，
+   匹配仍不失效、词表仍只出一个 chip。
+
+**写路径锁死（前端）**：dancer-edit 城市唯一入口 = city-picker（数据源 /venues/cities
+标准行政区划名），管理端无独立创建舞伴入口。**新增任何舞伴/门店城市写入通道前，必须
+评估形态一致性**（同款 picker 或入库前经 qwt_city_key 校验），否则防御层只兜底不根治。
+
+### 解锁信息统计（2026-08-21 追加：横向条形图，非时间序列）
+
+**需求**：舞伴统计页加"用户解锁信息"统计图——积分解锁内容 = 照片/联系方式（`PointsGateTargetType`
+可扩展），要求最合理图型不一定是折线图。
+
+**图型选型**：**横向条形图**。解锁 = 分类（内容类型）× 累计语义（"哪类内容最受用户付费解锁"），
+对比而非趋势；解锁低频离散事件，折线图大量为 0 视觉空洞；类别少标签横排可读、条长直观对比。
+条宽 = 解锁人次归一化（行为热度主指标），每类并排展示人数（按用户去重覆盖）与当前门槛积分
+（价值辅助）。
+
+**数据契约**：`DancerStatsResponse.unlockStats = List<DancerUnlockStat>`（新增字段）——
+`DancerUnlockStat{targetType, label, unlockCount, uniqueUsers, cost}`：
+- `unlockCount` = 累计解锁人次（`qwt_points_unlocks` 行数；照片每张一个 target_id，同人多张
+  照片计多次行为）；`uniqueUsers` = 累计解锁人数（COUNT(DISTINCT user_id)）；
+- `cost` = 当前门槛积分（LEFT JOIN 未软删且 cost>0 的 gate，MAX(cost)；软删=清除门槛→历史
+  解锁计数保留、cost 回落 0）；
+- `label` 后端枚举映射（"照片"/"联系方式"，未知枚举回退枚举名）——**新增内容类型仅需加枚举
+  值 + 映射，前端零改动**；
+- 仅返回人次 > 0 的类别（无记录类别不上行，前端空态=「暂无用户解锁记录」）；人次降序。
+
+**聚合**：`DancerStatsRepository.countDancerUnlockStats` 单条 SQL（一条 DB 往返，Supabase
+远程库往返昂贵）：照片 target_id IN (SELECT id FROM qwt_dancer_photos WHERE dancer_id=:id)
+归集到舞伴、联系方式 target_id=:id 直连；GROUP BY target_type。
+
+**缓存失效**：解锁写路径入统计失效矩阵——`PointsService.unlock` **真实写入后**（幂等分支
+无新数据不失效）afterCommit 经 `DancerDetailCacheService.invalidate(dancerId)` 级联失效
+（`invalidateDancerStatsAfterCommit`：DANCER_CONTACT → targetId 即 dancerId 直连；
+DANCER_PHOTO → `DancerPhotoRepository.findByIdAndDeletedFalse` 回查 dancerId）。
 
 ### 聚合缓存（DancerAggregateService）
 

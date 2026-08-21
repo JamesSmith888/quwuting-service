@@ -31,7 +31,7 @@
 
 **根因**：2026-08-10/12 设计「报告恢复营业」时把"纠正存储态（非营业→OPEN）"归为异步审核职责，接入 venuefeedback 通道——但忽略了**产品心智模型的一致性**：状态类上报（报告暂停/恢复营业）是用户在**现场确认的事实信号**，用户预期与「报告暂停营业」（status-reports 实时信号，提交即回显、采纳即联动）完全对称；异步审核通道无法提供"立即回显"与"采纳联动"，行为不对称违反可预期原则。该错误决策还曾被写成文档契约（前端 07-list-page「恢复营业反馈不出现在最近突发事件列表」）固化。
 
-**系统性修复（单一通道）**：状态类上报统一走 **venuestatusreport 实时信号通道**（先发后审 + 分级 TTL + 采纳联动），异步审核层回归纯「信息纠错/缺失/其他」职责：
+**系统性修复（单一通道）**：状态类上报统一走 **venuestatusreport 实时信号通道**（先发后审 + 统一公示期 + 采纳联动），异步审核层回归纯「信息纠错/缺失/其他」职责：
 
 1. **前端**：反馈面板类型 chips 白名单化（`FEEDBACK_TYPE_SUBMITTABLE_OPTIONS` = INACCURATE/MISSING_INFO/PRICE/OTHER，剔除 CLOSED_DOWN/SUSPENDED/RESUMED）；公告页 resumed 态操作栏「报告恢复营业」改走 `submitReport({type:'RESUMED'})`（需登录，提交即回显、mine 可点补充、采纳联动 reopenByReport）
 2. **本模块兜底（防御历史数据 + API 直调）**：`VenueFeedbackService.adoptReport` 对状态类反馈采纳时**同事务联动门店营业状态**——SUSPENDED → `VenueService.markSuspendedByReport`、RESUMED → `reopenByReport`（与 `StatusReportService.adoptReport` 同一联动通道），保证「采纳 = 门店状态生效」语义全通道一致；CLOSED_DOWN（已关门/停业）属较重停业认定，不自动联动（管理员经 updateVenue 手动执行），保持信息纠错语义
@@ -114,7 +114,7 @@
 **与 venuefeedback 的边界**（重要，2026-08-20 收敛）：
 
 - `venuefeedback` = 异步管理员审核（信息纠错/缺失/其他）：**状态类类型（SUSPENDED/RESUMED/CLOSED_DOWN）提交入口已下线**（历史数据兼容；采纳兜底联动见「状态类类型下线」），不再承担任何状态上报职责
-- `venuestatusreport` = "我现在就在现场，刚确认发生X"→ 实时 TTL 信号 → 自动过期；管理员采纳（状态类 SUSPENDED/RESUMED 联动门店状态）或移除。**状态类上报（报告暂停/恢复营业）的唯一通道**
+- `venuestatusreport` = "我现在就在现场，刚确认发生X"→ 实时信号 → 公示期（2 天）后自动撤下；管理员采纳（状态类 SUSPENDED/RESUMED 联动门店状态）或移除。**状态类上报（报告暂停/恢复营业）的唯一通道**
 
 两者语义边界由**信号性质**划分：实时事实信号（现场确认、需立即回显、采纳联动状态）→ status-reports；异步纠错信号（不在场、审核后回传）→ feedbacks。`venuefeedback` 不承担实时信号职责，`venuestatusreport` 不承担异步审核职责。
 
@@ -122,14 +122,16 @@
 
 用户上报**不改变** `Venue.status` 字段。`Venue.status` 的变更权仍属管理员/认领人（`POST /venues/{id}/update`）或**报告采纳联动**（`POST /admin/status-reports/{id}/adopt`，2026-08-10 新增，2026-08-11 泛化——管理员核实属实后，状态类（SUSPENDED/RESUMED）联动门店营业状态，见下「管理端可见性」）。用户上报作为独立信号层，出现在热度接口中为"N人报告X"的众包标记。管理员在管理后台查看活跃报告（`GET /admin/status-reports`）并处置：**采纳**（信号属实 → 状态类联动 + 奖励上报者积分 + 处理结果站内信，同事务；**仅打 ADOPTED 标记不软删**，记录保留展示带"已核实"，2026-08-20 修正）或**移除**（虚假信号清理，soft delete 公开视图即时消失）。
 
-### TTL 语义（按类型分级，expires_at 列）
+### 公示期语义（统一 2 天，expires_at 列）
 
 ```java
-// 写入时：expiresAt = 报告时刻 + type.getTtlHours()
+// 写入时：expiresAt = 报告时刻 + 公示期（StatusReportService.ANNOUNCEMENT_DISPLAY_DAYS = 2 天）
 // 活跃判定：expiresAt > now()
 ```
 
-**2026-08-11 迁移**：TTL 唯一事实源从 Service 常量（`ACTIVE_REPORT_TTL_HOURS=4` 单窗口）迁移到 **`expires_at` 列**（写入时 = createdAt + 类型 TTL，如情况不明 2h / 暂停营业 4h / 恢复营业 24h）。所有"活跃"判定统一判 `expires_at > now()`——旧单窗口无法表达分级 TTL，是本次迁移根因。**2026-08-20 修正：活跃判定另加 `admin_action IS NULL`（排除已处置记录——采纳 = 处置标记而非删除行，见「门店突发事件列表」）**。活跃判定点清单（全部为 `expires_at > :now` + `admin_action IS NULL`，`now` 由 Service 层传入，**SQL 层禁止自行定义时间窗**）：
+**2026-08-11 迁移**：TTL 唯一事实源从 Service 常量（`ACTIVE_REPORT_TTL_HOURS=4` 单窗口）迁移到 **`expires_at` 列**（写入时 = createdAt + 类型 TTL，如情况不明 2h / 暂停营业 4h / 恢复营业 24h）。所有"活跃"判定统一判 `expires_at > now()`——旧单窗口无法表达分级 TTL，是本次迁移根因。**2026-08-20 修正：活跃判定另加 `admin_action IS NULL`（排除已处置记录——采纳 = 处置标记而非删除行，见「门店突发事件列表」）**。
+
+**2026-08-21 统一公示期**：类型分级 TTL（2~24h）退役——`ReportType.ttlHours` 删除，expires_at 写入统一 = createdAt + 2 天（常量 `ANNOUNCEMENT_DISPLAY_DAYS`）。根因：时限由「类型」而非「事实」决定（装修停两周的「暂停营业」也 4h 消失，明晚用户白跑）；且不把时限选择交给上报用户（用户无决策动力），由系统定默认公示期。公示期后公告从活跃视图（详情页公告条）撤下、收入详情页「公告」折叠卡（历史可查）；已采纳「已核实」公告同样在公示期后撤下进卡（归档策略不变）。活跃判定点清单（`expires_at > :now` + `admin_action IS NULL`）结构不变——窗口数值变化不影响判定结构。活跃判定点清单（全部为 `expires_at > :now` + `admin_action IS NULL`，`now` 由 Service 层传入，**SQL 层禁止自行定义时间窗**）：
 
 - `VenueRepository.countHeatCounters` 的 `reportcount` / `latestreporttime`（热度聚合，`now` 参数）
 - `StatusReportRepository.countActiveAndLatestTime`（提交/撤销响应摘要）
@@ -164,7 +166,7 @@
 
 ### 管理端可见性（2026-08-10 新增，落实"管理员可在管理后台查看活跃报告"约定）
 
-**根因（用户反馈）**：暂停报是实时众包信号（公开 4h TTL），但管理端零可见性——`admin-reports` 页只查 venuefeedback，`pending-count` 只数 PENDING 反馈；用户上报暂停后管理员**收不到任何提醒、也看不到记录**（虚假信号无处置通道，只能等 TTL 过期）。设计早已预留管理端查看（「独立信号层」L693），"后续约定"一直未落地。
+**根因（用户反馈）**：暂停报是实时众包信号（公开公示期 2 天），但管理端零可见性——`admin-reports` 页只查 venuefeedback，`pending-count` 只数 PENDING 反馈；用户上报暂停后管理员**收不到任何提醒、也看不到记录**（虚假信号无处置通道，只能等公示期满）。设计早已预留管理端查看（「独立信号层」L693），"后续约定"一直未落地。
 
 - **列表 `GET /admin/status-reports`**：TTL 窗口内全部活跃报告，按时间倒序分页（PageRequest ≤100），`type` 可选筛选（2026-08-11，服务端库内过滤）。管理端上下文与公开列表的差异：① 上报者**真实昵称 + userId**（不脱敏——管理员需识别上报者）；② 携带 `note`（补充说明，审核安全约定"note 仅管理端可见"，公开响应禁止返回，见 L1897）；③ JOIN `qwt_venues` 取场所名；④ `peerCount` = 同店同类型活跃信号数（`countClustersByVenueAndType` 聚簇，众报置信度，管理端「N人报」显示）。`findActiveReports` 原生 SQL + 投影接口（全小写别名），countQuery 与主查询同谓词
 - **移除 `POST /admin/status-reports/{id}/remove`**：soft delete + `adminAction=REMOVED`（与用户自撤同软删语义，操作者是管理员）；移除后所有"活跃"查询立即过滤（公开视图即时消失，无需等 TTL）；同事务失效 `venueHeat` 缓存。幂等：已处置/不存在静默成功。语义 = **清理虚假/失效信号**（无副作用）
@@ -189,9 +191,9 @@
 
 ### 紧急公告区（GET /venues/{venueId}/status-reports/announcements，2026-08-11 新增，2026-08-20 分窗参数化）
 
-详情页「紧急公告」入口条与公告专属页（`pages/venue-announcements`）列表数据源（公开读，无需登录）。展示 = **活跃信号（deleted=false 且 admin_action IS NULL）+ 已采纳信号（adminAction=ADOPTED——2026-08-20 修正：采纳不再软删，deleted 恒为 false，带"已核实"标记）** 按类型聚簇摘要；移除（REMOVED）信号不展示。2026-08-11 前端拆页：同一聚合接口被两处消费——详情页取首条派生单行入口条（severity 色点 + 「紧急公告 · 最紧急类型摘要」），公告专属页全量渲染列表（列表层）+ 最近突发事件明细（详情层，`GET /venues/{id}/status-reports`）。
+详情页「紧急公告」入口条与公告专属页（`pages/venue-announcements`）列表数据源（公开读，无需登录）。展示 = **活跃信号（deleted=false 且 admin_action IS NULL）+ 已采纳信号（adminAction=ADOPTED——2026-08-20 修正：采纳不再软删，deleted 恒为 false，带"已核实"标记）** 按类型聚簇摘要；移除（REMOVED）信号不展示。2026-08-11 前端拆页：同一聚合接口被两处消费——详情页取首条派生单行入口条（severity 色点 + 「紧急公告 · 最紧急类型摘要」），公告专属页全量渲染列表（列表层）+ 最近突发事件明细（详情层，`GET /venues/{id}/status-reports`）。**2026-08-21 新增第三消费方**：详情页「公告」折叠卡（收到的礼物之上，默认折叠）——收纳公示期（2 天）后撤下的公告，展开惰性加载本接口历史视图（includeExpired=true，与公告页①区同窗）+ `GET /venues/{id}/status-reports` 明细（与公告页②区同源），操作入口仍收敛公告专属页。撤下语义：公示期内公告条醒目展示 → 公示期满撤下进卡（历史可查）；已采纳「已核实」公告同样在公示期满后撤下进卡（归档策略不变）。
 
-**根因（2026-08-20 分窗参数化）**：同一接口的两处消费方对时间窗口的语义要求**相反**——详情页公告条 = "当前紧急信号"（过时信号不得误导为当前紧急，应只看 TTL 窗口内）；公告专属页①区 = "历史事实摘要"（用户回看社区历史必须含已过期记录）。旧实现把 TTL 窗口（`expires_at > now`）硬套在整接口上：门店信号全部过期时公告页①区恒空，与"历史所有记录可见"语义冲突（同「门店突发事件列表」根因：信号新鲜度 ≠ 事实历史）。**修复：`includeExpired` 参数化**——`false`（默认）= 活跃视图（仅 TTL 窗口内，详情页公告条）；`true` = 历史视图（全部未撤销 + 已采纳，含已过期，公告页①区）。**长期规则：凡"同一接口被活跃视图 + 历史视图双消费"，时间窗口必须由消费方显式选择（参数化），禁止按单方语义硬编码。**
+**根因（2026-08-20 分窗参数化）**：同一接口的两处消费方对时间窗口的语义要求**相反**——详情页公告条 = "当前紧急信号"（过时信号不得误导为当前紧急，应只看 TTL 窗口内）；公告专属页①区 = "历史事实摘要"（用户回看社区历史必须含已过期记录）。旧实现把 TTL 窗口（`expires_at > now`）硬套在整接口上：门店信号全部过期时公告页①区恒空，与"历史所有记录可见"语义冲突（同「门店突发事件列表」根因：信号新鲜度 ≠ 事实历史）。**修复：`includeExpired` 参数化**——`false`（默认）= 活跃视图（仅 TTL 窗口内，详情页公告条）；`true` = 历史视图（全部未撤销 + 已采纳，含已过期，公告页①区 / 详情页公告卡——2026-08-21 第三消费方，收纳公示期后撤下的公告）。**长期规则：凡"同一接口被活跃视图 + 历史视图双消费"，时间窗口必须由消费方显式选择（参数化），禁止按单方语义硬编码。**
 
 - **聚合**：`StatusReportRepository.findAnnouncementsByVenue(venueId, now, includeExpired)` 按 `(venue_id, type)` 聚簇（COUNT / 已采纳数 / MAX(createdAt)），Service 层组摘要 `AnnouncementSummary`（type/typeDisplay/severity/count/adopted/latestAt），**排序 = 时间倒序（latestAt 降序，最新信号在前）为主、严重级为同时间次级排序**（**2026-08-20 修正**：状态类信号相互覆盖——门店先被报暂停营业（已采纳）、随后被报恢复营业（已采纳）时，最新采纳的恢复营业代表门店当前事实，即使严重级（recovery）低于暂停营业（medium）也必须在前，否则详情页公告条/公告页列表首条错误显示暂停营业；严重级改由前端色点表达，见 `StatusReportService.listAnnouncements`）；`includeExpired=true` 时聚簇含过期记录（类型枚举有限，摘要条数有界，无无限增长风险），时效由 `latestAt` 相对时间传达
 - **契约**：**不返回 note**（审核安全约定"note 仅管理端可见"，公开响应禁止携带——公告区不展示用户自由文本，规避微信审核风险）；`adopted` 驱动前端「已核实」标记；空结果 = 前端入口条/列表空态（详情页整行隐藏）
@@ -202,7 +204,7 @@
 
 - **范围**：仅未撤销（`deleted = false`）记录，含已过期（TTL 外）——「已过期」记录前端标注后提醒用户可重新上报；已撤销记录不返回（撤销是用户主动收回动作，soft delete 属内部实现细节，语义上不再属于"上报记录"）
 - **venueId 可选过滤（2026-08-06）**：null = 跨场所全部（个人中心「我的上报」区块）；非 null = 单门店（详情页「我的上报记录」弹窗——只展示当前门店记录，全部记录入口在个人中心）。与 `venuefeedback.listMyFeedbacks(venueId)` 的可选过滤同构——两套上报（异步审核 / 实时信号）的"个人中心全量 + 详情页单店"消费模型一致
-- **实现**：`StatusReportRepository.findMyReportsByUserId(userId, venueId)` 原生 SQL JOIN `qwt_venues` 一次取回场所名称/城市/区县/地址（消除 N+1）；venueId 过滤用 `:venueId IS NULL OR r.venue_id = :venueId` 参数化传值（防注入约定见 TextSanitizer javadoc）；`active` / `expiresAt` 在 `StatusReportService.listMyReports` 按 `ACTIVE_REPORT_TTL_HOURS` 统一计算（TTL 唯一权威源，SQL 不自行定义时间窗）
+- **实现**：`StatusReportRepository.findMyReportsByUserId(userId, venueId)` 原生 SQL JOIN `qwt_venues` 一次取回场所名称/城市/区县/地址（消除 N+1）；venueId 过滤用 `:venueId IS NULL OR r.venue_id = :venueId` 参数化传值（防注入约定见 TextSanitizer javadoc）；`active` / `expiresAt` 直接取 `expires_at` 列判定（公示期 2 天，2026-08-21 起统一，SQL 不自行定义时间窗）
 - **场所软删除不回退占位**：JOIN 不过滤 `v.deleted`——记录真实性不因场所下架而消失，与 /admin/reports 的"已下架场所"占位策略有意区分（那是管理端当前列表，这是用户历史记录）
 - **响应**：`MyStatusReportResponse`（id/venueId/venueName/venueCity/venueDistrict/venueAddress/createdAt/active/expiresAt），前端展示剩余时间只做 `expiresAt - now` 纯计算，不持有 TTL 常量
 
@@ -216,14 +218,14 @@
 
 `submitReport` 先查「我的活跃报告」（`findFirstByUserIdAndVenueIdAndDeletedFalseAndAdminActionIsNullAndExpiresAtAfterOrderByCreatedAtDesc`，未删**未处置**未过期最新一条——**采纳后的记录保留展示但不再是活跃报告**，2026-08-20 修正）分流：
 
-1. **有活跃记录 → 「补充详情」**：更新该行（type/occurredAt/note，含换类型）+ `renewReport` 续期 TTL——**不产生新记录**（完善当前报告不构成新上报），不限频
+1. **有活跃记录 → 「补充详情」**：更新该行（type/occurredAt/note，含换类型）+ `renewReport` 续期公示期——**不产生新记录**（完善当前报告不构成新上报），不限频
 2. **无活跃记录 → 「新上报」**：`pg_advisory_xact_lock(user_id, venue_id)` 事务级咨询锁 → **锁内重查**（另一请求可能已插入活跃记录，已有则按补充语义更新该行、不产生新记录）→ 确认无活跃后先频率限制（每次新上报消耗额度）再 `StatusReportRepository.insertReport` 普通 INSERT 新行——V34 起无 DB 唯一约束可冲突，无 ON CONFLICT 子句（2026-08-20 确定性化，替代旧「save + catch 23505 + 同事务继续查询」：PG 语句失败后事务中止 25P02，catch 后 `getActiveReportSummary` 必然 HTTP 500，与 venuefeedback 同源修复，见 15-governance 错误表）
 
 **根因（旧 upsert 模型为何废弃）**：全量 `UNIQUE(user_id, venue_id)` 使软删/已处置记录仍占用唯一槽位——「撤销/采纳后再次上报 = 恢复软删记录」导致同用户同门店永远只有一条物理记录（每次上报动作无法留痕），且采纳只 soft delete、用户再次提交即恢复 `deleted=false` → 报告页/详情页「已报告」态长期不重置（管理员已完成上报流程，用户侧却一直残留待补充）。V34 去掉全量唯一约束后，每次上报独立成行 + 处置后 `hasMyReport` 归零（`findDetailStats` EXISTS 判定加 `admin_action IS NULL`），天然支持"每次上报一条新记录 + 处置后重置为待报告"。
 
 **采纳 ≠ 删除行（2026-08-20 修正，V36 迁移）**：`adoptReport` **不再 soft delete**——仅置 `admin_action=ADOPTED`，「最近的突发事件」明细保留展示并带 `adopted`（"已核实"）标注（与公告区聚合同源语义），用户侧 `hasMyReport` 经活跃判定（`admin_action IS NULL`）归零重置为「待报告」，可再次上报产生新记录。根因：旧实现 soft delete 使明细列表（只查 `deleted=false`）查不到已采纳记录，用户误以为"上报记录被删除"（实际需求 = 状态重置而非删记录）。`removeReport` 语义不变（虚假信号清理仍 soft delete + REMOVED，公开视图消失）。**幂等判定同步修正**：adopt/remove 的"已处置"判断由 `isDeleted()` 改为 `adminAction != null`（采纳不再置 deleted）。**存量数据**：V36 迁移把历史 `deleted=true AND admin_action='ADOPTED'` 记录恢复 `deleted=false`（重新可见）。
 
-**`@CreationTimestamp` 属性不可变，TTL 续期必须经 JPQL 批量更新（2026-08-10 根因修复）**：`BaseEntity.createdAt` 标注 `@CreationTimestamp`，Hibernate 将其视为**不可变属性**——实体 setter（`report.setCreatedAt(now)`）在 UPDATE 时被静默忽略（WARN HHH000502，UPDATE 语句不含 `created_at` 列）。原实现"手动 setCreatedAt 刷新 TTL"从未生效：旧 `createdAt` 超出 4h TTL 窗口后，详情页 `hasMyStatusReport`（EXISTS 带 TTL 过滤）为 false、公开列表（TTL 过滤）查不到 → 用户"刚报告的记录消失"。**正确做法**：经 `StatusReportRepository.renewReport(id, now, now+ttl)`（`@Modifying(flushAutomatically=true, clearAutomatically=true)` 的 JPQL 批量更新）直写 `created_at` + `expires_at` 两列——批量更新不走实体生命周期，不受不可变约束；`flushAutomatically` 保证实体脏修改（deleted/type 等）先落库再续期。**长期规则：`@CreationTimestamp` 字段禁止用实体 setter 改，需"续期"语义（如 TTL 刷新）时必须走批量更新**。
+**`@CreationTimestamp` 属性不可变，公示期续期必须经 JPQL 批量更新（2026-08-10 根因修复）**：`BaseEntity.createdAt` 标注 `@CreationTimestamp`，Hibernate 将其视为**不可变属性**——实体 setter（`report.setCreatedAt(now)`）在 UPDATE 时被静默忽略（WARN HHH000502，UPDATE 语句不含 `created_at` 列）。原实现"手动 setCreatedAt 刷新公示期"从未生效：旧 `createdAt` 超出 TTL 窗口后，详情页 `hasMyStatusReport`（EXISTS 带 TTL 过滤）为 false、公开列表（TTL 过滤）查不到 → 用户"刚报告的记录消失"。**正确做法**：经 `StatusReportRepository.renewReport(id, now, now+公示期)`（`@Modifying(flushAutomatically=true, clearAutomatically=true)` 的 JPQL 批量更新）直写 `created_at` + `expires_at` 两列——批量更新不走实体生命周期，不受不可变约束；`flushAutomatically` 保证实体脏修改（deleted/type 等）先落库再续期。**长期规则：`@CreationTimestamp` 字段禁止用实体 setter 改，需"续期"语义（如公示期刷新）时必须走批量更新**。
 
 **新上报并发收口（2026-08-20 V34 定稿，旧「catch 23505 后必须 `entityManager.clear()`」指引已废止）**：旧写法在 `save()` 失败后 `entityManager.clear()` 清脏实体再继续同事务查询——这只能解决 Hibernate session 的 `AssertionFailure`，无法恢复 PostgreSQL 已中止（25P02）的 DB 事务，`getActiveReportSummary` 必然 HTTP 500。**现一律走 `pg_advisory_xact_lock` 事务级咨询锁 + 锁内重查 + 普通 INSERT**（`StatusReportRepository.lockUserVenue` / `insertReport`），不产生任何异常路径，无 session/事务状态恢复问题。锁实现注意：两参 `pg_advisory_xact_lock(int, int)` 为 32 位 int（id 超 2^31 截断仅致碰撞、过度串行化，不影响正确性），故用单参 bigint 版组合键（`userId * 1000003 + venueId`）。
 

@@ -165,7 +165,7 @@ class StatusReportServiceTest {
         assertTrue(Math.abs(java.time.Duration.between(renewed, LocalDateTime.now()).toSeconds()) < 5,
                 "续期时间戳必须是当前时刻（而非保留旧 createdAt）");
         assertTrue(expCaptor.getValue().isAfter(renewed),
-                "expiresAt 必须晚于 createdAt（TTL 窗口，缺省 SUSPENDED = 4h）");
+                "expiresAt 必须晚于 createdAt（公示期窗口，缺省 SUSPENDED = 2 天）");
         verify(statusReportRepository, never()).insertReport(any(), any(), any(), any(), any(), any(), any());
     }
 

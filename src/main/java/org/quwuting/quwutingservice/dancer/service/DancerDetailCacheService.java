@@ -51,7 +51,9 @@ import java.util.concurrent.TimeUnit;
  * 收藏态 + 相册 + 照片门槛/解锁批量），Supabase 抖动影响面同步收窄。
  * <p>
  * <b>失效矩阵（写路径必须调用 {@link #invalidate}）</b>：认可 toggle / 收藏 add·remove /
- * 浏览记录 / 礼物赠送(DANCER) / 分享 SHARE / 资料编辑（城市子表）/ 联系方式门槛设置。
+ * 浏览记录 / 礼物赠送(DANCER) / 分享 SHARE / 资料编辑（城市子表）/ 联系方式门槛设置 /
+ * 积分解锁（2026-08-21 入矩阵——解锁改变统计接口 unlockStats 输入，见
+ * PointsService#invalidateDancerStatsAfterCommit）。
  * 照片增删审（不在缓存内）与状态流转（主表字段，不在缓存内）无需失效。
  */
 @Service

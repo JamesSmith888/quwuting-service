@@ -82,7 +82,7 @@
 | 把 likedByMe/myScore 等个人状态塞进以 `{venueId, userId}` 为 key 的聚合缓存 | 聚合数据（venueId 为 key）与个人状态（永远实时查询）彻底分离，写操作对聚合缓存做 `@CacheEvict`，不要只依赖 TTL |
 | 在同一 Service 类内 `this.xxx()` 调用本类的 `@Cacheable` 方法 | 绕开 AOP 代理导致缓存静默失效；把被缓存的方法拆到独立 Bean（如 `TagAggregateStatsService`），从外部注入调用 |
 | 列表页展示的关联统计按 venueId 循环单独查询 | 收集整页 venueId 后一次 `IN (...)` 批量查询（如 `VenueReactionService.batchGetBadges`） |
-| 用 venuefeedback 做实时状态上报（误用异步审核做实时信号） | venuefeedback = 异步管理员审核流程；venuestatusreport = 实时 4h TTL 众包信号。两者共存，不可混用（见「场所状态上报」章节） |
+| 用 venuefeedback 做实时状态上报（误用异步审核做实时信号） | venuefeedback = 异步管理员审核流程；venuestatusreport = 实时公示期 2 天众包信号。两者共存，不可混用（见「场所状态上报」章节） |
 | JPQL 子查询根实体写数据库表名（`FROM qwt_venue_views`）/ 列写 snake_case | HQL 必须用实体名 + camelCase 属性名（`FROM VenueView vv ... vv.venueId`），启动期查询校验抛 `UnknownEntityException`；nativeQuery 才用表名 |
 | HQL 时间量减法写 `CURRENT_DATE - 30` | 带单位后缀 `CURRENT_DATE - 30 day`（Hibernate 7 裸整数报 `SemanticException: not a temporal amount`）；PostgreSQL native SQL 的日期减整数不受影响 |
 | 用户上报后修改 Venue.status | 用户上报是独立信号层，不改 Venue.status；管理员后续可决定是否据此手动更新（见「独立信号层」章节） |

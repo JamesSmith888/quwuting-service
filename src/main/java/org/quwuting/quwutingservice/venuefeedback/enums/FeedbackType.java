@@ -9,7 +9,7 @@ package org.quwuting.quwutingservice.venuefeedback.enums;
  * 新增上报场景 = 扩展枚举值 + 前端入口，无需新建表/接口——这是"通用模板"的
  * 可扩展性保证（见后端 AGENTS.md「统一用户上报（venuefeedback）」章节）。
  * <p>
- * 与 venuestatusreport（实时 4h TTL 众包信号）的边界保持：本模块是异步管理员
+ * 与 venuestatusreport（实时公示期 2 天众包信号）的边界保持：本模块是异步管理员
  * 审核流程，实时信号职责不在此承担（见 AGENTS.md「场所状态上报」章节）。
  * <p>
  * <b>状态类类型下线（2026-08-20）</b>：SUSPENDED/CLOSED_DOWN/RESUMED 的<b>提交入口</b>

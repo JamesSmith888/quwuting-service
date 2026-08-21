@@ -15,14 +15,14 @@ import java.time.LocalDateTime;
  * <p>
  * 与 {@link org.quwuting.quwutingservice.venuefeedback.entity.VenueFeedback} 的区别：
  * feedback 是异步纠错（管理员人工审核队列），status report 是实时众包信号
- * （按类型 TTL 自动过期，直接影响详情页紧急公告区展示与 StatusConfidence）。
+ * （统一公示期自动过期，直接影响详情页紧急公告区展示与 StatusConfidence）。
  * 两表独立，职责边界见 AGENTS.md。
  * <p>
  * 2026-08-11 泛化（V11）：原"暂停营业专用"泛化为 8 类突发事件（{@link ReportType}）。
  * <ul>
  *   <li>{@code type}：事件类型（替代原 reason 维度）；</li>
- *   <li>{@code expiresAt}：按类型 TTL 计算的过期时刻（TTL 唯一事实源，所有"活跃"
- *       判定统一判 {@code expiresAt > now()}）；</li>
+ *   <li>{@code expiresAt}：公示期（2026-08-21 起统一 2 天，原按类型 TTL 退役）计算的
+ *       过期时刻（TTL 唯一事实源，所有"活跃"判定统一判 {@code expiresAt > now()}）；</li>
  *   <li>{@code adminAction}：管理端处置标记（ADOPTED/REMOVED），null = 活跃信号。</li>
  * </ul>
  * 2026-08-20 追加式模型（V34）：<b>每次上报 = 一条新记录</b>（无活跃报告时 INSERT

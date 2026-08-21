@@ -33,8 +33,8 @@ public class MyStatusReportController {
      * <p>
      * venueId 可选（2026-08-06）：缺省 = 跨场所全部（个人中心「我的上报」区块）；
      * 传值 = 单门店（详情页「我的上报记录」弹窗）。返回未撤销记录（含已过期），
-     * 按报告时间倒序；{@code active} / {@code expiresAt} 由后端 TTL 常量计算，
-     * 前端不持有 TTL 常量。
+     * 按报告时间倒序；{@code active} / {@code expiresAt} 由后端 expires_at 列判定
+     * （公示期 2 天），前端不持有公示期常量。
      */
     @GetMapping("/mine")
     public ApiResponse<List<MyStatusReportResponse>> listMyReports(

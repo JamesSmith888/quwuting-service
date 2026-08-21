@@ -14,7 +14,7 @@ import org.springframework.web.bind.annotation.*;
  * 管理端可见性 + 处置能力。路由前缀 /admin/status-reports 独立于公开的
  * /venues/{venueId}/status-reports（提交通道）与 /status-reports/mine（用户自查询）。
  * <p>
- * 处置语义：暂停报是实时众包信号（4h TTL 自动过期），管理动作分两类（2026-08-10 扩展）：
+ * 处置语义：暂停报是实时众包信号（公示期 2 天自动撤下，2026-08-21 起统一公示期），管理动作分两类（2026-08-10 扩展）：
  * <ul>
  *   <li><b>移除</b>（{@code /{id}/remove}）= 清理虚假/失效信号（soft delete，公开视图即时消失）；</li>
  *   <li><b>采纳</b>（{@code /{id}/adopt}）= 核实暂停属实：门店营业状态随之改为「暂停营业」、

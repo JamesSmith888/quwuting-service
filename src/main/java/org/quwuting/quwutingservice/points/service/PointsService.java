@@ -32,6 +32,8 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -614,7 +616,46 @@ public class PointsService {
         unlock.setTransactionId(savedTx.getId());
         unlockRepository.save(unlock); // 串行化后 23505 不可达；唯一索引仍为纵深防御
         log.info("用户 {} 解锁 {}#{}，消耗 {} 积分（流水 {}）", userId, targetType, targetId, cost, savedTx.getId());
+        // 解锁改变舞伴统计输入（unlockStats 累计人次/人数）：真实写入后经事务
+        // afterCommit 失效舞伴统计缓存（对齐 DancerViewService 同款边界兜底——
+        // 提交后失效保证并发读者回源必读到已提交数据；幂等分支无新数据不需失效）
+        invalidateDancerStatsAfterCommit(targetType, targetId);
         return new UnlockResponse(true, newBalance, targetType, targetId, target.content(), target.contactImageUrl());
+    }
+
+    /**
+     * 解锁写路径 → 舞伴统计缓存失效（2026-08-21 解锁入统计失效矩阵）。
+     * 经 {@link DancerDetailCacheService#invalidate} 唯一入口（级联失效内层
+     * DancerStatsService，单一失效入口见其 javadoc）：
+     * <ul>
+     *   <li>DANCER_CONTACT：target_id = 舞伴 ID 直连；</li>
+     *   <li>DANCER_PHOTO：target_id = 照片 ID，回查 dancer_id；</li>
+     * </ul>
+     * 照片已软删/不存在时跳过（无舞伴可失效）。事务提交后执行（afterCommit），
+     * 单元测试无事务时直接内联失效（对齐 DancerService 同款兜底）。
+     */
+    private void invalidateDancerStatsAfterCommit(PointsGateTargetType targetType, Long targetId) {
+        Long dancerId;
+        if (targetType == PointsGateTargetType.DANCER_CONTACT) {
+            dancerId = targetId;
+        } else {
+            DancerPhoto photo = dancerPhotoRepository.findByIdAndDeletedFalse(targetId).orElse(null);
+            dancerId = photo != null ? photo.getDancerId() : null;
+        }
+        if (dancerId == null) {
+            return;
+        }
+        Long targetDancerId = dancerId;
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    dancerDetailCacheService.invalidate(targetDancerId);
+                }
+            });
+        } else {
+            dancerDetailCacheService.invalidate(targetDancerId);
+        }
     }
 
     /**

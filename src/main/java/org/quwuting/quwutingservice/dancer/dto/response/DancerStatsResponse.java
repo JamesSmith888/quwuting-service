@@ -3,10 +3,12 @@ package org.quwuting.quwutingservice.dancer.dto.response;
 import java.util.List;
 
 /**
- * 舞伴统计响应体（GET /dancers/{id}/stats，2026-08-14 舞伴统计图第一期）。
+ * 舞伴统计响应体（GET /dancers/{id}/stats，2026-08-14 舞伴统计图第一期，
+ * 2026-08-21 追加解锁信息统计）。
  * <p>
  * 六组近30天每日时间序列（含今日，骨架 31 天，服务端补零），供前端舞伴统计页
- * 六张趋势图渲染（认可/收藏/礼物价值/分享/浏览 + 浏览来源）。与门店
+ * 六张趋势图渲染（认可/收藏/礼物价值/分享/浏览 + 浏览来源）+ 一组「用户解锁信息」
+ * 分类聚合（unlockStats，前端横向条形图）。与门店
  * {@code VenueHeatResponse} 的趋势字段同模式（countDailyTrends 骨架 + 实时口径），
  * 但只含时间序列、不含热度指数——舞伴域暂无热度公式（第一期范围，见
  * 前端 docs/agents/09「舞伴统计」）。
@@ -48,6 +50,13 @@ public record DancerStatsResponse(
          * SHARE=分享卡片打开、SEARCH=搜索结果进入、OTHER=其他/历史兜底。
          */
         List<DancerViewSourceTrendPoint> viewSourceTrend,
+        /**
+         * 用户解锁信息分类聚合（2026-08-21 追加，「解锁信息」横向条形图用）。
+         * 按内容类型（照片/联系方式，可扩展）聚合 qwt_points_unlocks 累计解锁
+         * 人次/人数 + 当前门槛积分；非时间序列（解锁低频离散事件，无趋势语义）。
+         * 排序 = 解锁人次降序（无记录的类别不上行）。
+         */
+        List<DancerUnlockStat> unlockStats,
         /**
          * 滚动窗口统计口径的截止日期（yyyy-MM-dd，实时口径 = 今天）。
          * 所有趋势序列统计到请求时刻（含今日已发生的数据），同一天内多次请求结果

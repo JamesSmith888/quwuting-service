@@ -39,7 +39,9 @@ import java.util.Map;
  * 场所突发事件（紧急公告）实时信号服务。
  * <p>
  * 用户在详情页上报"突发事件"（8 类枚举，2026-08-11 由"仅暂停营业"泛化），系统作为
- * 独立信号层展示（不直接修改 Venue.status），通过按类型 TTL 过期（expires_at 列）+
+ * 独立信号层展示（不直接修改 Venue.status），通过统一公示期过期（expires_at 列，
+ * 2026-08-21 起 = created_at + {@value #ANNOUNCEMENT_DISPLAY_DAYS} 天，类型分级 TTL
+ * 退役——公示期后公告从活跃视图撤下、收入详情页公告卡片，历史由相对时间传达）+
  * {@link VenueHeatService} 的 StatusConfidence override 形成闭环。
  * <p>
  * 分层模型（先发后审）：上报立即进入活跃信号（低置信，TTL 窗口内公开可见）；管理员
@@ -55,7 +57,7 @@ import java.util.Map;
  * 同一用户对同一门店<b>同时至多一条活跃报告</b>——并发约束由<b>应用层
  * pg_advisory_xact_lock(user_id, venue_id) 串行化</b>保证（2026-08-19 定则方案②；
  * 曾尝试「活跃记录」维度的部分唯一索引，谓词含 now() 被 PG 拒绝——IMMUTABLE 限制，
- * 2026-08-20 实证）——「补充详情」= 更新该活跃行（type/occurredAt/note + 续期 TTL，
+ * 2026-08-20 实证）——「补充详情」= 更新该活跃行（type/occurredAt/note + 续期公示期，
  * 不产生新记录）；已被管理员采纳/移除、用户撤销、或 TTL 过期的记录不再被恢复，
  * 用户可再次上报产生新行（旧行保留为历史）。旧 upsert 模型（UNIQUE(user_id, venue_id)
  * 覆盖更新 + 恢复软删记录）已废弃——正是它导致"同用户同门店只有一条记录不断更新"
@@ -71,6 +73,15 @@ public class StatusReportService {
 
     /** 每日上报上限：每用户每日报告总次数（2026-08-11 新增，与滑动窗口互补兜底批量刷） */
     private static final int MAX_REPORTS_PER_DAY = 10;
+
+    /**
+     * 公告默认公示期（天，2026-08-21 起）：expires_at 写入时 = created_at + 本值。
+     * 统一公示期替代旧按类型分级 TTL（ReportType.ttlHours 2~24h 退役）——不把时限
+     * 选择交给上报用户（用户无决策动力），由系统定默认展示期：公示期内公告在详情页
+     * 公告条/公告区醒目展示，公示期后撤下、收入详情页「公告」折叠卡片（历史可查）。
+     * 2 天覆盖「今晚决策 + 明晚复查」的核心窗口（舞厅夜间高频，跨两个晚上足够新鲜）。
+     */
+    private static final int ANNOUNCEMENT_DISPLAY_DAYS = 2;
 
     /** 门店突发事件历史明细列表最大返回条数（全量历史倒序取最近 N 条，防无限增长；公告页消费） */
     private static final int RECENT_REPORT_LIST_LIMIT = 20;
@@ -89,7 +100,7 @@ public class StatusReportService {
      * 分支语义：
      * <ul>
      *   <li><b>已有活跃报告（未删未过期）→ 「补充详情」</b>：更新该活跃行
-     *       （type/occurredAt/note，含换类型），续期 TTL（经 renewReport 直写时间列），
+     *       （type/occurredAt/note，含换类型），续期公示期（经 renewReport 直写时间列），
      *       <b>不产生新记录</b>——完善当前报告不构成新上报；</li>
      *   <li><b>无活跃报告 → 「新上报」</b>：INSERT 新行（每次上报一条新记录，
      *       历史多条；曾被采纳/移除/撤销或已过期的旧记录不再被恢复）。
@@ -151,10 +162,10 @@ public class StatusReportService {
             report.setOccurredAt(req.occurredAt());
             report.setNote(TextSanitizer.sanitize(req.note()));
             statusReportRepository.save(report);
-            // 续期 TTL：@CreationTimestamp 不可变属性，实体 setter 被静默忽略（HHH000502）——
+            // 续期公示期：@CreationTimestamp 不可变属性，实体 setter 被静默忽略（HHH000502）——
             // 必须经 JPQL 批量更新直写 created_at + expires_at（见 renewReport 根因注记）
             statusReportRepository.renewReport(report.getId(), now,
-                    now.plusHours(type.getTtlHours()));
+                    now.plusDays(ANNOUNCEMENT_DISPLAY_DAYS));
         } else {
             // 新上报：并发首报串行化 + 锁内重查 + INSERT 新记录。
             // V34 去掉全量 UNIQUE(user_id, venue_id) 后无 DB 唯一约束兜底并发；
@@ -174,12 +185,12 @@ public class StatusReportService {
                 report.setNote(TextSanitizer.sanitize(req.note()));
                 statusReportRepository.save(report);
                 statusReportRepository.renewReport(report.getId(), now,
-                        now.plusHours(type.getTtlHours()));
+                        now.plusDays(ANNOUNCEMENT_DISPLAY_DAYS));
             } else {
                 // 确认无活跃记录：限频（每次新上报消耗额度）后 INSERT 新记录
                 checkRateLimit(userId);
                 statusReportRepository.insertReport(venueId, userId, type.name(), req.occurredAt(),
-                        TextSanitizer.sanitize(req.note()), now.plusHours(type.getTtlHours()), now);
+                        TextSanitizer.sanitize(req.note()), now.plusDays(ANNOUNCEMENT_DISPLAY_DAYS), now);
             }
         }
 
