@@ -33,7 +33,6 @@ import java.util.List;
  *   <li>GET /dancers/favorites — 我的收藏列表（登录，2026-08-14 舞伴收藏）</li>
  *   <li>POST /dancers/{id}/favorite — 收藏舞伴（登录，幂等）</li>
  *   <li>POST /dancers/{id}/favorite/remove — 取消收藏（登录，幂等）</li>
- *   <li>POST /dancers — 舞伴主动注册（登录，status=PENDING 待认证）</li>
  *   <li>GET /dancers/{id} — 舞伴详情（公开，可见性规则见 DancerService）</li>
  *   <li>POST /dancers/{id}/update — 编辑本人/管理舞伴资料（全量覆盖；REJECTED → 自动重审，
  *       2026-08-19 由 PUT /dancers/{id} 迁移对齐「只允许 GET 和 POST」约定）</li>
@@ -67,18 +66,21 @@ public class DancerController {
     }
 
     /**
-     * 舞伴主动注册（需登录）→ status=PENDING（审核中），管理员认证后公开。
-     * 返回新建舞伴 ID（前端据此跳转详情页）。
+     * ⚠️ 2026-08-21 已下线：原「舞伴主动注册 POST /dancers（登录 → status=PENDING）」
+     * 因个人主体小程序「收集、存储用户身份信息」审核驳回被移除——舞伴资料改为
+     * 纯平台发布内容，创建通道唯一 = 管理员 POST /admin/dancers（status=NORMAL 直通
+     * 公开）。前端无任何普通用户创建入口，见 AGENTS.md「小程序类目合规 UGC 红线」。
      */
-    @PostMapping
-    public ApiResponse<Long> create(@Valid @RequestBody UpsertDancerRequest request) {
-        Long userId = UserContext.requireAuth();
-        return ApiResponse.ok(dancerService.createDancer(userId, request, false));
-    }
 
     /**
      * 编辑舞伴资料（本人 createdBy 匹配 或 管理员）：全量覆盖可编辑字段；
      * REJECTED 资料编辑后自动回到 PENDING（重新送审）。返回更新后详情。
+     * <p>
+     * ⚠️ 合规约束（2026-08-21 个人主体审核驳回沉淀，见 AGENTS.md「小程序类目合规
+     * UGC 红线」）：舞伴资料 = 平台发布的黄页内容，创建通道唯一 = 管理员
+     * （POST /admin/dancers，status=NORMAL 直通公开）；本接口的「本人」分支仅
+     * 服务历史数据（早期用户主动注册创建的舞伴）的存量编辑，前端无任何非管理员
+     * 入口（dancer-edit 页面仅管理员可进入），不构成"收集、存储用户身份信息"。
      * <p>
      * 2026-08-19：HTTP 方法对齐项目「只允许 GET 和 POST」约定——由 PUT /dancers/{id}
      * 迁移为 POST /dancers/{id}/update（原 PUT 路径已废弃；与门店 favorite 的

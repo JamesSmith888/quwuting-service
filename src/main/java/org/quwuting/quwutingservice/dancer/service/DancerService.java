@@ -116,12 +116,19 @@ public class DancerService {
     /** 运营配置（2026-08-15 认可「每日一票」开关：dancer.recognition.daily.single） */
     private final OpsConfigService opsConfigService;
 
-    // ─── 创建（两条通道：主动注册 → PENDING；后台创建 → NORMAL） ─────────────────
+    // ─── 创建（唯一通道：管理员后台创建 → NORMAL；用户主动注册已下线） ────────
 
     /**
-     * 创建舞伴资料。
+     * 创建舞伴资料（<b>唯一调用方 = AdminDancerController</b>，2026-08-21 起）。
+     * <p>
+     * ⚠️ 合规约束：个人主体小程序「收集、存储用户身份信息」审核驳回后，用户主动
+     * 注册通道（原 POST /dancers，adminApproved=false）已下线，舞伴资料 = 平台发布
+     * 的黄页内容（同门店/动态/照片的平台代发模型，见 AGENTS.md「小程序类目合规
+     * UGC 红线」）。本方法仅经 adminApproved=true 调用（status=NORMAL 直通公开，
+     * createdBy = 管理员 ID）；adminApproved=false 分支保留仅为历史兼容，前端无
+     * 任何普通用户入口。
      *
-     * @param adminApproved true = 后台创建（管理员，status=NORMAL 直接公开）；false = 主动注册（status=PENDING 待认证）
+     * @param adminApproved true = 后台创建（管理员，status=NORMAL 直接公开）；false = 遗留分支（不再使用）
      * @return 新建舞伴 ID
      */
     @Transactional
