@@ -25,7 +25,9 @@ public enum FileCategory {
     /** 门店认领营业执照（2026-08-11 新增，认领申请材料，仅管理端审核可见） */
     VENUE_CLAIM_LICENSE("claim-licenses"),
     /** 舞友群群二维码（2026-08-17 新增，运营管理端上传；用户端长按识别加入群聊） */
-    GROUP_QR("group-qr");
+    GROUP_QR("group-qr"),
+    /** 舞伴短视频（2026-08-22 新增，管理员直发 + PENDING 审核后公开；走视频扩展名/大小校验通道） */
+    DANCER_VIDEO("dancer-videos");
 
     private final String pathPrefix;
 

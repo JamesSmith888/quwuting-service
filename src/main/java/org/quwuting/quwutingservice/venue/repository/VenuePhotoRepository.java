@@ -4,6 +4,7 @@ import org.quwuting.quwutingservice.venue.entity.VenuePhoto;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -16,6 +17,21 @@ public interface VenuePhotoRepository extends JpaRepository<VenuePhoto, Long> {
     List<VenuePhoto> findByVenueIdAndDeletedFalseOrderBySortOrderAscIdAsc(Long venueId);
 
     Optional<VenuePhoto> findByIdAndDeletedFalse(Long id);
+
+    /**
+     * 物理删除门店的高德导入相册记录（created_by=0 = 平台存量导入，2026-08-22 新增）。
+     * 用途：同步「重置式导入」——每店同步前先清旧高德图再插入最新匹配结果，
+     * 保证错配/过期图（如名称模糊匹配混入其他店照片）随重跑自愈，且不积累软删行。
+     * <b>禁派生删除</b>（2026-08-15 崩溃根因：子表逐条 em.remove 延迟删除在事务内
+     * flush + 同键并发写产生 StaleObjectStateException，一律 @Modifying 批量删除）。
+     * 必须在事务内调用（syncGalleryPhotos 的 @Transactional 覆盖）。
+     */
+    @Modifying(clearAutomatically = true)
+    @Query("""
+            DELETE FROM VenuePhoto p
+            WHERE p.venueId = :venueId AND p.createdBy = 0 AND p.deleted = false
+            """)
+    int deleteImportedByVenue(@Param("venueId") Long venueId);
 
     /** 当前最大展示顺序（新照片 sortOrder = max + 1；无照片返回 0）。
      *  单值聚合（同 DancerPhotoRepository#findMaxSortOrder，省跨洲往返与全表行传输） */

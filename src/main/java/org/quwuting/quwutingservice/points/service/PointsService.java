@@ -719,7 +719,10 @@ public class PointsService {
 
     /** 门槛目标属主解析：目标存在性 + 归属舞伴（设置门槛资格校验的公共前置） */
     private Dancer resolveGateOwner(PointsGateTargetType targetType, Long targetId) {
-        if (targetType == PointsGateTargetType.DANCER_PHOTO) {
+        // DANCER_PHOTO / DANCER_VIDEO（2026-08-22 视频门槛）：target_id = qwt_dancer_photos.id
+        // （kind 区分媒体类型，门槛目标解析同一张表）
+        if (targetType == PointsGateTargetType.DANCER_PHOTO
+                || targetType == PointsGateTargetType.DANCER_VIDEO) {
             DancerPhoto photo = dancerPhotoRepository.findByIdAndDeletedFalse(targetId)
                     .orElseThrow(() -> new BusinessException(1001, "照片不存在"));
             return dancerRepository.findByIdAndDeletedFalse(photo.getDancerId())
@@ -731,20 +734,21 @@ public class PointsService {
     }
 
     /**
-     * 解锁目标解析：目标可见性 + 门槛存在性 + 解锁内容（照片原图 URL / 联系方式）。
+     * 解锁目标解析：目标可见性 + 门槛存在性 + 解锁内容（照片原图 URL / 视频 URL / 联系方式）。
      * <ul>
-     *   <li>DANCER_PHOTO：照片须 PUBLIC（未公开对公众不可见）且舞伴 NORMAL；
-     *       内容 = 照片原图 URL；</li>
+     *   <li>DANCER_PHOTO / DANCER_VIDEO：媒体须 PUBLIC（未公开对公众不可见）且舞伴 NORMAL；
+     *       内容 = 原图/视频 URL（2026-08-22 视频门槛：解锁后返回视频直链供播放）；</li>
      *   <li>DANCER_CONTACT：舞伴须 NORMAL；内容 = 联系方式文本（可能为空串——
      *       舞伴未填联系方式时门槛无意义，防御性返回空）。</li>
      * </ul>
      */
     private UnlockTarget resolveUnlockTarget(PointsGateTargetType targetType, Long targetId) {
-        if (targetType == PointsGateTargetType.DANCER_PHOTO) {
+        if (targetType == PointsGateTargetType.DANCER_PHOTO
+                || targetType == PointsGateTargetType.DANCER_VIDEO) {
             DancerPhoto photo = dancerPhotoRepository.findByIdAndDeletedFalse(targetId)
                     .orElseThrow(() -> new BusinessException(1001, "照片不存在"));
             if (photo.getStatus() != DancerPhotoStatus.PUBLIC) {
-                throw new BusinessException(1001, "该照片暂不可查看");
+                throw new BusinessException(1001, "该媒体暂不可查看");
             }
             Dancer dancer = dancerRepository.findByIdAndDeletedFalse(photo.getDancerId())
                     .orElseThrow(() -> new BusinessException(1001, "舞伴不存在"));

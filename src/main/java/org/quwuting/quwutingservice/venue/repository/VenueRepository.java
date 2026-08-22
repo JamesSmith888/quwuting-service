@@ -45,6 +45,70 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     long countMissingCoordinates();
 
     /**
+     * 缺图场所（2026-08-21 高德图片同步用，2026-08-22 口径升级）：
+     * deleted=false 且 <b>主图为空（imageUrl NULL/空串）或无公开相册</b>
+     * （qwt_venue_photos 无 PUBLIC 记录）——幂等口径：已有主图的存量门店
+     * 重跑本轮时只补相册（syncOne 内处理），保证全量同步把主图 + 相册都补齐。
+     */
+    @Query("""
+            SELECT v FROM Venue v
+            WHERE v.deleted = false
+              AND (v.imageUrl IS NULL OR v.imageUrl = ''
+                   OR NOT EXISTS (SELECT 1 FROM VenuePhoto p
+                                  WHERE p.venueId = v.id
+                                    AND p.status = org.quwuting.quwutingservice.venue.enums.VenuePhotoStatus.PUBLIC
+                                    AND p.deleted = false))
+            """)
+    List<Venue> findMissingImages();
+
+    /** 缺图场所计数（轻量统计用，与 findMissingImages 同口径）。 */
+    @Query("""
+            SELECT COUNT(v) FROM Venue v
+            WHERE v.deleted = false
+              AND (v.imageUrl IS NULL OR v.imageUrl = ''
+                   OR NOT EXISTS (SELECT 1 FROM VenuePhoto p
+                                  WHERE p.venueId = v.id
+                                    AND p.status = org.quwuting.quwutingservice.venue.enums.VenuePhotoStatus.PUBLIC
+                                    AND p.deleted = false))
+            """)
+    long countMissingImages();
+
+    /**
+     * 门店图片状态分页（2026-08-22 新增，管理端图片同步工作台列表）：
+     * 每行 = 门店基本信息 + 主图 URL + 公开相册数（qwt_venue_photos 子查询聚合）。
+     * 筛选：hasImage（主图有无，null = 全部）、city（精确）、keyword（名称模糊，
+     * 调用方预先包装为 %xx%）。数据源 = DB 现状（非同步内存快照）——服务重启不丢、
+     * 与真实数据一致、可筛选分页，同时作为「成功项纠错」入口（成功 ≠ 100% 正确，
+     * 人工复核后重匹配/清除）。
+     * 返回 Object[]{id, name, city, address, image_url, photo_count}。
+     */
+    @Query(value = """
+            SELECT v.id, v.name, v.city, v.address, v.image_url,
+                   (SELECT COUNT(*) FROM qwt_venue_photos p
+                    WHERE p.venue_id = v.id AND p.status = 'PUBLIC' AND p.deleted = false) AS photo_count
+            FROM qwt_venues v
+            WHERE v.deleted = false
+              AND (:hasImage IS NULL
+                   OR (v.image_url IS NOT NULL AND v.image_url <> '') = :hasImage)
+              AND (:city IS NULL OR v.city = :city)
+              AND (:keyword IS NULL OR v.name LIKE :keyword)
+            ORDER BY v.id DESC
+            """,
+            countQuery = """
+            SELECT COUNT(*) FROM qwt_venues v
+            WHERE v.deleted = false
+              AND (:hasImage IS NULL
+                   OR (v.image_url IS NOT NULL AND v.image_url <> '') = :hasImage)
+              AND (:city IS NULL OR v.city = :city)
+              AND (:keyword IS NULL OR v.name LIKE :keyword)
+            """,
+            nativeQuery = true)
+    Page<Object[]> findPhotoStatusPage(@Param("hasImage") Boolean hasImage,
+                                       @Param("city") String city,
+                                       @Param("keyword") String keyword,
+                                       Pageable pageable);
+
+    /**
      * 列表筛选条件（全部排序变体共用）。
      * 所有参数可空：null 表示不限制；keyword / tag 需调用方预先包装为 %xx%。
      * <p>

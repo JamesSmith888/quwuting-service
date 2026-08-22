@@ -74,6 +74,39 @@
 - 照片驳回**不新增站内信**（编辑页可见状态，本人自行删除重传；低风险 + 可自查，避免消息域扩散）。
 - `FileCategory` 新增 `DANCER_PHOTO` / `DANCER_AVATAR`（Supabase 直传凭证分类）。
 
+### 相册短视频（2026-08-22 新增：V39 kind/cover_url/duration_seconds + 独立上传接口）
+
+**媒体无关契约落地**（兑现 2026-08-14「根因与防复发 · 媒体无关契约」）：`DancerPhoto` 扩展
+`kind`（`DancerPhotoKind`：PHOTO 默认 / VIDEO），照片与视频**同表同审核链**
+（PENDING → PUBLIC/REJECTED），复用排序/软删/封面模型。
+
+- **V39 迁移**：`qwt_dancer_photos` 加 `kind VARCHAR(10) NOT NULL DEFAULT 'PHOTO'`、
+  `cover_url VARCHAR(500)`、`duration_seconds INT NOT NULL DEFAULT 0`。
+- **存储**：`FileCategory.DANCER_VIDEO("dancer-videos")`；`StorageService.validateFile` 改
+  <b>按分类校验</b>——视频分类允许 `.mp4/.mov` + 独立上限 `supabase.storage.video-max-file-size`
+  （默认 50MB，`StorageProperties.videoMaxFileSize`）；图片分类恒用原 5MB + 图片白名单。
+- **URL 落库校验**：`ImageContentValidator.validateVideoUrl`（域名白名单 + 扩展名，不下载校验——
+  50MB 下载成本不可接受；恶意内容防线 = 凭证签发校验 + 管理员直发 + 逐条 PENDING 人审）；
+  封面帧图（图片）仍挂完整 `validate`（magic bytes + 尺寸）。
+- **接口**：`POST /dancers/{id}/videos`（`AddDancerVideosRequest`：urls + coverUrls + blurUrls +
+  durations 按 index 对齐，单次 ≤3，canManage 校验；插入即 PENDING）——独立于照片接口
+  （视频需封面/时长，混入 AddDancerPhotosRequest 会产生大量 null 分支）。删除复用照片软删端点。
+- **响应**：`DancerPhotoResponse` / `AdminDancerPhotoResponse` 加 `kind` / `coverUrl` /
+  `durationSeconds`；`findAdminPage` SQL 追加三列（Object[] 索引 8-10）。
+- **封面规则**：`findCoverUrlsByDancerIds` 恒 `kind='PHOTO'`（image 组件不承载视频，列表卡片/
+  详情快照以照片为封面）。
+- **合规**：视频同照片——仅本人/管理员可上传（实际入口仅管理员 dancer-edit）+ 逐条审核后公开。
+- **视频积分门槛（2026-08-22 同日开放，媒体无关契约兑现）**：
+  - `PointsGateTargetType` 加 `DANCER_VIDEO`（gate 表 target_type 字符串存储零迁移）；
+    `PointsService.resolveGateOwner`/`resolveUnlockTarget` 与 DANCER_PHOTO 同分支
+    （target_id = qwt_dancer_photos.id；解锁内容 = 视频 URL）；
+  - `DancerService.fetchPhotos` 门槛/解锁态**按 kind 分组批量查询**（照片 DANCER_PHOTO /
+    视频 DANCER_VIDEO）；<b>未解锁视频 url + coverUrl 一并置 null</b>（封面帧 = 清晰首帧，
+    即内容泄露——照片有 blurUrl 模糊降级，视频的模糊封面 = 封面帧降采样模糊版存 blurUrl 列，
+    上传时前端 `generateBlurImage` 生成，未解锁下发 blurUrl 作遮罩）；
+  - 门槛设置复用 `POST /points/gates`（cost 0~maxCost，前端 dancer-edit 视频卡角标；
+    统计 `DancerStatsService.unlockLabel` 加 DANCER_VIDEO → "视频"）。
+
 ### 认可模型（每日一记 → 2026-08-15 单票换票 + 可配置多选，复用 Reaction 的 anti-刷票设计）
 
 与 VenueReaction「每日一记」模型完全同源（2026-08 确立，见「Reaction 快速反馈系统」）：
@@ -230,9 +263,11 @@ charts 数组模板 + chart-brush + 图例开关 + 空图恒渲染 + y 轴全量
 **接口**：
 - `GET /dancers/{id}/stats`（**仅本人 + 管理员**）：`DancerStatsResponse{recognitionTrend,
   favoriteTrend, pointsTrend, shareTrend, viewTrend, viewSourceTrend, unlockStats,
-  statsAsOfDate}`——
+  totals, statsAsOfDate}`——
   六组近30天每日时间序列（含今日，骨架 31 天，generate_series 补零；与门店 countDailyTrends
-  同骨架，见下）+ **解锁信息分类聚合**（unlockStats，2026-08-21 追加，横向条形图，见后）。
+  同骨架，见下）+ **解锁信息分类聚合**（unlockStats，2026-08-21 追加，横向条形图，见后）
+  + **累计指标**（totals，2026-08-22 追加，全量历史口径——累计认可/总收藏/累计浏览/
+  累计分享/收到礼物价值累计，前端「累计数据」汇总卡）。
   **鉴权**：Controller `requireAuth()`（未登录 → HTTP 401，前端触发登录）
   + `DancerService.checkStatsAccess`（已登录非本人/非管理员 → 业务错 1003「仅舞伴本人可查看
   统计数据」）。缓存 = 内嵌 Caffeine LoadingCache（60s refresh-ahead / 30min 过期，对齐
@@ -262,6 +297,21 @@ generate_series 显式 ::timestamp 重载 + ::date 收口——门店时区链�
 - 分享趋势：`qwt_dancer_shares`（event_type='SHARE' 主动分享事件，不含 OPEN 回流）→ 单折线；
 - 浏览趋势 / 浏览来源：`qwt_dancer_views`（V29；viewSource 的 other = 全量 − list − share
   − search 减法派生，前端只画 list/share/search 三线）→ 单折线 / 三折线。
+
+**累计指标（2026-08-22 追加：totals，前端「累计数据」汇总卡）**：`DancerStatsResponse.totals
+= DancerTotals{recognitionCount, favoriteCount, viewCount, shareCount,
+pointsReceivedTotal}`——**全量历史口径**（非近30天窗口）的常见指标一览（总收藏数 /
+总浏览数等），与各趋势序列**同源同口径、仅窗口不同**：
+- `recognitionCount` = `qwt_dancer_recognitions` 行数（deleted=false，每日一记）；
+- `favoriteCount` = `qwt_dancer_favorites` 行数（deleted=false）；
+- `viewCount` = `qwt_dancer_views` 行数（PV 含匿名，按天按来源去重）；
+- `shareCount` = `qwt_dancer_shares` 行数（event_type='SHARE'）；
+- `pointsReceivedTotal` = `qwt_points_transactions` 的 SUM(-delta)（target_type='DANCER'
+  AND delta<0，礼物价值=积分价值）。
+
+聚合 = `DancerStatsRepository.countDancerTotals` 单条 SQL（五组标量子查询各扫一次目标表，
+无骨架——累计无补零语义）。写路径缓存失效矩阵沿用既有（totals 与趋势同源表，同一
+`invalidate(dancerId)` 已覆盖）。
 
 **写路径缓存失效矩阵**（对齐门店「写路径缓存逐出」约定；refresh-ahead 仅兜底）：
 浏览 recordView（真实插入后 afterCommit，VenueViewService 同款）/ 认可 toggleRecognize /

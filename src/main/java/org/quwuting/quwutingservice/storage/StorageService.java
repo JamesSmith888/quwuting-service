@@ -32,7 +32,7 @@ public class StorageService {
      */
     public UploadTokenResponse generateUploadToken(Long userId, FileCategory category,
                                                    String fileName, long fileSize) {
-        validateFile(fileName, fileSize);
+        validateFile(category, fileName, fileSize);
 
         String ext = extractExtension(fileName);
         String uploadPath = category.getPathPrefix() + "/" + userId + "/" + UUID.randomUUID() + ext;
@@ -47,18 +47,37 @@ public class StorageService {
         );
     }
 
-    private void validateFile(String fileName, long fileSize) {
+    /** 视频分类（2026-08-22 舞伴短视频）——校验走视频扩展名 + 独立大小上限通道 */
+    private static final java.util.Set<String> VIDEO_EXTENSIONS =
+            java.util.Set.of(".mp4", ".mov");
+
+    private static boolean isVideoCategory(FileCategory category) {
+        return category == FileCategory.DANCER_VIDEO;
+    }
+
+    private void validateFile(FileCategory category, String fileName, long fileSize) {
         if (fileName == null || fileName.isBlank()) {
             throw new BusinessException(1005, "文件名不能为空");
         }
         if (fileSize <= 0) {
             throw new BusinessException(1005, "文件大小无效");
         }
+        String ext = extractExtension(fileName);
+        if (isVideoCategory(category)) {
+            // 视频分类（2026-08-22 舞伴短视频）：视频扩展名 + 独立大小上限
+            if (fileSize > props.videoMaxFileSize()) {
+                long maxMb = props.videoMaxFileSize() / (1024 * 1024);
+                throw new BusinessException(1005, "视频大小不能超过 " + maxMb + "MB");
+            }
+            if (!VIDEO_EXTENSIONS.contains(ext)) {
+                throw new BusinessException(1005, "不支持的视频格式，仅允许: mp4, mov");
+            }
+            return;
+        }
         if (fileSize > props.maxFileSize()) {
             long maxMb = props.maxFileSize() / (1024 * 1024);
             throw new BusinessException(1005, "文件大小不能超过 " + maxMb + "MB");
         }
-        String ext = extractExtension(fileName);
         boolean allowed = Arrays.stream(props.allowedExtensions())
                 .anyMatch(e -> e.equalsIgnoreCase(ext));
         if (!allowed) {

@@ -10,8 +10,10 @@ package org.quwuting.quwutingservice.points.enums;
  * 故解锁流水只挂 PointsGateTargetType，不参与 receivedTotal 聚合。
  */
 public enum PointsGateTargetType {
-    /** 舞伴相册照片（qwt_dancer_photos.id） */
+    /** 舞伴相册照片（qwt_dancer_photos.id，kind=PHOTO） */
     DANCER_PHOTO,
+    /** 舞伴相册短视频（qwt_dancer_photos.id，kind=VIDEO，2026-08-22 视频门槛） */
+    DANCER_VIDEO,
     /** 舞伴联系方式（qwt_dancers.id——联系方式是舞伴实体的字段，门槛挂在舞伴上） */
     DANCER_CONTACT
 }

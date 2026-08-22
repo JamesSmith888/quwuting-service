@@ -26,7 +26,7 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务，为去舞厅小程序
 | [`01-build-and-run.md`](docs/agents/01-build-and-run.md) | 编译/测试/启动命令、开发测试数据（seed-dev.sql） | 构建、跑测试 |
 | [`02-package-structure.md`](docs/agents/02-package-structure.md) | 包结构总览（按功能分包、controller/service/mapper/repository 分层） | 找类、新模块落地 |
 | [`03-auth-and-user.md`](docs/agents/03-auth-and-user.md) | 登录流程、软鉴权、微信 API 调用规范、角色、用户资料与用户态刷新 | 鉴权/用户相关 |
-| [`04-venue-domain.md`](docs/agents/04-venue-domain.md) | 场所数据模型（核心信息/地址/坐标/营业时间/消费信息）、门店认领与管理权限、场所动态 | venue 域改动 |
+| [`04-venue-domain.md`](docs/agents/04-venue-domain.md) | 场所数据模型（核心信息/地址/坐标/营业时间/消费信息）、门店认领与管理权限、场所动态、**门店图片同步（高德直链 + 工作台纠错生命周期，2026-08-22）** | venue 域改动 |
 | [`05-venue-heat.md`](docs/agents/05-venue-heat.md) | 热度公式与权重、统计口径（实时/截至昨日分家）、各趋势口径、营业稳定性、状态可信度、性能优化 | 热度/统计接口 |
 | [`06-listing-and-stats.md`](docs/agents/06-listing-and-stats.md) | 复合评分排序、双查询拆分坑位、标签筛选、城市词表、isHot 热门标记、累计浏览量 | 列表接口 |
 | [`07-feedback-and-reporting.md`](docs/agents/07-feedback-and-reporting.md) | 统一用户上报（类型/状态机/防刷/**原子幂等 upsert，2026-08-20**/激励下发/**状态类类型下线与采纳联动兜底，2026-08-20**）、场所状态上报（公示期/采纳联动/紧急公告） | 上报模块 |

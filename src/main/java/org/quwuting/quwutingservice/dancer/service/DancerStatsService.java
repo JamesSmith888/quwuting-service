@@ -4,6 +4,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerStatsResponse;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerTotals;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTrendPoint;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerUnlockStat;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerViewSourceTrendPoint;
@@ -22,7 +23,8 @@ import java.util.concurrent.TimeUnit;
  * 舞伴统计服务（2026-08-14 舞伴统计图第一期）。
  * <p>
  * 对齐门店热度服务（{@code VenueHeatService}）的「内嵌 Caffeine refresh-ahead」缓存
- * 模式（能力平权：统计接口同模式，但舞伴域暂无热度公式，只含趋势时间序列）：
+ * 模式（能力平权：统计接口同模式，但舞伴域暂无热度公式，只含趋势时间序列 +
+ * 累计指标 totals + 解锁信息）：
  * <ul>
  *   <li>{@code refreshAfterWrite(60s)}：条目写入 60s 后，下一次访问立即返回旧值并
  *       异步回源刷新（单飞：同键并发只触发一次回源）——统计页高频滚动浏览场景下
@@ -133,9 +135,19 @@ public class DancerStatsService {
                     row.getCost() != null ? row.getCost() : 0));
         }
         unlockStats.sort(Comparator.comparingLong(DancerUnlockStat::unlockCount).reversed());
+        // 全量历史累计指标（2026-08-22 追加，「累计数据」汇总卡用）：与趋势序列同源
+        // 同口径、仅窗口不同（累计=全量）——独立一条往返（合并进 mega-query 会破坏
+        // 骨架 GROUP BY 语义，标量子查询更直接）。
+        DancerStatsRepository.TotalsRow totalsRow = dancerStatsRepository.countDancerTotals(dancerId);
+        DancerTotals totals = new DancerTotals(
+                orZero(totalsRow.getRecognitioncount()),
+                orZero(totalsRow.getFavoritecount()),
+                orZero(totalsRow.getViewcount()),
+                orZero(totalsRow.getSharecount()),
+                orZero(totalsRow.getPointstotal()));
         return new DancerStatsResponse(
                 recognitionTrend, favoriteTrend, pointsTrend, shareTrend,
-                viewTrend, viewSourceTrend, unlockStats, asOfDate.toString());
+                viewTrend, viewSourceTrend, unlockStats, totals, asOfDate.toString());
     }
 
     /**
@@ -148,6 +160,7 @@ public class DancerStatsService {
         }
         return switch (targetType) {
             case DANCER_PHOTO -> "照片";
+            case DANCER_VIDEO -> "视频";
             case DANCER_CONTACT -> "联系方式";
         };
     }

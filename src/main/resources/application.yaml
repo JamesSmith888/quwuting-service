@@ -92,6 +92,11 @@ app:
   # 腾讯位置服务 WebService key，只放后端不落前端；生产经 QQMAP_KEY 环境变量注入
   geocode:
     key: ${QQMAP_KEY:}
+  # 高德地图 Web 服务配置（2026-08-21 新增，管理端「一键同步门店图片」）：
+  # place/text 关键词搜索（extensions=all 返回 photos[]），key 只放后端不落前端；
+  # 生产经 AMAP_KEY 环境变量注入
+  amap:
+    key: ${AMAP_KEY:}
   # 积分系统配置（2026-08-10 V2：全部参数配置化，禁止业务硬编码）
   points:
     # 每日打卡奖励（积分）
@@ -130,3 +135,9 @@ supabase:
     bucket: ${SUPABASE_STORAGE_BUCKET:qwt-public}
     max-file-size: 5242880  # 5MB
     allowed-extensions: .jpg,.jpeg,.png,.webp
+    # 舞伴短视频单文件上限（2026-08-22；客户端压缩后通常 2~6MB，此值宽松兜底；
+    # 仅 DANCER_VIDEO 分类生效，图片分类恒用 max-file-size）
+    video-max-file-size: 52428800  # 50MB
+    # 历史遗留 Supabase 项目 URL（2026-08-22 项目切换兼容：旧项目图片未迁移，编辑回显
+    # 提交被域名白名单拒绝「图片地址不合法」；校验白名单 = projectUrl + 本列表，均为自有项目）
+    legacy-project-urls: ${SUPABASE_LEGACY_PROJECT_URLS:}

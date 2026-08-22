@@ -53,6 +53,11 @@ public class ImageContentValidator {
     private final StorageProperties props;
     private final HttpClient httpClient;
     private final Cache<String, Boolean> resultCache;
+    /**
+     * 允许的存储桶前缀集合（2026-08-22 项目切换兼容）：projectUrl + legacyProjectUrls
+     * （均为本应用自有 Supabase 项目，安全语义保持封闭——任意外部域名仍被拒）。
+     */
+    private final List<String> storagePrefixes;
 
     public ImageContentValidator(StorageProperties props) {
         this.props = props;
@@ -64,6 +69,26 @@ public class ImageContentValidator {
                 .maximumSize(1024)
                 .expireAfterWrite(Duration.ofMinutes(10))
                 .build();
+        java.util.ArrayList<String> prefixes = new java.util.ArrayList<>(4);
+        prefixes.add(props.projectUrl() + "/storage/v1/object/public/" + props.bucket() + "/");
+        if (props.legacyProjectUrls() != null) {
+            for (String legacy : props.legacyProjectUrls()) {
+                if (legacy != null && !legacy.isBlank()) {
+                    prefixes.add(legacy.trim() + "/storage/v1/object/public/" + props.bucket() + "/");
+                }
+            }
+        }
+        this.storagePrefixes = List.copyOf(prefixes);
+    }
+
+    /** URL 是否属于本应用自有存储前缀（当前项目 + 历史遗留项目） */
+    private boolean matchesStoragePrefix(String url) {
+        for (String prefix : storagePrefixes) {
+            if (url.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 校验单个图片 URL（null / 空白直接通过——字段可空性由调用方语义决定） */
@@ -72,6 +97,25 @@ public class ImageContentValidator {
             return;
         }
         validateInternal(url);
+    }
+
+    /**
+     * 校验视频 URL（2026-08-22 舞伴短视频落库）：仅做<b>域名白名单 + 扩展名</b>校验，
+     * 不下载内容（视频可达 50MB，下载校验成本不可接受；恶意内容防线由「凭证签发时
+     * 扩展名/大小校验」+「管理员直发 + 逐条 PENDING 审核」双闸门承接）。
+     * 接受 mp4 / mov（微信 chooseMedia 输出格式）。
+     */
+    public void validateVideoUrl(String url) {
+        if (url == null || url.isBlank()) {
+            return;
+        }
+        if (!matchesStoragePrefix(url)) {
+            throw new BusinessException(1005, "视频地址不合法，请重新上传");
+        }
+        String lower = url.toLowerCase();
+        if (!lower.endsWith(".mp4") && !lower.endsWith(".mov")) {
+            throw new BusinessException(1005, "视频地址不合法，请重新上传");
+        }
     }
 
     /** 校验图片 URL 列表（null / 空列表直接通过；任一失败抛 BusinessException 中断） */
@@ -85,9 +129,9 @@ public class ImageContentValidator {
     }
 
     private void validateInternal(String url) {
-        // 1. 域名白名单：仅接受本应用公开桶前缀，排除外部图床与 SSRF 面
-        String prefix = props.projectUrl() + "/storage/v1/object/public/" + props.bucket() + "/";
-        if (!url.startsWith(prefix)) {
+        // 1. 域名白名单：仅接受本应用自有存储前缀（当前项目 + 历史遗留项目），
+        //    排除外部图床与 SSRF 面
+        if (!matchesStoragePrefix(url)) {
             throw new BusinessException(1005, "图片地址不合法，请重新上传");
         }
         // 2. 内容校验（缓存命中不产生下载）

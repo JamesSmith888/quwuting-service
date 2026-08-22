@@ -1,5 +1,6 @@
 package org.quwuting.quwutingservice.dancer.dto.response;
 
+import org.quwuting.quwutingservice.dancer.enums.DancerPhotoKind;
 import org.quwuting.quwutingservice.dancer.enums.DancerPhotoStatus;
 
 import java.time.LocalDateTime;
@@ -34,5 +35,11 @@ public record DancerPhotoResponse(
         /** 当前用户是否已解锁（本人/管理员恒 true；匿名恒 false） */
         boolean unlocked,
         /** 模糊图 URL（未解锁时的遮罩占位图；可空 = 回退纯锁占位） */
-        String blurUrl
+        String blurUrl,
+        /** 媒体类型（2026-08-22：PHOTO 照片 / VIDEO 短视频；展示端据此分支渲染） */
+        DancerPhotoKind kind,
+        /** 视频封面帧图 URL（2026-08-22 新增，仅 kind=VIDEO 有值；可空 = 回退虚焦占位） */
+        String coverUrl,
+        /** 视频时长（秒，2026-08-22 新增，仅 kind=VIDEO 有值；零值 = 未知不展示） */
+        int durationSeconds
 ) {}

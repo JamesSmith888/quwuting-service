@@ -4,6 +4,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.dancer.dto.request.AddDancerPhotosRequest;
+import org.quwuting.quwutingservice.dancer.dto.request.AddDancerVideosRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.RecognizeDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.RecordDancerViewRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
@@ -211,6 +212,19 @@ public class DancerController {
         Long userId = UserContext.requireAuth();
         return ApiResponse.ok(dancerService.addPhotos(userId, id, request.urls(), request.blurUrls(),
                 UserContext.getCurrentRole()));
+    }
+
+    /**
+     * 本人/管理员上传短视频（需登录 + canManage，2026-08-22 新增）：插入即 PENDING，
+     * 逐条审核后公开（与照片同审核链）。coverUrls（封面帧图）与 durations（秒）与
+     * urls 按 index 一一对应（可缺省）。删除复用照片删除端点（同表软删）。
+     * 返回本人视角全量相册（含刚上传的待审项）。
+     */
+    @PostMapping("/{id}/videos")
+    public ApiResponse<List<DancerPhotoResponse>> addVideos(@PathVariable Long id,
+                                                            @Valid @RequestBody AddDancerVideosRequest request) {
+        Long userId = UserContext.requireAuth();
+        return ApiResponse.ok(dancerService.addVideos(userId, id, request, UserContext.getCurrentRole()));
     }
 
     /**

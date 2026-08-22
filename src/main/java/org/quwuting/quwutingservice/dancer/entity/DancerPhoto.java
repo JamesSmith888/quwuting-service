@@ -10,6 +10,7 @@ import lombok.Getter;
 import lombok.Setter;
 import org.hibernate.annotations.ColumnDefault;
 import org.quwuting.quwutingservice.base.BaseEntity;
+import org.quwuting.quwutingservice.dancer.enums.DancerPhotoKind;
 import org.quwuting.quwutingservice.dancer.enums.DancerPhotoStatus;
 
 /**
@@ -65,4 +66,27 @@ public class DancerPhoto extends BaseEntity {
     @Column(nullable = false)
     @ColumnDefault("0")
     private int sortOrder = 0;
+
+    /**
+     * 媒体类型（2026-08-22 视频扩展）：PHOTO（默认，历史数据恒 PHOTO）/ VIDEO（短视频）。
+     * 视频与照片同表同审核链（PENDING → PUBLIC/REJECTED），仅展示端渲染分支不同
+     * （视频 = 封面帧图占位 + 点击播放，见 09-dancer-and-points.md「媒体无关契约」）。
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(length = 10, nullable = false)
+    @ColumnDefault("'PHOTO'")
+    private DancerPhotoKind kind = DancerPhotoKind.PHOTO;
+
+    /**
+     * 视频封面帧图 URL（2026-08-22 新增，仅 kind=VIDEO 有值）——chooseMedia 返回的
+     * thumb 帧经平台直传入库（与视频同批上传），列表/轮播/审核预览以封面为视觉占位。
+     * 缺失（旧数据/上传失败）时展示端回退虚焦占位。
+     */
+    @Column(length = 500)
+    private String coverUrl;
+
+    /** 视频时长（秒，2026-08-22 新增，仅 kind=VIDEO 有值；展示 mm:ss，零值 = 未知） */
+    @Column(nullable = false)
+    @ColumnDefault("0")
+    private int durationSeconds = 0;
 }

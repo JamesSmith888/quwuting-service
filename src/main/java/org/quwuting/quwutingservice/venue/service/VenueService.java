@@ -294,6 +294,60 @@ public class VenueService {
     }
 
     /**
+     * 平台侧批量导入门店公开相册（2026-08-22 新增，高德图片同步专用，仅 ADMIN 链路）。
+     * <p>
+     * 与 {@link #addVenuePhotos} 的差异：
+     * <ul>
+     *   <li><b>跳过 ImageContentValidator 域名白名单</b>——高德官方图床 URL
+     *       （store.is.autonavi.com）非本应用存储桶前缀，走用户上传校验必然 1005 拒绝；
+     *       URL 来自受信数据源（高德 place/text 响应），非用户输入，无 SSRF 面。</li>
+     *   <li>createdBy = 0（存量导入，无用户归属）；status = PUBLIC 直发公开。</li>
+     *   <li><b>重置式导入</b>：先物理删除该店全部高德导入记录（created_by=0）再插入
+     *       最新列表——每店同步结果恒 = 最新匹配快照，错配图随重跑自愈，幂等无需去重。</li>
+     * </ul>
+     * 保留 TextSanitizer 清洗 + http 前缀粗校验（防脏数据）；写路径失效公共缓存。
+     */
+    @Transactional
+    public void syncGalleryPhotos(Long venueId, List<String> urls) {
+        venuePhotoRepository.deleteImportedByVenue(venueId);
+        if (urls == null || urls.isEmpty()) {
+            return;
+        }
+        int nextOrder = venuePhotoRepository.findMaxSortOrder(venueId) + 1;
+        for (String raw : urls) {
+            String clean = TextSanitizer.sanitize(raw, 500);
+            if (clean.isEmpty() || !clean.startsWith("http")) {
+                continue;
+            }
+            VenuePhoto photo = new VenuePhoto();
+            photo.setVenueId(venueId);
+            photo.setUrl(clean);
+            photo.setStatus(VenuePhotoStatus.PUBLIC);
+            photo.setCreatedBy(0L);
+            photo.setSortOrder(nextOrder++);
+            venuePhotoRepository.save(photo);
+        }
+        evictVenueEntityCache(venueId);
+        invalidateDetailPublic(venueId);
+    }
+
+    /**
+     * 清除门店全部图片（2026-08-22 新增，图片同步纠错入口：人工判定错配后回退）。
+     * 主图 image_url 置空 + 物理删除高德导入相册（created_by=0）+ 详情/列表缓存失效，
+     * 门店回到「无图」状态可重新同步。幂等：门店本就无图时同样安全（delete 0 行）。
+     */
+    @Transactional
+    public void clearImportedPhotos(Long venueId) {
+        venueRepository.findByIdAndDeletedFalse(venueId).ifPresent(v -> {
+            v.setImageUrl(null);
+            venueRepository.save(v);
+        });
+        venuePhotoRepository.deleteImportedByVenue(venueId);
+        evictVenueEntityCache(venueId);
+        invalidateDetailPublic(venueId);
+    }
+
+    /**
      * 删除门店照片（软删；POST /venues/{id}/photos/{photoId}/remove）。
      * 权限：上传者本人（仅可删自己的 PENDING/REJECTED，防删除他人公开贡献）或门店
      * 管理方（canManage，门店负责人对门店相册有管理权，可删任意含 PUBLIC）或管理员。

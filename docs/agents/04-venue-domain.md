@@ -26,6 +26,34 @@
 - 回写前坐标粗校验中国境内区间（lat 18~54 / lng 73~135），越界拒绝写入并计入失败报告；
 - 批量回写**禁持跨批大事务**：`GeocodeService.backfillAll()` 非事务，逐条 `save` 各自提交（连接池仅 5 连接 + Supabase 抖动为已知外部条件，见「连接池与数据库抖动韧性」）；
 
+### 门店图片同步（2026-08-21 新增，高德 place/text）
+
+**背景**：存量门店缺主图（`image_url` 为空，历史占位图 `picsum.photos` 已清空）。管理端「一键同步门店图片」调用高德 Web 服务 `place/text` 关键词搜索（**必须 `extensions=all` 才返回 `photos[]`**，2026-08-21 实测 base 不含），取图直接写入 `image_url`。
+
+**图片策略（用户决策）**：`image_url` 直接存高德官方图床 URL（`store.is.autonavi.com`），**不下载到 Supabase Storage**（省存储 + 高德 CDN 直出）。候选排序：① 官方图床优先；② 无官方图回退 `photos[]` 第一条（可能为 `aos-comment.amap.com` 用户评论图——含 EXIF 隐私风险，有图兜底，管理端人工可判断）；③ photos 为空 → 失败「高德未收录照片」。
+
+**多图落点（2026-08-22 修复）**：`image_url` 是单值主图字段（varchar 500），高德 `photos[]` 多图写入独立相册表 `qwt_venue_photos`（status=PUBLIC、createdBy=0 存量导入、**重置式导入**——每店先物理删除 created_by=0 旧记录再插入最新匹配结果，错配图随重跑自愈，见 `VenuePhotoRepository#deleteImportedByVenue`；复用 `VenueService.syncGalleryPhotos` 自带缓存失效）——V35 起 `venue.photos` JSON 列废弃，详情/列表轮播读 `qwt_venue_photos`（PUBLIC），同步后详情页自动多图轮播。**幂等口径 = 缺主图 OR 无公开相册**（`findMissingImages` NOT EXISTS 子查询），已有主图的存量门店重跑本轮时若主图仍在匹配结果中则保留，否则重写（错配自愈）。
+
+**名称匹配防错配（2026-08-22 修复「梦幻酒馆」混入「梦幻网咖」图）**：全量同步（名称模式）**只取目标 POI 的照片**，不再收集高德返回全部候选——`searchPoi` 遍历 pois 按名称归一化打分（`normalize` 全角转半角 + 去空白；`nameScore`：完全相等 100、互为子串且短串 ≥2 字按长度占比（下限 60）、其余 0），最高分 ≥ `NAME_MATCH_THRESHOLD`(60) 才采纳；低于阈值记失败「名称未匹配（最近候选：xx）」，管理员可补精确地址重试。**重试 = 地址模式**（overwrite=true）：用户已核实地址，跳过名称校验直接取高德结果第一个 POI。真实案例：搜索「梦幻酒馆」返回 34 个相似名 POI，仅「梦幻酒馆(暂停营业)」得分 60 被采纳，其余（梦幻网咖/梦幻宾馆/梦幻电竞馆…）全部 0 分拒绝。
+
+**接口**（仅 ADMIN，`AdminVenuePhotoSyncController` / `AmapVenuePhotoSyncService`）：
+- `GET /admin/venues/photo-sync/missing-count` — 缺图数量（`findMissingImages` 口径：deleted=false 且 imageUrl NULL/空串 OR 无公开相册）
+- `POST /admin/venues/photo-sync/run` — **异步**触发全量同步，返回 `{started:bool}`（false = 已有同步进行中，防并发重复触发）
+- `GET /admin/venues/photo-sync/progress` — 实时进度轮询（`SyncProgress`：running/total/processed/updated/failed/skipped/currentName/items 逐条结果）
+- `POST /admin/venues/photo-sync/retry` — 单店重匹配（body `{venueId, address?}`，同步返回单条 `SyncItem`；**address 可选**：空 = 名称模式强制重匹配（成功项复核后重取），非空 = 地址模式（完整地址检索取第一个 POI，覆盖「店名与高德登记不一致/搜不到」场景））
+- `POST /admin/venues/photo-sync/clear` — 清除门店图片（body `{venueId}`；主图 image_url 置空 + 物理删高德导入相册 + 缓存失效，回到无图态可重新同步——人工判定错配后回退）
+- `GET /admin/venues/photo-sync/list` — 门店图片状态分页（`hasImage` 主图有无 / `city` / `keyword` 名称模糊筛选；数据源 = **DB 现状**（qwt_venues + qwt_venue_photos 子查询聚合，`VenueRepository#findPhotoStatusPage`）非同步内存快照——服务重启不丢、可筛选分页，兼作成功项纠错入口）
+
+**工作台与纠错生命周期（2026-08-22 拆独立页，遵循「列表+明细+写操作 → 独立页」架构约定）**：
+- 管理端入口 = `pages/admin-photo-sync`（上报管理页仅留一行入口条）；页面 = 同步控制（缺图数/一键同步/进度轮询/完成 toast 含近似匹配复核提示）+ 状态筛选（全部/有图/无图）+ 城市/名称筛选 + 分页列表 + 详情弹层（主图+相册预览 / 重新匹配（可带地址）/ 清除图片）；
+- **成功 ≠ 100% 正确**：`SyncItem` 携带 matchedName/confidence（100=精确，60~99=近似需复核）/poiId/city——近似匹配置信度驱动人工复核；有图门店（成功项）同样有纠错入口（详情弹层重匹配/清除）。
+
+**强制约定**：
+- 高德 key 只放后端配置（`app.amap.key`，生产经 `AMAP_KEY` 环境变量注入），禁止落前端（与 geocode 同合规策略）；
+- 异步执行：单线程 `ExecutorService` + `AtomicBoolean` running 防并发 + `AtomicReference<SyncProgress>` 内存进度（**单实例部署前提**，systemd 单进程可靠）；前端每 1.2s 轮询 progress，页面隐藏停轮询（`pageLifetimes.hide`）；
+- 幂等：只处理缺图门店，可反复触发补扫失败项；单店失败不影响其他项；
+- 限速：高德个人版 QPS≈3 → 逐条 `Thread.sleep(400ms)`；
+
 ### 营业时间（时段列表，2026-08-08 由固定列改造）
 
 **数据形状**：`business_hours`（`varchar(1000)`）JSON 数组字符串列，与 tickets/partnerFees 同模式：

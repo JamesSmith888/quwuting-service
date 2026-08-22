@@ -77,6 +77,24 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
     }
 
     /**
+     * 舞伴全量历史累计指标行投影（2026-08-22 追加，非时间序列——「累计数据」
+     * 汇总卡用：总收藏数/总浏览数等常见指标一览）。getter 名与 SQL alias（小写）
+     * 逐字匹配（同 DailyTrendRow 惯例）。
+     */
+    interface TotalsRow {
+        /** 累计认可数（每日一记，deleted=false） */
+        Long getRecognitioncount();
+        /** 总收藏数（deleted=false） */
+        Long getFavoritecount();
+        /** 累计浏览数（PV 含匿名） */
+        Long getViewcount();
+        /** 累计分享数（event_type='SHARE' 主动分享事件） */
+        Long getSharecount();
+        /** 收到礼物价值累计（SUM(-delta)） */
+        Long getPointstotal();
+    }
+
+    /**
      * 舞伴解锁信息聚合（2026-08-21 追加）：一条 DB 往返取回各内容类型的累计
      * 解锁人次/人数 + 当前门槛积分。
      * <ul>
@@ -109,6 +127,28 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
             ORDER BY unlockcount DESC
             """, nativeQuery = true)
     List<UnlockStatRow> countDancerUnlockStats(@Param("dancerId") Long dancerId);
+
+    /**
+     * 舞伴全量历史累计指标聚合（2026-08-22 追加，「累计数据」汇总卡用）：一条 DB
+     * 往返取回 认可/收藏/浏览/分享/礼物价值 五类全量累计值。五组标量子查询各扫一次
+     * 目标表（与趋势 mega-query 同源表同口径，仅去掉窗口过滤取全量）——统计页打开
+     * 时该查询与趋势查询并行两趟，但均为索引覆盖扫描，条目量级下开销可接受。
+     *
+     * @param dancerId 舞伴 ID
+     */
+    @Query(value = """
+            SELECT (SELECT COUNT(*) FROM qwt_dancer_recognitions
+                    WHERE dancer_id = :dancerId AND deleted = false) AS recognitioncount,
+                   (SELECT COUNT(*) FROM qwt_dancer_favorites
+                    WHERE dancer_id = :dancerId AND deleted = false) AS favoritecount,
+                   (SELECT COUNT(*) FROM qwt_dancer_views
+                    WHERE dancer_id = :dancerId) AS viewcount,
+                   (SELECT COUNT(*) FROM qwt_dancer_shares
+                    WHERE dancer_id = :dancerId AND event_type = 'SHARE') AS sharecount,
+                   (SELECT COALESCE(SUM(-delta), 0) FROM qwt_points_transactions
+                    WHERE target_type = 'DANCER' AND target_id = :dancerId AND delta < 0) AS pointstotal
+            """, nativeQuery = true)
+    TotalsRow countDancerTotals(@Param("dancerId") Long dancerId);
 
     /**
      * 舞伴统计趋势 mega-query：一条 DB 往返取回 认可/收藏/礼物价值/分享/浏览

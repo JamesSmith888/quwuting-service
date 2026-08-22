@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.text.TextSanitizer;
 import org.quwuting.quwutingservice.config.DancerAdProperties;
 import org.quwuting.quwutingservice.dancer.DancerTagCode;
+import org.quwuting.quwutingservice.dancer.dto.request.AddDancerVideosRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.RecognizeDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.response.*;
@@ -15,6 +16,7 @@ import org.quwuting.quwutingservice.dancer.entity.DancerRecognition;
 import org.quwuting.quwutingservice.dancer.entity.DancerRecognitionTag;
 import org.quwuting.quwutingservice.dancer.entity.DancerVenue;
 import org.quwuting.quwutingservice.dancer.entity.DancerVerificationLog;
+import org.quwuting.quwutingservice.dancer.enums.DancerPhotoKind;
 import org.quwuting.quwutingservice.dancer.enums.DancerPhotoStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerVenueRelation;
@@ -29,7 +31,6 @@ import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionTagReposi
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVenueRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVerificationLogRepository;
-import org.quwuting.quwutingservice.dancer.repository.DancerViewRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.message.service.MessageService;
@@ -50,7 +51,6 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
  * 舞伴生态体系核心服务（领域边界：认可/标签/资料/场所关系，独立于舞厅 reaction——
@@ -83,6 +83,9 @@ public class DancerService {
     /** 单次上传照片数上限（与前端 image-upload maxCount=9 对齐——后端独立校验防绕过，2026-08-19） */
     private static final int MAX_PHOTOS_PER_UPLOAD = 9;
 
+    /** 单次上传视频数上限（2026-08-22：短视频少量场景，与 AddDancerVideosRequest 对齐） */
+    private static final int MAX_VIDEOS_PER_UPLOAD = 3;
+
     /** 管理端照片列表中舞伴已软删时的昵称占位（审核页仍可辨识来源，同 AdminDancerResponse） */
     private static final String PHOTO_OWNER_GONE_NAME = "未知舞伴";
 
@@ -97,8 +100,6 @@ public class DancerService {
     private final DancerVerificationLogRepository verificationLogRepository;
     /** 舞伴收藏（2026-08-14：qwt_dancer_favorites，见 V27 迁移与 AGENTS.md「舞伴收藏」） */
     private final DancerFavoriteRepository dancerFavoriteRepository;
-    /** 舞伴浏览记录（2026-08-15 列表摘要累计浏览量 viewCount 批量查询用；写路径见 DancerViewService） */
-    private final DancerViewRepository dancerViewRepository;
     /**
      * 详情公共部分聚合缓存（2026-08-19 引入）：用户无关聚合（认可统计/标签/场所/城市/
      * 收礼/收到积分/广告计数/联系方式门槛）整体缓存，详情接口 DB 往返 ~15 次 → ~6 次。
@@ -106,6 +107,14 @@ public class DancerService {
      * 失效内层 DancerAggregateService 与 DancerStatsService），见「写路径缓存失效」约定。
      */
     private final DancerDetailCacheService detailCacheService;
+    /**
+     * 列表公共部分聚合缓存（2026-08-22 引入）：主查询行 + 用户无关 enrichments
+     * （Top 标签/常驻舞厅名/封面/累计浏览量）整体缓存，列表接口 DB 往返 ~7 次 → ~2 次。
+     * 改变列表行内容/排序的写路径（认可/收藏/编辑/照片增删审/状态流转/认证/新建）必须
+     * 经 {@link #invalidateListCache()} 失效（唯一失效入口，全清——条目数小可接受），
+     * 浏览量/分享/广告浏览不入失效矩阵（弱信息 + 高频写，refresh 兜底），见类 javadoc。
+     */
+    private final DancerListCacheService listCacheService;
     private final VenueLookupService venueLookupService;
     private final MessageService messageService;
     private final org.quwuting.quwutingservice.points.service.PointsService pointsService;
@@ -160,6 +169,8 @@ public class DancerService {
         if (request.homeVenueId() != null) {
             attachHomeVenue(dancer.getId(), request.homeVenueId());
         }
+        // 管理端直通公开（adminApproved=true → NORMAL）：新舞伴立即出现在公开列表 → 列表缓存失效
+        invalidateListCache();
         return dancer.getId();
     }
 
@@ -304,6 +315,8 @@ public class DancerService {
         replaceDancerCities(dancerId, cities);
         // 城市子表是详情公共缓存（cities）的输入——编辑后失效（2026-08-19 详情缓存约定）
         detailCacheService.invalidate(dancerId);
+        // 编辑改变列表行内容（昵称/常去/城市/简介）——列表缓存失效（2026-08-22）
+        invalidateListCache();
         return getDetail(dancerId, userId, currentRole);
     }
 
@@ -345,24 +358,60 @@ public class DancerService {
         }
     }
 
+    /**
+     * 列表公共缓存失效（写路径统一入口，2026-08-22 列表缓存配套）：
+     * 改变公开列表行内容/排序的写操作（认可/编辑/照片增删审/状态流转/认证/新建）
+     * 后调用——对齐 {@link #detailCacheService} 失效约定：内联失效（写事务内清缓存，
+     * 保证响应后读者回源最新）+ afterCommit/afterCompletion 兜底（防并发读者在内联
+     * 失效与提交之间回源缓存旧值 / 事务回滚污染缓存）。
+     * 收藏 add·remove 不改公开列表内容，豁免（见 DancerListCacheService javadoc）；
+     * 浏览量/分享/广告浏览为弱信息 + 高频写，同样豁免（60s refresh 兜底）。
+     */
+    private void invalidateListCache() {
+        listCacheService.invalidateAll();
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    listCacheService.invalidateAll();
+                }
+
+                @Override
+                public void afterCompletion(int status) {
+                    if (status != STATUS_COMMITTED) {
+                        listCacheService.invalidateAll();
+                    }
+                }
+            });
+        }
+    }
+
     // ─── 列表 / 详情 ───────────────────────────────────────────────────────────
 
     /**
      * 公开舞伴列表（仅 NORMAL），按近7天认可倒序分页。
-     * 批量编排（N+1 规避）：单条分页 SQL 带计数 → 一次 IN 查询覆盖整页的
-     * Top 标签 + 一次 IN JOIN 查询覆盖常驻舞厅名 + 一次 IN 查询覆盖个人"今日已认可"。
+     * <p>
+     * 2026-08-22 性能根因修复：用户无关部分（主查询行 + Top 标签/常驻舞厅/封面/浏览量
+     * enrichments）整体走 {@link DancerListCacheService}（60s refresh-ahead + 写路径失效），
+     * 列表接口 DB 往返 ~7 次 → ~2 次；个人态（今日已认可 ID / 今日投票标签）恒实时查询
+     * （严禁进用户无关缓存，列表卡片 chips 活跃态数据源）。写路径（认可/收藏/编辑/照片
+     * 增删审/状态流转/认证/新建）经 {@link #invalidateListCache()} 显式失效。
      */
     @Transactional(readOnly = true)
     public Page<DancerSummaryResponse> listPublic(String city, int page, int size, Long currentUserId) {
-        LocalDateTime now = LocalDateTime.now();
         Pageable pageable = sanePage(page, size);
-        Page<Object[]> rows = dancerRepository.findPublicPage(
-                city, LocalDate.now().atStartOfDay() /* 今日锚点 = 今日0点 */,
-                now.minusDays(7), now.minusDays(30), pageable);
+        // 用户无关公共部分（缓存：单飞 + refresh-ahead，见 DancerListCacheService）
+        DancerListCacheService.ListPublicPart part = listCacheService.get(city, pageable);
+        List<Object[]> rows = part.rows();
         if (rows.isEmpty()) {
-            return new PageImpl<>(Collections.emptyList(), pageable, rows.getTotalElements());
+            return new PageImpl<>(Collections.emptyList(), pageable, part.totalElements());
         }
-        return new PageImpl<>(buildSummaries(rows.getContent(), currentUserId), pageable, rows.getTotalElements());
+        List<Long> ids = rows.stream().map(r -> (Long) r[0]).toList();
+        // 个人态实时查询（不缓存）：今日已认可 ID + 今日投票标签（chips 活跃态数据源）
+        Set<Long> myTodayIds = fetchMyTodayIds(ids, currentUserId);
+        Map<Long, List<String>> myTagsById = fetchMyTodayTags(ids, currentUserId);
+        return new PageImpl<>(buildSummaries(rows, part.enrichments(), myTodayIds, myTagsById),
+                pageable, part.totalElements());
     }
 
     /** 分页参数归一（2026-08-19 加固：page<0 / size<1 会令 PageRequest 抛 IllegalArgumentException → HTTP 500；
@@ -380,13 +429,18 @@ public class DancerService {
      */
     @Transactional(readOnly = true)
     public List<DancerSummaryResponse> listFavorites(Long userId) {
-        LocalDateTime now = LocalDateTime.now();
         List<Object[]> rows = dancerFavoriteRepository.findFavoriteDancersByUserId(
-                userId, LocalDate.now().atStartOfDay(), now.minusDays(7));
+                userId, LocalDate.now().atStartOfDay(), LocalDateTime.now().minusDays(7));
         if (rows.isEmpty()) {
             return Collections.emptyList();
         }
-        return buildSummaries(rows, userId);
+        List<Long> ids = rows.stream().map(r -> (Long) r[0]).toList();
+        // 用户无关 enrichments（单一权威 = DancerListCacheService；收藏列表个性化不进缓存，
+        // 但 enrichments 计算口径与公开列表一致）；个人态（今日认可/投票标签）恒实时查询
+        DancerListCacheService.ListEnrichments en = listCacheService.computeEnrichments(ids);
+        Set<Long> myTodayIds = fetchMyTodayIds(ids, userId);
+        Map<Long, List<String>> myTagsById = fetchMyTodayTags(ids, userId);
+        return buildSummaries(rows, en, myTodayIds, myTagsById);
     }
 
     /**
@@ -429,33 +483,23 @@ public class DancerService {
 
     /**
      * 行内 Object[]（{id, nickname, avatar_url, bio, gender, city, cnt_all, cnt_today,
-     * cnt7, verification_status}）→ 卡片摘要列表。公开列表（listPublic）与收藏列表
-     * （listFavorites）共用——两处查询返回同构行，摘要构建逻辑单一权威（2026-08-14
-     * 抽取；此前 listPublic 内联构建，收藏列表落地时必然复制，违反 DRY）。
+     * cnt7, verification_status}）+ 批量 enrichments → 卡片摘要列表。
+     * 公开列表（listPublic，enrichments 走列表缓存）、收藏列表（listFavorites）与
+     * 我的舞伴主页（listMyDancers）共用——三处查询返回同构行，enrichments 计算单一权威
+     * （DancerListCacheService#computeEnrichments），摘要构建逻辑也单一权威
+     * （2026-08-14 抽取；2026-08-22 enrichments 参数化：列表缓存命中时零查询直组装）。
      */
-    private List<DancerSummaryResponse> buildSummaries(List<Object[]> content, Long currentUserId) {
-        List<Long> ids = content.stream().map(r -> (Long) r[0]).toList();
+    private List<DancerSummaryResponse> buildSummaries(
+            List<Object[]> content,
+            DancerListCacheService.ListEnrichments en,
+            Set<Long> myTodayIds,
+            Map<Long, List<String>> myTagsById) {
         // 行内计数：Object[]{id, ..., count_all(6), count_today(7), count_7d(8)}
         Map<Long, long[]> countsById = new HashMap<>();
         for (Object[] row : content) {
             countsById.put((Long) row[0], new long[]{
                     ((Number) row[6]).longValue(), ((Number) row[7]).longValue(), ((Number) row[8]).longValue()});
         }
-        Map<Long, List<DancerTagStat>> tagsById = fetchTopTags(ids);
-        Map<Long, String> homeVenueNameById = fetchHomeVenueNames(ids);
-        Map<Long, String> coverPhotoUrlById = fetchCoverPhotoUrls(ids);
-        Set<Long> myTodayIds = fetchMyTodayIds(ids, currentUserId);
-        // 当前用户今日投票标签（2026-08-19 列表 reaction 区域 chip 活跃态；个人态实时不缓存）
-        Map<Long, List<String>> myTagsById = fetchMyTodayTags(ids, currentUserId);
-        // 批量累计浏览量（2026-08-15 列表卡片右下角「👁 浏览数」数据源）：一次 IN + GROUP BY
-        // 覆盖整页，避免逐条 COUNT 的 N+1；口径 = qwt_dancer_views 全量行数（按天按来源去重
-        // PV 含匿名，与 DancerStatsService viewTrend 同源同口径的全量版，见
-        // DancerViewRepository#countByDancerIds javadoc）
-        Map<Long, Long> viewCounts = ids.isEmpty() ? Collections.emptyMap()
-                : dancerViewRepository.countByDancerIds(ids).stream()
-                        .collect(Collectors.toMap(
-                                row -> (Long) row[0],
-                                row -> ((Number) row[1]).longValue()));
 
         List<DancerSummaryResponse> summaries = new ArrayList<>(content.size());
         for (Object[] row : content) {
@@ -464,12 +508,12 @@ public class DancerService {
             summaries.add(new DancerSummaryResponse(
                     id, (String) row[1], (String) row[2], (String) row[3], (String) row[4], (String) row[5],
                     DancerStatus.NORMAL, toVerificationStatus(row[9]),
-                    homeVenueNameById.get(id), coverPhotoUrlById.get(id),
+                    en.homeVenueNameById().get(id), en.coverPhotoUrlById().get(id),
                     counts[0], counts[2], counts[1],
                     myTodayIds.contains(id),
                     myTagsById.getOrDefault(id, Collections.emptyList()),
-                    tagsById.getOrDefault(id, Collections.emptyList()),
-                    viewCounts.getOrDefault(id, 0L)));
+                    en.tagsById().getOrDefault(id, Collections.emptyList()),
+                    en.viewCounts().getOrDefault(id, 0L)));
         }
         return summaries;
     }
@@ -739,6 +783,8 @@ public class DancerService {
         // （响应值 = 操作后真相；detailCacheService.invalidate 级联失效内层
         // DancerAggregateService 与 DancerStatsService——单一失效入口，2026-08-19）
         detailCacheService.invalidate(dancerId);
+        // 认可数变化直接改变公开列表排序（近7天认可倒序）与卡片 chips——列表缓存失效
+        invalidateListCache();
         // 事务边界兜底（对齐 VenueReactionService 根因修复）：
         // - afterCommit 再失效：并发读者在内联失效与提交之间回源可能缓存旧值 → 提交后清除；
         // - afterCompletion(非提交) 失效：事务回滚时清除内联失效后写入缓存的"未提交值"（防幻影）。
@@ -748,12 +794,14 @@ public class DancerService {
                 @Override
                 public void afterCommit() {
                     detailCacheService.invalidate(dancerId);
+                    listCacheService.invalidateAll();
                 }
 
                 @Override
                 public void afterCompletion(int status) {
                     if (status != STATUS_COMMITTED) {
                         detailCacheService.invalidate(dancerId);
+                        listCacheService.invalidateAll();
                     }
                 }
             });
@@ -812,12 +860,6 @@ public class DancerService {
         for (String tag : tags) {
             recognitionTagRepository.upsertRecognitionTag(recognitionId, dancerId, userId, tag, now);
         }
-    }
-
-    /** 认可/标签聚合的时间窗口锚点（今日0点 / 7天前 / 30天前，"此刻"口径，同 Reaction） */
-    private LocalDateTime[] recognitionWindowAnchors() {
-        LocalDateTime now = LocalDateTime.now();
-        return new LocalDateTime[]{LocalDate.now().atStartOfDay(), now.minusDays(7), now.minusDays(30)};
     }
 
     /** 校验并去重标签：全部须命中字典；去重（保持顺序）；最多 MAX_TAGS_PER_RECOGNITION 个 */
@@ -893,29 +935,22 @@ public class DancerService {
         }
         List<Long> ids = dancers.stream().map(Dancer::getId).toList();
         Map<Long, long[]> countsById = fetchCounts(ids);
-        Map<Long, List<DancerTagStat>> tagsById = fetchTopTags(ids);
-        Map<Long, String> homeVenueNameById = fetchHomeVenueNames(ids);
-        Map<Long, String> coverPhotoUrlById = fetchCoverPhotoUrls(ids);
+        // 用户无关 enrichments（单一权威 = DancerListCacheService）；个人态恒实时查询
+        DancerListCacheService.ListEnrichments en = listCacheService.computeEnrichments(ids);
         Set<Long> myTodayIds = fetchMyTodayIds(ids, userId);
         Map<Long, List<String>> myTagsById = fetchMyTodayTags(ids, userId);
-        // 累计浏览量（2026-08-15）：与 buildSummaries 同口径（全量历史 PV，含匿名）
-        Map<Long, Long> viewCounts = ids.isEmpty() ? Collections.emptyMap()
-                : dancerViewRepository.countByDancerIds(ids).stream()
-                        .collect(Collectors.toMap(
-                                row -> (Long) row[0],
-                                row -> ((Number) row[1]).longValue()));
 
         List<DancerSummaryResponse> result = new ArrayList<>(dancers.size());
         for (Dancer d : dancers) {
             long[] counts = countsById.getOrDefault(d.getId(), new long[]{0L, 0L, 0L});
             result.add(new DancerSummaryResponse(
                     d.getId(), d.getNickname(), d.getAvatarUrl(), d.getBio(), d.getGender(), d.getCity(),
-                    d.getStatus(), d.getVerificationStatus(), homeVenueNameById.get(d.getId()), coverPhotoUrlById.get(d.getId()),
+                    d.getStatus(), d.getVerificationStatus(), en.homeVenueNameById().get(d.getId()), en.coverPhotoUrlById().get(d.getId()),
                     counts[0], counts[2], counts[1],
                     myTodayIds.contains(d.getId()),
                     myTagsById.getOrDefault(d.getId(), Collections.emptyList()),
-                    tagsById.getOrDefault(d.getId(), Collections.emptyList()),
-                    viewCounts.getOrDefault(d.getId(), 0L)));
+                    en.tagsById().getOrDefault(d.getId(), Collections.emptyList()),
+                    en.viewCounts().getOrDefault(d.getId(), 0L)));
         }
         return result;
     }
@@ -970,6 +1005,78 @@ public class DancerService {
             photo.setSortOrder(nextOrder++);
             photoRepository.save(photo);
         }
+        // 相册变化可能影响列表封面（封面 = 展示序最小 PUBLIC 照片）——列表缓存失效
+        invalidateListCache();
+        return fetchPhotos(dancerId, true, userId);
+    }
+
+    /**
+     * 舞伴短视频上传（2026-08-22 新增；与照片同审核链——插入即 PENDING，逐条审核后公开）。
+     * <p>
+     * 请求体语义与照片不同（视频 = urls + coverUrls 封面帧 + durations 时长，无 blurUrls——
+     * 本期视频不上积分门槛，封面帧图承担视觉占位），故独立接口而非混入 AddDancerPhotosRequest。
+     * 合规：个人主体小程序 UGC 红线下视频同照片——仅舞伴本人/管理员可上传（canManage），
+     * 内容经逐条 PENDING 审核后才公开（恶意内容双闸门 = 凭证签发扩展名/大小校验 + 人审）。
+     */
+    @Transactional
+    public List<DancerPhotoResponse> addVideos(Long userId, Long dancerId,
+                                               AddDancerVideosRequest req, UserRole currentRole) {
+        Dancer dancer = findDancerOrThrow(dancerId);
+        if (!canManage(dancer, userId, currentRole)) {
+            throw new BusinessException(1003, "仅舞伴本人或管理员可上传视频");
+        }
+        List<String> urls = req.urls();
+        if (urls == null || urls.isEmpty()) {
+            throw new BusinessException(1001, "请至少选择一个视频");
+        }
+        if (urls.size() > MAX_VIDEOS_PER_UPLOAD) {
+            throw new BusinessException(1001, "单次最多上传 " + MAX_VIDEOS_PER_UPLOAD + " 个视频");
+        }
+        List<String> coverList = req.coverUrls() == null ? Collections.emptyList() : req.coverUrls();
+        List<String> blurList = req.blurUrls() == null ? Collections.emptyList() : req.blurUrls();
+        List<Integer> durationList = req.durations() == null ? Collections.emptyList() : req.durations();
+        int nextOrder = maxSortOrder(dancerId) + 1;
+        for (int i = 0; i < urls.size(); i++) {
+            String clean = TextSanitizer.sanitize(urls.get(i), 500);
+            if (clean.isEmpty() || !clean.startsWith("http")) {
+                throw new BusinessException(1001, "视频地址不合法");
+            }
+            imageValidator.validateVideoUrl(clean); // 域名白名单 + 扩展名（不下载，见校验器 javadoc）
+            DancerPhoto video = new DancerPhoto();
+            video.setDancerId(dancerId);
+            video.setUrl(clean);
+            video.setKind(DancerPhotoKind.VIDEO);
+            String coverUrl = i < coverList.size()
+                    ? TextSanitizer.sanitize(coverList.get(i), 500) : null;
+            if (coverUrl != null && !coverUrl.isEmpty() && coverUrl.startsWith("http")) {
+                try {
+                    imageValidator.validate(coverUrl); // 封面 = 图片，挂图片内容校验（08-12 安全约定）
+                    video.setCoverUrl(coverUrl);
+                } catch (BusinessException e) {
+                    // 封面帧异常（2026-08-22：前端已做 thumb 立即持久化兜底，此分支仅防御
+                    // 个别机型封面损坏/3 字节占位）——降级无封面（未过校验的 URL 不落库，
+                    // 安全约定不破坏），不阻断整批视频入库；展示端无封面回退虚焦占位。
+                    log.warn("封面帧校验失败，降级无封面：dancerId={} url={} 原因={}",
+                            dancerId, clean, e.getMessage());
+                }
+            }
+            // 模糊封面（2026-08-22 视频门槛配套：封面帧降采样模糊版，未解锁遮罩用；
+            // 缺省 = 有门槛视频未解锁时纯锁占位）
+            String blurUrl = i < blurList.size()
+                    ? TextSanitizer.sanitize(blurList.get(i), 500) : null;
+            if (blurUrl != null && !blurUrl.isEmpty() && blurUrl.startsWith("http")) {
+                imageValidator.validate(blurUrl); // 08-12 安全约定：图片 URL 落库字段必须挂载校验
+                video.setBlurUrl(blurUrl);
+            }
+            int duration = i < durationList.size() && durationList.get(i) != null
+                    ? Math.max(0, durationList.get(i)) : 0;
+            video.setDurationSeconds(duration);
+            video.setStatus(DancerPhotoStatus.PENDING);
+            video.setCreatedBy(userId);
+            video.setSortOrder(nextOrder++);
+            photoRepository.save(video);
+        }
+        invalidateListCache();
         return fetchPhotos(dancerId, true, userId);
     }
 
@@ -987,6 +1094,8 @@ public class DancerService {
         }
         photo.setDeleted(true);
         photoRepository.save(photo);
+        // 照片删除可能影响列表封面——列表缓存失效
+        invalidateListCache();
     }
 
     // ─── 管理端照片审核 ────────────────────────────────────────────────────────
@@ -1003,7 +1112,9 @@ public class DancerService {
                 .map(r -> new AdminDancerPhotoResponse(
                         (Long) r[0], (String) r[1], DancerPhotoStatus.valueOf((String) r[2]),
                         (Long) r[3], r[4] != null ? (String) r[4] : PHOTO_OWNER_GONE_NAME, (String) r[5], (String) r[6],
-                        (LocalDateTime) r[7]))
+                        (LocalDateTime) r[7],
+                        DancerPhotoKind.valueOf((String) r[8]), (String) r[9],
+                        r[10] != null ? ((Number) r[10]).intValue() : 0))
                 .toList();
         return new PageImpl<>(content, pageable, rows.getTotalElements());
     }
@@ -1025,6 +1136,8 @@ public class DancerService {
         }
         photo.setStatus(status);
         photoRepository.save(photo);
+        // 照片审核（PENDING → PUBLIC）可能改变列表封面——列表缓存失效
+        invalidateListCache();
         log.info("管理员 {} 审核舞伴照片 {} → {}（舞伴 {}）{}", adminId, photoId, status,
                 photo.getDancerId(), reason == null || reason.isBlank() ? "" : "，说明：" + TextSanitizer.sanitize(reason, 200));
     }
@@ -1075,6 +1188,8 @@ public class DancerService {
         }
         dancer.setStatus(status);
         dancerRepository.save(dancer);
+        // 状态流转（PENDING → NORMAL / NORMAL ↔ HIDDEN）改变公开列表可见性——列表缓存失效
+        invalidateListCache();
         notifyStatusChange(dancer, from, status, reason);
     }
 
@@ -1142,6 +1257,8 @@ public class DancerService {
         audit.setToStatus(to.name());
         audit.setReason(reason);
         verificationLogRepository.save(audit);
+        // 认证流转改变列表行 verification_status——列表缓存失效
+        invalidateListCache();
         log.info("舞伴 {} 信息核验 {} → {}（操作人 {}）{}", dancer.getId(), from, to, operatorId,
                 reason == null || reason.isBlank() ? "" : "，原因：" + reason);
     }
@@ -1236,27 +1353,9 @@ public class DancerService {
         return result;
     }
 
-    /** 批量标签聚合（<b>全量</b>，2026-08-19 去截断：列表卡片 reaction 区域 chips 数据源，
-     *  同门店 topReactions 无截断契约；按全量计数倒序——聚合 SQL 已排序，服务层不截断。
-     *  前端按展示窗口（近7天）计数过滤，字典仅 8 枚，全量下发负载可忽略） */
-    private Map<Long, List<DancerTagStat>> fetchTopTags(List<Long> dancerIds) {
-        LocalDateTime[] w = recognitionWindowAnchors();
-        Map<Long, List<DancerTagStat>> result = new HashMap<>();
-        for (Object[] row : recognitionTagRepository.aggregateByDancerIds(dancerIds, w[0], w[1], w[2])) {
-            Long dancerId = (Long) row[0];
-            String tag = (String) row[1];
-            long countAll = ((Number) row[2]).longValue();
-            long countToday = ((Number) row[3]).longValue();
-            long count7d = ((Number) row[4]).longValue();
-            long count30d = ((Number) row[5]).longValue();
-            DancerTagCode code = DancerTagCode.valueOf(tag); // 仅字典内代码落库，valueOf 安全
-            result.computeIfAbsent(dancerId, k -> new ArrayList<>())
-                    .add(new DancerTagStat(tag, code.getEmoji(), code.getLabel(), countAll, countToday, count7d, count30d));
-        }
-        return result;
-    }
-
-    /** 批量"常去"舞厅名：取每个舞伴最早一条 HOME 关系（venue briefs 按 created_at 升序） */
+    /** 批量"常去"舞厅名：取每个舞伴最早一条 HOME 关系（venue briefs 按 created_at 升序）。
+     *  ⚠️ 仅我的认可记录（listMyRecognitions）消费——列表/收藏/我的舞伴主页的 enrichments
+     *  已统一走 {@link DancerListCacheService#computeEnrichments}（2026-08-22 单一权威） */
     private Map<Long, String> fetchHomeVenueNames(List<Long> dancerIds) {
         Map<Long, String> result = new HashMap<>();
         for (Object[] row : dancerVenueRepository.findVenueBriefsByDancerIds(dancerIds)) {
@@ -1318,19 +1417,36 @@ public class DancerService {
      * @param showAll       true = 本人/管理员视角（全量含 PENDING/REJECTED，编辑页回显状态）；
      *                      false = 公开视角（仅 PUBLIC）。
      * @param currentUserId 当前用户（组装"已解锁"态；匿名 null）
-     * @apiNote 积分解锁（2026-08-14 公共模块）：照片有门槛（cost&gt;0）且当前用户
-     * 未解锁 → <b>url 置 null</b>（不下发原图，防绕过——原图仅经 POST /points/unlock
+     * @apiNote 积分解锁（2026-08-14 公共模块）：媒体有门槛（cost&gt;0）且当前用户
+     * 未解锁 → <b>url 置 null</b>（不下发原内容，防绕过——原内容仅经 POST /points/unlock
      * 解锁成功后返回）；本人/管理员（showAll）恒可看。门槛/解锁态经 PointsService
      * 批量查询组装（N+1 规避）。
+     * @apiNote 2026-08-22 视频门槛（媒体无关契约落地）：视频按 kind 查独立门槛类型
+     * （DANCER_VIDEO，照片恒 DANCER_PHOTO——gate 表 target_type 区分媒体类型，统计口径
+     * 不混杂）。<b>视频封面帧 = 清晰首帧，未解锁时 coverUrl 一并置 null</b>（封面即内容
+     * 泄露——照片有 blurUrl 模糊降级，视频无模糊封面，只能纯锁占位）。
      */
     private List<DancerPhotoResponse> fetchPhotos(Long dancerId, boolean showAll, Long currentUserId) {
         List<DancerPhoto> photos = photoRepository.findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(dancerId);
         if (photos.isEmpty()) {
             return Collections.emptyList();
         }
-        List<Long> ids = photos.stream().map(DancerPhoto::getId).toList();
-        Map<Long, Integer> costs = pointsService.gateCosts(PointsGateTargetType.DANCER_PHOTO, ids);
-        Set<Long> unlockedIds = pointsService.unlockedIds(currentUserId, PointsGateTargetType.DANCER_PHOTO, ids);
+        // 门槛/解锁态按媒体类型分组批量查询（照片 DANCER_PHOTO / 视频 DANCER_VIDEO）
+        Map<Long, Integer> costs = new HashMap<>();
+        Set<Long> unlockedIds = new HashSet<>();
+        List<Long> photoIds = new ArrayList<>();
+        List<Long> videoIds = new ArrayList<>();
+        for (DancerPhoto p : photos) {
+            (p.getKind() == DancerPhotoKind.VIDEO ? videoIds : photoIds).add(p.getId());
+        }
+        if (!photoIds.isEmpty()) {
+            costs.putAll(pointsService.gateCosts(PointsGateTargetType.DANCER_PHOTO, photoIds));
+            unlockedIds.addAll(pointsService.unlockedIds(currentUserId, PointsGateTargetType.DANCER_PHOTO, photoIds));
+        }
+        if (!videoIds.isEmpty()) {
+            costs.putAll(pointsService.gateCosts(PointsGateTargetType.DANCER_VIDEO, videoIds));
+            unlockedIds.addAll(pointsService.unlockedIds(currentUserId, PointsGateTargetType.DANCER_VIDEO, videoIds));
+        }
         List<DancerPhotoResponse> result = new ArrayList<>(photos.size());
         for (DancerPhoto p : photos) {
             if (!showAll && p.getStatus() != DancerPhotoStatus.PUBLIC) {
@@ -1338,18 +1454,17 @@ public class DancerService {
             }
             int cost = costs.getOrDefault(p.getId(), 0);
             boolean unlocked = showAll || cost == 0 || unlockedIds.contains(p.getId());
+            boolean isVideo = p.getKind() == DancerPhotoKind.VIDEO;
             result.add(new DancerPhotoResponse(
                     p.getId(), unlocked ? p.getUrl() : null, p.getStatus(), p.getSortOrder(),
-                    p.getCreatedAt(), cost, unlocked, p.getBlurUrl()));
-        }
-        return result;
-    }
-
-    /** 批量封面照片：每个舞伴展示顺序最小的一张 PUBLIC（列表页/我的舞伴主页，N+1 规避） */
-    private Map<Long, String> fetchCoverPhotoUrls(List<Long> dancerIds) {
-        Map<Long, String> result = new HashMap<>();
-        for (Object[] row : photoRepository.findCoverUrlsByDancerIds(dancerIds)) {
-            result.put((Long) row[0], (String) row[1]);
+                    p.getCreatedAt(), cost, unlocked,
+                    // 模糊封面（照片 = 原图降采样模糊图；视频 = 封面帧降采样模糊图，2026-08-22）：
+                    // 未解锁时下发作遮罩占位（不泄露内容），恒不为未解锁态置空
+                    p.getBlurUrl(),
+                    p.getKind(),
+                    // 视频未解锁：封面帧 = 清晰首帧，一并置 null（纯锁/模糊占位，防内容泄露）
+                    isVideo && !unlocked ? null : p.getCoverUrl(),
+                    p.getDurationSeconds()));
         }
         return result;
     }
