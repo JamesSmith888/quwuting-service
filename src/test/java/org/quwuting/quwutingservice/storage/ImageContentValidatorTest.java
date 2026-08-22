@@ -23,7 +23,8 @@ class ImageContentValidatorTest {
 
     private static final StorageProperties PROPS = new StorageProperties(
             "https://tkyreautvukkwpwmisbg.supabase.co", "anon", "qwt-public",
-            5 * 1024 * 1024, new String[]{".jpg", ".jpeg", ".png", ".webp"});
+            5 * 1024 * 1024, new String[]{".jpg", ".jpeg", ".png", ".webp"},
+            50 * 1024 * 1024, new String[0]);
 
     private final ImageContentValidator validator = new ImageContentValidator(PROPS);
 

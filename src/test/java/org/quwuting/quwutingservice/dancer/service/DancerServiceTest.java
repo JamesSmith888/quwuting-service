@@ -29,7 +29,6 @@ import org.quwuting.quwutingservice.dancer.repository.DancerCityRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVenueRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVerificationLogRepository;
-import org.quwuting.quwutingservice.dancer.repository.DancerViewRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.message.service.MessageService;
@@ -87,7 +86,7 @@ class DancerServiceTest {
     @Mock
     private DancerFavoriteRepository dancerFavoriteRepository;
     @Mock
-    private DancerViewRepository dancerViewRepository;
+    private DancerListCacheService listCacheService;
     @Mock
     private OpsConfigService opsConfigService;
 
@@ -119,7 +118,7 @@ class DancerServiceTest {
     void setUp() {
         dancerService = new DancerService(dancerRepository, dancerCityRepository, dancerVenueRepository, recognitionRepository,
                 recognitionTagRepository, photoRepository, adViewRepository, verificationLogRepository,
-                dancerFavoriteRepository, dancerViewRepository, detailCacheService, venueLookupService,
+                dancerFavoriteRepository, detailCacheService, listCacheService, venueLookupService,
                 messageService, pointsService, imageValidator, new org.quwuting.quwutingservice.config.DancerAdProperties(""),
                 opsConfigService);
 
