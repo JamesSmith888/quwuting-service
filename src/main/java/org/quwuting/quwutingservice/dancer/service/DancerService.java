@@ -37,6 +37,8 @@ import org.quwuting.quwutingservice.message.service.MessageService;
 import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
 import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
 import org.quwuting.quwutingservice.storage.ImageContentValidator;
+import org.quwuting.quwutingservice.tagdict.dto.response.TagItemResponse;
+import org.quwuting.quwutingservice.tagdict.service.TagDictService;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.springframework.data.domain.Page;
@@ -124,6 +126,8 @@ public class DancerService {
     private final DancerAdProperties dancerAdProperties;
     /** 运营配置（2026-08-15 认可「每日一票」开关：dancer.recognition.daily.single） */
     private final OpsConfigService opsConfigService;
+    /** 通用标签字典（2026-08-24：资料标签序列化/反序列化 + 字典解析） */
+    private final TagDictService tagDictService;
 
     // ─── 创建（唯一通道：管理员后台创建 → NORMAL；用户主动注册已下线） ────────
 
@@ -161,6 +165,8 @@ public class DancerService {
         // 联系方式遮挡开关（2026-08-14：null = 默认遮挡 true，向后兼容旧客户端）
         dancer.setHideContact(request.hideContact() == null || request.hideContact());
         dancer.setEarningsEnabled(request.earningsEnabled() != null && request.earningsEnabled());
+        // 资料标签（2026-08-24 字典化：id 数组 JSON；去重/去空/存在性校验后落库）
+        dancer.setProfileTags(tagDictService.serializeIds(normalizeProfileTags(request.profileTags())));
         dancer.setStatus(adminApproved ? DancerStatus.NORMAL : DancerStatus.PENDING);
         dancer.setCreatedBy(userId);
         dancer = dancerRepository.save(dancer);
@@ -224,6 +230,26 @@ public class DancerService {
     /** 主城市（= cities 首个，冗余同步 dancer.city 展示位；空列表 → null） */
     private String primaryCity(List<String> cities) {
         return cities.isEmpty() ? null : cities.get(0);
+    }
+
+    /**
+     * 资料标签归一（2026-08-24，创建/编辑共用单一权威）：
+     * 去 null、去重（LinkedHashSet 保序）、剔除字典中不存在的 id——
+     * 标签由管理员从字典选择，正常不出现脏 id，此处为纵深防御（防绕过前端
+     * 的任意 id 落库）；返回空列表 = 无标签（serializeIds 存 null）。
+     */
+    private List<Long> normalizeProfileTags(List<Long> tags) {
+        if (tags == null || tags.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<Long> ids = new ArrayList<>(new LinkedHashSet<>(tags));
+        ids.removeIf(id -> id == null);
+        if (ids.isEmpty()) {
+            return Collections.emptyList();
+        }
+        Set<Long> existing = tagDictService.resolveByIds(ids).keySet();
+        ids.removeIf(id -> !existing.contains(id));
+        return ids;
     }
 
     /**
@@ -296,6 +322,8 @@ public class DancerService {
         dancer.setContact(TextSanitizer.sanitize(request.contact(), 100));
         dancer.setHideContact(request.hideContact() == null || request.hideContact());
         dancer.setEarningsEnabled(request.earningsEnabled() != null && request.earningsEnabled());
+        // 资料标签（2026-08-24：全量覆盖语义——传 null/空 = 清除全部标签）
+        dancer.setProfileTags(tagDictService.serializeIds(normalizeProfileTags(request.profileTags())));
         // REJECTED 资料编辑后重新送审（管理员直改仍由管理员后续流转，此处不覆盖）
         if (dancer.getStatus() == DancerStatus.REJECTED) {
             dancer.setStatus(DancerStatus.PENDING);
@@ -507,6 +535,7 @@ public class DancerService {
             long[] counts = countsById.get(id);
             summaries.add(new DancerSummaryResponse(
                     id, (String) row[1], (String) row[2], (String) row[3], (String) row[4], (String) row[5],
+                    en.profileTagsById().getOrDefault(id, Collections.emptyList()),
                     DancerStatus.NORMAL, toVerificationStatus(row[9]),
                     en.homeVenueNameById().get(id), en.coverPhotoUrlById().get(id),
                     counts[0], counts[2], counts[1],
@@ -582,9 +611,13 @@ public class DancerService {
         // 累计广告支持次数（收益线下结算依据）
         boolean earningsEnabled = dancer.isEarningsEnabled();
         String earningsAdUnitId = earningsEnabled ? dancerAdProperties.adUnitId() : "";
+        // 资料标签（2026-08-24：profile_tags 为 dancer 主行字段，实体已加载——
+        // 反序列化 + 字典解析（text + description，长按/点击弹说明的权威文案））
+        List<TagItemResponse> profileTags =
+                tagDictService.resolveOrdered(tagDictService.deserializeIds(dancer.getProfileTags()));
         return new DancerDetailResponse(
                 dancer.getId(), dancer.getNickname(), dancer.getAvatarUrl(), dancer.getBio(),
-                dancer.getGender(), dancer.getCity(), pub.cities(), dancer.getStatus(),
+                dancer.getGender(), dancer.getCity(), pub.cities(), profileTags, dancer.getStatus(),
                 dancer.getVerificationStatus(), dancer.getVerifiedAt(),
                 isMine, myToday, myTags, favorite, pub.stats(),
                 pub.pointsReceivedTotal(), pub.pointsReceived30d(), pub.giftsReceived(),
@@ -945,6 +978,7 @@ public class DancerService {
             long[] counts = countsById.getOrDefault(d.getId(), new long[]{0L, 0L, 0L});
             result.add(new DancerSummaryResponse(
                     d.getId(), d.getNickname(), d.getAvatarUrl(), d.getBio(), d.getGender(), d.getCity(),
+                    en.profileTagsById().getOrDefault(d.getId(), Collections.emptyList()),
                     d.getStatus(), d.getVerificationStatus(), en.homeVenueNameById().get(d.getId()), en.coverPhotoUrlById().get(d.getId()),
                     counts[0], counts[2], counts[1],
                     myTodayIds.contains(d.getId()),

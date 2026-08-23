@@ -138,4 +138,18 @@ public class Dancer extends BaseEntity {
      */
     @Column(length = 50)
     private String city;
+
+    /**
+     * 资料标签（2026-08-24，V40 迁移）：通用标签字典 {@code qwt_tag_dict} 的 id 数组
+     * （JSON 字符串，如 "[1,3]"；null/空 = 无标签）。
+     * <p>
+     * 语义 = <b>管理员/运营设置的资料标签</b>（线上/线下/龙女…，黄页内容，平台代发模型）——
+     * 与「舞伴认可标签」（qwt_dancer_recognition_tags，用户认可行为产生）完全独立；
+     * 展示时经 {@code TagDictService#resolveOrdered} 解析为 TagItemResponse
+     * （text + description，长按/点击弹说明的权威文案）。
+     * 存 id 而非 text：标签重命名/改说明不影响历史关联。编辑为全量覆盖语义
+     * （传 null/空 = 清除全部标签，与多城市/常驻舞厅同「编辑 = 变更而非追加」约定）。
+     */
+    @Column(length = 500)
+    private String profileTags;
 }

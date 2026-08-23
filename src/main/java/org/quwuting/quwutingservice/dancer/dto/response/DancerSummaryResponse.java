@@ -2,6 +2,7 @@ package org.quwuting.quwutingservice.dancer.dto.response;
 
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerVerificationStatus;
+import org.quwuting.quwutingservice.tagdict.dto.response.TagItemResponse;
 
 import java.util.List;
 
@@ -22,6 +23,13 @@ public record DancerSummaryResponse(
         String bio,
         String gender,
         String city,
+        /**
+         * 资料标签（2026-08-24 管理员设置，字典化）：TagItemResponse 列表
+         * （text + description——列表卡片长按/点击弹说明的权威文案），按字典排序。
+         * 空列表 = 无标签，卡片不渲染标签行。与「认可标签聚合」（topTags，
+         * 用户行为产生）语义独立，字段名显式区分防混淆。
+         */
+        List<TagItemResponse> profileTags,
         DancerStatus status,
         /**
          * 信息核验状态（2026-08-14 官方认证）。展示规则：VERIFIED → 卡片「信息已核验」

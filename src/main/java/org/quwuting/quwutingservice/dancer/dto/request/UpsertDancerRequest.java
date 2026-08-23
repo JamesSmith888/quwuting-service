@@ -78,6 +78,14 @@ public record UpsertDancerRequest(
          */
         Boolean earningsEnabled,
 
+        /**
+         * 资料标签（2026-08-24 新增，管理员设置）：通用标签字典 {@code qwt_tag_dict} 的
+         * id 数组（如 [1,3]），可选；null/空列表 = 无标签。编辑为<b>全量覆盖语义</b>
+         * （传空 = 清除全部标签，与多城市/常驻舞厅同「编辑 = 变更而非追加」约定）。
+         * 服务层负责去重/去空/存在性校验（不存在或重复的 id 剔除，不阻断提交）。
+         */
+        List<Long> profileTags,
+
         /** 常驻舞厅 ID（可选；落 DancerVenue HOME 关系，仅作"常去"展示，不构成强绑定） */
         Long homeVenueId
 ) {}

@@ -147,6 +147,32 @@ emoji 由枚举派生不下库，无迁移）。**2026-08-15 晚 窗口化**：�
 countToday/count7d/count30d（count = countAll 兼容列表 topTags），详情页认可 chip 默认
 展示近7天、可切近30天/全部。
 
+### 资料标签（2026-08-24：管理员设置的字典化标签，V40 迁移）
+
+与「认可标签」（用户行为产生）**语义完全独立**：资料标签 = **管理员/运营在舞伴新增/编辑表单
+设置**的黄页属性（线上/线下/龙女…），随资料走平台代发模型，无 UGC 红线风险。
+
+- **通用标签字典 `qwt_tag_dict`**（`tagdict` 包，非 dancer 域——通用能力）：
+  `scope`（DANCER 舞伴 / VENUE 门店预留——门店未来可从自由文本 tags 迁移到本字典，
+  即"标签系统套用门店"的落点）、`text`（展示名，同 scope 唯一，部分唯一索引
+  `uk_qwt_tag_dict_scope_text`）、`description`（说明文案——用户长按/点击标签弹层的权威
+  文案，如「龙女」用「听障舞者版」尊重说明）、`sort_order`/`active`/`created_by`。
+  管理员可新增（`POST /admin/tag-dict`，requireAdmin；同 scope+text 已存在 → 1001），
+  公开读 `GET /tag-dict?scope=DANCER`（编辑页表单可选标签数据源）。
+- **舞伴关联 `qwt_dancers.profile_tags`**：字典 **id 数组 JSON**（如 `[1,3]`；null/空 = 无标签）。
+  存 id 而非 text——标签重命名/改说明不影响历史关联（对比门店存 text 无法重命名）。
+  编辑为**全量覆盖语义**（传 null/空 = 清除，与多城市/常驻舞厅同「编辑 = 变更而非追加」约定）；
+  写入前 `normalizeProfileTags` 去 null/去重/剔除字典不存在的 id（纵深防御）。
+- **响应**：`DancerSummaryResponse`/`DancerDetailResponse` 新增 `profileTags:
+  List<TagItemResponse>`（id/text/description，按字典顺序；空列表 = 无标签）。
+  详情从 dancer 主行反序列化 + 字典解析（实体已加载，零额外主查询）；列表走
+  `DancerListCacheService` 批量 enrichments（`findProfileTagsByDancerIds` + 一次字典 IN，
+  规避 N+1；写路径 `invalidateListCache`/`detailCacheService.invalidate` 已内联覆盖）。
+  **含停用标签**：resolveByIds 不筛 active——历史关联不因字典停用而消失。
+- **前端**：dancer-edit 表单「标签」区 = 字典 chips 多选（长按弹说明）+「新增标签」弹窗
+  （输入名+说明，POST 后回填并选中）；dancers 列表卡片昵称下方 / dancer-detail 身份区下方
+  展示 chips，点击/长按弹说明（复用全局 `.recognition-desc-*` 弹层原语）。
+
 ### 可见性规则（隐私边界）
 
 | 状态 | 公众列表/详情 | 创建人本人 | 平台管理员 |

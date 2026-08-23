@@ -55,6 +55,10 @@ supabase:
   magic bytes 命中 JPEG/PNG/WebP（拒 exe/HTML/脚本改名伪造）、JPEG/PNG 解析宽高限尺寸（防解压炸弹）
 - 挂载点：venue 创建/更新（imageUrl/photos/wechatQr）、dancer 创建/更新（avatarUrl）与相册（photos）、
   user 头像（avatarUrl）、claim 营业执照（licenseUrls）——**新增图片 URL 落库字段必须挂载校验**
+- **编辑未变更跳过校验（2026-08-24）**：venue `updateVenue` 对 imageUrl/wechatQr 仅在与库中现值
+  **不同**时才校验（未变更相等跳过）——存量 URL（历史 picsum 占位图 / 高德图床直写主图）不在
+  白名单内，编辑表单回显原样提交必 1005 拒绝（「只改位置也报图片地址不合法」即此根因）。
+  创建/新增 URL 仍全量校验，安全语义不变；清空图片（null）由 validator 空值放行兜底
 - 校验结果按 URL 缓存（Caffeine 10min），编辑全量覆盖旧图不重复下载
 - `serviceRoleKey` 绝不下发前端（本模块不使用）
 - 后端在签发凭证前完成文件类型/大小校验（第一道，可绕过），内容校验在业务提交时兜底（第二道，不可绕过）

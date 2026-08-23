@@ -3,6 +3,7 @@ package org.quwuting.quwutingservice.dancer.dto.response;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerVerificationStatus;
+import org.quwuting.quwutingservice.tagdict.dto.response.TagItemResponse;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -33,6 +34,13 @@ public record DancerDetailResponse(
          * 编辑页预填回显用；列表筛选/词表消费方仍走主城市/子表聚合，不依赖本字段。
          */
         List<String> cities,
+        /**
+         * 资料标签（2026-08-24 管理员设置，字典化）：TagItemResponse 列表
+         * （text + description——详情页长按/点击弹说明的权威文案），按字典排序。
+         * 空列表 = 无标签，不渲染标签区块。与「认可标签聚合」（tags，用户行为产生）
+         * 语义独立，字段名显式区分防混淆。
+         */
+        List<TagItemResponse> profileTags,
         DancerStatus status,
         /**
          * 信息核验状态（2026-08-14 官方认证——「信息已核验」标识）。

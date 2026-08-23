@@ -59,6 +59,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -208,8 +209,17 @@ public class VenueService {
                 .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
         UserContext.requireManageOrAdmin(venue.getClaimedBy());
         validateTickets(req.tickets());
-        imageValidator.validate(req.imageUrl());
-        imageValidator.validate(req.wechatQr());
+        // 2026-08-24 修复「只改位置也报 1005 图片地址不合法」：图片未变更不重校验。
+        // 存量 URL（历史 picsum 占位图 / 高德图床直写主图）不在 ImageContentValidator
+        // 白名单内，编辑表单回显原样提交必被拒；本接口只校验「新提交的值」——
+        // 与库中现值不同才校验，未变更（相等）跳过。清空图片（null）由 validator
+        // 空值放行兜底，不属本分支。
+        if (!Objects.equals(req.imageUrl(), venue.getImageUrl())) {
+            imageValidator.validate(req.imageUrl());
+        }
+        if (!Objects.equals(req.wechatQr(), venue.getWechatQr())) {
+            imageValidator.validate(req.wechatQr());
+        }
 
         venue.setName(req.name());
         // 状态变更检测：写入变迁日志（热度统计"暂停营业次数"的数据源）

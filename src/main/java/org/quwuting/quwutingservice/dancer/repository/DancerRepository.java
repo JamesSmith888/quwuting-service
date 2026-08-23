@@ -20,6 +20,14 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
     @Query("SELECT d FROM Dancer d WHERE d.id IN :ids AND d.deleted = false")
     List<Dancer> findByIds(@Param("ids") List<Long> ids);
 
+    /**
+     * 批量取资料标签列（2026-08-24，列表 enrichments 用）：返回
+     * {id, profile_tags}——反序列化 + 字典解析由 DancerListCacheService 完成
+     * （一次 IN 查询覆盖整页，规避 N+1）。
+     */
+    @Query("SELECT d.id, d.profileTags FROM Dancer d WHERE d.id IN :ids AND d.deleted = false")
+    List<Object[]> findProfileTagsByDancerIds(@Param("ids") List<Long> ids);
+
     /** 我的舞伴主页列表（创建人视角，含 PENDING/HIDDEN 自有资料） */
     List<Dancer> findByCreatedByAndDeletedFalseOrderByUpdatedAtDesc(Long createdBy);
 

@@ -11,6 +11,8 @@ import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionTagReposi
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVenueRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerViewRepository;
+import org.quwuting.quwutingservice.tagdict.dto.response.TagItemResponse;
+import org.quwuting.quwutingservice.tagdict.service.TagDictService;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -20,8 +22,10 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -77,6 +81,8 @@ public class DancerListCacheService {
     private final DancerVenueRepository dancerVenueRepository;
     private final DancerPhotoRepository photoRepository;
     private final DancerViewRepository dancerViewRepository;
+    /** 通用标签字典（2026-08-24：资料标签反序列化 + 字典解析） */
+    private final TagDictService tagDictService;
 
     /**
      * 列表用户无关的批量 enrichments（一次快照；消费方只读，不共享可变状态）。
@@ -87,7 +93,9 @@ public class DancerListCacheService {
             Map<Long, List<DancerTagStat>> tagsById,
             Map<Long, String> homeVenueNameById,
             Map<Long, String> coverPhotoUrlById,
-            Map<Long, Long> viewCounts
+            Map<Long, Long> viewCounts,
+            /** 资料标签（2026-08-24：dancerId → TagItemResponse 列表，卡片长按弹说明文案） */
+            Map<Long, List<TagItemResponse>> profileTagsById
     ) {}
 
     /** 列表公共部分（用户无关的主查询行 + enrichments；totalElements 随行缓存避免重复计数） */
@@ -152,7 +160,8 @@ public class DancerListCacheService {
                 fetchTopTags(dancerIds),
                 fetchHomeVenueNames(dancerIds),
                 fetchCoverPhotoUrls(dancerIds),
-                fetchViewCounts(dancerIds));
+                fetchViewCounts(dancerIds),
+                fetchProfileTags(dancerIds));
     }
 
     /** 批量标签聚合（全量，同 DancerService.fetchTopTags 口径——列表卡片 chips 数据源） */
@@ -215,5 +224,37 @@ public class DancerListCacheService {
                 .collect(Collectors.toMap(
                         row -> (Long) row[0],
                         row -> ((Number) row[1]).longValue()));
+    }
+
+    /**
+     * 批量资料标签（2026-08-24）：profile_tags JSON id 数组 → 字典解析为
+     * TagItemResponse 列表（text + description，卡片长按弹说明的权威文案）。
+     * 两次 IN 查询（profile_tags 列 + 字典），空标签舞伴无条目（消费方
+     * getOrDefault 空列表，卡片不渲染标签行）。
+     */
+    private Map<Long, List<TagItemResponse>> fetchProfileTags(List<Long> dancerIds) {
+        if (dancerIds.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<Long, List<Long>> tagIdsByDancer = new HashMap<>();
+        Set<Long> allTagIds = new LinkedHashSet<>();
+        for (Object[] row : dancerRepository.findProfileTagsByDancerIds(dancerIds)) {
+            List<Long> tagIds = tagDictService.deserializeIds((String) row[1]);
+            tagIdsByDancer.put((Long) row[0], tagIds);
+            allTagIds.addAll(tagIds);
+        }
+        Map<Long, TagItemResponse> byId = tagDictService.resolveByIds(allTagIds);
+        Map<Long, List<TagItemResponse>> result = new HashMap<>();
+        for (Map.Entry<Long, List<Long>> e : tagIdsByDancer.entrySet()) {
+            List<TagItemResponse> items = new ArrayList<>(e.getValue().size());
+            for (Long id : e.getValue()) {
+                TagItemResponse item = byId.get(id);
+                if (item != null) {
+                    items.add(item);
+                }
+            }
+            result.put(e.getKey(), items);
+        }
+        return result;
     }
 }
