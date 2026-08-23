@@ -123,13 +123,13 @@ log "使用 JAVA_HOME=$JAVA_HOME"
 
 # ── 4. 打包（除非 --no-package） ───────────────────────────────────────────
 if ! $SKIP_PACKAGE; then
-  log "打包 jar（./mvnw -q -DskipTests package）"
+  log "打包 jar（./mvnw -q -Dmaven.test.skip=true package）"
   pushd "$APP_DIR" >/dev/null
   sudo -u "$APP_USER" env \
       HOME="$APP_DIR" \
       JAVA_HOME="$JAVA_HOME" \
       PATH="$JAVA_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-      ./mvnw -q -DskipTests package \
+      ./mvnw -q -Dmaven.test.skip=true package \
     || die "Maven 打包失败"
   popd >/dev/null
 fi
