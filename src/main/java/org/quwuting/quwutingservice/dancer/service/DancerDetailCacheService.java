@@ -5,14 +5,17 @@ import com.github.benmanes.caffeine.cache.LoadingCache;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.dancer.DancerTagCode;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerRecognitionStats;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerServiceResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTagStat;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerVenueInfo;
 import org.quwuting.quwutingservice.dancer.entity.DancerCity;
+import org.quwuting.quwutingservice.dancer.enums.DancerServiceSubCategory;
 import org.quwuting.quwutingservice.dancer.enums.DancerVenueRelation;
 import org.quwuting.quwutingservice.dancer.repository.DancerAdViewRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerCityRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionTagRepository;
+import org.quwuting.quwutingservice.dancer.repository.DancerServiceRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVenueRepository;
 import org.quwuting.quwutingservice.points.dto.GiftCountResponse;
 import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
@@ -24,8 +27,10 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Objects;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -76,6 +81,9 @@ public class DancerDetailCacheService {
     private final DancerVenueRepository dancerVenueRepository;
     private final DancerCityRepository dancerCityRepository;
     private final DancerAdViewRepository adViewRepository;
+    /** 舞伴服务范围（2026-08-24：详情页「服务范围」卡 + 需求弹层 chip 数据源，
+     *  admin 录入的黄页内容，用户无关 → 进详情公共缓存） */
+    private final DancerServiceRepository dancerServiceRepository;
     // 积分读侧直连仓库（不经 PointsService——避免「PointsService → 本服务 → PointsService」
     // 构造循环依赖；本服务是纯读侧聚合器，与 PointsService 的写路径通过 invalidate 解耦）
     private final PointsTransactionRepository pointsTransactionRepository;
@@ -91,7 +99,8 @@ public class DancerDetailCacheService {
             long pointsReceivedTotal,
             long pointsReceived30d,
             int contactCost,
-            long adViews
+            long adViews,
+            List<DancerServiceResponse> services
     ) {}
 
     private final LoadingCache<Long, PublicPart> cache = Caffeine.newBuilder()
@@ -147,8 +156,40 @@ public class DancerDetailCacheService {
                 .map(gate -> gate.isDeleted() ? 0 : gate.getCost())
                 .orElse(0);
         long adViews = adViewRepository.countByDancerId(dancerId);
+        List<DancerServiceResponse> services = dancerServiceRepository
+                .findByDancerIdAndDeletedFalseAndActiveTrueOrderBySortOrderAscIdAsc(dancerId)
+                .stream().map(s -> {
+                    // 2026-08-25 晚二轮多选：sub_category 逗号串 → 列表（与 DancerService
+                    // toServiceResponse 口径一致，仅兜底顺序不同——本缓存侧顺带稳定排序）
+                    List<DancerServiceSubCategory> subs = parseSubCategories(s.getSubCategory());
+                    return new DancerServiceResponse(
+                            s.getId(), s.getCategory(), s.getCategory().defaultLabel(),
+                            subs, subs.stream().map(DancerServiceSubCategory::defaultLabel).toList(),
+                            s.getLabel(),
+                            s.getPriceText(), s.getLocationScope(), s.getAdvanceNotice(), s.getRules(),
+                            s.isNegotiable());
+                })
+                .toList();
         return new PublicPart(stats, tags, venues, cities, giftsReceived,
-                pointsReceivedTotal, pointsReceived30d, contactCost, adViews);
+                pointsReceivedTotal, pointsReceived30d, contactCost, adViews, services);
+    }
+
+    /** 逗号连接的子类别 code 串 → 枚举列表（空串/null → 空列表；非法 code 防御性忽略） */
+    private static List<DancerServiceSubCategory> parseSubCategories(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return List.of();
+        }
+        return Arrays.stream(raw.split(","))
+                .filter(code -> !code.isBlank())
+                .map(code -> {
+                    try {
+                        return DancerServiceSubCategory.valueOf(code);
+                    } catch (IllegalArgumentException e) {
+                        return null; // 脏数据防御（历史/手工改动），忽略非法项
+                    }
+                })
+                .filter(Objects::nonNull)
+                .toList();
     }
 
     /** 近7日每日认可（含今日，最近在前）——按 recognitionDate 自然日聚合（同 DancerService 口径） */

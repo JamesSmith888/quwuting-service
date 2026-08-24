@@ -8,6 +8,7 @@ import org.quwuting.quwutingservice.dancer.DancerTagCode;
 import org.quwuting.quwutingservice.dancer.dto.request.AddDancerVideosRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.RecognizeDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
+import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerServiceRequest;
 import org.quwuting.quwutingservice.dancer.dto.response.*;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.entity.DancerCity;
@@ -18,6 +19,8 @@ import org.quwuting.quwutingservice.dancer.entity.DancerVenue;
 import org.quwuting.quwutingservice.dancer.entity.DancerVerificationLog;
 import org.quwuting.quwutingservice.dancer.enums.DancerPhotoKind;
 import org.quwuting.quwutingservice.dancer.enums.DancerPhotoStatus;
+import org.quwuting.quwutingservice.dancer.enums.DancerServiceCategory;
+import org.quwuting.quwutingservice.dancer.enums.DancerServiceSubCategory;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerVenueRelation;
 import org.quwuting.quwutingservice.dancer.enums.DancerVerificationAction;
@@ -29,6 +32,7 @@ import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionTagRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
+import org.quwuting.quwutingservice.dancer.repository.DancerServiceRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVenueRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVerificationLogRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
@@ -45,6 +49,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -53,6 +58,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * 舞伴生态体系核心服务（领域边界：认可/标签/资料/场所关系，独立于舞厅 reaction——
@@ -98,6 +104,8 @@ public class DancerService {
     private final DancerRecognitionTagRepository recognitionTagRepository;
     private final DancerPhotoRepository photoRepository;
     private final DancerAdViewRepository adViewRepository;
+    /** 舞伴服务范围（2026-08-24：admin 录入的黄页内容——详情服务卡/需求弹层/列表服务类别筛选） */
+    private final DancerServiceRepository dancerServiceRepository;
     /** 信息核验审计日志（2026-08-14 官方认证：全部状态变迁的唯一历史事实源） */
     private final DancerVerificationLogRepository verificationLogRepository;
     /** 舞伴收藏（2026-08-14：qwt_dancer_favorites，见 V27 迁移与 AGENTS.md「舞伴收藏」） */
@@ -426,10 +434,17 @@ public class DancerService {
      * 增删审/状态流转/认证/新建）经 {@link #invalidateListCache()} 显式失效。
      */
     @Transactional(readOnly = true)
-    public Page<DancerSummaryResponse> listPublic(String city, int page, int size, Long currentUserId) {
+    public Page<DancerSummaryResponse> listPublic(String city, String serviceCategory,
+                                                  int page, int size, Long currentUserId) {
         Pageable pageable = sanePage(page, size);
+        // 服务类别筛选（2026-08-24 需求优先匹配）：非法类别 code → 1001（枚举解析防御）
+        DancerServiceCategory category = null;
+        if (serviceCategory != null && !serviceCategory.isBlank()) {
+            category = DancerServiceCategory.parse(serviceCategory);
+        }
         // 用户无关公共部分（缓存：单飞 + refresh-ahead，见 DancerListCacheService）
-        DancerListCacheService.ListPublicPart part = listCacheService.get(city, pageable);
+        DancerListCacheService.ListPublicPart part = listCacheService.get(city,
+                category != null ? category.name() : null, pageable);
         List<Object[]> rows = part.rows();
         if (rows.isEmpty()) {
             return new PageImpl<>(Collections.emptyList(), pageable, part.totalElements());
@@ -552,7 +567,8 @@ public class DancerService {
                     myTagsById.getOrDefault(id, Collections.emptyList()),
                     en.tagsById().getOrDefault(id, Collections.emptyList()),
                     en.viewCounts().getOrDefault(id, 0L),
-                    buildMediaPreviews(en.mediaPreviewsById().get(id), unlockedMediaIds, showAllMedia)));
+                    buildMediaPreviews(en.mediaPreviewsById().get(id), unlockedMediaIds, showAllMedia),
+                    en.onlineServiceDancerIds().contains(id)));
         }
         return summaries;
     }
@@ -651,25 +667,27 @@ public class DancerService {
                 .filter(f -> !f.isDeleted()).isPresent();
         // 用户无关公共聚合（2026-08-19 详情缓存：stats/tags/venues/cities/gifts/points/adViews/contactCost）
         DancerDetailCacheService.PublicPart pub = detailCacheService.get(dancerId);
-        // 联系方式可见性（2026-08-14 积分解锁 + 遮挡开关）：
-        // - 不遮挡（hideContact=false）→ 恒下发真实值（门槛被忽略——打码与否是展示层决策，
-        //   残留门槛值保留，重新遮挡后恢复生效）；
-        // - 遮挡 + 有门槛 + 未解锁 → 不下发真实值（防绕过），经 POST /points/unlock 解锁后返回；
-        // - 遮挡 + 无门槛（免费）→ 下发真实值，由前端遮罩承载"点击直显"交互（内容本身免费）。
-        // 本人/管理员（contactUnlocked 恒 true）恒可见。
+        // 联系方式可见性（2026-08-24 晚 改版：联系方式改为「用户获取时才实时查询」）：
+        // - 详情接口对普通用户（非本人/管理员）恒不下发真实值（contact/contactImageUrl），
+        //   无论是否解锁/无门槛/不遮挡——防内容随详情泄漏；用户点击「获取联系方式」
+        //   经 POST /points/unlock 实时查询返回（无门槛恒免费、有门槛每日首免、
+        //   已解锁幂等，见 PointsService#unlock）；
+        // - 本人/管理员（dancer-edit 编辑回显 + 管理者天然可见）仍随详情下发；
+        // - hideContact/contactCost/contactUnlocked 照常下发（前端驱动入口文案/锁态）。
         boolean hideContact = dancer.isHideContact();
         int contactCost = pub.contactCost();
         boolean contactUnlocked = showAllPhotos
                 || pointsService.isUnlocked(currentUserId, PointsGateTargetType.DANCER_CONTACT, dancerId);
-        String contact = dancer.getContact();
-        if (contact != null && !contact.isBlank() && hideContact && contactCost > 0 && !contactUnlocked) {
-            contact = null;
-        }
-        // 联系方式图片（2026-08-14）：与 contact 同一可见性——未解锁不下发真实 URL
-        String contactImageUrl = dancer.getContactImageUrl();
-        if (contactImageUrl != null && !contactImageUrl.isBlank() && hideContact && contactCost > 0 && !contactUnlocked) {
-            contactImageUrl = null;
-        }
+        String contact = showAllPhotos ? dancer.getContact() : null;
+        String contactImageUrl = showAllPhotos ? dancer.getContactImageUrl() : null;
+        // 舞伴是否填写了联系方式（contact 或 contactImageUrl 任一非空）——普通用户侧
+        // 「联系方式」行入口的权威依据（真实值恒不下发，前端无法自判"是否可获取"）。
+        // ⚠️ 必须基于 dancer 原始值计算（contact/contactImageUrl 已按视角置 null，
+        // 误用会导致普通用户 hasContact 恒 false、联系方式行入口消失）
+        String rawContact = dancer.getContact();
+        String rawContactImageUrl = dancer.getContactImageUrl();
+        boolean hasContact = (rawContact != null && !rawContact.isBlank())
+                || (rawContactImageUrl != null && !rawContactImageUrl.isBlank());
         // 创作者收益计划（2026-08-14）：开关 + 广告位 ID（配置下发，前端零硬编码）+
         // 累计广告支持次数（收益线下结算依据）
         boolean earningsEnabled = dancer.isEarningsEnabled();
@@ -685,9 +703,183 @@ public class DancerService {
                 isMine, myToday, myTags, favorite, pub.stats(),
                 pub.pointsReceivedTotal(), pub.pointsReceived30d(), pub.giftsReceived(),
                 fetchPhotos(dancerId, showAllPhotos, currentUserId),
-                pub.tags(), pub.venues(),
-                contact, contactImageUrl, hideContact, contactCost, contactUnlocked,
+                pub.tags(), pub.venues(), pub.services(),
+                hasContact, contact, contactImageUrl, hideContact, contactCost, contactUnlocked,
                 earningsEnabled, earningsAdUnitId, pub.adViews());
+    }
+
+    // ─── 服务范围（2026-08-24：admin 录入的黄页内容；详情公开读 + 管理端写） ─────
+
+    /**
+     * 单舞伴在用服务列表（GET /dancers/{id}/services，公开软鉴权——与详情同可见性校验）。
+     * 详情页服务卡数据已随详情响应下发（pub.services，公共缓存），本端点供独立
+     * 场景/前端降级直查（口径一致）。
+     */
+    @Transactional(readOnly = true)
+    public List<DancerServiceResponse> listServices(Long dancerId, Long currentUserId, UserRole currentRole) {
+        Dancer dancer = findDancerOrThrow(dancerId);
+        if (!canView(dancer, currentUserId, currentRole)) {
+            throw new BusinessException(1003, "该舞伴资料暂不可见");
+        }
+        return dancerServiceRepository.findByDancerIdAndDeletedFalseAndActiveTrueOrderBySortOrderAscIdAsc(dancerId)
+                .stream().map(this::toServiceResponse).toList();
+    }
+
+    /** admin 新增服务范围（POST /admin/dancers/{id}/services，平台代发黄页内容——合规见 AGENTS.md） */
+    @Transactional
+    public DancerServiceResponse addService(Long adminId, Long dancerId, UpsertDancerServiceRequest request) {
+        Dancer dancer = findDancerOrThrow(dancerId);
+        org.quwuting.quwutingservice.dancer.entity.DancerService service =
+                new org.quwuting.quwutingservice.dancer.entity.DancerService();
+        service.setDancerId(dancerId);
+        applyServiceFields(service, request, dancerServiceRepository.findMaxSortOrder(dancerId) + 1);
+        return saveService(adminId, dancer, service);
+    }
+
+    /** admin 更新服务范围（POST /admin/dancers/{id}/services/{serviceId}；全量覆盖可编辑字段） */
+    @Transactional
+    public DancerServiceResponse updateService(Long adminId, Long dancerId, Long serviceId,
+                                               UpsertDancerServiceRequest request) {
+        Dancer dancer = findDancerOrThrow(dancerId);
+        org.quwuting.quwutingservice.dancer.entity.DancerService service =
+                dancerServiceRepository.findByIdAndDeletedFalse(serviceId)
+                        .orElseThrow(() -> new BusinessException(1001, "服务不存在"));
+        if (!service.getDancerId().equals(dancerId)) {
+            throw new BusinessException(1001, "服务不属于该舞伴");
+        }
+        applyServiceFields(service, request, service.getSortOrder());
+        return saveService(adminId, dancer, service);
+    }
+
+    /**
+     * admin 下架服务（POST /admin/dancers/{id}/services/{serviceId}/remove，软删）。
+     * 软删保留历史需求关联（qwt_demand_records.service_ids 存服务 id，删除后仍可审计）；
+     * 同舞伴同标签的服务软删后不占唯一索引位，可重建。
+     */
+    @Transactional
+    public void removeService(Long adminId, Long dancerId, Long serviceId) {
+        Dancer dancer = findDancerOrThrow(dancerId);
+        org.quwuting.quwutingservice.dancer.entity.DancerService service =
+                dancerServiceRepository.findByIdAndDeletedFalse(serviceId)
+                        .orElseThrow(() -> new BusinessException(1001, "服务不存在"));
+        if (!service.getDancerId().equals(dancerId)) {
+            throw new BusinessException(1001, "服务不属于该舞伴");
+        }
+        service.setDeleted(true);
+        service.setActive(false);
+        dancerServiceRepository.save(service);
+        detailCacheService.invalidate(dancerId); // 服务范围在详情公共缓存内，写路径显式失效
+        invalidateListCache(); // 服务类别筛选的列表成员资格变化（全清，条目数小可接受）
+        log.info("管理员 {} 下架舞伴 {} 的服务「{}」", adminId, dancerId, service.getLabel());
+    }
+
+    /**
+     * 可编辑字段全量覆盖（trim 归一；缺省 sortOrder = 传入值——新增 = max+1，更新 = 原值）。
+     * 2026-08-24 晚：category=PACKAGE 时子类别必填；2026-08-25 晚二轮：子类别<b>多选</b>
+     * （subCategories 列表 → 逗号连接的 code 串落库），其余类别忽略恒置 null；
+     * 2026-08-26：label 改<b>服务端权威派生</b>（buildServiceLabel）+ negotiable
+     * 回头客/熟人可谈（缺省 true）。
+     */
+    private void applyServiceFields(org.quwuting.quwutingservice.dancer.entity.DancerService service,
+                                    UpsertDancerServiceRequest request, int defaultSortOrder) {
+        List<DancerServiceSubCategory> subs = request.category() == DancerServiceCategory.PACKAGE
+                ? normalizeSubCategories(request.subCategories()) : null;
+        service.setLabel(buildServiceLabel(request.category(), subs, request.label()));
+        service.setCategory(request.category());
+        service.setSubCategory(subs != null
+                ? subs.stream().map(DancerServiceSubCategory::name).collect(Collectors.joining(","))
+                : null);
+        service.setPriceText(norm(request.priceText()));
+        service.setLocationScope(norm(request.locationScope()));
+        service.setAdvanceNotice(norm(request.advanceNotice()));
+        service.setRules(norm(request.rules()));
+        service.setNegotiable(request.negotiable() == null || request.negotiable());
+        service.setSortOrder(request.sortOrder() != null ? request.sortOrder() : defaultSortOrder);
+        service.setActive(true);
+    }
+
+    /**
+     * label 服务端权威派生（2026-08-26：表单删除「服务标签」输入——包时 =
+     * 子类别名顿号连接+「包时」，舞厅跳舞/线上陪聊 = 类别名，仅「其他」类别
+     * admin 手动录入「服务内容」（必填，如「户外露营」）。
+     * 存量自定义 label（含 OTHER）原样保留：请求 label 非空 → 直接采用；
+     * 空 → 按类别派生（OTHER 无默认名 → 1001 提示录入服务内容）。
+     */
+    private static String buildServiceLabel(DancerServiceCategory category,
+                                            List<DancerServiceSubCategory> subs,
+                                            String rawLabel) {
+        String manual = rawLabel == null ? "" : rawLabel.trim();
+        if (!manual.isEmpty()) {
+            return manual;
+        }
+        if (category == DancerServiceCategory.PACKAGE) {
+            return subs.stream().map(DancerServiceSubCategory::defaultLabel)
+                    .collect(Collectors.joining("、")) + "包时";
+        }
+        if (category == DancerServiceCategory.OTHER) {
+            throw new BusinessException(1001, "请填写服务内容");
+        }
+        return category.defaultLabel();
+    }
+
+    /** 包时子类别归一：非空校验 + 去重保序（PACKAGE 必选 ≥1，2026-08-25 晚二轮多选） */
+    private static List<DancerServiceSubCategory> normalizeSubCategories(List<DancerServiceSubCategory> raw) {
+        if (raw == null || raw.isEmpty()) {
+            throw new BusinessException(1001, "包时请至少选择 1 个子类别（酒吧/舞厅/私影/KTV/其他）");
+        }
+        return raw.stream().distinct().toList();
+    }
+
+    /** 可空字段归一（null → 空串；trim） */
+    private static String norm(String v) {
+        return v == null ? "" : v.trim();
+    }
+
+    /** 保存服务：同舞伴同标签唯一预检 + 库内唯一索引兜底（SQLState 23505 → 1001）+ 详情缓存失效 */
+    private DancerServiceResponse saveService(Long adminId, Dancer dancer,
+                                              org.quwuting.quwutingservice.dancer.entity.DancerService service) {
+        dancerServiceRepository.findByDancerIdAndLabelAndDeletedFalse(service.getDancerId(), service.getLabel())
+                .filter(existing -> !existing.getId().equals(service.getId()))
+                .ifPresent(existing -> {
+                    throw new BusinessException(1001, "该舞伴已有同名服务");
+                });
+        try {
+            dancerServiceRepository.saveAndFlush(service);
+        } catch (DataIntegrityViolationException e) {
+            // 并发竞态兜底（admin 单人写入场景罕见，库内部分唯一索引为准）
+            throw new BusinessException(1001, "该舞伴已有同名服务");
+        }
+        detailCacheService.invalidate(dancer.getId()); // 服务范围在详情公共缓存内
+        invalidateListCache(); // 服务类别筛选的列表成员资格变化（全清，条目数小可接受）
+        log.info("管理员 {} 保存舞伴 {} 服务「{}」（{}）", adminId, dancer.getId(), service.getLabel(), service.getCategory());
+        return toServiceResponse(service);
+    }
+
+    /** 实体 → 响应：subCategory 逗号串 → subCategories 列表（按枚举声明序，兼容旧单值） */
+    private DancerServiceResponse toServiceResponse(org.quwuting.quwutingservice.dancer.entity.DancerService s) {
+        List<DancerServiceSubCategory> subs = parseSubCategories(s.getSubCategory());
+        return new DancerServiceResponse(s.getId(), s.getCategory(), s.getCategory().defaultLabel(),
+                subs, subs.stream().map(DancerServiceSubCategory::defaultLabel).toList(), s.getLabel(),
+                s.getPriceText(), s.getLocationScope(), s.getAdvanceNotice(), s.getRules(),
+                s.isNegotiable());
+    }
+
+    /** 逗号连接的子类别 code 串 → 枚举列表（空串/null → 空列表；非法 code 防御性忽略） */
+    private static List<DancerServiceSubCategory> parseSubCategories(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return List.of();
+        }
+        return Arrays.stream(raw.split(","))
+                .filter(code -> !code.isBlank())
+                .map(code -> {
+                    try {
+                        return DancerServiceSubCategory.valueOf(code);
+                    } catch (IllegalArgumentException e) {
+                        return null; // 脏数据防御（历史/手工改动），忽略非法项
+                    }
+                })
+                .filter(Objects::nonNull)
+                .toList();
     }
 
     // ─── 创作者收益计划（2026-08-14：激励视频广告观看上报） ─────────────────────
@@ -1033,7 +1225,8 @@ public class DancerService {
                     en.tagsById().getOrDefault(d.getId(), Collections.emptyList()),
                     en.viewCounts().getOrDefault(d.getId(), 0L),
                     // 本人视角：所有媒体恒解锁（showAllMedia=true，见 buildMediaPreviews）
-                    buildMediaPreviews(en.mediaPreviewsById().get(d.getId()), Collections.emptySet(), true)));
+                    buildMediaPreviews(en.mediaPreviewsById().get(d.getId()), Collections.emptySet(), true),
+                    en.onlineServiceDancerIds().contains(d.getId())));
         }
         return result;
     }

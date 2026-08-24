@@ -11,6 +11,7 @@ import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.response.AdViewResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerDetailResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerPhotoResponse;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerServiceResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerStatsResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerSummaryResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTagsResponse;
@@ -56,14 +57,19 @@ public class DancerController {
 
     /**
      * 舞伴列表（公开，软鉴权：登录时返回个人"今日已认可"状态）。
-     * 支持按常驻城市筛选（city 可选）；排序由后端完成（近7天认可倒序，见 DancerService#listPublic）。
+     * 支持按常驻城市筛选（city 可选）与<b>服务类别筛选</b>（serviceCategory 可选，
+     * 2026-08-24 需求优先匹配：命中"存在 ≥1 个在用且类别匹配的服务"的舞伴，
+     * 枚举 code = PACKAGE/DANCE/BAR/ONLINE_CHAT/OTHER）；
+     * 排序由后端完成（近7天认可倒序，见 DancerService#listPublic）。
      */
     @GetMapping
     public ApiResponse<Page<DancerSummaryResponse>> list(
             @RequestParam(required = false) String city,
+            @RequestParam(required = false) String serviceCategory,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "10") int size) {
-        return ApiResponse.ok(dancerService.listPublic(city, page, size, UserContext.getCurrentUserId()));
+        return ApiResponse.ok(dancerService.listPublic(city, serviceCategory, page, size,
+                UserContext.getCurrentUserId()));
     }
 
     /**
@@ -101,6 +107,17 @@ public class DancerController {
     @GetMapping("/{id}")
     public ApiResponse<DancerDetailResponse> get(@PathVariable Long id) {
         return ApiResponse.ok(dancerService.getDetail(id, UserContext.getCurrentUserId(), UserContext.getCurrentRole()));
+    }
+
+    /**
+     * 舞伴服务范围列表（公开软鉴权，2026-08-24——与详情同可见性校验）。
+     * 详情页服务卡数据已随详情响应下发（services 字段，公共缓存），本端点供
+     * 独立场景/前端降级直查（口径一致）。需求弹层「服务场景」chip 数据源。
+     */
+    @GetMapping("/{id}/services")
+    public ApiResponse<List<DancerServiceResponse>> services(@PathVariable Long id) {
+        return ApiResponse.ok(dancerService.listServices(
+                id, UserContext.getCurrentUserId(), UserContext.getCurrentRole()));
     }
 
     /** 舞伴标签聚合（公开软鉴权；2026-08-19 扩展：响应含 myTags——当前用户今日

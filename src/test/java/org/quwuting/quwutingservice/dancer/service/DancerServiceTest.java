@@ -27,6 +27,7 @@ import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionRepositor
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionTagRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerCityRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
+import org.quwuting.quwutingservice.dancer.repository.DancerServiceRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVenueRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVerificationLogRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
@@ -71,6 +72,8 @@ class DancerServiceTest {
     @Mock
     private DancerPhotoRepository photoRepository;
     @Mock
+    private DancerServiceRepository dancerServiceRepository;
+    @Mock
     private DancerDetailCacheService detailCacheService;
     @Mock
     private VenueLookupService venueLookupService;
@@ -112,7 +115,7 @@ class DancerServiceTest {
         return new DancerDetailCacheService.PublicPart(
                 new DancerRecognitionStats(agg[0], agg[1], agg[2], agg[3], Collections.emptyList()),
                 Collections.emptyList(), Collections.emptyList(), Collections.emptyList(),
-                Collections.emptyList(), 0L, 0L, contactCost, 0L);
+                Collections.emptyList(), 0L, 0L, contactCost, 0L, Collections.emptyList());
     }
 
     private Dancer dancer;
@@ -120,7 +123,7 @@ class DancerServiceTest {
     @BeforeEach
     void setUp() {
         dancerService = new DancerService(dancerRepository, dancerCityRepository, dancerVenueRepository, recognitionRepository,
-                recognitionTagRepository, photoRepository, adViewRepository, verificationLogRepository,
+                recognitionTagRepository, photoRepository, adViewRepository, dancerServiceRepository, verificationLogRepository,
                 dancerFavoriteRepository, detailCacheService, listCacheService, venueLookupService,
                 messageService, pointsService, imageValidator, new org.quwuting.quwutingservice.config.DancerAdProperties(""),
                 opsConfigService, tagDictService);
@@ -267,11 +270,12 @@ class DancerServiceTest {
 
         assertTrue(resp.hideContact(), "默认遮挡");
         assertEquals(5, resp.contactCost());
-        assertNull(resp.contact(), "遮挡 + 有门槛 + 未解锁 → 不下发真实值（防绕过）");
+        assertNull(resp.contact(), "普通用户恒不下发真实值（无论门槛/解锁/遮挡态——防内容随详情泄漏）");
+        assertTrue(resp.hasContact(), "舞伴填写了联系方式 → 联系方式行渲染入口依据");
     }
 
     @Test
-    void getDetail_hideContactTrue_withFreeGate_contactDeliveredForFrontendMask() {
+    void getDetail_hideContactTrue_withFreeGate_contactNotDelivered_hasContactTrue() {
         dancer.setContact("wx:xiaoya");
         dancer.setHideContact(true);
         stubDetailForContact(0);
@@ -280,12 +284,14 @@ class DancerServiceTest {
 
         assertTrue(resp.hideContact());
         assertEquals(0, resp.contactCost());
-        assertEquals("wx:xiaoya", resp.contact(),
-                "遮挡 + 免费 → 下发真实值（内容本身免费），前端遮罩承载点击直显交互");
+        assertTrue(resp.hasContact(), "无门槛免费舞伴同样下发 hasContact=true（入口渲染依据）");
+        assertNull(resp.contact(),
+                "2026-08-24 晚 改版：普通用户恒不下发真实值（无论无门槛/已解锁/未遮挡）——"
+                + "点击「获取联系方式」经 POST /points/unlock 实时查询（无门槛恒免费）");
     }
 
     @Test
-    void getDetail_hideContactFalse_contactAlwaysDelivered() {
+    void getDetail_hideContactFalse_contactNotDelivered_hasContactTrue() {
         dancer.setContact("wx:xiaoya");
         dancer.setHideContact(false);
         stubDetailForContact(5); // 残留门槛
@@ -293,8 +299,10 @@ class DancerServiceTest {
 
         DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
 
-        assertFalse(resp.hideContact(), "不遮挡 → 恒直显");
-        assertEquals("wx:xiaoya", resp.contact(), "不遮挡时忽略门槛下发真实值");
+        assertFalse(resp.hideContact(), "不遮挡 → 行内直显入口（真实值仍按需实时查询）");
+        assertTrue(resp.hasContact());
+        assertNull(resp.contact(),
+                "2026-08-24 晚 改版：不遮挡也不再随详情下发真实值——点击获取经 POST /points/unlock 实时查询");
     }
 
     @Test
@@ -307,7 +315,8 @@ class DancerServiceTest {
 
         DancerDetailResponse resp = dancerService.getDetail(1L, 1L, UserRole.USER);
 
-        assertEquals("wx:xiaoya", resp.contact(), "本人恒可见（showAllPhotos 短路解锁判定）");
+        assertEquals("wx:xiaoya", resp.contact(), "本人恒可见（dancer-edit 编辑回显）");
+        assertTrue(resp.hasContact());
     }
 
     // ─── 认可（每日一记 toggle） ─────────────────────────────────────────────

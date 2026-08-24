@@ -6,10 +6,12 @@ import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.dancer.DancerTagCode;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTagStat;
 import org.quwuting.quwutingservice.dancer.enums.DancerPhotoKind;
+import org.quwuting.quwutingservice.dancer.enums.DancerServiceCategory;
 import org.quwuting.quwutingservice.dancer.enums.DancerVenueRelation;
 import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionTagRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
+import org.quwuting.quwutingservice.dancer.repository.DancerServiceRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerVenueRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerViewRepository;
 import org.quwuting.quwutingservice.tagdict.dto.response.TagItemResponse;
@@ -23,6 +25,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -86,6 +89,8 @@ public class DancerListCacheService {
     private final DancerVenueRepository dancerVenueRepository;
     private final DancerPhotoRepository photoRepository;
     private final DancerViewRepository dancerViewRepository;
+    /** 舞伴服务范围（2026-08-24：线上服务标识批量判定） */
+    private final DancerServiceRepository dancerServiceRepository;
     /** 通用标签字典（2026-08-24：资料标签反序列化 + 字典解析） */
     private final TagDictService tagDictService;
 
@@ -118,7 +123,13 @@ public class DancerListCacheService {
             /** 资料标签（2026-08-24：dancerId → TagItemResponse 列表，卡片长按弹说明文案） */
             Map<Long, List<TagItemResponse>> profileTagsById,
             /** 媒体预览简报（2026-08-24 晚：dancerId → 前 N 个 PUBLIC 媒体，列表卡片多图预览） */
-            Map<Long, List<DancerMediaBrief>> mediaPreviewsById
+            Map<Long, List<DancerMediaBrief>> mediaPreviewsById,
+            /**
+             * 提供线上服务的舞伴 id 集合（2026-08-24：存在 ≥1 个在用且类别为
+             * ONLINE_CHAT（线上陪聊）的服务——列表卡片「线上」胶囊数据源；
+             * 用户无关可缓存）。
+             */
+            Set<Long> onlineServiceDancerIds
     ) {}
 
     /** 列表公共部分（用户无关的主查询行 + enrichments；totalElements 随行缓存避免重复计数） */
@@ -137,11 +148,13 @@ public class DancerListCacheService {
     /**
      * 获取列表公共部分（缓存：单飞 + refresh-ahead；首次 miss 全量聚合一次）。
      *
-     * @param city     城市筛选（null = 全部，与 DancerService.listPublic 同参数语义）
-     * @param pageable 分页（page/size 参与缓存 key；compute 内重新构造 Pageable 查询）
+     * @param city            城市筛选（null = 全部，与 DancerService.listPublic 同参数语义）
+     * @param serviceCategory 服务类别筛选（2026-08-24 需求优先匹配；null = 全部——
+     *                        命中"存在 ≥1 个在用且类别匹配的服务"的舞伴）
+     * @param pageable        分页（page/size 参与缓存 key；compute 内重新构造 Pageable 查询）
      */
-    public ListPublicPart get(String city, Pageable pageable) {
-        return cache.get(key(city, pageable.getPageNumber(), pageable.getPageSize()));
+    public ListPublicPart get(String city, String serviceCategory, Pageable pageable) {
+        return cache.get(key(city, serviceCategory, pageable.getPageNumber(), pageable.getPageSize()));
     }
 
     /**
@@ -153,20 +166,22 @@ public class DancerListCacheService {
         cache.invalidateAll();
     }
 
-    /** 缓存 key（城市名来自标准行政区划词表，不含 '|'，安全分隔） */
-    private static String key(String city, int page, int size) {
-        return (city == null ? "" : city) + "|" + page + "|" + size;
+    /** 缓存 key（城市名/类别 code 来自标准词表与枚举，不含 '|'，安全分隔） */
+    private static String key(String city, String serviceCategory, int page, int size) {
+        return (city == null ? "" : city) + "|" + (serviceCategory == null ? "" : serviceCategory)
+                + "|" + page + "|" + size;
     }
 
     /** 聚合计算（缓存 loader，勿直接调用——经 {@link #get} 走缓存）。 */
     private ListPublicPart compute(String key) {
         String[] parts = key.split("\\|", -1);
         String city = parts[0].isEmpty() ? null : parts[0];
-        int page = Integer.parseInt(parts[1]);
-        int size = Integer.parseInt(parts[2]);
+        String serviceCategory = parts[1].isEmpty() ? null : parts[1];
+        int page = Integer.parseInt(parts[2]);
+        int size = Integer.parseInt(parts[3]);
         LocalDateTime now = LocalDateTime.now();
         Page<Object[]> rows = dancerRepository.findPublicPage(
-                city, LocalDate.now().atStartOfDay() /* 今日锚点 = 今日0点 */,
+                city, serviceCategory, LocalDate.now().atStartOfDay() /* 今日锚点 = 今日0点 */,
                 now.minusDays(7), now.minusDays(30),
                 org.springframework.data.domain.PageRequest.of(page, size));
         List<Long> ids = rows.getContent().stream().map(r -> (Long) r[0]).toList();
@@ -185,7 +200,17 @@ public class DancerListCacheService {
                 fetchCoverPhotoUrls(dancerIds),
                 fetchViewCounts(dancerIds),
                 fetchProfileTags(dancerIds),
-                fetchMediaPreviews(dancerIds));
+                fetchMediaPreviews(dancerIds),
+                fetchOnlineServiceDancerIds(dancerIds));
+    }
+
+    /** 批量「提供线上服务」舞伴 id（2026-08-24：复用服务类别批量判定，一次 IN 查询） */
+    private Set<Long> fetchOnlineServiceDancerIds(List<Long> dancerIds) {
+        if (dancerIds.isEmpty()) {
+            return Collections.emptySet();
+        }
+        return new HashSet<>(dancerServiceRepository.findDancerIdsByCategoryIn(
+                dancerIds, DancerServiceCategory.ONLINE_CHAT));
     }
 
     /** 批量标签聚合（全量，同 DancerService.fetchTopTags 口径——列表卡片 chips 数据源） */

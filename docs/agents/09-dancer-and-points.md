@@ -106,6 +106,13 @@
   按当前用户批量实时查（照片/视频分组），<b>不进列表缓存</b>（对齐 myTodayIds 边界）——
   列表缓存 ListEnrichments 仅存用户无关媒体简报（`DancerMediaBrief`：id/kind/url/blurUrl/
   coverUrl/cost/duration，url/coverUrl 仅服务端内存持有，组装时按解锁态选择下发）。
+- **线上服务标识（2026-08-24：`DancerSummaryResponse.onlineService`；晚改版类别
+  ONLINE_CHAT 线上陪聊）**：列表卡片「线上」
+  胶囊数据源 = 舞伴存在 ≥1 个在用且类别为 ONLINE_CHAT 的服务（`DancerServiceRepository
+  .findDancerIdsByCategoryIn(dancerIds, ONLINE_CHAT)` 一次 IN 批量判定，与城市筛选同参数语义
+  正交——线上线下兼有的舞伴同样为 true）。用户无关态 → 进列表缓存
+  `ListEnrichments.onlineServiceDancerIds`（Set），listPublic 走缓存、listFavorites /
+  listMyDancers 走 `computeEnrichments` 同源组装（buildSummaries 统一消费）。
 - **合规**：视频同照片——仅本人/管理员可上传（实际入口仅管理员 dancer-edit）+ 逐条审核后公开。
 - **视频积分门槛（2026-08-22 同日开放，媒体无关契约兑现）**：
   - `PointsGateTargetType` 加 `DANCER_VIDEO`（gate 表 target_type 字符串存储零迁移）；
@@ -207,7 +214,7 @@ V41 迁移 UPDATE 为简短中性对称文案：线上「可提供线上互动�
 
 | 接口 | 鉴权 | 说明 |
 |---|---|---|
-| GET /dancers | 软鉴权 | 列表（仅 NORMAL；city 可选；按 count7d 倒序分页；登录含 myRecognizedToday + **myTags（2026-08-19 今日投票 code，列表 reaction 区域 chip 活跃态）**；topTags **全量下发**（2026-08-19 去截断）；含 coverPhotoUrl + **mediaPreviews（2026-08-24 晚：照片+视频混合前 4 个 PUBLIC 媒体，付费未解锁仅薄码，解锁态按当前用户实时组装）**） |
+| GET /dancers | 软鉴权 | 列表（仅 NORMAL；city 可选；按 count7d 倒序分页；登录含 myRecognizedToday + **myTags（2026-08-19 今日投票 code，列表 reaction 区域 chip 活跃态）**；topTags **全量下发**（2026-08-19 去截断）；含 coverPhotoUrl + **mediaPreviews（2026-08-24 晚：照片+视频混合前 4 个 PUBLIC 媒体，付费未解锁仅薄码，解锁态按当前用户实时组装）** + **onlineService（2026-08-24：存在在用 ONLINE_CHAT（线上陪聊）服务 → 列表卡片「线上」胶囊）**） |
 | GET /dancers/cities | 软鉴权 | 常驻城市词表（聚合真实数据，2026-08-10 激活列表页城市筛选） |
 | POST /dancers | 登录 | 舞伴主动注册 → PENDING；返回新建 ID |
 | GET /dancers/{id} | 软鉴权 | 详情（可见性校验；登录含 isMine + myRecognizedToday + **myTags（2026-08-15 今日认可携带标签，chip 活跃态数据源）** + **favorite（2026-08-14 服务端权威收藏态）** + 四窗口统计 + 近7日每日认可 + **标签聚合（2026-08-15 四窗口：countAll/countToday/count7d/count30d）** + 常去/出现舞厅 + 相册 photos（按身份过滤）） |
@@ -561,12 +568,14 @@ Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻
   - `qwt_dancers.contact`（V24，varchar 100 可空）：联系方式随 UpsertDancerRequest
     走既有 PENDING 审核（管理员可见），明文存储（与昵称/简介同级别，MVP 不加密）。
   - `qwt_dancers.hide_contact`（V28，boolean NOT NULL DEFAULT true）：<b>联系方式遮挡
-    开关</b>（2026-08-14，默认遮挡）——与积分门槛<b>正交</b>：hide_contact 决定是否
-    打码展示；门槛 cost 决定打码后如何解锁（0=免费点击直显，>0=积分解锁后显示）。
-    不遮挡（false）时后端<b>忽略门槛恒下发真实值</b>（残留门槛值保留，重新遮挡后
-    恢复生效）；遮挡 + 免费照常下发（内容免费，前端遮罩承载"点击直显"交互）；
-    遮挡 + 有门槛 + 未解锁才置 null 防绕过。UpsertDancerRequest 增 hideContact
-    （null = 默认遮挡 true，旧客户端向后兼容）。
+    开关</b>（2026-08-14，默认遮挡；<b>2026-08-24 晚 语义改版：真实值按需实时查询</b>）——
+    与积分门槛<b>正交</b>：hide_contact 决定入口锁态；门槛 cost 决定如何获取
+    （0=免费获取，>0=积分解锁后获取）。<b>详情接口对普通用户恒不下发真实值</b>
+    （contact/contactImageUrl = null，无论无门槛/已解锁/未遮挡——防内容随详情泄漏），
+    用户点击「获取联系方式」经 `POST /points/unlock` 实时查询返回（无门槛恒免费 /
+    有门槛每日首免 / 已解锁幂等）；本人/管理员（dancer-edit 编辑回显）仍随详情下发。
+    新增 `hasContact`（contact 或 contactImageUrl 任一非空）驱动前端入口渲染。
+    UpsertDancerRequest 增 hideContact（null = 默认遮挡 true，旧客户端向后兼容）。
   - `qwt_dancer_photos.blur_url`（V25，可空）：<b>模糊占位图</b>（需求 4：
     收费照片详情页"模糊可见轮廓"遮罩，<b>薄码语义</b>——轻模糊、轮廓隐约可见，
     非厚码/马赛克）——前端上传原图时 canvas 离屏降采样生成（最长边 96px +
@@ -588,7 +597,9 @@ Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻
   - `POST /dancers/{id}/photos` body 扩展 `{urls, blurUrls}`（2026-08-14）：
     blurUrls 与 urls 按 index 一一对应（可缺省），落库 DancerPhoto.blurUrl。
 - **详情组装（DancerService）**：`DancerDetailResponse` 增 contact/contactCost/
-  contactUnlocked/hideContact；`DancerPhotoResponse` 增 cost/unlocked/blurUrl；**未解锁照片 url 置
+  contactUnlocked/hideContact/hasContact（2026-08-24 晚：contact/contactImageUrl
+  对普通用户恒置 null——按需实时查询，仅本人/管理员下发；hasContact = 二者任一
+  非空，普通用户侧入口渲染权威依据）；`DancerPhotoResponse` 增 cost/unlocked/blurUrl；**未解锁照片 url 置
   null**（不下发原图防绕过，blurUrl 恒下发作遮罩）；列表封面 SQL
   （findCoverUrlsByDancerIds）LEFT JOIN gates **跳过有门槛照片**（列表页不泄露需解锁
   原图；全设门槛的舞伴无封面 = 诚实呈现）。批量组装走 PointsService.gateCosts /
@@ -597,8 +608,8 @@ Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻
 - **测试**：PointsServiceTest / DancerServiceTest 适配新构造参数（UpsertDancerRequest
   + contact/earningsEnabled/hideContact、PointsService + gate/unlock/photo repo、PointsProperties + gate、
   DancerService + adViewRepo/DancerAdProperties、addPhotos + blurUrls；DancerServiceTest
-  增 hideContact 三态用例：默认遮挡+付费→不下发 / 遮挡+免费→下发（前端遮罩）/
-  不遮挡→恒下发 / 本人恒可见）。
+  增 hideContact 可见性用例（2026-08-24 晚 改版后）：普通用户恒不下发（无论无门槛/
+  已解锁/未遮挡）+ hasContact 判定 / 本人·管理员恒下发（编辑回显））。
 
 ---
 

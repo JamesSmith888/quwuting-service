@@ -74,5 +74,12 @@ public record DancerSummaryResponse(
          * 薄码 + 锁语义（unlocked=false），前端渲染薄码 + 锁角标；视频条目带
          * 播放角标。空列表 = 无公开媒体，卡片不渲染预览行。
          */
-        List<DancerMediaPreviewResponse> mediaPreviews
+        List<DancerMediaPreviewResponse> mediaPreviews,
+        /**
+         * 是否提供线上服务（2026-08-24：存在 ≥1 个在用且类别为 ONLINE_CHAT 的服务）。
+         * 驱动列表卡片「线上」胶囊——线上舞伴可不绑定常驻城市（cities 为空），
+         * 城市筛选「全部」仍可见（服务范围不限地域）；同时提供线下服务的舞伴
+         * 本字段同样为 true（线上可约是独立于城市的服务属性）。
+         */
+        boolean onlineService
 ) {}

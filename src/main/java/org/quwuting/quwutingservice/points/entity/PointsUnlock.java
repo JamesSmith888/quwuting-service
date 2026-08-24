@@ -55,7 +55,11 @@ public class PointsUnlock {
     @Column(nullable = false)
     private Long targetId;
 
-    /** 扣费流水 ID（qwt_points_transactions.id，审计闭环） */
-    @Column(nullable = false)
+    /**
+     * 扣费流水 ID（qwt_points_transactions.id，审计闭环）。
+     * 2026-08-24 可空：免费解锁（每日首单免费 / 无门槛舞伴）无扣费流水——流水只记录
+     * 真实扣费，免费解锁以「transaction_id 为 null」区分（见 V42 迁移 DROP NOT NULL）。
+     */
+    @Column
     private Long transactionId;
 }

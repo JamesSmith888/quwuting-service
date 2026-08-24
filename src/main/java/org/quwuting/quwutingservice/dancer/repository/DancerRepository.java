@@ -110,6 +110,10 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
                         SELECT 1 FROM qwt_dancer_cities c
                         WHERE c.dancer_id = d.id AND c.deleted = false
                           AND (c.city = :city OR qwt_city_key(c.city) = qwt_city_key(:city))))
+              AND (:serviceCategory IS NULL OR EXISTS (
+                        SELECT 1 FROM qwt_dancer_services s
+                        WHERE s.dancer_id = d.id AND s.deleted = false AND s.active = true
+                          AND s.category = :serviceCategory))
             ORDER BY COALESCE(a.cnt7, 0) DESC, COALESCE(p.points30d, 0) DESC, d.id DESC
             """,
             countQuery = """
@@ -120,9 +124,14 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
                         SELECT 1 FROM qwt_dancer_cities c
                         WHERE c.dancer_id = d.id AND c.deleted = false
                           AND (c.city = :city OR qwt_city_key(c.city) = qwt_city_key(:city))))
+              AND (:serviceCategory IS NULL OR EXISTS (
+                        SELECT 1 FROM qwt_dancer_services s
+                        WHERE s.dancer_id = d.id AND s.deleted = false AND s.active = true
+                          AND s.category = :serviceCategory))
             """,
             nativeQuery = true)
     Page<Object[]> findPublicPage(@Param("city") String city,
+                                  @Param("serviceCategory") String serviceCategory,
                                   @Param("sinceToday") LocalDateTime sinceToday,
                                   @Param("since7d") LocalDateTime since7d,
                                   @Param("since30d") LocalDateTime since30d,

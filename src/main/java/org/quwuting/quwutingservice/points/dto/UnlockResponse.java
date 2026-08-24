@@ -13,6 +13,11 @@ import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
  *   <li>{@code contactImageUrl}：联系方式图片 URL（2026-08-14 新增，二维码等）——
  *       仅 targetType=DANCER_CONTACT 且该舞伴填了联系方式图片时返回；
  *       照片解锁恒为 null。与 contact 同一门槛语义（解锁后一并下发）。</li>
+ *   <li>{@code demandMessage}：添加好友需求描述（2026-08-24 新增，方案B 结构化格式
+ *       去舞厅【服务 · 时间 · 时长】）——仅 targetType=DANCER_CONTACT
+ *       且请求携带需求时返回（服务端拼接权威文案，前端零拼接）；照片/视频恒 null。</li>
+ *   <li>{@code freeToday}：本次解锁是否命中「每日首次免费」（2026-08-24 新增；
+ *       仅 DANCER_CONTACT 有意义，其余恒 false）——前端结果卡据此展示"今日首次 · 免费"。</li>
  * </ul>
  */
 public record UnlockResponse(
@@ -21,5 +26,7 @@ public record UnlockResponse(
         PointsGateTargetType targetType,
         Long targetId,
         String content,
-        String contactImageUrl
+        String contactImageUrl,
+        String demandMessage,
+        boolean freeToday
 ) {}

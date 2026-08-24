@@ -76,21 +76,41 @@ public record DancerDetailResponse(
         List<DancerTagStat> tags,
         List<DancerVenueInfo> venues,
         /**
-         * 联系方式（2026-08-14 积分解锁）：<b>仅当无门槛、当前用户已解锁、
-         * 或未开启遮挡时返回</b>；有门槛且未解锁返回 null（不下发真实值，防绕过），
-         * 经 POST /points/unlock 解锁后返回。本人/管理员恒返回（管理者天然可见）。
+         * 服务范围（2026-08-24 联系方式获取质量优化）：admin 录入的结构化服务列表
+         * （类别/短标签/计费方式/地点范围/预约要求/规则）——详情页「服务范围」卡
+         * 展示 + 需求弹层 chip 数据源。空列表 = 舞伴未录入服务（前端不渲染服务卡，
+         * 需求弹层按"服务不可选"降级——见 AGENTS.md「舞伴服务与联系方式需求」）。
+         */
+        List<DancerServiceResponse> services,
+        /**
+         * 舞伴是否填写了联系方式（2026-08-24 晚 按需实时查询改版）：contact 或
+         * contactImageUrl 任一非空即 true。详情接口对普通用户<b>恒不下发真实值</b>
+         * （见 contact 注释），前端据此决定「联系方式」行是否渲染入口——真实值
+         * 仅经 POST /points/unlock 点击获取时实时返回，此字段是普通用户侧唯一
+         * 的"是否可获取"权威依据。本人/管理员（编辑回显）同时可读 contact。
+         */
+        boolean hasContact,
+        /**
+         * 联系方式（2026-08-24 晚 改版：改为「用户获取时才实时查询」）：
+         * 详情接口对<b>普通用户恒不下发真实值</b>（null）——无论无门槛/已解锁/
+         * 未开启遮挡，防止内容随详情泄漏；用户点击「获取联系方式」时经
+         * POST /points/unlock 实时查询返回（无门槛恒免费、有门槛每日首免、
+         * 已解锁幂等，见 PointsService#unlock）。本人/管理员恒返回（dancer-edit
+         * 编辑回显 + 管理者天然可见）。
          */
         String contact,
         /**
          * 联系方式图片 URL（2026-08-14 新增，二维码等）：与 contact 同一可见性——
-         * 有门槛且未解锁时返回 null（不下发真实值，防绕过），解锁后经
-         * POST /points/unlock 响应返回（UnlockResponse.contactImageUrl）。
+         * 2026-08-24 晚 改版后详情接口对普通用户恒为 null（不下发真实值，防绕过），
+         * 点击获取时经 POST /points/unlock 响应返回（UnlockResponse.contactImageUrl）；
+         * 本人/管理员恒返回。
          */
         String contactImageUrl,
         /**
          * 联系方式遮挡开关（2026-08-14，默认 true）：
-         * true = 详情页打码展示（无门槛 = 免费遮罩点击直显 / 有门槛 = 积分解锁后显示）；
-         * false = 不遮挡直接展示。前端据此渲染遮罩/直显。
+         * true = 详情页打码展示（无门槛 = 免费获取 / 有门槛 = 积分解锁后获取）；
+         * false = 不遮挡直接展示。2026-08-24 晚 改版后真实值一律按需经
+         * POST /points/unlock 实时查询，本字段仅驱动前端入口文案/锁态。
          */
         boolean hideContact,
         /** 查看联系方式所需积分（0 = 无门槛；有遮挡且无门槛时点击遮罩直显） */

@@ -103,10 +103,18 @@ public class PointsController {
      * 积分解锁内容（2026-08-14 公共模块，需登录）：消耗积分换取查看权（单向燃烧，
      * 不进任何接收方账户——合规红线见 AGENTS.md「积分系统 · 积分解锁」）。
      * 幂等：已解锁直接返回内容，不重复扣费。响应含解锁后余额与解锁内容。
+     * <p>
+     * 2026-08-24 联系方式扩展：targetType=DANCER_CONTACT 时——
+     * <ul>
+     *   <li>无门槛舞伴恒免费（放开门槛限制，需求弹层收集需求后仍走本接口）；</li>
+     *   <li>有门槛舞伴每日首次获取免费（freeToday 响应字段，前端结果卡展示）；</li>
+     *   <li>body.demand（服务≤2 + 时间≤2 + 时长可选）→ 服务端生成添加好友需求描述
+     *       （响应 demandMessage）+ 需求记录落库（风控留痕）。</li>
+     * </ul>
      */
     @PostMapping("/unlock")
     public ApiResponse<UnlockResponse> unlock(@Valid @RequestBody UnlockRequest request) {
         return ApiResponse.ok(pointsService.unlock(
-                UserContext.requireAuth(), request.targetType(), request.targetId()));
+                UserContext.requireAuth(), request.targetType(), request.targetId(), request.demand()));
     }
 }

@@ -4,11 +4,13 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
+import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerServiceRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpdateDancerPhotoStatusRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpdateDancerStatusRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpdateDancerVerificationRequest;
 import org.quwuting.quwutingservice.dancer.dto.response.AdminDancerPhotoResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.AdminDancerResponse;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerServiceResponse;
 import org.quwuting.quwutingservice.dancer.enums.DancerPhotoStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.service.DancerService;
@@ -115,6 +117,31 @@ public class AdminDancerController {
                                                @Valid @RequestBody UpdateDancerPhotoStatusRequest request) {
         Long adminId = UserContext.requireAdmin();
         dancerService.updatePhotoStatus(adminId, photoId, request.status(), request.reason());
+        return ApiResponse.ok(null);
+    }
+
+    /** 新增舞伴服务范围（仅 ADMIN，2026-08-24——黄页内容平台代发模型，见 AGENTS.md
+     *  「舞伴服务与联系方式需求」；返回保存后条目，管理端据此刷新列表） */
+    @PostMapping("/{id}/services")
+    public ApiResponse<DancerServiceResponse> addService(@PathVariable Long id,
+                                                         @Valid @RequestBody UpsertDancerServiceRequest request) {
+        Long adminId = UserContext.requireAdmin();
+        return ApiResponse.ok(dancerService.addService(adminId, id, request));
+    }
+
+    /** 更新舞伴服务范围（仅 ADMIN，2026-08-24；全量覆盖可编辑字段，返回更新后条目） */
+    @PostMapping("/{id}/services/{serviceId}")
+    public ApiResponse<DancerServiceResponse> updateService(@PathVariable Long id, @PathVariable Long serviceId,
+                                                            @Valid @RequestBody UpsertDancerServiceRequest request) {
+        Long adminId = UserContext.requireAdmin();
+        return ApiResponse.ok(dancerService.updateService(adminId, id, serviceId, request));
+    }
+
+    /** 下架舞伴服务（仅 ADMIN，2026-08-24；软删保留历史需求关联，同舞伴同标签可重建） */
+    @PostMapping("/{id}/services/{serviceId}/remove")
+    public ApiResponse<Void> removeService(@PathVariable Long id, @PathVariable Long serviceId) {
+        Long adminId = UserContext.requireAdmin();
+        dancerService.removeService(adminId, id, serviceId);
         return ApiResponse.ok(null);
     }
 }

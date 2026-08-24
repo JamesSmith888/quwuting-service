@@ -10,6 +10,8 @@ import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
+import org.quwuting.quwutingservice.dancer.repository.DancerServiceRepository;
+import org.quwuting.quwutingservice.dancer.repository.DemandRecordRepository;
 import org.quwuting.quwutingservice.dancer.service.DancerDetailCacheService;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.points.dto.CheckInResponse;
@@ -74,6 +76,10 @@ class PointsServiceTest {
     @Mock
     private DancerPhotoRepository dancerPhotoRepository;
     @Mock
+    private DancerServiceRepository dancerServiceRepository;
+    @Mock
+    private DemandRecordRepository demandRecordRepository;
+    @Mock
     private PointsProperties pointsProperties;
     @Mock
     private VenueHeatService venueHeatService;
@@ -85,7 +91,8 @@ class PointsServiceTest {
     void setUp() {
         pointsService = new PointsService(accountRepository, transactionRepository, checkinRepository,
                 gateRepository, unlockRepository, venueLookupService, dancerRepository,
-                dancerPhotoRepository, pointsProperties, venueHeatService, dancerDetailCacheService);
+                dancerPhotoRepository, dancerServiceRepository, demandRecordRepository,
+                pointsProperties, venueHeatService, dancerDetailCacheService);
         // 各测试按需 stub（Mockito strict stubs：不使用的 stubbing 会在测试级报多余）
     }
 
