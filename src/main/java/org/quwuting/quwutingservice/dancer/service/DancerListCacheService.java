@@ -5,6 +5,7 @@ import com.github.benmanes.caffeine.cache.LoadingCache;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.dancer.DancerTagCode;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTagStat;
+import org.quwuting.quwutingservice.dancer.enums.DancerPhotoKind;
 import org.quwuting.quwutingservice.dancer.enums.DancerVenueRelation;
 import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionTagRepository;
@@ -76,6 +77,10 @@ public class DancerListCacheService {
     /** 缓存容量上限（城市 × 分页组合，舞伴数据量小，500 条足够覆盖活跃入口） */
     private static final int MAX_CACHE_SIZE = 500;
 
+    /** 每舞伴媒体预览条数上限（2026-08-24 晚：列表卡片多图预览，消息预览式——
+     *  照片+视频混合取前 N 个 PUBLIC 媒体；N 恒为展示序最小的 4 个，防列表卡片过高） */
+    public static final int LIST_MEDIA_PREVIEW_LIMIT = 4;
+
     private final DancerRepository dancerRepository;
     private final DancerRecognitionTagRepository recognitionTagRepository;
     private final DancerVenueRepository dancerVenueRepository;
@@ -85,9 +90,25 @@ public class DancerListCacheService {
     private final TagDictService tagDictService;
 
     /**
+     * 媒体预览简报（2026-08-24 晚，缓存内用户无关部分）：dancerId → 前 N 个 PUBLIC
+     * 媒体的基础信息。url/coverUrl 为清晰版——仅服务端内存持有，组装响应时按当前
+     * 用户解锁态选择下发（未解锁只下 blurUrl，见 DancerMediaPreviewResponse）。
+     */
+    public record DancerMediaBrief(
+            Long id,
+            DancerPhotoKind kind,
+            String url,
+            String blurUrl,
+            String coverUrl,
+            int cost,
+            int durationSeconds
+    ) {}
+
+    /**
      * 列表用户无关的批量 enrichments（一次快照；消费方只读，不共享可变状态）。
      * 与 {@link DancerService#listPublic} 的 buildSummaries 消费侧一一对应——
-     * 缓存命中时个人态（myTodayIds / myTagsById）仍在调用方实时查询后合并。
+     * 缓存命中时个人态（myTodayIds / myTagsById / unlockedMediaIds）仍在调用方
+     * 实时查询后合并。
      */
     public record ListEnrichments(
             Map<Long, List<DancerTagStat>> tagsById,
@@ -95,7 +116,9 @@ public class DancerListCacheService {
             Map<Long, String> coverPhotoUrlById,
             Map<Long, Long> viewCounts,
             /** 资料标签（2026-08-24：dancerId → TagItemResponse 列表，卡片长按弹说明文案） */
-            Map<Long, List<TagItemResponse>> profileTagsById
+            Map<Long, List<TagItemResponse>> profileTagsById,
+            /** 媒体预览简报（2026-08-24 晚：dancerId → 前 N 个 PUBLIC 媒体，列表卡片多图预览） */
+            Map<Long, List<DancerMediaBrief>> mediaPreviewsById
     ) {}
 
     /** 列表公共部分（用户无关的主查询行 + enrichments；totalElements 随行缓存避免重复计数） */
@@ -161,7 +184,8 @@ public class DancerListCacheService {
                 fetchHomeVenueNames(dancerIds),
                 fetchCoverPhotoUrls(dancerIds),
                 fetchViewCounts(dancerIds),
-                fetchProfileTags(dancerIds));
+                fetchProfileTags(dancerIds),
+                fetchMediaPreviews(dancerIds));
     }
 
     /** 批量标签聚合（全量，同 DancerService.fetchTopTags 口径——列表卡片 chips 数据源） */
@@ -181,9 +205,12 @@ public class DancerListCacheService {
             long countToday = ((Number) row[3]).longValue();
             long count7d = ((Number) row[4]).longValue();
             long count30d = ((Number) row[5]).longValue();
-            DancerTagCode code = DancerTagCode.valueOf(tag); // 仅字典内代码落库，valueOf 安全
+            // 2026-08-24 全放开：tag 可为 legacy 或 EmojiCatalog 目录 code（valueOf 会抛异常），
+            // 统一经 DancerTagCode 适配器查 emoji/label（非法 code 防御性跳过）
+            if (!DancerTagCode.isValid(tag)) continue;
             result.computeIfAbsent(dancerId, k -> new ArrayList<>())
-                    .add(new DancerTagStat(tag, code.getEmoji(), code.getLabel(), countAll, countToday, count7d, count30d));
+                    .add(new DancerTagStat(tag, DancerTagCode.emojiOf(tag), DancerTagCode.labelOf(tag),
+                            countAll, countToday, count7d, count30d));
         }
         return result;
     }
@@ -254,6 +281,30 @@ public class DancerListCacheService {
                 }
             }
             result.put(e.getKey(), items);
+        }
+        return result;
+    }
+
+    /**
+     * 批量媒体预览简报（2026-08-24 晚）：每舞伴前 {@link #LIST_MEDIA_PREVIEW_LIMIT} 个
+     * PUBLIC 媒体（照片+视频混合，展示序）。gate cost 随查询 LEFT JOIN 带回（用户无关，
+     * 可缓存）；清晰 url/coverUrl 仅服务端内存持有，响应组装时按解锁态选择下发。
+     */
+    private Map<Long, List<DancerMediaBrief>> fetchMediaPreviews(List<Long> dancerIds) {
+        if (dancerIds.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<Long, List<DancerMediaBrief>> result = new HashMap<>();
+        for (Object[] row : photoRepository.findMediaPreviewsByDancerIds(dancerIds, LIST_MEDIA_PREVIEW_LIMIT)) {
+            result.computeIfAbsent((Long) row[0], k -> new ArrayList<>())
+                    .add(new DancerMediaBrief(
+                            (Long) row[1],
+                            DancerPhotoKind.valueOf((String) row[2]),
+                            (String) row[3],
+                            (String) row[4],
+                            (String) row[5],
+                            ((Number) row[6]).intValue(),
+                            ((Number) row[7]).intValue()));
         }
         return result;
     }

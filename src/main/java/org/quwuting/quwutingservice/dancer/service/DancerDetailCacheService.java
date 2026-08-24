@@ -176,8 +176,11 @@ public class DancerDetailCacheService {
             long countToday = ((Number) row[2]).longValue();
             long count7d = ((Number) row[3]).longValue();
             long count30d = ((Number) row[4]).longValue();
-            DancerTagCode code = DancerTagCode.valueOf(tag); // 仅字典内代码落库，valueOf 安全
-            result.add(new DancerTagStat(tag, code.getEmoji(), code.getLabel(), countAll, countToday, count7d, count30d));
+            // 2026-08-24 全放开：tag 可为 legacy 或 EmojiCatalog 目录 code（valueOf 会抛异常），
+            // 统一经 DancerTagCode 适配器查 emoji/label（非法 code 防御性跳过）
+            if (!DancerTagCode.isValid(tag)) continue;
+            result.add(new DancerTagStat(tag, DancerTagCode.emojiOf(tag), DancerTagCode.labelOf(tag),
+                    countAll, countToday, count7d, count30d));
         }
         return result;
     }

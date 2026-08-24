@@ -1,7 +1,11 @@
 package org.quwuting.quwutingservice.venuereaction;
 
+import org.quwuting.quwutingservice.emoji.EmojiCatalog;
+
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Reaction 字典（后台维护，不允许用户自由创建——避免色情/攻击/广告/竞对刷评价）。
@@ -76,6 +80,16 @@ import java.util.List;
  * 极性（2026-08 确立）：热度公式只统计 POSITIVE 项（正向反馈才是"热度"），NEGATIVE 项
  * 不计入公式、单独计数下发供详情页展示负面信号（见 VenueHeatService）——修复"被吐槽服务问题
  * 的店热度反而更高"的语义硬伤。极性是热度公式的唯一事实源；前端 Picker 展示全量 Reaction 不受影响。
+ * <p>
+ * <b>2026-08-24 常见表情全放开（根因驱动，详见前端 AGENTS.md「Reaction 表情」章节）</b>：
+ * 本枚举 = <b>legacy 业务语义 code（12 项，保留全部历史数据与文案）+ 常见表情目录适配</b>。
+ * 常见表情（~150 项，含三极性）单一事实源 = {@link org.quwuting.quwutingservice.emoji.EmojiCatalog}，
+ * 本枚举的静态适配器（{@link #allCodes()} / {@link #isValid} / {@link #emojiOf} /
+ * {@link #labelOf} / {@link #polarityOf}）在 legacy 之上叠加目录——<b>禁止</b>把目录项
+ * 逐个复制成本枚举的 enum value（否则双端同步成本结构性膨胀，重蹈 08-12 收缩覆辙）。
+ * 域内去重规则：目录项若 emoji（去除 VS16 后）与 legacy 撞车则剔除（同一域同一 emoji
+ * 只有一个 code，防 Picker 双胞胎）——legacy 12 项占用的 emoji（🔥👍⭐🌸💋💃💁✌🪑😕😡😬）
+ * 在门店域不再重复提供普通版。
  */
 public enum ReactionCode {
     HOT("🔥", "人气旺", Polarity.POSITIVE),
@@ -159,16 +173,94 @@ public enum ReactionCode {
         return polarity;
     }
 
-    /** 该 code 是否为正向反馈（热度公式计入项） */
+    /**
+     * 该 code 是否为正向反馈（热度公式计入项）。legacy 或目录（POSITIVE）命中即 true。
+     * 合法集合唯一事实源 = {@link #allCodes()}；非法 code 返回 false。
+     */
     public static boolean isPositive(String code) {
-        ReactionCode rc = valueOfSafe(code);
-        return rc != null && rc.polarity == Polarity.POSITIVE;
+        Polarity p = polarityOf(code);
+        return p != null && p == Polarity.POSITIVE;
     }
 
-    /** 该 code 是否为负向反馈（热度公式不计入，单独展示） */
+    /** 该 code 是否为负向反馈（热度公式不计入，单独展示）。非法 code 返回 false。 */
     public static boolean isNegative(String code) {
+        Polarity p = polarityOf(code);
+        return p != null && p == Polarity.NEGATIVE;
+    }
+
+    /**
+     * 该 code 是否为合法 Reaction（legacy 或目录且未被域内去重剔除）。
+     * 合法集合 = {@link #allCodes()}——与前端 Picker 展示集严格一致。
+     */
+    public static boolean isValid(String code) {
+        if (code == null) return false;
+        for (ReactionCode value : values()) {
+            if (value.name().equals(code)) return true;
+        }
+        return isCatalogCode(code);
+    }
+
+    /**
+     * 门店域全部合法 code（声明序：legacy 12 在前 + 目录去重后在后）。
+     * <b>唯一事实源</b>：getStats 遍历 / isValid / 极性列表全部经本方法取集合，
+     * 禁止调用方自行遍历 values() 或遍历 EmojiCatalog 再各自 filter——
+     * 否则新增/调整目录或去重规则时遗漏某一处即产生口径漂移（2026-08-24 确立，
+     * 同「权重/极性跨模块语义收敛到单一源头」规则）。
+     */
+    public static List<String> allCodes() {
+        List<String> codes = new ArrayList<>(values().length + EmojiCatalog.values().length);
+        for (ReactionCode value : values()) {
+            codes.add(value.name());
+        }
+        codes.addAll(catalogCodes());
+        return codes;
+    }
+
+    /** 该 code 的展示 emoji（legacy 或目录；非法 code 返回 null，调用方须先 isValid） */
+    public static String emojiOf(String code) {
         ReactionCode rc = valueOfSafe(code);
-        return rc != null && rc.polarity == Polarity.NEGATIVE;
+        if (rc != null) return rc.getEmoji();
+        return EmojiCatalog.emojiOf(code);
+    }
+
+    /** 该 code 的 label（legacy 业务文案或目录 CLDR 中文名；非法 code 返回 null） */
+    public static String labelOf(String code) {
+        ReactionCode rc = valueOfSafe(code);
+        if (rc != null) return rc.getLabel();
+        return EmojiCatalog.labelOf(code);
+    }
+
+    /** 该 code 的极性（legacy 或目录；非法 code 返回 null） */
+    public static Polarity polarityOf(String code) {
+        ReactionCode rc = valueOfSafe(code);
+        if (rc != null) return rc.getPolarity();
+        return EmojiCatalog.polarityOf(code) == null
+                ? null
+                : Polarity.valueOf(EmojiCatalog.polarityOf(code).name());
+    }
+
+    /**
+     * 正向反馈 code 名列表（仅 Polarity.POSITIVE，热度公式计入项）。
+     * 极性的唯一事实源：热度计算（VenueHeatService / 列表排序 SQL 镜像 / 趋势聚合）
+     * 全部经本方法取列表，禁止各调用方自行遍历枚举再各自 filter——否则新增/调整极性
+     * 时遗漏某一处即产生口径漂移（2026-08-08 确立，与「公式文案后端下发」同族规则：
+     * 权重/极性这类跨模块语义必须收敛到单一源头）。
+     */
+    public static List<String> positiveCodeNames() {
+        List<String> names = new ArrayList<>();
+        for (String code : allCodes()) {
+            if (isPositive(code)) names.add(code);
+        }
+        return names;
+    }
+
+    /** 负向反馈 code 名列表（仅 Polarity.NEGATIVE，热度公式不计入、单独计数展示） */
+    public static List<String> negativeCodeNames() {
+        List<String> names = new ArrayList<>();
+        for (String code : allCodes()) {
+            if (isNegative(code)) names.add(code);
+        }
+        return names;
     }
 
     private static ReactionCode valueOfSafe(String code) {
@@ -179,39 +271,36 @@ public enum ReactionCode {
         return null;
     }
 
-    /** 校验字符串是否为合法的 Reaction 代码，避免 valueOf 抛出未受控异常 */
-    public static boolean isValid(String code) {
-        if (code == null) return false;
-        for (ReactionCode value : values()) {
-            if (value.name().equals(code)) return true;
-        }
-        return false;
+    /** 目录 code 是否属于门店域（目录项 && 未被域内去重剔除） */
+    private static boolean isCatalogCode(String code) {
+        return catalogCodes().contains(code);
     }
 
     /**
-     * 正向反馈 code 名列表（仅 Polarity.POSITIVE，热度公式计入项）。
-     * <p>
-     * 极性的唯一事实源：热度计算（VenueHeatService / 列表排序 SQL 镜像 / 趋势聚合）
-     * 全部经本方法取列表，禁止各调用方自行遍历枚举再各自 filter——否则新增/调整极性
-     * 时遗漏某一处即产生口径漂移（2026-08-08 确立，与「公式文案后端下发」同族规则：
-     * 权重/极性这类跨模块语义必须收敛到单一源头）。
+     * 门店域目录 code 集合（缓存，惰性计算）：目录全部 code − 域内 emoji 去重剔除项。
+     * 去重规则 = 目录项 emoji 去除 VS16（U+FE0F）后与任一 legacy emoji 相同即剔除
+     * （legacy 语义 code 优先占用该 emoji；普通版不重复提供）。
      */
-    public static List<String> positiveCodeNames() {
-        return polarityCodeNames(Polarity.POSITIVE);
-    }
+    private static volatile List<String> catalogCodeCache = null;
 
-    /** 负向反馈 code 名列表（仅 Polarity.NEGATIVE，热度公式不计入、单独计数展示） */
-    public static List<String> negativeCodeNames() {
-        return polarityCodeNames(Polarity.NEGATIVE);
-    }
-
-    private static List<String> polarityCodeNames(Polarity target) {
-        List<String> names = new ArrayList<>();
+    private static List<String> catalogCodes() {
+        List<String> cached = catalogCodeCache;
+        if (cached != null) return cached;
+        Set<String> legacyEmojis = new HashSet<>();
         for (ReactionCode value : values()) {
-            if (value.polarity == target) {
-                names.add(value.name());
-            }
+            legacyEmojis.add(stripVariationSelector(value.getEmoji()));
         }
-        return names;
+        List<String> codes = new ArrayList<>();
+        for (EmojiCatalog catalog : EmojiCatalog.values()) {
+            if (legacyEmojis.contains(stripVariationSelector(catalog.getEmoji()))) continue;
+            codes.add(catalog.name());
+        }
+        catalogCodeCache = List.copyOf(codes);
+        return catalogCodeCache;
+    }
+
+    private static String stripVariationSelector(String emoji) {
+        if (emoji == null || emoji.isEmpty()) return emoji;
+        return emoji.replace("\uFE0F", "");
     }
 }

@@ -125,17 +125,14 @@ public class DancerController {
     }
 
     /**
-     * 舞伴统计（<b>仅本人 + 管理员可查看</b>，2026-08-14 舞伴统计图第一期）：
+     * 舞伴统计（<b>公开访问</b>，2026-08-14 舞伴统计图第一期；2026-08-24 放开：
+     * 对齐门店 venue-heat 公开先例——响应为纯计数聚合（趋势/累计/解锁人次），
+     * 无个人身份信息，详情页「统计图」动作行按钮全员可见可入）：
      * 六组近30天每日时间序列（认可/收藏/礼物价值/分享/浏览 + 浏览来源），供舞伴统计页
-     * 渲染。舞伴是自然人，逐日时间序列/来源拆解属精细行为数据（与创作者收益计划
-     * 敏感度耦合）——对齐 hide_contact 隐私默认最小化先例，他人不可查看：
-     * 未登录 → HTTP 401（requireAuth，前端触发登录）；已登录非本人/非管理员 →
-     * 业务错 1003「仅舞伴本人可查看统计数据」。缓存 60s refresh-ahead（写路径显式失效）。
+     * 渲染。缓存 60s refresh-ahead（写路径显式失效）。
      */
     @GetMapping("/{id}/stats")
     public ApiResponse<DancerStatsResponse> stats(@PathVariable Long id) {
-        Long userId = UserContext.requireAuth();
-        dancerService.checkStatsAccess(id, userId, UserContext.getCurrentRole());
         return ApiResponse.ok(dancerStatsService.getStats(id));
     }
 

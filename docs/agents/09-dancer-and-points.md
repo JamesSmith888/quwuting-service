@@ -95,6 +95,17 @@
   `durationSeconds`；`findAdminPage` SQL 追加三列（Object[] 索引 8-10）。
 - **封面规则**：`findCoverUrlsByDancerIds` 恒 `kind='PHOTO'`（image 组件不承载视频，列表卡片/
   详情快照以照片为封面）。
+- **列表媒体预览多图（2026-08-24 晚：`DancerSummaryResponse.mediaPreviews`）**：列表卡片
+  缩略图行由单张封面（coverPhotoUrl）升级为<b>照片+视频混合前 `LIST_MEDIA_PREVIEW_LIMIT`
+  （4）个 PUBLIC 媒体</b>——`DancerPhotoRepository.findMediaPreviewsByDancerIds`
+  （ROW_NUMBER 窗口每舞伴取前 N + gate cost LEFT JOIN，gate 按媒体类型分型
+  DANCER_PHOTO/DANCER_VIDEO）。组装 = `DancerService.buildMediaPreviews`：
+  免费/已解锁 → `url`（照片原图 / 视频封面帧）；<b>付费未解锁 → 仅 `blurUrl` 薄码 +
+  `unlocked=false`（清晰 url 置 null 防内容绕过，与详情页 fetchPhotos 同一门槛口径）</b>；
+  本人/管理员视角（listMyDancers）恒解锁。解锁态 = 用户相关态：`fetchUnlockedMediaIds`
+  按当前用户批量实时查（照片/视频分组），<b>不进列表缓存</b>（对齐 myTodayIds 边界）——
+  列表缓存 ListEnrichments 仅存用户无关媒体简报（`DancerMediaBrief`：id/kind/url/blurUrl/
+  coverUrl/cost/duration，url/coverUrl 仅服务端内存持有，组装时按解锁态选择下发）。
 - **合规**：视频同照片——仅本人/管理员可上传（实际入口仅管理员 dancer-edit）+ 逐条审核后公开。
 - **视频积分门槛（2026-08-22 同日开放，媒体无关契约兑现）**：
   - `PointsGateTargetType` 加 `DANCER_VIDEO`（gate 表 target_type 字符串存储零迁移）；
@@ -173,6 +184,12 @@ countToday/count7d/count30d（count = countAll 兼容列表 topTags），详情�
   （输入名+说明，POST 后回填并选中）；dancers 列表卡片昵称下方 / dancer-detail 身份区下方
   展示 chips，点击/长按弹说明（复用全局 `.recognition-desc-*` 弹层原语）。
 
+**V41 描述修订（2026-08-24）**：「线上/线下」初始 description 存在两处问题——
+① 互斥表述失实（「仅提供线上…不提供线下见面伴舞」/「以线下见面伴舞为主」，同一舞伴
+可同时打线上+线下标签）；② 含偏暗示/风险文字（「视频连线、线上陪跳」「线下见面伴舞」）。
+V41 迁移 UPDATE 为简短中性对称文案：线上「可提供线上互动，与线下不冲突」/ 线下
+「可提供线下互动，与线上不冲突」。数据层修订（非结构变更），字典可新增标签不受影响。
+
 ### 可见性规则（隐私边界）
 
 | 状态 | 公众列表/详情 | 创建人本人 | 平台管理员 |
@@ -190,7 +207,7 @@ countToday/count7d/count30d（count = countAll 兼容列表 topTags），详情�
 
 | 接口 | 鉴权 | 说明 |
 |---|---|---|
-| GET /dancers | 软鉴权 | 列表（仅 NORMAL；city 可选；按 count7d 倒序分页；登录含 myRecognizedToday + **myTags（2026-08-19 今日投票 code，列表 reaction 区域 chip 活跃态）**；topTags **全量下发**（2026-08-19 去截断）；含 coverPhotoUrl） |
+| GET /dancers | 软鉴权 | 列表（仅 NORMAL；city 可选；按 count7d 倒序分页；登录含 myRecognizedToday + **myTags（2026-08-19 今日投票 code，列表 reaction 区域 chip 活跃态）**；topTags **全量下发**（2026-08-19 去截断）；含 coverPhotoUrl + **mediaPreviews（2026-08-24 晚：照片+视频混合前 4 个 PUBLIC 媒体，付费未解锁仅薄码，解锁态按当前用户实时组装）**） |
 | GET /dancers/cities | 软鉴权 | 常驻城市词表（聚合真实数据，2026-08-10 激活列表页城市筛选） |
 | POST /dancers | 登录 | 舞伴主动注册 → PENDING；返回新建 ID |
 | GET /dancers/{id} | 软鉴权 | 详情（可见性校验；登录含 isMine + myRecognizedToday + **myTags（2026-08-15 今日认可携带标签，chip 活跃态数据源）** + **favorite（2026-08-14 服务端权威收藏态）** + 四窗口统计 + 近7日每日认可 + **标签聚合（2026-08-15 四窗口：countAll/countToday/count7d/count30d）** + 常去/出现舞厅 + 相册 photos（按身份过滤）） |
@@ -280,24 +297,25 @@ reason/created_at + 索引 dancer_id）。
 **背景**：舞伴详情页参考门店热度页（venue-heat）做统计图（用户需求"舞伴详情页也需要
 做一个统计图，第一期先做核心关注点"）。与门店的关键差异 = ① **舞伴域无热度公式**（列表
 排序已有认可数/收礼信号，综合指数属后续扩展），第一期只做**趋势时间序列**六张图：
-认可 / 收藏 / 礼物价值 / 分享 / 浏览 + 浏览来源；② **可见范围仅本人 + 管理员**（门店热度
-页公开，舞伴是自然人——逐日时间序列/来源拆解属精细行为数据且与创作者收益计划敏感度
-耦合，对齐 hide_contact 隐私默认最小化先例；详情页头部已公开的聚合信号"328 人认可"等
-足以支撑他人评估，不需要开放逐日明细）。前端独立页 `dancer-stats`（对齐 venue-heat 的
-charts 数组模板 + chart-brush + 图例开关 + 空图恒渲染 + y 轴全量锁定）。
+认可 / 收藏 / 礼物价值 / 分享 / 浏览 + 浏览来源；② **可见范围公开**（2026-08-24 起，
+对齐门店热度页先例——原"仅本人 + 管理员"决策 2026-08-14 曾因舞伴是自然人、逐日时间
+序列/来源拆解属精细行为数据且与创作者收益计划敏感度耦合而收紧；放开后详情页「统计图」
+动作行按钮全员可见可入，响应为纯计数聚合、无个人身份信息）。前端独立页 `dancer-stats`
+（对齐 venue-heat 的 charts 数组模板 + chart-brush + 图例开关 + 空图恒渲染 +
+y 轴全量锁定）。
 
 **接口**：
-- `GET /dancers/{id}/stats`（**仅本人 + 管理员**）：`DancerStatsResponse{recognitionTrend,
+- `GET /dancers/{id}/stats`（**公开**）：`DancerStatsResponse{recognitionTrend,
   favoriteTrend, pointsTrend, shareTrend, viewTrend, viewSourceTrend, unlockStats,
   totals, statsAsOfDate}`——
   六组近30天每日时间序列（含今日，骨架 31 天，generate_series 补零；与门店 countDailyTrends
   同骨架，见下）+ **解锁信息分类聚合**（unlockStats，2026-08-21 追加，横向条形图，见后）
   + **累计指标**（totals，2026-08-22 追加，全量历史口径——累计认可/总收藏/累计浏览/
   累计分享/收到礼物价值累计，前端「累计数据」汇总卡）。
-  **鉴权**：Controller `requireAuth()`（未登录 → HTTP 401，前端触发登录）
-  + `DancerService.checkStatsAccess`（已登录非本人/非管理员 → 业务错 1003「仅舞伴本人可查看
-  统计数据」）。缓存 = 内嵌 Caffeine LoadingCache（60s refresh-ahead / 30min 过期，对齐
-  VenueHeatService 模式）。
+  **鉴权**：无（对齐门店 GET /venues/{id}/heat 公开先例；2026-08-24 移除
+  requireAuth + checkStatsAccess——原未登录 HTTP 401、非本人/非管理员 1003「仅舞伴
+  本人可查看统计数据」一并下线，方法已删）。缓存 = 内嵌 Caffeine LoadingCache
+  （60s refresh-ahead / 30min 过期，对齐 VenueHeatService 模式）。
 - `POST /dancers/{id}/view`（软鉴权，fire-and-forget）：浏览埋点，body `{source}` 可空，
   null/非法值兜底 OTHER（枚举类列无 CHECK，应用层防御；与门店 POST /venues/{id}/view 同模式）。
 

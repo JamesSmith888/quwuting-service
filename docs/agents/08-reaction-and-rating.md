@@ -97,6 +97,8 @@
 
 Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对刷评价。字典是后台维护的 Java 枚举（`ReactionCode`），emoji + label 由后端唯一定义并通过接口下发，前端 Picker 的静态字典（`constants/reactions.ts`）是镜像副本需两端同步。
 
+**2026-08-24 常见表情全放开（双层字典架构）**：`ReactionCode` = **legacy 12 项业务语义 code（历史保留）+ 常见表情目录适配**——常见表情（~150 项三极性）单一事实源 = `EmojiCatalog.java`（独立包 `emoji`），本枚举的静态适配器 `allCodes/isValid/emojiOf/labelOf/polarityOf` 在 legacy 之上叠加目录（**禁止把目录项复制成枚举 value**）；域内去重：目录项 emoji 去除 VS16 后与 legacy 撞车即剔除。热度公式极性列表（`positiveCodeNames/negativeCodeNames`）经适配器自动含目录项，NEUTRAL 仅展示不入公式。详见文件末尾「2026-08-24」节。
+
 | 代码 | Emoji | 说明 |
 |------|-------|------|
 | HOT | 🔥 | 人气旺 |
@@ -158,7 +160,7 @@ Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对�
 4. **热度公式自动适配**：PARTNER_ABUNDANT 经 `positiveCodeNames()` 自动计入、MISMATCH 经 `negativeCodeNames()` 自动单独计数（极性唯一事实源机制免手工维护）
 5. **前端联动**：见[前端 AGENTS.md](../../quwuting/AGENTS.md) · 「Reaction 快速反馈系统 → 静态字典」的"2026-08-13 字典优化"纪要（描述重写原则、详情页「近期风险」区块 = 纯前端负面聚合，后端零改动）
 
-6. **枚举外 code 防御（2026-08-08 线上 500 事故教训）**：`GET /venues/{id}` 因 `VenueReactionService.buildTopBadgesFromCounts` 裸 `ReactionCode.valueOf(e.getKey())` 抛 `IllegalArgumentException`（库中残留 `YOUNG_PARTNER`，枚举已删除）→ 详情页 500。**长期规则**：**从聚合/查询结果按 code 转枚举时，必须先过滤或安全转换（`ReactionCode.isValid(code)` filter 或 `valueOfSafe`），禁止裸 `Enum.valueOf`**——枚举删除/改名后，库中旧 code 仍可能被聚合查询返回，必须优雅跳过（与 `getStats` 用 `ReactionCode.values()` 遍历 + filter、`VenueHeatService` 用 `values()` 流的行为对齐）；枚举内 code 是唯一事实源，库中残留 code 是脏数据，跳过而非让接口崩溃
+6. **枚举外 code 防御（2026-08-08 线上 500 事故教训）**：`GET /venues/{id}` 因 `VenueReactionService.buildTopBadgesFromCounts` 裸 `ReactionCode.valueOf(e.getKey())` 抛 `IllegalArgumentException`（库中残留 `YOUNG_PARTNER`，枚举已删除）→ 详情页 500。**长期规则**：**从聚合/查询结果按 code 转枚举时，必须先过滤或安全转换（`ReactionCode.isValid(code)` filter 或 `valueOfSafe`），禁止裸 `Enum.valueOf`**——枚举删除/改名后，库中旧 code 仍可能被聚合查询返回，必须优雅跳过（与 `getStats` 用 `ReactionCode.allCodes()` 遍历 + filter、`VenueHeatService` 用极性列表流的行为对齐）；枚举内 code 是唯一事实源，库中残留 code 是脏数据，跳过而非让接口崩溃
 
 审核安全说明：字典坚持"具体、中性描述"原则——`BAD_ENV` 未采用需求初稿中的 🤮（呕吐表情），因强烈厌恶语义与"不引入攻击性反馈"的设计原则相悖；`RECOMMEND` 的 👍 是**单一正向表达**而非 👍👎 二元组合，允许使用。新增/调整字典条目时需过审核安全过滤（参照 venuestatusreport 模块 `ReportReason` 命名规避敏感词的先例）。
 
@@ -217,3 +219,21 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 
 ---
 
+
+
+## 2026-08-24 常见表情全放开（双层字典架构，门店 + 舞伴）
+
+**根因**：Reaction 本质是 Telegram 式情感表达媒介，价值随词汇广度与熟悉度增长；历史上按"决策信号价值/使用率"反复收缩字典（18→14→10→12）是语义定位错误，且"每表情一张 PNG + 双端手动同步"使扩展成本 > 收缩成本，结构性偏向收缩。详见[前端文档](../../quwuting/docs/agents/08-reaction-system.md) · 「2026-08-24 常见表情全放开」。
+
+**架构**：
+- **`EmojiCatalog.java`**（新，包 `org.quwuting.quwutingservice.emoji`）= 常见表情共享目录单一事实源：~152 项，每项 `code(EMOJI_<HEX>) / emoji / label(CLDR 中文短名) / description(黄脸/物象描述) / polarity(三极性 59 正/68 中/25 负)`。**不承担舞厅业务语义**（业务信号由 legacy code 承担，禁止给新表情塞业务文案）。源文件 UTF-8 明文，严禁手写反斜杠加 u 的 unicode 转义（Java 注释中的此类序列也会被预处理器解析导致编译失败）。
+- **`ReactionCode.java`** = legacy 12 业务 code（历史保留，值/文案零变化）+ 目录适配器：
+  `allCodes()`（唯一事实源，getStats 遍历/isValid/极性列表均经此取集合）、`isValid/emojiOf/labelOf/polarityOf`、`positiveCodeNames()/negativeCodeNames()`（自动含目录项；NEUTRAL 不进两者——热度公式只计 POSITIVE、NEGATIVE 单独计数，语义不变）。
+  **域内去重**：目录项 emoji 去除 VS16（U+FE0F）后与 legacy 撞车即剔除（`catalogCodes()` 缓存，volatile 惰性）。
+- **`DancerTagCode.java`**（舞伴认可）= legacy 7 业务 code + 目录适配器（`allCodes/isValid/emojiOf/labelOf`）；
+  **舞伴域约束**：目录仅收 POSITIVE/NEUTRAL（NEGATIVE 不进入真实个人主页）；域内去重同门店。
+- **消费方改造**：`VenueReactionService.getStats` 遍历 `allCodes()`（原 `values()`）、徽标构建经 `emojiOf/labelOf`（原 `valueOf`）；`DancerDetailCacheService` / `DancerListCacheService` 标签聚合经 `DancerTagCode.isValid + emojiOf/labelOf`（原 `valueOf`——目录 code 不是枚举 value，裸 valueOf 会 500）。
+- **DB 零迁移**：`reaction_code`/`tag` 为 varchar(30)（无枚举约束），新增 code 直接可用；旧数据保留，展示层按字典过滤。
+- **双端同步配方**：改目录必须三处同步（后端 `EmojiCatalog.java` → 前端 `constants/emoji-catalog.ts` → `types/emoji.ts` 联合类型）；域枚举/域字典自动适配。
+
+**验证**：`./mvnw -q clean test-compile` 通过；前端 tsc 零新错误 + `check:tokens` 通过；双端目录逐项脚本比对一致。

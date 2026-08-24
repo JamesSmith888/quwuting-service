@@ -48,6 +48,37 @@ public interface DancerPhotoRepository extends JpaRepository<DancerPhoto, Long> 
     List<Object[]> findCoverUrlsByDancerIds(@Param("dancerIds") List<Long> dancerIds);
 
     /**
+     * 批量舞伴媒体预览（2026-08-24 晚：列表卡片多图预览——单张封面升级为照片+视频
+     * 混合的前 N 个 PUBLIC 媒体，消息预览语义）。每舞伴按展示顺序取 limit 个
+     * （ROW_NUMBER 窗口 + 外层过滤，一次 IN 查询覆盖整页舞伴，规避 N+1）。
+     * 返回 Object[]：{dancerId, mediaId, kind, url, blur_url, cover_url,
+     * duration_seconds, cost}（kind='PHOTO'/'VIDEO'，cost 来自 qwt_points_gates
+     * LEFT JOIN——按媒体类型取门槛 DANCER_PHOTO/DANCER_VIDEO；免费媒体 cost=0）。
+     * <p>
+     * 与 findCoverUrlsByDancerIds 的区别：本查询<b>包含视频与付费媒体</b>（照片+视频
+     * 混合、不跳过有门槛媒体）——列表卡片要展示未解锁内容的薄码预览（blurUrl），
+     * 付费媒体不下发清晰 url 即可（服务层按解锁态组装，见 DancerMediaPreviewResponse）。
+     */
+    @Query(value = """
+            SELECT t.dancer_id, t.id, t.kind, t.url, t.blur_url, t.cover_url,
+                   t.duration_seconds, COALESCE(t.cost, 0)
+            FROM (
+                SELECT p.dancer_id, p.id, p.kind, p.url, p.blur_url, p.cover_url,
+                       p.duration_seconds, g.cost,
+                       ROW_NUMBER() OVER (PARTITION BY p.dancer_id ORDER BY p.sort_order ASC, p.id ASC) AS rn
+                FROM qwt_dancer_photos p
+                LEFT JOIN qwt_points_gates g
+                  ON g.deleted = false
+                 AND g.target_id = p.id
+                 AND g.target_type = CASE WHEN p.kind = 'VIDEO' THEN 'DANCER_VIDEO' ELSE 'DANCER_PHOTO' END
+                WHERE p.dancer_id IN :dancerIds AND p.status = 'PUBLIC' AND p.deleted = false
+            ) t
+            WHERE t.rn <= :limit
+            ORDER BY t.dancer_id, t.rn
+            """, nativeQuery = true)
+    List<Object[]> findMediaPreviewsByDancerIds(@Param("dancerIds") List<Long> dancerIds, @Param("limit") int limit);
+
+    /**
      * 管理端照片审核列表（仅 ADMIN，含全部状态，按上传时间倒序——新照片优先审核）。
      * status 可选过滤（null = 全部）。LEFT JOIN qwt_dancers 取舞伴昵称/城市/头像
      * （舞伴已软删时昵称回退占位，服务层处理）。返回 Object[]：

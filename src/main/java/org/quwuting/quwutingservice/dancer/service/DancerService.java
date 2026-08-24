@@ -438,7 +438,11 @@ public class DancerService {
         // 个人态实时查询（不缓存）：今日已认可 ID + 今日投票标签（chips 活跃态数据源）
         Set<Long> myTodayIds = fetchMyTodayIds(ids, currentUserId);
         Map<Long, List<String>> myTagsById = fetchMyTodayTags(ids, currentUserId);
-        return new PageImpl<>(buildSummaries(rows, part.enrichments(), myTodayIds, myTagsById),
+        // 媒体预览解锁态（2026-08-24 晚：列表卡片多图预览——付费媒体按当前用户实时
+        // 解锁态选择清晰/薄码；用户相关态不进列表缓存，同 myTodayIds 边界）
+        Set<Long> unlockedMediaIds = fetchUnlockedMediaIds(part.enrichments(), currentUserId);
+        return new PageImpl<>(buildSummaries(rows, part.enrichments(), myTodayIds, myTagsById,
+                unlockedMediaIds, false),
                 pageable, part.totalElements());
     }
 
@@ -464,11 +468,12 @@ public class DancerService {
         }
         List<Long> ids = rows.stream().map(r -> (Long) r[0]).toList();
         // 用户无关 enrichments（单一权威 = DancerListCacheService；收藏列表个性化不进缓存，
-        // 但 enrichments 计算口径与公开列表一致）；个人态（今日认可/投票标签）恒实时查询
+        // 但 enrichments 计算口径与公开列表一致）；个人态（今日认可/投票标签/媒体解锁）恒实时查询
         DancerListCacheService.ListEnrichments en = listCacheService.computeEnrichments(ids);
         Set<Long> myTodayIds = fetchMyTodayIds(ids, userId);
         Map<Long, List<String>> myTagsById = fetchMyTodayTags(ids, userId);
-        return buildSummaries(rows, en, myTodayIds, myTagsById);
+        Set<Long> unlockedMediaIds = fetchUnlockedMediaIds(en, userId);
+        return buildSummaries(rows, en, myTodayIds, myTagsById, unlockedMediaIds, false);
     }
 
     /**
@@ -516,12 +521,16 @@ public class DancerService {
      * 我的舞伴主页（listMyDancers）共用——三处查询返回同构行，enrichments 计算单一权威
      * （DancerListCacheService#computeEnrichments），摘要构建逻辑也单一权威
      * （2026-08-14 抽取；2026-08-22 enrichments 参数化：列表缓存命中时零查询直组装）。
+     * 2026-08-24 晚：新增 unlockedMediaIds / showAllMedia 两参——媒体预览（列表卡片
+     * 多图）解锁态按当前用户实时组装（用户相关态不进列表缓存，同 myTodayIds 边界）。
      */
     private List<DancerSummaryResponse> buildSummaries(
             List<Object[]> content,
             DancerListCacheService.ListEnrichments en,
             Set<Long> myTodayIds,
-            Map<Long, List<String>> myTagsById) {
+            Map<Long, List<String>> myTagsById,
+            Set<Long> unlockedMediaIds,
+            boolean showAllMedia) {
         // 行内计数：Object[]{id, ..., count_all(6), count_today(7), count_7d(8)}
         Map<Long, long[]> countsById = new HashMap<>();
         for (Object[] row : content) {
@@ -542,9 +551,63 @@ public class DancerService {
                     myTodayIds.contains(id),
                     myTagsById.getOrDefault(id, Collections.emptyList()),
                     en.tagsById().getOrDefault(id, Collections.emptyList()),
-                    en.viewCounts().getOrDefault(id, 0L)));
+                    en.viewCounts().getOrDefault(id, 0L),
+                    buildMediaPreviews(en.mediaPreviewsById().get(id), unlockedMediaIds, showAllMedia)));
         }
         return summaries;
+    }
+
+    /**
+     * 媒体预览组装（2026-08-24 晚：列表卡片多图预览）：按当前用户解锁态选择展示图——
+     * 免费（cost=0）/已解锁 → 清晰（照片原图 / 视频封面帧）；付费未解锁 → <b>仅下发
+     * blurUrl 薄码（url 置 null 防内容绕过）</b>；本人/管理员视角（showAllMedia）恒清晰。
+     * 与详情页 fetchPhotos 同一门槛口径（cost 语义 / DANCER_PHOTO·DANCER_VIDEO 分型）。
+     */
+    private List<DancerMediaPreviewResponse> buildMediaPreviews(
+            List<DancerListCacheService.DancerMediaBrief> briefs,
+            Set<Long> unlockedMediaIds,
+            boolean showAllMedia) {
+        if (briefs == null || briefs.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<DancerMediaPreviewResponse> out = new ArrayList<>(briefs.size());
+        for (DancerListCacheService.DancerMediaBrief b : briefs) {
+            boolean unlocked = showAllMedia || b.cost() == 0 || unlockedMediaIds.contains(b.id());
+            boolean isVideo = b.kind() == DancerPhotoKind.VIDEO;
+            out.add(new DancerMediaPreviewResponse(
+                    b.id(), b.kind(),
+                    unlocked ? (isVideo ? b.coverUrl() : b.url()) : null,
+                    unlocked ? null : b.blurUrl(),
+                    b.cost(), unlocked, b.durationSeconds()));
+        }
+        return out;
+    }
+
+    /**
+     * 批量当前用户已解锁的媒体 ID（2026-08-24 晚：列表卡片媒体预览解锁态）。
+     * 从 enrichments 媒体简报收集全部媒体 id，按类型分组批量查解锁（照片
+     * DANCER_PHOTO / 视频 DANCER_VIDEO，N+1 规避，同 fetchPhotos 口径）；
+     * 匿名（userId=null）→ 空集（付费媒体恒薄码展示）。
+     */
+    private Set<Long> fetchUnlockedMediaIds(DancerListCacheService.ListEnrichments en, Long currentUserId) {
+        if (currentUserId == null) {
+            return Collections.emptySet();
+        }
+        List<Long> photoIds = new ArrayList<>();
+        List<Long> videoIds = new ArrayList<>();
+        for (List<DancerListCacheService.DancerMediaBrief> briefs : en.mediaPreviewsById().values()) {
+            for (DancerListCacheService.DancerMediaBrief b : briefs) {
+                (b.kind() == DancerPhotoKind.VIDEO ? videoIds : photoIds).add(b.id());
+            }
+        }
+        Set<Long> unlocked = new HashSet<>();
+        if (!photoIds.isEmpty()) {
+            unlocked.addAll(pointsService.unlockedIds(currentUserId, PointsGateTargetType.DANCER_PHOTO, photoIds));
+        }
+        if (!videoIds.isEmpty()) {
+            unlocked.addAll(pointsService.unlockedIds(currentUserId, PointsGateTargetType.DANCER_VIDEO, videoIds));
+        }
+        return unlocked;
     }
 
     /** 公开舞伴的常驻城市词表（列表页城市筛选数据源，聚合真实数据） */
@@ -683,22 +746,6 @@ public class DancerService {
             myTags = myTodayRec.map(r -> fetchTagsForRecognition(r.getId())).orElseGet(Collections::emptyList);
         }
         return new DancerTagsResponse(detailCacheService.get(dancerId).tags(), myTags);
-    }
-
-    /**
-     * 舞伴统计访问校验（GET /dancers/{id}/stats，2026-08-14 舞伴统计图：<b>仅本人 +
-     * 管理员可查看</b>——舞伴是自然人，逐日时间序列/来源拆解属精细行为数据，且与
-     * 创作者收益计划（收礼价值）敏感度耦合；对齐 hide_contact 隐私默认最小化先例，
-     * 他人不可查看）。未登录由 Controller requireAuth 前置拦截（HTTP 401），
-     * 本方法只处理"已登录但非本人/非管理员"的业务拒绝（HTTP 200 + 1003）。
-     */
-    @Transactional(readOnly = true)
-    public void checkStatsAccess(Long dancerId, Long currentUserId, UserRole currentRole) {
-        Dancer dancer = findDancerOrThrow(dancerId);
-        boolean isMine = currentUserId != null && dancer.getCreatedBy().equals(currentUserId);
-        if (!isMine && currentRole != UserRole.ADMIN) {
-            throw new BusinessException(1003, "仅舞伴本人可查看统计数据");
-        }
     }
 
     // ─── 认可（每日一记 toggle；2026-08-15 单票换票 + 可配置多选，对齐 Reaction 语义） ───
@@ -984,7 +1031,9 @@ public class DancerService {
                     myTodayIds.contains(d.getId()),
                     myTagsById.getOrDefault(d.getId(), Collections.emptyList()),
                     en.tagsById().getOrDefault(d.getId(), Collections.emptyList()),
-                    en.viewCounts().getOrDefault(d.getId(), 0L)));
+                    en.viewCounts().getOrDefault(d.getId(), 0L),
+                    // 本人视角：所有媒体恒解锁（showAllMedia=true，见 buildMediaPreviews）
+                    buildMediaPreviews(en.mediaPreviewsById().get(d.getId()), Collections.emptySet(), true)));
         }
         return result;
     }

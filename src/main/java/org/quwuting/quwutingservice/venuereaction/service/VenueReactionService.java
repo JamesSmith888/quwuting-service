@@ -160,8 +160,9 @@ public class VenueReactionService {
     }
 
     /**
-     * 详情页完整 Reaction 统计：字典内全部代码，按声明顺序返回（无数据时计数为 0）。
-     * 聚合计数走缓存共享；个人参与状态（今日已参与）单独实时查询，不与聚合数据混存。
+     * 详情页完整 Reaction 统计：门店域全部合法 code（legacy + 目录去重，2026-08-24 全放开），
+     * 按声明顺序返回（无数据时计数为 0）。聚合计数走缓存共享；个人参与状态（今日已参与）
+     * 单独实时查询，不与聚合数据混存。
      */
     @Transactional(readOnly = true)
     public ReactionStatsResponse getStats(Long venueId, Long currentUserId) {
@@ -172,16 +173,16 @@ public class VenueReactionService {
                 : Collections.emptySet();
 
         List<ReactionStat> stats = new ArrayList<>();
-        for (ReactionCode rc : ReactionCode.values()) {
-            long[] counts = aggregate.get(rc.name());
+        for (String code : ReactionCode.allCodes()) {
+            long[] counts = aggregate.get(code);
             long countAll = counts != null ? counts[0] : 0L;
             long countToday = counts != null ? counts[1] : 0L;
             long count7d = counts != null ? counts[2] : 0L;
             long count30d = counts != null ? counts[3] : 0L;
             stats.add(new ReactionStat(
-                    rc.name(), rc.getEmoji(), rc.getLabel(),
+                    code, ReactionCode.emojiOf(code), ReactionCode.labelOf(code),
                     countToday, count7d, count30d, countAll,
-                    myCodes.contains(rc.name())));
+                    myCodes.contains(code)));
         }
         return new ReactionStatsResponse(stats);
     }
@@ -302,20 +303,20 @@ public class VenueReactionService {
                 // 2026-08-08 防御：枚举外的残留 code（历史数据/seed 旧值/未来误写）跳过不崩——
                 // 枚举删除/改名后，库中旧 code 仍可能被聚合查询返回（如 V3 迁移前的
                 // YOUNG_PARTNER/OLD_PARTNER）。裸 valueOf 会抛 IllegalArgumentException
-                // 让整个详情/列表接口 500。与 getStats（ReactionCode.values() 遍历 + filter）
-                // 和 VenueHeatService（values() 流）的"枚举外 code 优雅忽略"行为对齐。
+                // 让整个详情/列表接口 500。与 getStats（ReactionCode.allCodes() 遍历 + filter）
+                // 和 VenueHeatService（极性列表流）的"字典外 code 优雅忽略"行为对齐。
                 .filter(e -> ReactionCode.isValid(e.getKey()))
                 .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
                 .collect(Collectors.toList());
         // 完整展示：全部 count>0 的 code 均返回，不做任何截断（2026-08-09 需求定稿，见方法 javadoc）
         List<ReactionBadge> badges = new ArrayList<>();
         for (Map.Entry<String, Long> e : ranked) {
-            ReactionCode rc = ReactionCode.valueOf(e.getKey());
-            badges.add(new ReactionBadge(rc.name(), rc.getEmoji(), rc.getLabel(),
-                    countAllByCode.getOrDefault(e.getKey(), 0L),
-                    count7dByCode.getOrDefault(e.getKey(), 0L),
-                    count30dByCode.getOrDefault(e.getKey(), 0L),
-                    myCodes.contains(rc.name())));
+            String code = e.getKey();
+            badges.add(new ReactionBadge(code, ReactionCode.emojiOf(code), ReactionCode.labelOf(code),
+                    countAllByCode.getOrDefault(code, 0L),
+                    count7dByCode.getOrDefault(code, 0L),
+                    count30dByCode.getOrDefault(code, 0L),
+                    myCodes.contains(code)));
         }
         return badges;
     }

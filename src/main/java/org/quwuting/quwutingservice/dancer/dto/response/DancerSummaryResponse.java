@@ -5,7 +5,6 @@ import org.quwuting.quwutingservice.dancer.enums.DancerVerificationStatus;
 import org.quwuting.quwutingservice.tagdict.dto.response.TagItemResponse;
 
 import java.util.List;
-
 /**
  * 舞伴列表条目（列表页卡片数据源）。
  * <p>
@@ -67,5 +66,13 @@ public record DancerSummaryResponse(
          * {@code DancerViewRepository#countByDancerIds}），禁止传默认 0
          * （否则列表卡片浏览量恒为 0，同门店 isHot 历史缺陷模式）。
          */
-        long viewCount
+        long viewCount,
+        /**
+         * 媒体预览列表（2026-08-24 晚：列表卡片多图预览，消息预览式——单张封面
+         * coverPhotoUrl 升级为照片+视频混合的前 N 个 PUBLIC 媒体）。每项已按当前
+         * 用户视角组装可见性：免费/已解锁 → url 清晰图；付费未解锁 → 仅 blurUrl
+         * 薄码 + 锁语义（unlocked=false），前端渲染薄码 + 锁角标；视频条目带
+         * 播放角标。空列表 = 无公开媒体，卡片不渲染预览行。
+         */
+        List<DancerMediaPreviewResponse> mediaPreviews
 ) {}

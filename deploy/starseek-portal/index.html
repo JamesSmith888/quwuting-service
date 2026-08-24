@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>星寻在线 · Starseek</title>
+<meta name="description" content="星寻在线（Starseek）个人网站">
+<style>
+  :root {
+    --bg: #f6f7fb;
+    --card: #ffffff;
+    --ink: #1f2329;
+    --ink-2: #646a73;
+    --line: #e5e6eb;
+    --brand: #2b6ef3;
+    --brand-soft: #eaf1fe;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { min-height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.7;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+  .wrap { width: min(880px, 92%); margin: 0 auto; }
+
+  /* Header */
+  header { background: linear-gradient(135deg, #2b6ef3 0%, #6a5cff 100%); color: #fff; padding: 64px 0 56px; }
+  header .wrap { display: flex; flex-direction: column; gap: 14px; }
+  .site-name { font-size: 32px; font-weight: 700; letter-spacing: 1px; }
+  .site-tagline { font-size: 15px; opacity: .92; }
+
+  /* Main */
+  main { flex: 1; padding: 32px 0 48px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 28px 32px;
+    margin-bottom: 20px;
+  }
+  .card h2 {
+    font-size: 17px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    padding-left: 10px;
+    border-left: 3px solid var(--brand);
+    line-height: 1.4;
+  }
+  .card p { color: var(--ink-2); font-size: 14px; }
+  .card p + p { margin-top: 8px; }
+
+  .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+  .info-item { background: #fafbfc; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .info-item .label { font-size: 12px; color: var(--ink-2); margin-bottom: 4px; }
+  .info-item .value { font-size: 15px; font-weight: 500; word-break: break-all; }
+
+  .contact { color: var(--brand); text-decoration: none; }
+
+  /* Footer */
+  footer { border-top: 1px solid var(--line); background: var(--card); padding: 22px 0; }
+  footer .wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; }
+  footer .beian { font-size: 13px; color: var(--ink-2); }
+  footer .beian a { color: var(--ink-2); text-decoration: none; }
+  footer .beian a:hover { color: var(--brand); }
+
+  @media (max-width: 600px) {
+    header { padding: 44px 0 38px; }
+    .site-name { font-size: 24px; }
+    .card { padding: 22px 20px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="site-name">星寻在线 · Starseek</div>
+    <div class="site-tagline">个人网站，提供线上服务与信息展示。</div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="card">
+    <h2>关于本站</h2>
+    <p>本站为个人网站，用于提供线上服务入口与相关信息展示。</p>
+    <p>如有任何问题或建议，欢迎通过站内公开的联系方式与我们联系。</p>
+  </section>
+
+  <section class="card">
+    <h2>主体信息</h2>
+    <div class="info-grid">
+      <div class="info-item">
+        <div class="label">主办单位</div>
+        <div class="value">个人</div>
+      </div>
+      <div class="info-item">
+        <div class="label">网站负责人</div>
+        <div class="value">个人（姓名脱敏）</div>
+      </div>
+      <div class="info-item">
+        <div class="label">联系邮箱</div>
+        <div class="value"><a class="contact" href="mailto:contact@starseek.online">contact@starseek.online</a></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="beian">
+      <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">沪ICP备XXXXXXXX号-1</a>
+    </div>
+    <div class="beian">
+      <a href="https://beian.mps.gov.cn/" target="_blank" rel="noopener noreferrer">沪公网安备310112XXXXXXXX号</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
