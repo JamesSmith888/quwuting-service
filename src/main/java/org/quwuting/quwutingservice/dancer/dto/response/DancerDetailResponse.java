@@ -123,5 +123,13 @@ public record DancerDetailResponse(
          *  未开启时为空串，前端不渲染广告入口） */
         String earningsAdUnitId,
         /** 舞伴累计获得的广告支持次数（收益线下结算依据，"已获得 N 次支持"） */
-        long earningsViews
+        long earningsViews,
+        /**
+         * 加好友需告知位置（2026-08-26，per-dancer 开关）：
+         * true = 需求确认层须二选一表态「同城 / 非同城·自行前往」且必填
+         * （UserLocationOption，随需求记录落库）——面向需确认用户能否到达
+         * 服务地点的舞伴（服务范围 location_scope 配套）；false = 不出现该
+         * 字段（绝大多数舞伴，零影响）。用户无关，随详情下发。
+         */
+        boolean requireUserLocation
 ) {}

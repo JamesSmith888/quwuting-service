@@ -34,13 +34,22 @@ public record UnlockRequest(
 
     /**
      * 联系方式需求选择（2026-08-24；2026-08-24 晚改版：服务/时间各选 1 项——
-     * 逼迫用户精准需求，消息拼接无「或」；2026-08-25 改版：时间 = 具体日期）。
+     * 逼迫用户精准需求，消息拼接无「或」；2026-08-25 改版：时间 = 具体日期；
+     * 2026-08-26 优化：时间新增「近3天内」相对槽 + 按时段服务可携带子选项 +
+     * 位置表态（location））。
      * <ul>
      *   <li>{@code serviceIds}：选中的服务 id（qwt_dancer_services.id，恰好 1 个，
      *       须属于目标舞伴且在用）；</li>
-     *   <li>{@code timeSlots}：选中的时间（具体日期 YYYY-MM-DD，恰好 1 个，须落在
-     *       [今天, 今天+6] 窗口——今天起 7 天快捷选项）；</li>
-     *   <li>{@code duration}：时长（DemandDuration 枚举 code，可空 = 未选）。</li>
+     *   <li>{@code timeSlots}：选中的时间（恰好 1 个：相对槽「近3天内」code
+     *       {@code WITHIN_3_DAYS}，或具体日期 YYYY-MM-DD 且须落在 [今天, 今天+6]
+     *       窗口——今天起 7 天快捷选项）；</li>
+     *   <li>{@code duration}：时长（DemandDuration 枚举 code，可空 = 未选）；</li>
+     *   <li>{@code subCategory}：按时段子类别 code（DancerServiceSubCategory，仅服务
+     *       category=PACKAGE 时必填——需求弹层「具体场景」单选，默认 KTV；其余类别忽略）；</li>
+     *   <li>{@code location}：位置表态（2026-08-26，UserLocationOption 枚举 code：
+     *       SAME_CITY 同城 / WILL_TRAVEL 非同城·自行前往——相对关系而非真实地址）。
+     *       仅目标舞伴开启「加好友需告知位置」（require_user_location）时<b>必填</b>
+     *       （缺失/非法 → 1001）；未开启时忽略本字段。</li>
      * </ul>
      */
     public record DemandSelection(
@@ -50,6 +59,12 @@ public record UnlockRequest(
             @Size(min = 1, max = 1, message = "时间请选择 1 个")
             List<String> timeSlots,
 
-            String duration
+            String duration,
+
+            /** 按时段子类别 code（仅 PACKAGE 服务必填；其余类别忽略） */
+            String subCategory,
+
+            /** 位置表态 code（仅舞伴开启「加好友需告知位置」时必填；其余忽略） */
+            String location
     ) {}
 }

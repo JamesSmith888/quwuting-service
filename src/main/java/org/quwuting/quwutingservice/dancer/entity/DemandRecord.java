@@ -64,6 +64,14 @@ public class DemandRecord {
     @Column(length = 20)
     private String duration;
 
+    /**
+     * 用户位置表态（2026-08-26，UserLocationOption 枚举 code：SAME_CITY 同城 /
+     * WILL_TRAVEL 自行前往；可空 = 舞伴未开启「加好友需告知位置」）。
+     * 只存枚举 code（相对关系非真实地址，隐私克制，见 UserLocationOption javadoc）。
+     */
+    @Column(length = 20)
+    private String userLocation;
+
     /** 服务端拼接的完整需求描述（与用户微信添加好友时粘贴的内容一致，审计用） */
     @Column(nullable = false, length = 120)
     private String message = "";

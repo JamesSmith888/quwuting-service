@@ -173,6 +173,8 @@ public class DancerService {
         // 联系方式遮挡开关（2026-08-14：null = 默认遮挡 true，向后兼容旧客户端）
         dancer.setHideContact(request.hideContact() == null || request.hideContact());
         dancer.setEarningsEnabled(request.earningsEnabled() != null && request.earningsEnabled());
+        // 加好友需告知位置（2026-08-26：null = 关闭；per-dancer 开关，见 V47）
+        dancer.setRequireUserLocation(request.requireUserLocation() != null && request.requireUserLocation());
         // 资料标签（2026-08-24 字典化：id 数组 JSON；去重/去空/存在性校验后落库）
         dancer.setProfileTags(tagDictService.serializeIds(normalizeProfileTags(request.profileTags())));
         dancer.setStatus(adminApproved ? DancerStatus.NORMAL : DancerStatus.PENDING);
@@ -330,6 +332,8 @@ public class DancerService {
         dancer.setContact(TextSanitizer.sanitize(request.contact(), 100));
         dancer.setHideContact(request.hideContact() == null || request.hideContact());
         dancer.setEarningsEnabled(request.earningsEnabled() != null && request.earningsEnabled());
+        // 加好友需告知位置（2026-08-26：null = 关闭；per-dancer 开关，见 V47）
+        dancer.setRequireUserLocation(request.requireUserLocation() != null && request.requireUserLocation());
         // 资料标签（2026-08-24：全量覆盖语义——传 null/空 = 清除全部标签）
         dancer.setProfileTags(tagDictService.serializeIds(normalizeProfileTags(request.profileTags())));
         // REJECTED 资料编辑后重新送审（管理员直改仍由管理员后续流转，此处不覆盖）
@@ -705,7 +709,8 @@ public class DancerService {
                 fetchPhotos(dancerId, showAllPhotos, currentUserId),
                 pub.tags(), pub.venues(), pub.services(),
                 hasContact, contact, contactImageUrl, hideContact, contactCost, contactUnlocked,
-                earningsEnabled, earningsAdUnitId, pub.adViews());
+                earningsEnabled, earningsAdUnitId, pub.adViews(),
+                dancer.isRequireUserLocation());
     }
 
     // ─── 服务范围（2026-08-24：admin 录入的黄页内容；详情公开读 + 管理端写） ─────
@@ -778,7 +783,7 @@ public class DancerService {
      * 2026-08-24 晚：category=PACKAGE 时子类别必填；2026-08-25 晚二轮：子类别<b>多选</b>
      * （subCategories 列表 → 逗号连接的 code 串落库），其余类别忽略恒置 null；
      * 2026-08-26：label 改<b>服务端权威派生</b>（buildServiceLabel）+ negotiable
-     * 回头客/熟人可谈（缺省 true）。
+     * 朋友可议（缺省 true；2026-08-26 合规用词：回头客/熟人可谈→朋友可议）。
      */
     private void applyServiceFields(org.quwuting.quwutingservice.dancer.entity.DancerService service,
                                     UpsertDancerServiceRequest request, int defaultSortOrder) {
@@ -799,9 +804,10 @@ public class DancerService {
     }
 
     /**
-     * label 服务端权威派生（2026-08-26：表单删除「服务标签」输入——包时 =
-     * 子类别名顿号连接+「包时」，舞厅跳舞/线上陪聊 = 类别名，仅「其他」类别
-     * admin 手动录入「服务内容」（必填，如「户外露营」）。
+     * label 服务端权威派生（2026-08-26：表单删除「服务标签」输入——按时段 =
+     * 子类别名顿号连接+「按时段」（2026-08-26 合规用词：包时→按时段），舞厅跳舞/
+     * 线上聊天 = 类别名，仅「其他」类别 admin 手动录入「服务内容」（必填，如
+     * 「户外露营」）。
      * 存量自定义 label（含 OTHER）原样保留：请求 label 非空 → 直接采用；
      * 空 → 按类别派生（OTHER 无默认名 → 1001 提示录入服务内容）。
      */
@@ -814,7 +820,7 @@ public class DancerService {
         }
         if (category == DancerServiceCategory.PACKAGE) {
             return subs.stream().map(DancerServiceSubCategory::defaultLabel)
-                    .collect(Collectors.joining("、")) + "包时";
+                    .collect(Collectors.joining("、")) + "按时段";
         }
         if (category == DancerServiceCategory.OTHER) {
             throw new BusinessException(1001, "请填写服务内容");
@@ -822,10 +828,10 @@ public class DancerService {
         return category.defaultLabel();
     }
 
-    /** 包时子类别归一：非空校验 + 去重保序（PACKAGE 必选 ≥1，2026-08-25 晚二轮多选） */
+    /** 按时段子类别归一：非空校验 + 去重保序（PACKAGE 必选 ≥1，2026-08-25 晚二轮多选） */
     private static List<DancerServiceSubCategory> normalizeSubCategories(List<DancerServiceSubCategory> raw) {
         if (raw == null || raw.isEmpty()) {
-            throw new BusinessException(1001, "包时请至少选择 1 个子类别（酒吧/舞厅/私影/KTV/其他）");
+            throw new BusinessException(1001, "按时段请至少选择 1 个场景（酒吧/舞厅/影咖/KTV/其他）");
         }
         return raw.stream().distinct().toList();
     }

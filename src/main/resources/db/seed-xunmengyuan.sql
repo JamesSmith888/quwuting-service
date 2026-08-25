@@ -67,7 +67,7 @@ BEGIN
   INSERT INTO qwt_venue_posts (venue_id, title, content, publisher_type, publisher_name, created_at, updated_at, deleted) VALUES
   (v_venue_id,
    '周末假面舞会 · 报名开启',
-   '本周六晚19:30，寻梦缘举办夏季假面舞会，现场提供面具租赁，双人同行一人免票。提前电话预约可享包时优惠，欢迎新老舞友到场！',
+   '本周六晚19:30，寻梦缘举办夏季假面舞会，现场提供面具租赁，双人同行一人免票。提前电话预约可享按时段优惠，欢迎新老舞友到场！',
    'OWNER', '寻梦缘', '2026-07-18 11:00:00', '2026-07-18 11:00:00', false),
   (v_venue_id,
    '长期招聘舞伴 / 舞蹈老师',

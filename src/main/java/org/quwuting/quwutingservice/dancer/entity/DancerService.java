@@ -14,26 +14,28 @@ import org.quwuting.quwutingservice.dancer.enums.DancerServiceCategory;
 
 /**
  * 舞伴服务范围（2026-08-24 联系方式获取质量优化；2026-08-24 晚类别改版；
- * 2026-08-25 晚二轮：包时子类别多选——sub_category 存逗号连接的枚举 code 串；
- * 2026-08-26：label 改服务端权威派生 + 新增 negotiable，qwt_dancer_services）。
+ * 2026-08-25 晚二轮：按时段子类别多选——sub_category 存逗号连接的枚举 code 串；
+ * 2026-08-26：label 改服务端权威派生 + 新增 negotiable + 合规用词
+ * （包时→按时段、线上陪聊→线上聊天、私影→影咖），qwt_dancer_services）。
  * <p>
  * 领域定位：<b>黄页内容</b>——admin 录入（平台代发模型），非用户 UGC，符合
  * 「小程序类目合规 UGC 红线」（见 AGENTS.md）。服务信息结构化展示：
  * <ul>
  *   <li>{@code category} 服务类别（PACKAGE/DANCE/ONLINE_CHAT/OTHER），
  *       需求弹层与列表「服务场景」筛选的维度；</li>
- *   <li>{@code subCategory} 包时子类别（仅 PACKAGE 有意义，<b>逗号连接多值</b>：
- *       酒吧/舞厅/私影/KTV/其他，如「BAR,KTV」；其余类别恒 null）；</li>
+ *   <li>{@code subCategory} 按时段子类别（仅 PACKAGE 有意义，<b>逗号连接多值</b>：
+ *       酒吧/舞厅/影咖/KTV/其他，如「BAR,KTV」；其余类别恒 null）；</li>
  *   <li>{@code label} 短标签——<b>服务端权威派生</b>（2026-08-26 起）：PACKAGE =
- *       子类别名顿号连接+「包时」，DANCE/ONLINE_CHAT = 类别名，仅 OTHER =
+ *       子类别名顿号连接+「按时段」，DANCE/ONLINE_CHAT = 类别名，仅 OTHER =
  *       admin 手动录入的「服务内容」（如「户外露营」）——需求弹层 chip 与
  *       <b>添加好友需求消息拼接</b>的唯一文案来源；</li>
  *   <li>{@code priceText} 服务价格/计费方式（如「300元/小时起」）；</li>
  *   <li>{@code locationScope} 服务地点范围（如「5KM左右」）；</li>
  *   <li>{@code advanceNotice} 提前预约要求（如「提前 2 小时」）；</li>
  *   <li>{@code rules} 服务规则和限制（如「不含酒水」）；</li>
- *   <li>{@code negotiable} 回头客/熟人可谈（2026-08-26，per-service 默认 true：
- *       价格可私下与舞伴协商，与平台无关——详情页服务卡「可谈」行展示）。</li>
+ *   <li>{@code negotiable} 朋友可议（2026-08-26，per-service 默认 true：
+ *       朋友间价格可商量——详情页服务卡「可议」行展示；2026-08-26 合规用词：
+ *       回头客/熟人可谈→朋友可议，「回头客/熟客」为陪侍黑话）。</li>
  * </ul>
  * active = 展示开关（admin 下架某服务但保留历史需求关联）；deleted = 软删。
  * sortOrder 控制详情页「服务范围」卡与需求弹层 chip 的展示顺序。
@@ -59,7 +61,7 @@ public class DancerService extends BaseEntity {
     @Column(nullable = false, length = 20)
     private DancerServiceCategory category;
 
-    /** 包时子类别（2026-08-25 晚二轮多选：逗号连接的枚举 code 串，如「BAR,KTV」；
+    /** 按时段子类别（2026-08-25 晚二轮多选：逗号连接的枚举 code 串，如「BAR,KTV」；
      *  仅 PACKAGE 有意义，其余类别恒 null） */
     @Column(length = 100)
     private String subCategory;
@@ -84,8 +86,8 @@ public class DancerService extends BaseEntity {
     @ColumnDefault("''")
     private String rules = "";
 
-    /** 回头客/熟人可谈（2026-08-26：per-service，默认 true——价格可私下与舞伴
-     *  协商，与平台无关；详情页服务卡「可谈」行展示） */
+    /** 朋友可议（2026-08-26：per-service，默认 true——朋友间价格可商量；
+     *  详情页服务卡「可议」行展示；合规用词：回头客/熟人可谈→朋友可议） */
     @Column(nullable = false)
     @ColumnDefault("true")
     private boolean negotiable = true;

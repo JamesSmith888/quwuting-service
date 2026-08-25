@@ -79,6 +79,15 @@ public record UpsertDancerRequest(
         Boolean earningsEnabled,
 
         /**
+         * 加好友需告知位置（2026-08-26 新增，null = 关闭）：
+         * 开启后用户获取联系方式前须二选一表态「同城 / 非同城·自行前往」
+         * （相对关系而非真实地址，不收集坐标/区划/门牌——合规安全，
+         * 见 UserLocationOption javadoc）。per-dancer 开关，仅需要确认用户
+         * 能否到达服务地点的舞伴开启（服务范围 location_scope 配套）。
+         */
+        Boolean requireUserLocation,
+
+        /**
          * 资料标签（2026-08-24 新增，管理员设置）：通用标签字典 {@code qwt_tag_dict} 的
          * id 数组（如 [1,3]），可选；null/空列表 = 无标签。编辑为<b>全量覆盖语义</b>
          * （传空 = 清除全部标签，与多城市/常驻舞厅同「编辑 = 变更而非追加」约定）。

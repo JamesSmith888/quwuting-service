@@ -94,6 +94,20 @@ public class Dancer extends BaseEntity {
     private boolean earningsEnabled = false;
 
     /**
+     * 加好友需告知位置（2026-08-26 新增，默认关闭；per-dancer 开关）。
+     * <p>
+     * 语义：开启后用户获取联系方式（需求确认层）须二选一表态——「同城」或
+     * 「非同城 · 自行前往」（UserLocationOption，随需求记录落库）。面向需要
+     * 确认用户能否到达服务地点的舞伴（服务范围 location_scope 的配套确认），
+     * 非所有舞伴都需要。设计上<b>不收集真实地址</b>（相对关系而非 PII，
+     * 见 UserLocationOption javadoc / docs/agents/20）。列默认值唯一声明通道
+     * = @ColumnDefault（见 V47 迁移）。
+     */
+    @Column(nullable = false)
+    @ColumnDefault("false")
+    private boolean requireUserLocation = false;
+
+    /**
      * 资料状态。列默认值唯一声明通道 = @ColumnDefault（见 AGENTS.md「Schema 演进」）。
      * 默认 PENDING：所有新资料必须经管理员认证后才公开（真实个人隐私边界的第一道闸）。
      */

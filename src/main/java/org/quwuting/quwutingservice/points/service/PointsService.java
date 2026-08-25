@@ -8,8 +8,11 @@ import org.quwuting.quwutingservice.dancer.entity.DancerPhoto;
 import org.quwuting.quwutingservice.dancer.entity.DancerService;
 import org.quwuting.quwutingservice.dancer.entity.DemandRecord;
 import org.quwuting.quwutingservice.dancer.enums.DancerPhotoStatus;
+import org.quwuting.quwutingservice.dancer.enums.DancerServiceCategory;
+import org.quwuting.quwutingservice.dancer.enums.DancerServiceSubCategory;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.enums.DemandDuration;
+import org.quwuting.quwutingservice.dancer.enums.UserLocationOption;
 import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerServiceRepository;
@@ -30,6 +33,7 @@ import org.quwuting.quwutingservice.points.repository.PointsAccountRepository;
 import org.quwuting.quwutingservice.points.repository.PointsGateRepository;
 import org.quwuting.quwutingservice.points.repository.PointsTransactionRepository;
 import org.quwuting.quwutingservice.points.repository.PointsUnlockRepository;
+import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
@@ -42,6 +46,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -95,6 +100,13 @@ public class PointsService {
 
     /** 需求时间窗口天数（2026-08-25 改版：今天起 7 个具体日期快捷选项） */
     private static final int DEMAND_TIME_WINDOW_DAYS = 7;
+
+    /** 需求时间「近3天内」相对槽 code（2026-08-26：需求弹层默认时间选项，
+     *  消息拼接 = 「近3天内」；qwt_demand_records.time_slots 原样存本 code） */
+    private static final String DEMAND_TIME_WITHIN_3_DAYS = "WITHIN_3_DAYS";
+
+    /** 需求时间「近3天内」消息拼接文案（2026-08-26；前端预览经同一常量镜像） */
+    private static final String DEMAND_TIME_WITHIN_3_DAYS_TEXT = "近3天内";
 
     /**
      * 采纳奖励整句激励文案（2026-08-12 上报激励三触点，文案唯一事实源在本服务）。
@@ -609,15 +621,26 @@ public class PointsService {
         if (!contactType && (gate == null || gate.isDeleted())) {
             throw new BusinessException(1001, "该内容无需积分即可查看");
         }
+        // 本人/管理员归属豁免（2026-08-26 末轮：本人/管理员查看联系方式同样走需求单
+        // 流程——详情页 onTapContact 一律 demand 模式，不区分视角；后端与详情组装
+        // contactUnlocked 语义一致（本人/管理员恒已解锁）：直接返回内容 + 需求落库，
+        // 不扣费、不写解锁记录、不消耗每日首免、不失效舞伴统计缓存）
+        if (contactType && isOwnerOrAdmin(userId, target.ownerUserId())) {
+            UnlockResponse.DemandDetail demandDetail = recordDemand(userId, targetId, demand);
+            return new UnlockResponse(true, currentBalance(userId), targetType, targetId,
+                    target.content(), target.contactImageUrl(),
+                    demandDetail != null ? demandDetail.demandMessage() : null, false, demandDetail);
+        }
         // 同一用户并发解锁串行化（防「双请求同时通过幂等检查 → 双双扣费」；
         // 锁必须在幂等检查之前获取，见 repository javadoc）
         unlockRepository.lockUserUnlock("unlock:" + userId);
         // 幂等：已解锁 → 直接返回内容（不重复扣费；串行化后此处判定确定可靠）。
         // 已解锁舞伴重新选需求（新意图/新时间）→ 重新生成需求描述并落库，不扣费。
         if (unlockRepository.findByUserIdAndTargetTypeAndTargetId(userId, targetType, targetId).isPresent()) {
-            String demandMessage = contactType ? recordDemand(userId, targetId, demand) : null;
+            UnlockResponse.DemandDetail demandDetail = contactType ? recordDemand(userId, targetId, demand) : null;
+            String demandMessage = demandDetail != null ? demandDetail.demandMessage() : null;
             return new UnlockResponse(true, currentBalance(userId), targetType, targetId,
-                    target.content(), target.contactImageUrl(), demandMessage, false);
+                    target.content(), target.contactImageUrl(), demandMessage, false, demandDetail);
         }
         // 费用计算：无门槛恒免费；有门槛联系方式每日首免；其余按门槛扣费
         int cost = (gate != null && !gate.isDeleted()) ? gate.getCost() : 0;
@@ -664,9 +687,10 @@ public class PointsService {
         // afterCommit 失效舞伴统计缓存（对齐 DancerViewService 同款边界兜底——
         // 提交后失效保证并发读者回源必读到已提交数据；幂等分支无新数据不需失效）
         invalidateDancerStatsAfterCommit(targetType, targetId);
-        String demandMessage = contactType ? recordDemand(userId, targetId, demand) : null;
+        UnlockResponse.DemandDetail demandDetail = contactType ? recordDemand(userId, targetId, demand) : null;
+        String demandMessage = demandDetail != null ? demandDetail.demandMessage() : null;
         return new UnlockResponse(true, newBalance, targetType, targetId,
-                target.content(), target.contactImageUrl(), demandMessage, freeToday);
+                target.content(), target.contactImageUrl(), demandMessage, freeToday, demandDetail);
     }
 
     /**
@@ -702,13 +726,17 @@ public class PointsService {
      *       请重新选择」）；时长枚举合法；</li>
      *   <li>消息拼接（方案B 结构化三要素，服务端权威文案）：</li>
      * </ul>
-     * {@code 去舞厅【服务 · M月D日 · 时长】}
-     * （时长未选时省略）。需求记录只存 id/日期/整句文案，
-     * 不存自由文本（隐私克制，见 DemandRecord javadoc）。
+     * {@code 去舞厅【服务 · 时间 · 时长 · 位置】}
+     * （时长/位置未选时省略；时间 = 「近3天内」相对槽或具体日期；按时段服务 =
+     * 类别名 · 具体场景名，2026-08-26；位置 = 舞伴开启「加好友需告知位置」时必填，
+     * 2026-08-26——「同城」或「自行前往」，相对关系而非真实地址）。需求记录只存
+     * id/日期/整句文案/枚举 code，不存自由文本（隐私克制，见 DemandRecord javadoc）。
      *
-     * @return 拼接好的需求描述（demand 为 null 或非联系方式场景返回 null）
+     * @return 需求说明详情（含单行验证消息 demandMessage 与多行详细文本
+     *         demandDetailText，2026-08-26 21-demand-detail-card；demand 为 null
+     *         或非联系方式场景返回 null）
      */
-    private String recordDemand(Long userId, Long dancerId, UnlockRequest.DemandSelection demand) {
+    private UnlockResponse.DemandDetail recordDemand(Long userId, Long dancerId, UnlockRequest.DemandSelection demand) {
         if (demand == null) {
             return null;
         }
@@ -720,59 +748,194 @@ public class PointsService {
         if (serviceIds.size() > 1 || timeSlotCodes.size() > 1) {
             throw new BusinessException(1001, "服务与时间请各选 1 项");
         }
+        // 2026-08-26 位置表态：仅舞伴开启「加好友需告知位置」时校验（必填 + 枚举合法）；
+        // 未开启忽略（向后兼容旧客户端，不校验不落库）
+        Dancer dancer = dancerRepository.findById(dancerId)
+                .orElseThrow(() -> new BusinessException(1001, "舞伴不存在"));
+        String location = demand.location();
+        if (dancer.isRequireUserLocation()) {
+            if (location == null || location.isBlank()) {
+                throw new BusinessException(1001, "请选择同城或自行前往");
+            }
+            UserLocationOption.parse(location); // 非法 → 1001「无效的位置选项」
+        } else {
+            location = null;
+        }
         List<DancerService> services = dancerServiceRepository.findAllById(serviceIds);
         if (services.size() != new HashSet<>(serviceIds).size()) {
             throw new BusinessException(1001, "所选服务不存在");
         }
+        // 2026-08-26 子选项：按时段服务须携带 1 个属于其子类别集合的具体场景 code
+        // （需求弹层「具体场景」单选，默认 KTV；其余类别忽略本字段）
+        String subCategory = demand.subCategory();
         for (DancerService s : services) {
             if (!s.getDancerId().equals(dancerId) || s.isDeleted() || !s.isActive()) {
                 throw new BusinessException(1001, "所选服务不属于该舞伴或已下架");
             }
+            if (s.getCategory() == DancerServiceCategory.PACKAGE
+                    && (subCategory == null || !parseSubCategoryCodes(s.getSubCategory()).contains(subCategory))) {
+                throw new BusinessException(1001, "所选服务场景无效，请重新选择");
+            }
         }
-        List<LocalDate> timeDates = timeSlotCodes.stream().map(PointsService::parseDemandDate).toList();
+        // 时间校验：相对槽「近3天内」或 [今天, 今天+6] 具体日期（2026-08-26 相对槽）
+        timeSlotCodes.forEach(PointsService::validateDemandTime);
         DemandDuration duration = (demand.duration() == null || demand.duration().isBlank())
                 ? null : DemandDuration.parse(demand.duration());
-        String message = buildDemandMessage(services, timeDates, duration);
+        String message = buildDemandMessage(services.get(0), timeSlotCodes.get(0), subCategory, duration, location);
         DemandRecord record = new DemandRecord();
         record.setUserId(userId);
         record.setDancerId(dancerId);
         record.setServiceIds(serviceIds.stream().map(String::valueOf).collect(Collectors.joining(",")));
         record.setTimeSlots(timeSlotCodes.stream().map(String::valueOf).collect(Collectors.joining(",")));
         record.setDuration(duration != null ? duration.name() : null);
+        record.setUserLocation(location);
         record.setMessage(message);
         demandRecordRepository.save(record);
         log.info("用户 {} 对舞伴 {} 提出需求：{}", userId, dancerId, message);
-        return message;
+        // 2026-08-26 需求说明详情（21-demand-detail-card）：结构化字段供结果卡表格
+        // 渲染与离屏 canvas 图片绘制；demandDetailText = 服务端权威多行文本（出口 C
+        // 复制即用，前端零拼接）。全部来自本方法上下文，零额外查询。
+        DancerService service = services.get(0);
+        String timeSlotCode = timeSlotCodes.get(0);
+        String timeLabel = DEMAND_TIME_WITHIN_3_DAYS.equals(timeSlotCode)
+                ? DEMAND_TIME_WITHIN_3_DAYS_TEXT : formatDemandDate(LocalDate.parse(timeSlotCode));
+        String locationLabel = (location != null && !location.isBlank())
+                ? UserLocationOption.valueOf(location).display() : null;
+        return new UnlockResponse.DemandDetail(
+                dancer.getNickname(),
+                dancer.getCity(),
+                buildDemandServicePart(service, subCategory),
+                service.getPriceText(),
+                service.isNegotiable(),
+                service.getLocationScope(),
+                service.getAdvanceNotice(),
+                service.getRules(),
+                timeLabel,
+                duration != null ? duration.display() : null,
+                locationLabel,
+                message,
+                buildDemandDetailText(dancer, service, subCategory, timeLabel, duration, locationLabel, message));
+    }
+
+    /**
+     * 多行详细需求文本拼接（2026-08-26，21-demand-detail-card 出口 C「复制详情」——
+     * 服务端权威文案，前端零拼接；与表格结构化字段同源同序，粘贴微信聊天即完整
+     * 需求说明）。行格式「标签：值」，空值行省略（计费行 negotiable=true 追加
+     * 「 · 朋友可议」；规则空 → 兜底「未注明特别规则，可联系 TA 确认」，与详情页
+     * 服务卡一致）。
+     */
+    private static String buildDemandDetailText(Dancer dancer,
+                                                DancerService service,
+                                                String subCategoryCode,
+                                                String timeLabel,
+                                                DemandDuration duration,
+                                                String locationLabel,
+                                                String message) {
+        StringBuilder sb = new StringBuilder("舞伴：").append(dancer.getNickname());
+        if (dancer.getCity() != null && !dancer.getCity().isBlank()) {
+            sb.append(" · ").append(dancer.getCity());
+        }
+        sb.append('\n').append("服务：").append(buildDemandServicePart(service, subCategoryCode));
+        boolean hasPrice = service.getPriceText() != null && !service.getPriceText().isBlank();
+        boolean hasNegotiable = service.isNegotiable();
+        if (hasPrice || hasNegotiable) {
+            sb.append('\n').append("计费：");
+            if (hasPrice) {
+                sb.append(service.getPriceText());
+            }
+            if (hasPrice && hasNegotiable) {
+                sb.append(" · ");
+            }
+            if (hasNegotiable) {
+                sb.append("朋友可议");
+            }
+        }
+        sb.append('\n').append("时间：").append(timeLabel);
+        if (duration != null) {
+            sb.append('\n').append("时长：").append(duration.display());
+        }
+        if (locationLabel != null) {
+            sb.append('\n').append("位置：").append(locationLabel);
+        }
+        if (service.getLocationScope() != null && !service.getLocationScope().isBlank()) {
+            sb.append('\n').append("地点范围：").append(service.getLocationScope());
+        }
+        if (service.getAdvanceNotice() != null && !service.getAdvanceNotice().isBlank()) {
+            sb.append('\n').append("预约要求：").append(service.getAdvanceNotice());
+        }
+        String rules = service.getRules();
+        sb.append('\n').append("规则：")
+                .append(rules != null && !rules.isBlank() ? rules : "未注明特别规则，可联系 TA 确认");
+        sb.append('\n').append("需求描述：").append(message);
+        return sb.toString();
     }
 
     /**
      * 添加好友需求描述拼接（2026-08-24 方案B 结构化三要素；
      * 2026-08-24 晚：服务/时间各 1 项 + 前缀小程序名「去舞厅」——
      * 舞伴收到好友请求即知来自哪个小程序，降低拒收概率；
-     * 2026-08-25：时间 = 具体日期「M月D日」）：
-     * {@code 去舞厅【服务 · M月D日 · 时长】}（时长未选时省略）。
-     * 服务名 = 服务自身 label（2026-08-26 起服务端按类别权威派生，仅 OTHER 为
-     * admin 手动录入的服务内容）；前端预览规则与本方法一致（注释互证，前端零拼接）。
+     * 2026-08-25：时间 = 具体日期「M月D日」；
+     * 2026-08-26：时间支持「近3天内」相对槽；按时段服务部分 = 类别名 · 具体场景名
+     * （如「按时段 · KTV」，弹层「具体场景」单选）；位置表态（location，舞伴开启
+     * 「加好友需告知位置」时必填——「同城」或「自行前往」，相对关系而非真实地址））：
+     * {@code 去舞厅【服务 · 时间 · 时长 · 位置】}（时长/位置未选时省略）。
+     * 服务名 = 类别权威派生（PACKAGE = 类别名 · 具体场景名；DANCE/ONLINE_CHAT =
+     * 类别名；仅 OTHER = admin 手动录入的服务内容）；前端预览规则与本方法一致
+     * （注释互证，前端零拼接）。
      */
-    private static String buildDemandMessage(List<DancerService> services,
-                                             List<LocalDate> timeDates,
-                                             DemandDuration duration) {
-        String servicePart = services.get(0).getLabel();
-        String timePart = formatDemandDate(timeDates.get(0));
+    private static String buildDemandMessage(DancerService service,
+                                             String timeSlotCode,
+                                             String subCategoryCode,
+                                             DemandDuration duration,
+                                             String locationCode) {
+        String servicePart = buildDemandServicePart(service, subCategoryCode);
+        String timePart = DEMAND_TIME_WITHIN_3_DAYS.equals(timeSlotCode)
+                ? DEMAND_TIME_WITHIN_3_DAYS_TEXT : formatDemandDate(LocalDate.parse(timeSlotCode));
         StringBuilder sb = new StringBuilder("去舞厅【").append(servicePart).append(" · ").append(timePart);
         if (duration != null) {
             sb.append(" · ").append(duration.display());
         }
+        if (locationCode != null && !locationCode.isBlank()) {
+            // 位置已在 recordDemand 校验合法（UserLocationOption.parse），valueOf 安全
+            sb.append(" · ").append(UserLocationOption.valueOf(locationCode).display());
+        }
         return sb.append("】").toString();
     }
 
+    /** 需求消息服务部分（2026-08-26）：按时段 = 类别名 · 具体场景名（如「按时段 · KTV」，
+     *  子选项已在 recordDemand 校验属于服务子类别集合，valueOf 安全）；
+     *  其余类别 = 服务 label（权威派生，仅 OTHER 为 admin 手动录入） */
+    private static String buildDemandServicePart(DancerService service, String subCategoryCode) {
+        if (service.getCategory() == DancerServiceCategory.PACKAGE
+                && subCategoryCode != null && !subCategoryCode.isBlank()) {
+            DancerServiceSubCategory sub = DancerServiceSubCategory.valueOf(subCategoryCode);
+            return service.getCategory().defaultLabel() + " · " + sub.defaultLabel();
+        }
+        return service.getLabel();
+    }
+
+    /** 按时段子类别 code 拆分（逗号连接串 → 列表，去空；空串 = 空列表） */
+    private static List<String> parseSubCategoryCodes(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return List.of();
+        }
+        return Arrays.stream(raw.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .toList();
+    }
+
     /**
-     * 需求时间 code 解析 + 窗口校验（2026-08-25 改版：时间 = 具体日期，今天起 7 天）。
-     * code = ISO LocalDate（YYYY-MM-DD，如 2026-08-01）；非法格式 → 1001
-     * 「无效的时间选项」；合法但不在 [今天, 今天+6] → 1001「所选日期已过期，
-     * 请重新选择」（弹层跨天提交时前端重新打开选择即可）。
+     * 需求时间 code 校验（2026-08-25 改版：时间 = 具体日期，今天起 7 天；
+     * 2026-08-26：新增「近3天内」相对槽 WITHIN_3_DAYS——需求弹层默认时间选项）。
+     * code = WITHIN_3_DAYS 直接通过；否则须为 ISO LocalDate（YYYY-MM-DD）且落在
+     * [今天, 今天+6] 窗口——非法格式 → 1001「无效的时间选项」；合法但不在窗口 →
+     * 1001「所选日期已过期，请重新选择」（弹层跨天提交时前端重新打开选择即可）。
      */
-    private static LocalDate parseDemandDate(String code) {
+    private static void validateDemandTime(String code) {
+        if (DEMAND_TIME_WITHIN_3_DAYS.equals(code)) {
+            return;
+        }
         LocalDate date;
         try {
             date = LocalDate.parse(code);
@@ -783,7 +946,6 @@ public class PointsService {
         if (date.isBefore(today) || date.isAfter(today.plusDays(DEMAND_TIME_WINDOW_DAYS - 1))) {
             throw new BusinessException(1001, "所选日期已过期，请重新选择");
         }
-        return date;
     }
 
     /** 具体日期 → 消息拼接文案（2026-08-25：「M月D日」，如 8月1日） */
@@ -924,7 +1086,7 @@ public class PointsService {
                 throw new BusinessException(1001, "该舞伴资料暂不可见");
             }
             PointsGate gate = gateRepository.findByTargetTypeAndTargetId(targetType, targetId).orElse(null);
-            return new UnlockTarget(gate, photo.getUrl(), null);
+            return new UnlockTarget(gate, photo.getUrl(), null, null);
         }
         Dancer dancer = dancerRepository.findByIdAndDeletedFalse(targetId)
                 .orElseThrow(() -> new BusinessException(1001, "舞伴不存在"));
@@ -933,9 +1095,22 @@ public class PointsService {
         }
         PointsGate gate = gateRepository.findByTargetTypeAndTargetId(targetType, targetId).orElse(null);
         // 联系方式（2026-08-14 多形态：文本 contact + 图片 contactImageUrl 一并下发，解锁后展示）
-        return new UnlockTarget(gate, dancer.getContact(), dancer.getContactImageUrl());
+        return new UnlockTarget(gate, dancer.getContact(), dancer.getContactImageUrl(), dancer.getCreatedBy());
     }
 
-    /** 解锁目标解析结果（门槛 + 解锁内容，一次解析避免重复查询；contactImageUrl 仅联系方式场景非空） */
-    private record UnlockTarget(PointsGate gate, String content, String contactImageUrl) {}
+    /**
+     * 本人/管理员归属判定（2026-08-26：舞伴创建者（createdBy 匹配）或平台管理员——
+     * 与详情组装 contactUnlocked 的「本人/管理员恒已解锁」语义对齐，解锁豁免依据）。
+     */
+    private boolean isOwnerOrAdmin(Long userId, Long ownerUserId) {
+        if (ownerUserId == null) {
+            return false;
+        }
+        return ownerUserId.equals(userId) || UserContext.getCurrentRole() == UserRole.ADMIN;
+    }
+
+    /** 解锁目标解析结果（门槛 + 解锁内容 + 归属用户，一次解析避免重复查询；
+     *  contactImageUrl 仅联系方式场景非空；ownerUserId 仅联系方式场景非空 =
+     *  舞伴创建者，供本人/管理员归属豁免判定） */
+    private record UnlockTarget(PointsGate gate, String content, String contactImageUrl, Long ownerUserId) {}
 }

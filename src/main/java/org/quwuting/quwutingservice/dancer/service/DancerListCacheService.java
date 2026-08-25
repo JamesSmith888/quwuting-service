@@ -126,7 +126,7 @@ public class DancerListCacheService {
             Map<Long, List<DancerMediaBrief>> mediaPreviewsById,
             /**
              * 提供线上服务的舞伴 id 集合（2026-08-24：存在 ≥1 个在用且类别为
-             * ONLINE_CHAT（线上陪聊）的服务——列表卡片「线上」胶囊数据源；
+             * ONLINE_CHAT（线上聊天）的服务——列表卡片「线上」胶囊数据源；
              * 用户无关可缓存）。
              */
             Set<Long> onlineServiceDancerIds
