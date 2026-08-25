@@ -1025,6 +1025,9 @@ public class PointsService {
      * 微信加好友验证消息 50 字限制内，实测最长组合约 27 字）：
      * {@code 「去舞厅」：【包时 · KTV · 近3天内 · 2小时 · 同城】😊}
      * （时长/位置未选时省略）。
+     * 2026-08-26（用户反馈定稿落地）：删【】左右括号——微信验证消息输入框的
+     * 方括号在部分机型显示拥挤/多余，定稿无括号版：
+     * {@code 「去舞厅」：包时 · KTV · 近3天内 · 2小时 · 同城😊}。
      * 服务名 = 类别权威派生（PACKAGE = 包时 · 具体场景名；DANCE/ONLINE_CHAT =
      * 类别名；仅 OTHER = admin 手动录入的服务内容）；前端预览规则与本方法一致
      * （注释互证，前端零拼接）。
@@ -1037,7 +1040,7 @@ public class PointsService {
         String servicePart = buildDemandMessageServicePart(service, subCategoryCode);
         String timePart = DEMAND_TIME_WITHIN_3_DAYS.equals(timeSlotCode)
                 ? DEMAND_TIME_WITHIN_3_DAYS_TEXT : formatDemandDate(LocalDate.parse(timeSlotCode));
-        StringBuilder sb = new StringBuilder("「去舞厅」：【")
+        StringBuilder sb = new StringBuilder("「去舞厅」：")
                 .append(servicePart).append(" · ").append(timePart);
         if (duration != null) {
             sb.append(" · ").append(duration.display());
@@ -1046,7 +1049,7 @@ public class PointsService {
             // 位置已在 recordDemand 校验合法（UserLocationOption.parse），valueOf 安全
             sb.append(" · ").append(UserLocationOption.valueOf(locationCode).display());
         }
-        return sb.append("】😊").toString();
+        return sb.append("😊").toString();
     }
 
     /** 需求消息服务部分（2026-08-26）：按时段 = 类别名 · 具体场景名（如「按时段 · KTV」，
