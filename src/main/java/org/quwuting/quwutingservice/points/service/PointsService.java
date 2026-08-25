@@ -694,6 +694,157 @@ public class PointsService {
     }
 
     /**
+     * 我的需求单（2026-08-26，个人中心「我的需求单」列表数据源）。
+     * <p>
+     * 语义：需求记录 = 用户自己的行为记录（我向谁提了什么需求），按 userId 过滤天然
+     * 隔离（只返回本人记录，前端零权限判定）；分页倒序（新记录在前，idx_qwt_demand_records_user
+     * 索引）。
+     * <p>
+     * 舞伴摘要：批量 IN 查询一次取整页舞伴（规避 N+1，dancerRepository.findByIds 已
+     * 过滤 deleted）；舞伴软删 → 摘要 null（前端回退「舞伴已下架」占位禁跳）；dancerVisible
+     * = 未软删且 status=NORMAL（普通用户可跳详情的唯一口径，PENDING/HIDDEN/REJECTED 仅
+     * 本人/管理员可见——边缘情况：本人/管理员自己的非 NORMAL 舞伴记录同样显示不可跳，
+     * 可接受）。
+     */
+    public Page<DemandRecordResponse> listMyDemands(Long userId, int page, int size) {
+        Page<DemandRecord> records = demandRecordRepository
+                .findByUserIdOrderByIdDesc(userId, PageRequest.of(page, Math.min(Math.max(size, 1), 50)));
+        List<Long> dancerIds = records.getContent().stream()
+                .map(DemandRecord::getDancerId).distinct().toList();
+        Map<Long, Dancer> dancerMap = dancerIds.isEmpty() ? Map.of()
+                : dancerRepository.findByIds(dancerIds).stream()
+                        .collect(Collectors.toMap(Dancer::getId, d -> d));
+        return records.map(r -> {
+            Dancer dancer = dancerMap.get(r.getDancerId());
+            return new DemandRecordResponse(
+                    r.getId(),
+                    r.getDancerId(),
+                    dancer != null ? dancer.getNickname() : null,
+                    dancer != null ? dancer.getAvatarUrl() : null,
+                    dancer != null ? dancer.getCity() : null,
+                    dancer != null && dancer.getStatus() == DancerStatus.NORMAL,
+                    r.getMessage(),
+                    r.getCreatedAt());
+        });
+    }
+
+    /**
+     * 我的单条需求单详情（2026-08-26，需求单详情页数据源——点击需求单进<b>详情</b>
+     * 而非舞伴主页，见 20 号文档「我的需求单」）。
+     * <p>
+     * 归属校验：findByUserIdAndId 双重条件（userId + id）——越权/不存在 → 1001「需求单
+     * 不存在」（需求单是用户级资源，前端零权限判定）。
+     * <p>
+     * 需求四要素从落库枚举/id 串反推（recordDemand 上下文的镜像）：
+     * <ul>
+     *   <li><b>服务</b>：历史记录<b>未存 subCategory</b>（落库仅 serviceIds），无法还原
+     *       「按时段 · KTV」子选项——用服务<b>当前权威 label</b> 兜底（与详情页服务卡
+     *       同源，buildServiceLabel）；服务已软删/下架 → null（前端省略该行）；</li>
+     *   <li><b>时间</b>：WITHIN_3_DAYS 或具体日期 → 详情表述（补「可协商」）；</li>
+     *   <li><b>时长/位置</b>：枚举 code → display/detailText 详情表述；历史数据枚举异常
+     *       → 防御性 null（不打断详情页，parse 的 1001 语义只属于实时提交路径）。</li>
+     * </ul>
+     * 舞伴摘要与 dancerVisible 口径同 listMyDemands（软删 null / 未软删且 NORMAL 可跳）。
+     */
+    public DemandDetailResponse getMyDemand(Long userId, Long demandId) {
+        DemandRecord record = demandRecordRepository.findByUserIdAndId(userId, demandId)
+                .orElseThrow(() -> new BusinessException(1001, "需求单不存在"));
+        Dancer dancer = dancerRepository.findByIds(List.of(record.getDancerId()))
+                .stream().findFirst().orElse(null);
+        // 服务（serviceIds 落库恒恰好 1 项，recordDemand 校验；逐段防御历史脏数据）
+        DancerService service = null;
+        for (String raw : record.getServiceIds().split(",")) {
+            if (raw.isBlank()) {
+                continue;
+            }
+            try {
+                service = dancerServiceRepository.findByIdAndDeletedFalse(Long.parseLong(raw.trim()))
+                        .orElse(null);
+            } catch (NumberFormatException e) {
+                service = null;
+            }
+            if (service != null) {
+                break;
+            }
+        }
+        String serviceLabel = service != null ? service.getLabel() : null;
+        String timeDetailLabel = buildTimeDetailLabel(record.getTimeSlots());
+        String durationLabel = parseDemandDurationLabel(record.getDuration());
+        String locationLabel = parseUserLocationLabel(record.getUserLocation());
+        // 多行详细文本（服务/时间/时长/位置，缺失行省略；与前端表格同源同序，复制即用）
+        StringBuilder detailText = new StringBuilder();
+        if (serviceLabel != null) {
+            detailText.append("服务：").append(serviceLabel);
+        }
+        if (timeDetailLabel != null) {
+            if (detailText.length() > 0) {
+                detailText.append('\n');
+            }
+            detailText.append("时间：").append(timeDetailLabel);
+        }
+        if (durationLabel != null) {
+            detailText.append('\n').append("时长：").append(durationLabel);
+        }
+        if (locationLabel != null) {
+            detailText.append('\n').append("位置：").append(locationLabel);
+        }
+        return new DemandDetailResponse(
+                record.getId(),
+                record.getDancerId(),
+                dancer != null ? dancer.getNickname() : null,
+                dancer != null ? dancer.getAvatarUrl() : null,
+                dancer != null ? dancer.getCity() : null,
+                dancer != null && dancer.getStatus() == DancerStatus.NORMAL,
+                record.getMessage(),
+                serviceLabel,
+                timeDetailLabel,
+                durationLabel,
+                locationLabel,
+                detailText.toString(),
+                record.getCreatedAt());
+    }
+
+    /** 时间详情表述（WITHIN_3_DAYS = 近3天内 + 可协商；具体日期 = M月D日 + 可协商；
+     *  历史数据日期非法 → 防御性 null） */
+    private static String buildTimeDetailLabel(String timeSlotCode) {
+        if (timeSlotCode == null || timeSlotCode.isBlank()) {
+            return null;
+        }
+        try {
+            if (DEMAND_TIME_WITHIN_3_DAYS.equals(timeSlotCode)) {
+                return DEMAND_TIME_WITHIN_3_DAYS_TEXT + "，具体哪天可与您协商";
+            }
+            return formatDemandDate(LocalDate.parse(timeSlotCode)) + "，具体时段可与您协商";
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** 时长详情表述（历史数据枚举异常 → 防御性 null，不打断详情页） */
+    private static String parseDemandDurationLabel(String code) {
+        if (code == null || code.isBlank()) {
+            return null;
+        }
+        try {
+            return DemandDuration.valueOf(code).display() + "，时长可商量";
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /** 位置详情表述（历史数据枚举异常 → 防御性 null，不打断详情页） */
+    private static String parseUserLocationLabel(String code) {
+        if (code == null || code.isBlank()) {
+            return null;
+        }
+        try {
+            return UserLocationOption.valueOf(code).detailText();
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /**
      * 今日是否已对"任意有门槛舞伴"解锁过联系方式（2026-08-24 每日首免判定）：
      * 取今日全部 DANCER_CONTACT 解锁（target_id = 舞伴 ID），逐个回查门槛——
      * 存在任一有门槛（cost>0 且未软删）即返回 true。无门槛舞伴的免费解锁不消耗
@@ -799,8 +950,15 @@ public class PointsService {
         String timeSlotCode = timeSlotCodes.get(0);
         String timeLabel = DEMAND_TIME_WITHIN_3_DAYS.equals(timeSlotCode)
                 ? DEMAND_TIME_WITHIN_3_DAYS_TEXT : formatDemandDate(LocalDate.parse(timeSlotCode));
-        String locationLabel = (location != null && !location.isBlank())
-                ? UserLocationOption.valueOf(location).display() : null;
+        // 2026-08-26 需求单瘦身：详情表述（表格/文本/海报 = 给舞伴看的完整语义，无字数限制）
+        // ——时间补「可协商」（近3天内=日期未定需沟通）、位置用 detailText 完整句；单行
+        // 验证消息 buildDemandMessage 仍用 display 精简文案（加好友有字数限制），互证不混淆。
+        String timeDetailLabel = DEMAND_TIME_WITHIN_3_DAYS.equals(timeSlotCode)
+                ? timeLabel + "，具体哪天可与您协商"
+                : timeLabel + "，具体时段可与您协商";
+        String durationDetailLabel = duration != null ? duration.display() + "，时长可商量" : null;
+        String locationDetailLabel = (location != null && !location.isBlank())
+                ? UserLocationOption.valueOf(location).detailText() : null;
         return new UnlockResponse.DemandDetail(
                 dancer.getNickname(),
                 dancer.getCity(),
@@ -810,63 +968,34 @@ public class PointsService {
                 service.getLocationScope(),
                 service.getAdvanceNotice(),
                 service.getRules(),
-                timeLabel,
-                duration != null ? duration.display() : null,
-                locationLabel,
+                timeDetailLabel,
+                durationDetailLabel,
+                locationDetailLabel,
                 message,
-                buildDemandDetailText(dancer, service, subCategory, timeLabel, duration, locationLabel, message));
+                buildDemandDetailText(service, subCategory, timeDetailLabel, durationDetailLabel, locationDetailLabel));
     }
 
     /**
      * 多行详细需求文本拼接（2026-08-26，21-demand-detail-card 出口 C「复制详情」——
      * 服务端权威文案，前端零拼接；与表格结构化字段同源同序，粘贴微信聊天即完整
-     * 需求说明）。行格式「标签：值」，空值行省略（计费行 negotiable=true 追加
-     * 「 · 朋友可议」；规则空 → 兜底「未注明特别规则，可联系 TA 确认」，与详情页
-     * 服务卡一致）。
+     * 需求说明）。2026-08-26 需求单瘦身：只保留用户本次需求四要素行——服务/时间/时长/
+     * 位置（值 = 详情表述，无字数限制语义说透）；舞伴自己的静态信息（名字·城市/计费/
+     * 地点范围/预约要求/规则）不再重复（TA 均已设置知晓）；需求描述原文行一并移除
+     * （加好友验证消息已用过）。行格式「标签：值」，空值行省略（时长/位置未选）。
      */
-    private static String buildDemandDetailText(Dancer dancer,
-                                                DancerService service,
+    private static String buildDemandDetailText(DancerService service,
                                                 String subCategoryCode,
-                                                String timeLabel,
-                                                DemandDuration duration,
-                                                String locationLabel,
-                                                String message) {
-        StringBuilder sb = new StringBuilder("舞伴：").append(dancer.getNickname());
-        if (dancer.getCity() != null && !dancer.getCity().isBlank()) {
-            sb.append(" · ").append(dancer.getCity());
+                                                String timeDetailLabel,
+                                                String durationDetailLabel,
+                                                String locationDetailLabel) {
+        StringBuilder sb = new StringBuilder("服务：").append(buildDemandServicePart(service, subCategoryCode));
+        sb.append('\n').append("时间：").append(timeDetailLabel);
+        if (durationDetailLabel != null) {
+            sb.append('\n').append("时长：").append(durationDetailLabel);
         }
-        sb.append('\n').append("服务：").append(buildDemandServicePart(service, subCategoryCode));
-        boolean hasPrice = service.getPriceText() != null && !service.getPriceText().isBlank();
-        boolean hasNegotiable = service.isNegotiable();
-        if (hasPrice || hasNegotiable) {
-            sb.append('\n').append("计费：");
-            if (hasPrice) {
-                sb.append(service.getPriceText());
-            }
-            if (hasPrice && hasNegotiable) {
-                sb.append(" · ");
-            }
-            if (hasNegotiable) {
-                sb.append("朋友可议");
-            }
+        if (locationDetailLabel != null) {
+            sb.append('\n').append("位置：").append(locationDetailLabel);
         }
-        sb.append('\n').append("时间：").append(timeLabel);
-        if (duration != null) {
-            sb.append('\n').append("时长：").append(duration.display());
-        }
-        if (locationLabel != null) {
-            sb.append('\n').append("位置：").append(locationLabel);
-        }
-        if (service.getLocationScope() != null && !service.getLocationScope().isBlank()) {
-            sb.append('\n').append("地点范围：").append(service.getLocationScope());
-        }
-        if (service.getAdvanceNotice() != null && !service.getAdvanceNotice().isBlank()) {
-            sb.append('\n').append("预约要求：").append(service.getAdvanceNotice());
-        }
-        String rules = service.getRules();
-        sb.append('\n').append("规则：")
-                .append(rules != null && !rules.isBlank() ? rules : "未注明特别规则，可联系 TA 确认");
-        sb.append('\n').append("需求描述：").append(message);
         return sb.toString();
     }
 

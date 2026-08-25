@@ -168,6 +168,8 @@ public class DancerService {
         // 多城市（2026-08-14）：cities 优先（去空去重，最多 3 个）；主城市 = 首个
         List<String> cities = resolveCities(request);
         dancer.setCity(primaryCity(cities));
+        // 当前所在城市（2026-08-26，V48：从已选城市中再选中一个，须 ∈ cities）
+        dancer.setCurrentCity(resolveCurrentCity(request, cities));
         dancer.setContactImageUrl(sanitizeContactImageUrl(request.contactImageUrl()));
         dancer.setContact(TextSanitizer.sanitize(request.contact(), 100));
         // 联系方式遮挡开关（2026-08-14：null = 默认遮挡 true，向后兼容旧客户端）
@@ -240,6 +242,35 @@ public class DancerService {
     /** 主城市（= cities 首个，冗余同步 dancer.city 展示位；空列表 → null） */
     private String primaryCity(List<String> cities) {
         return cities.isEmpty() ? null : cities.get(0);
+    }
+
+    /**
+     * 解析当前所在城市（2026-08-26，V48；创建/编辑共用单一权威）。
+     * <p>
+     * 约束 = 必须为已选常驻城市之一（多城市时显式指定，单城市即该城市本身）：
+     * <ul>
+     *   <li>cities 为空（纯线上舞伴，无城市）→ 恒 null；显式传入值 → 1001
+     *       （防脏数据，与前端"未选城市不渲染该字段"对齐）；</li>
+     *   <li>cities 非空、currentCity 清洗后为空（存量舞伴/旧客户端缺省）→
+     *       回退主城市 cities[0]（不报错——存量数据无需强制补选，回退即该城市）；</li>
+     *   <li>cities 非空、currentCity 不在列表中 → 1001「当前所在城市须为常驻城市之一」。</li>
+     * </ul>
+     */
+    private String resolveCurrentCity(UpsertDancerRequest request, List<String> cities) {
+        String raw = TextSanitizer.sanitize(request.currentCity(), 50);
+        if (cities.isEmpty()) {
+            if (!raw.isEmpty()) {
+                throw new BusinessException(1001, "未选择常驻城市，无需设置当前所在城市");
+            }
+            return null;
+        }
+        if (raw.isEmpty()) {
+            return cities.get(0);
+        }
+        if (!cities.contains(raw)) {
+            throw new BusinessException(1001, "当前所在城市须为常驻城市之一");
+        }
+        return raw;
     }
 
     /**
@@ -328,6 +359,8 @@ public class DancerService {
         // "城市变更"而非"追加"，防止多次编辑累积超过 3 个城市）
         List<String> cities = resolveCities(request);
         dancer.setCity(primaryCity(cities));
+        // 当前所在城市（2026-08-26，V48：从已选城市中再选中一个，须 ∈ cities）
+        dancer.setCurrentCity(resolveCurrentCity(request, cities));
         dancer.setContactImageUrl(sanitizeContactImageUrl(request.contactImageUrl()));
         dancer.setContact(TextSanitizer.sanitize(request.contact(), 100));
         dancer.setHideContact(request.hideContact() == null || request.hideContact());
@@ -702,7 +735,7 @@ public class DancerService {
                 tagDictService.resolveOrdered(tagDictService.deserializeIds(dancer.getProfileTags()));
         return new DancerDetailResponse(
                 dancer.getId(), dancer.getNickname(), dancer.getAvatarUrl(), dancer.getBio(),
-                dancer.getGender(), dancer.getCity(), pub.cities(), profileTags, dancer.getStatus(),
+                dancer.getGender(), dancer.getCity(), pub.cities(), dancer.getCurrentCity(), profileTags, dancer.getStatus(),
                 dancer.getVerificationStatus(), dancer.getVerifiedAt(),
                 isMine, myToday, myTags, favorite, pub.stats(),
                 pub.pointsReceivedTotal(), pub.pointsReceived30d(), pub.giftsReceived(),

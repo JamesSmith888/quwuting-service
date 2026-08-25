@@ -42,19 +42,19 @@ public record UnlockResponse(
      * 需求说明详情（2026-08-26，解锁结果卡「需求说明」表格 + 三出口数据源）。
      * 全部来自 {@code recordDemand} 上下文（dancer/service/time/duration/location），
      * 零额外查询；空值行由前端渲染时省略（WXML 零三元，TS 派生 rows）。
+     * 2026-08-26 需求单瘦身：表格只渲染用户本次需求四要素行——服务/时间/时长/位置，
+     * 值 = 详情表述（时间补「可协商」、位置 detailText 完整句，无字数限制语义说透）；
+     * 舞伴静态信息字段（dancerName/city/priceText/locationScope/advanceNotice/rules）
+     * 保留结构向后兼容，前端不再消费（TA 自己的信息无需在需求单重复）。
      * <ul>
-     *   <li>{@code dancerName}/{@code city}：舞伴昵称/城市（表格首行「舞伴 琳琳 · 上海」）；</li>
      *   <li>{@code serviceLabel}：本次服务权威 label（PACKAGE = 类别名 · 具体场景名，
      *       如「按时段 · KTV」；DANCE/ONLINE_CHAT = 类别名；OTHER = admin 录入服务内容）
      *       ——与需求描述服务部分同源（buildDemandServicePart）；</li>
-     *   <li>{@code priceText}/{@code negotiable}：计费方式 + 朋友可议（表格计费行
-     *       「300元/小时起 · 朋友可议」合并展示，negotiable=false 省略后半）；</li>
-     *   <li>{@code locationScope}/{@code advanceNotice}/{@code rules}：服务地点范围/
-     *       预约要求/规则说明（rules 空 → 前端兜底「未注明特别规则，可联系 TA 确认」）；</li>
-     *   <li>{@code timeLabel}：本次时间（「M月D日」或「近3天内」）；</li>
-     *   <li>{@code durationLabel}/{@code locationLabel}：时长/位置表态（未选/未开启
-     *       恒 null，前端省略行）；</li>
-     *   <li>{@code demandMessage}：单行验证消息原文（表格底部灰底块展示）；</li>
+     *   <li>{@code timeLabel}：本次时间详情表述（「近3天内，具体哪天可与您协商」或
+     *       「8月27日，具体时段可与您协商」）；</li>
+     *   <li>{@code durationLabel}/{@code locationLabel}：时长/位置详情表述（未选/未开启
+     *       恒 null，前端省略行；位置 = UserLocationOption.detailText 完整句）；</li>
+     *   <li>{@code demandMessage}：单行验证消息原文（加好友用，保持精简文案）；</li>
      *   <li>{@code demandDetailText}：多行详细文本（出口 C 复制即用，服务端权威拼接）。</li>
      * </ul>
      */

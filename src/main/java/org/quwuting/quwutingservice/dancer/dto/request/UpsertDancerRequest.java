@@ -48,6 +48,17 @@ public record UpsertDancerRequest(
         List<@Size(max = 50, message = "城市最长50个字符") String> cities,
 
         /**
+         * 当前所在城市（2026-08-26 新增，V48 迁移；可空 = 未填城市/存量舞伴）：
+         * 从已选常驻城市（cities）中再选中一个作为舞伴当前所在城市——用户在
+         * 「解锁联系方式-是否同城」时据此判断是否同城。服务层校验：cities 非空
+         * 时须为已选城市之一（显式非法值 → 1001「当前所在城市须为常驻城市之一」；
+         * 缺省回退主城市兼容旧客户端/存量数据）；cities 为空（纯线上舞伴）时
+         * 本字段须为空。
+         */
+        @Size(max = 50, message = "城市最长50个字符")
+        String currentCity,
+
+        /**
          * 联系方式图片（2026-08-14 新增，二维码等，可选；null/空串 = 不填）。
          * 与 contact 同一门槛/遮挡语义（详情页三态一致）；入库前必须经
          * storage/ImageContentValidator 内容校验（08-12 安全加固约定）。

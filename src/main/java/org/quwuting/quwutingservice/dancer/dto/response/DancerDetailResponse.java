@@ -35,6 +35,12 @@ public record DancerDetailResponse(
          */
         List<String> cities,
         /**
+         * 当前所在城市（2026-08-26 新增，V48；从已选城市中再选中一个——
+         * 用户在「解锁联系方式-是否同城」时据此判断是否与舞伴同城）。
+         * 可空 = 未填城市（纯线上舞伴）/存量舞伴（前端回退主城市 city 展示）。
+         */
+        String currentCity,
+        /**
          * 资料标签（2026-08-24 管理员设置，字典化）：TagItemResponse 列表
          * （text + description——详情页长按/点击弹说明的权威文案），按字典排序。
          * 空列表 = 无标签，不渲染标签区块。与「认可标签聚合」（tags，用户行为产生）

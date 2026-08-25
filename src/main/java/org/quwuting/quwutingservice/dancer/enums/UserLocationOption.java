@@ -34,6 +34,15 @@ public enum UserLocationOption {
         return display;
     }
 
+    /**
+     * 需求说明详情表述（2026-08-26 需求单瘦身：给舞伴看的完整语义，无字数限制——
+     * 只用于需求说明表格/文本/海报；单行验证消息仍用 {@link #display()} 精简文案，
+     * 两者互证不混淆）。
+     */
+    public String detailText() {
+        return this == SAME_CITY ? "用户与您同城" : "用户非同城，会自行前往您所在的城市";
+    }
+
     /** 解析位置表态代码（非法值 → 1001「无效的位置选项」） */
     public static UserLocationOption parse(String code) {
         try {

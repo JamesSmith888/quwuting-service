@@ -108,6 +108,18 @@ public class Dancer extends BaseEntity {
     private boolean requireUserLocation = false;
 
     /**
+     * 当前所在城市（2026-08-26 新增，可空；V48 迁移）。
+     * <p>
+     * 语义：从已选常驻城市（{@code qwt_dancer_cities}）中再选中一个作为舞伴
+     * <b>当前</b>所在城市——用户在「解锁联系方式-是否同城」时据此判断是否与
+     * 舞伴同城（多城市场景下「城市列表」无法表达当前所在）。约束：必须为已选
+     * 城市之一（服务层校验，非法 → 1001）；未填城市（纯线上舞伴）恒为 null；
+     * 存量舞伴为 null 时前端回退主城市（city）展示。
+     */
+    @Column(length = 50)
+    private String currentCity;
+
+    /**
      * 资料状态。列默认值唯一声明通道 = @ColumnDefault（见 AGENTS.md「Schema 演进」）。
      * 默认 PENDING：所有新资料必须经管理员认证后才公开（真实个人隐私边界的第一道闸）。
      */

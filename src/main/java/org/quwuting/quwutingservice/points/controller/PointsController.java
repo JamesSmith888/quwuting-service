@@ -4,6 +4,8 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.points.dto.CheckInResponse;
+import org.quwuting.quwutingservice.points.dto.DemandDetailResponse;
+import org.quwuting.quwutingservice.points.dto.DemandRecordResponse;
 import org.quwuting.quwutingservice.points.dto.GifterResponse;
 import org.quwuting.quwutingservice.points.dto.GiftRequest;
 import org.quwuting.quwutingservice.points.dto.GiftResponse;
@@ -116,5 +118,27 @@ public class PointsController {
     public ApiResponse<UnlockResponse> unlock(@Valid @RequestBody UnlockRequest request) {
         return ApiResponse.ok(pointsService.unlock(
                 UserContext.requireAuth(), request.targetType(), request.targetId(), request.demand()));
+    }
+
+    /**
+     * 我的需求单（2026-08-26，需登录）：个人中心「我的需求单」列表数据源。
+     * 按当前用户过滤（只返回本人记录），分页倒序；行 = 舞伴摘要（软删/非 NORMAL 时
+     * dancerVisible=false 前端禁跳）+ 需求描述原文 + 创建时间。
+     */
+    @GetMapping("/demands/mine")
+    public ApiResponse<Page<DemandRecordResponse>> myDemands(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return ApiResponse.ok(pointsService.listMyDemands(UserContext.requireAuth(), page, size));
+    }
+
+    /**
+     * 我的单条需求单详情（2026-08-26，需登录）：需求单详情页数据源——点击需求单进入
+     * 详情（需求四要素表格 + 验证消息 + 舞伴摘要），而非舞伴主页。userId + id 双重
+     * 归属校验（越权/不存在 → 1001「需求单不存在」）。
+     */
+    @GetMapping("/demands/{id}")
+    public ApiResponse<DemandDetailResponse> demandDetail(@PathVariable Long id) {
+        return ApiResponse.ok(pointsService.getMyDemand(UserContext.requireAuth(), id));
     }
 }
