@@ -3,10 +3,10 @@ package org.quwuting.quwutingservice.points.dto;
 import java.time.LocalDateTime;
 
 /**
- * 我的需求单记录（2026-08-26，GET /points/demands/mine 行）。
+ * 我的邀约记录（2026-08-26，GET /points/demands/mine 行）。
  * <p>
- * 语义：用户每次获取舞伴联系方式时强制填写需求单（服务端生成添加好友验证消息并落库
- * qwt_demand_records），本响应 = 个人中心「我的需求单」列表数据源——只展示<b>自己的</b>
+ * 语义：用户每次获取舞伴联系方式时强制填写邀约（服务端生成添加好友验证消息并落库
+ * qwt_demand_records），本响应 = 个人中心「我的邀约」列表数据源——只展示<b>自己的</b>
  * 记录（按 userId 过滤，天然隔离），行 = 舞伴摘要 + 需求描述原文 + 创建时间。
  * <p>
  * 舞伴摘要（dancerNickname/avatarUrl/city）来自 qwt_dancers JOIN——舞伴软删后为 null，

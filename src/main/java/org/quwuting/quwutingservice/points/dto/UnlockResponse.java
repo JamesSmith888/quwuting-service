@@ -42,10 +42,10 @@ public record UnlockResponse(
      * 需求说明详情（2026-08-26，解锁结果卡「需求说明」表格 + 三出口数据源）。
      * 全部来自 {@code recordDemand} 上下文（dancer/service/time/duration/location），
      * 零额外查询；空值行由前端渲染时省略（WXML 零三元，TS 派生 rows）。
-     * 2026-08-26 需求单瘦身：表格只渲染用户本次需求四要素行——服务/时间/时长/位置，
+     * 2026-08-26 邀约瘦身：表格只渲染用户本次需求四要素行——服务/时间/时长/位置，
      * 值 = 详情表述（时间补「可协商」、位置 detailText 完整句，无字数限制语义说透）；
      * 舞伴静态信息字段（dancerName/city/priceText/locationScope/advanceNotice/rules）
-     * 保留结构向后兼容，前端不再消费（TA 自己的信息无需在需求单重复）。
+     * 保留结构向后兼容，前端不再消费（TA 自己的信息无需在邀约重复）。
      * <ul>
      *   <li>{@code serviceLabel}：本次服务权威 label（PACKAGE = 类别名 · 具体场景名，
      *       如「按时段 · KTV」；DANCE/ONLINE_CHAT = 类别名；OTHER = admin 录入服务内容）

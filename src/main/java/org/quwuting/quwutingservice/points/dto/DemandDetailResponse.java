@@ -3,10 +3,10 @@ package org.quwuting.quwutingservice.points.dto;
 import java.time.LocalDateTime;
 
 /**
- * 我的需求单详情（2026-08-26，GET /points/demands/{id}）。
+ * 我的邀约详情（2026-08-26，GET /points/demands/{id}）。
  * <p>
- * 语义：需求单 = 用户自己的行为记录，点击列表行进入<b>需求单详情</b>（而非舞伴主页）——
- * 展示这条需求单的完整内容：验证消息 message + 需求四要素表格（服务/时间/时长/位置，
+ * 语义：邀约 = 用户自己的行为记录，点击列表行进入<b>邀约详情</b>（而非舞伴主页）——
+ * 展示这条邀约的完整内容：验证消息 message + 需求四要素表格（服务/时间/时长/位置，
  * 服务端权威详情表述）+ 舞伴摘要 + 创建时间。
  * <p>
  * 服务/时间/时长/位置从 qwt_demand_records 反推（recordDemand 落库的枚举/id 串）：

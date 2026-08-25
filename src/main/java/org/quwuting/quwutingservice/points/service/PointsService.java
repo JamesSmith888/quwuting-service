@@ -109,6 +109,16 @@ public class PointsService {
     private static final String DEMAND_TIME_WITHIN_3_DAYS_TEXT = "近3天内";
 
     /**
+     * 验证消息按时段类别用词（2026-08-26 晚：对外展示仍用「按时段」（V46 合规词，
+     * 见 AGENTS.md 合规用词脱敏），验证消息用舞伴行话「包时」——舞伴更看得懂；
+     * 验证消息不含计费信息（仅时长「2小时」），与审核词库命中的高危组合
+     * 「包时+元/小时计费」不同，风险可控；若后续审核驳回，回退 = 界面保持
+     * 「按时段」、仅复制文本替换）。前端预览经同一词镜像（utils/demand.ts
+     * DEMAND_MESSAGE_PACKAGE_LABEL，注释互证）。
+     */
+    private static final String DEMAND_MESSAGE_PACKAGE_CATEGORY_LABEL = "包时";
+
+    /**
      * 采纳奖励整句激励文案（2026-08-12 上报激励三触点，文案唯一事实源在本服务）。
      * 金额来自配置 app.points.feedback-reward；整句后端拼接——VenueFeedbackService
      * 提交响应与公开接口 GET /points/reward-hint 同源消费，前端零硬编码零拼接。
@@ -621,7 +631,7 @@ public class PointsService {
         if (!contactType && (gate == null || gate.isDeleted())) {
             throw new BusinessException(1001, "该内容无需积分即可查看");
         }
-        // 本人/管理员归属豁免（2026-08-26 末轮：本人/管理员查看联系方式同样走需求单
+        // 本人/管理员归属豁免（2026-08-26 末轮：本人/管理员查看联系方式同样走邀约
         // 流程——详情页 onTapContact 一律 demand 模式，不区分视角；后端与详情组装
         // contactUnlocked 语义一致（本人/管理员恒已解锁）：直接返回内容 + 需求落库，
         // 不扣费、不写解锁记录、不消耗每日首免、不失效舞伴统计缓存）
@@ -694,7 +704,7 @@ public class PointsService {
     }
 
     /**
-     * 我的需求单（2026-08-26，个人中心「我的需求单」列表数据源）。
+     * 我的邀约（2026-08-26，个人中心「我的邀约」列表数据源）。
      * <p>
      * 语义：需求记录 = 用户自己的行为记录（我向谁提了什么需求），按 userId 过滤天然
      * 隔离（只返回本人记录，前端零权限判定）；分页倒序（新记录在前，idx_qwt_demand_records_user
@@ -729,11 +739,11 @@ public class PointsService {
     }
 
     /**
-     * 我的单条需求单详情（2026-08-26，需求单详情页数据源——点击需求单进<b>详情</b>
-     * 而非舞伴主页，见 20 号文档「我的需求单」）。
+     * 我的单条邀约详情（2026-08-26，邀约详情页数据源——点击邀约进<b>详情</b>
+     * 而非舞伴主页，见 20 号文档「我的邀约」）。
      * <p>
-     * 归属校验：findByUserIdAndId 双重条件（userId + id）——越权/不存在 → 1001「需求单
-     * 不存在」（需求单是用户级资源，前端零权限判定）。
+     * 归属校验：findByUserIdAndId 双重条件（userId + id）——越权/不存在 → 1001「邀约
+     * 不存在」（邀约是用户级资源，前端零权限判定）。
      * <p>
      * 需求四要素从落库枚举/id 串反推（recordDemand 上下文的镜像）：
      * <ul>
@@ -748,7 +758,7 @@ public class PointsService {
      */
     public DemandDetailResponse getMyDemand(Long userId, Long demandId) {
         DemandRecord record = demandRecordRepository.findByUserIdAndId(userId, demandId)
-                .orElseThrow(() -> new BusinessException(1001, "需求单不存在"));
+                .orElseThrow(() -> new BusinessException(1001, "邀约不存在"));
         Dancer dancer = dancerRepository.findByIds(List.of(record.getDancerId()))
                 .stream().findFirst().orElse(null);
         // 服务（serviceIds 落库恒恰好 1 项，recordDemand 校验；逐段防御历史脏数据）
@@ -950,7 +960,7 @@ public class PointsService {
         String timeSlotCode = timeSlotCodes.get(0);
         String timeLabel = DEMAND_TIME_WITHIN_3_DAYS.equals(timeSlotCode)
                 ? DEMAND_TIME_WITHIN_3_DAYS_TEXT : formatDemandDate(LocalDate.parse(timeSlotCode));
-        // 2026-08-26 需求单瘦身：详情表述（表格/文本/海报 = 给舞伴看的完整语义，无字数限制）
+        // 2026-08-26 邀约瘦身：详情表述（表格/文本/海报 = 给舞伴看的完整语义，无字数限制）
         // ——时间补「可协商」（近3天内=日期未定需沟通）、位置用 detailText 完整句；单行
         // 验证消息 buildDemandMessage 仍用 display 精简文案（加好友有字数限制），互证不混淆。
         String timeDetailLabel = DEMAND_TIME_WITHIN_3_DAYS.equals(timeSlotCode)
@@ -978,7 +988,7 @@ public class PointsService {
     /**
      * 多行详细需求文本拼接（2026-08-26，21-demand-detail-card 出口 C「复制详情」——
      * 服务端权威文案，前端零拼接；与表格结构化字段同源同序，粘贴微信聊天即完整
-     * 需求说明）。2026-08-26 需求单瘦身：只保留用户本次需求四要素行——服务/时间/时长/
+     * 需求说明）。2026-08-26 邀约瘦身：只保留用户本次需求四要素行——服务/时间/时长/
      * 位置（值 = 详情表述，无字数限制语义说透）；舞伴自己的静态信息（名字·城市/计费/
      * 地点范围/预约要求/规则）不再重复（TA 均已设置知晓）；需求描述原文行一并移除
      * （加好友验证消息已用过）。行格式「标签：值」，空值行省略（时长/位置未选）。
@@ -1006,9 +1016,16 @@ public class PointsService {
      * 2026-08-25：时间 = 具体日期「M月D日」；
      * 2026-08-26：时间支持「近3天内」相对槽；按时段服务部分 = 类别名 · 具体场景名
      * （如「按时段 · KTV」，弹层「具体场景」单选）；位置表态（location，舞伴开启
-     * 「加好友需告知位置」时必填——「同城」或「自行前往」，相对关系而非真实地址））：
-     * {@code 去舞厅【服务 · 时间 · 时长 · 位置】}（时长/位置未选时省略）。
-     * 服务名 = 类别权威派生（PACKAGE = 类别名 · 具体场景名；DANCE/ONLINE_CHAT =
+     * 「加好友需告知位置」时必填——「同城」或「自行前往」，相对关系而非真实地址）；
+     * 2026-08-26 晚（用户反馈优化，两轮）：前缀「去舞厅【】」→「💃 舞伴你好～ 在
+     * 「去舞厅」看到你，想约你：【】」→（用户嫌寒暄老气）最终定稿
+     * 「去舞厅」：【服务 · 时间 · 时长 · 位置】😊——书名号明确小程序名（防名词/动词
+     * 歧义）+ 去寒暄 + 结尾 emoji；分隔符统一「 · 」；服务类别用舞伴行话「包时」
+     * （对外展示仍「按时段」，见 DEMAND_MESSAGE_PACKAGE_CATEGORY_LABEL）——
+     * 微信加好友验证消息 50 字限制内，实测最长组合约 27 字）：
+     * {@code 「去舞厅」：【包时 · KTV · 近3天内 · 2小时 · 同城】😊}
+     * （时长/位置未选时省略）。
+     * 服务名 = 类别权威派生（PACKAGE = 包时 · 具体场景名；DANCE/ONLINE_CHAT =
      * 类别名；仅 OTHER = admin 手动录入的服务内容）；前端预览规则与本方法一致
      * （注释互证，前端零拼接）。
      */
@@ -1017,10 +1034,11 @@ public class PointsService {
                                              String subCategoryCode,
                                              DemandDuration duration,
                                              String locationCode) {
-        String servicePart = buildDemandServicePart(service, subCategoryCode);
+        String servicePart = buildDemandMessageServicePart(service, subCategoryCode);
         String timePart = DEMAND_TIME_WITHIN_3_DAYS.equals(timeSlotCode)
                 ? DEMAND_TIME_WITHIN_3_DAYS_TEXT : formatDemandDate(LocalDate.parse(timeSlotCode));
-        StringBuilder sb = new StringBuilder("去舞厅【").append(servicePart).append(" · ").append(timePart);
+        StringBuilder sb = new StringBuilder("「去舞厅」：【")
+                .append(servicePart).append(" · ").append(timePart);
         if (duration != null) {
             sb.append(" · ").append(duration.display());
         }
@@ -1028,7 +1046,7 @@ public class PointsService {
             // 位置已在 recordDemand 校验合法（UserLocationOption.parse），valueOf 安全
             sb.append(" · ").append(UserLocationOption.valueOf(locationCode).display());
         }
-        return sb.append("】").toString();
+        return sb.append("】😊").toString();
     }
 
     /** 需求消息服务部分（2026-08-26）：按时段 = 类别名 · 具体场景名（如「按时段 · KTV」，
@@ -1039,6 +1057,21 @@ public class PointsService {
                 && subCategoryCode != null && !subCategoryCode.isBlank()) {
             DancerServiceSubCategory sub = DancerServiceSubCategory.valueOf(subCategoryCode);
             return service.getCategory().defaultLabel() + " · " + sub.defaultLabel();
+        }
+        return service.getLabel();
+    }
+
+    /**
+     * 验证消息服务部分（2026-08-26 晚，与 {@link #buildDemandServicePart} 并存）：
+     * 仅按时段类别的类别词不同——消息用舞伴行话「包时」（DEMAND_MESSAGE_PACKAGE_
+     * CATEGORY_LABEL），对外展示（服务卡/详情表格/海报 = buildDemandServicePart）仍
+     * 「按时段」（V46 合规词）。两者注释互证，避免误改。
+     */
+    private static String buildDemandMessageServicePart(DancerService service, String subCategoryCode) {
+        if (service.getCategory() == DancerServiceCategory.PACKAGE
+                && subCategoryCode != null && !subCategoryCode.isBlank()) {
+            DancerServiceSubCategory sub = DancerServiceSubCategory.valueOf(subCategoryCode);
+            return DEMAND_MESSAGE_PACKAGE_CATEGORY_LABEL + " · " + sub.defaultLabel();
         }
         return service.getLabel();
     }
