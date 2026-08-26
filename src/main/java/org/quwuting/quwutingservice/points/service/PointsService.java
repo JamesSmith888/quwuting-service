@@ -654,7 +654,7 @@ public class PointsService {
         // 同样走邀约流程（管理员暂时也不给特权）；admin/本人要看联系方式走
         // dancer-edit 回显（详情接口对本人/管理员下发真实值，不依赖 unlock 豁免）。
         if (contactType && !target.contactRelay() && isOwnerOrAdmin(userId, target.ownerUserId())) {
-            UnlockResponse.DemandDetail demandDetail = recordDemand(userId, targetId, demand, null).detail();
+            UnlockResponse.DemandDetail demandDetail = recordDemandDetail(userId, targetId, demand, null);
             return new UnlockResponse(true, currentBalance(userId), targetType, targetId,
                     target.content(), target.contactImageUrl(),
                     demandDetail != null ? demandDetail.demandMessage() : null, false, demandDetail,
@@ -682,7 +682,7 @@ public class PointsService {
             Optional<DemandRecord> approved = demandRecordRepository
                     .findApprovedByUserIdAndDancerId(userId, targetId);
             if (approved.isPresent()) {
-                UnlockResponse.DemandDetail demandDetail = recordDemand(userId, targetId, demand, null).detail();
+                UnlockResponse.DemandDetail demandDetail = recordDemandDetail(userId, targetId, demand, null);
                 String demandMessage = demandDetail != null ? demandDetail.demandMessage() : null;
                 return new UnlockResponse(true, currentBalance(userId), targetType, targetId,
                         target.content(), target.contactImageUrl(), demandMessage, false, demandDetail,
@@ -706,7 +706,7 @@ public class PointsService {
         // 2026-08-26 邀约中转：contactRelay 舞伴已在上方中转分支处理（基于邀约
         // 状态幂等），此处仅非中转舞伴。
         if (unlockRepository.findByUserIdAndTargetTypeAndTargetId(userId, targetType, targetId).isPresent()) {
-            UnlockResponse.DemandDetail demandDetail = contactType ? recordDemand(userId, targetId, demand, null).detail() : null;
+            UnlockResponse.DemandDetail demandDetail = contactType ? recordDemandDetail(userId, targetId, demand, null) : null;
             String demandMessage = demandDetail != null ? demandDetail.demandMessage() : null;
             return new UnlockResponse(true, currentBalance(userId), targetType, targetId,
                     target.content(), target.contactImageUrl(), demandMessage, false, demandDetail,
@@ -761,7 +761,7 @@ public class PointsService {
         // afterCommit 失效舞伴统计缓存（对齐 DancerViewService 同款边界兜底——
         // 提交后失效保证并发读者回源必读到已提交数据；幂等分支无新数据不需失效）
         invalidateDancerStatsAfterCommit(targetType, targetId);
-        UnlockResponse.DemandDetail demandDetail = contactType ? recordDemand(userId, targetId, demand, null).detail() : null;
+        UnlockResponse.DemandDetail demandDetail = contactType ? recordDemandDetail(userId, targetId, demand, null) : null;
         String demandMessage = demandDetail != null ? demandDetail.demandMessage() : null;
         return new UnlockResponse(true, newBalance, targetType, targetId,
                 target.content(), target.contactImageUrl(), demandMessage, freeToday, demandDetail,
@@ -1006,6 +1006,19 @@ public class PointsService {
                 DemandDetailTexts.detailText(buildDemandServicePart(service, subCategory),
                         timeDetailLabel, durationDetailLabel, locationDetailLabel)),
                 record.getId(), record.getCreatedAt());
+    }
+
+    /**
+     * 需求落库 + 详情（2026-08-26 修复 NPE 回归：2026-08-26 16:20 生产事故——
+     * unlock(DANCER_CONTACT, demand=null) 直接 recordDemand(...).detail() 在
+     * demand 为 null（前端无服务降级路径 / mode=view 幂等取回，见 dancer-contact
+     * unlockContact(null)）时 NPE → 500）。统一判空：demand 缺失 = 无需求记录，
+     * 返回 null（调用点已有 demandDetail != null 判空语义，仅缺判空本身）。
+     */
+    private UnlockResponse.DemandDetail recordDemandDetail(Long userId, Long dancerId,
+                                                           UnlockRequest.DemandSelection demand, String status) {
+        DemandRecorded recorded = recordDemand(userId, dancerId, demand, status);
+        return recorded != null ? recorded.detail() : null;
     }
 
     /** 需求落库结果（2026-08-26 邀约中转：detail + 记录 id + createdAt——

@@ -19,9 +19,11 @@ import org.quwuting.quwutingservice.points.dto.CheckInResponse;
 import org.quwuting.quwutingservice.points.dto.GifterResponse;
 import org.quwuting.quwutingservice.points.dto.GiftResponse;
 import org.quwuting.quwutingservice.points.dto.PointsSummaryResponse;
+import org.quwuting.quwutingservice.points.dto.UnlockResponse;
 import org.quwuting.quwutingservice.points.entity.DailyCheckin;
 import org.quwuting.quwutingservice.points.entity.PointsAccount;
 import org.quwuting.quwutingservice.points.entity.PointsTransaction;
+import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
 import org.quwuting.quwutingservice.points.enums.PointsSourceType;
 import org.quwuting.quwutingservice.points.enums.PointsTargetType;
 import org.quwuting.quwutingservice.points.repository.DailyCheckinRepository;
@@ -296,5 +298,76 @@ class PointsServiceTest {
 
         assertThrows(BusinessException.class,
                 () -> pointsService.gifters(PointsTargetType.DANCER, 7L, "ROSE"));
+    }
+
+    // ─── 联系方式解锁 demand=null 回归（2026-08-26 16:20 生产事故修复） ──────
+
+    /**
+     * 本人/管理员豁免分支（2026-08-26 16:20 生产 NPE 事故路径）：舞伴未录入服务时
+     * 前端走无服务降级路径 unlockContact(null)（dancer-contact.ts），demand 为 null。
+     * 修复前 recordDemand(...).detail() 直接解引用 → NPE → POST /points/unlock 500。
+     * 修复后：豁免直返内容、需求不落库、demandDetail/demandMessage 为 null。
+     */
+    @Test
+    void unlock_contact_ownerOrAdmin_demandNull_returnsContentWithoutNpe() {
+        Dancer dancer = new Dancer();
+        dancer.setId(9L);
+        dancer.setCreatedBy(1L); // 本人（userId=1 → 豁免分支）
+        dancer.setStatus(DancerStatus.NORMAL);
+        dancer.setContact("wx:owner");
+        when(dancerRepository.findByIdAndDeletedFalse(9L)).thenReturn(Optional.of(dancer));
+        when(gateRepository.findByTargetTypeAndTargetId(
+                PointsGateTargetType.DANCER_CONTACT, 9L)).thenReturn(Optional.empty());
+        PointsAccount account = new PointsAccount();
+        account.setUserId(1L);
+        account.setBalance(0L);
+        when(accountRepository.findByUserId(1L)).thenReturn(Optional.of(account));
+
+        UnlockResponse resp = pointsService.unlock(1L, PointsGateTargetType.DANCER_CONTACT, 9L, null);
+
+        assertEquals(true, resp.unlocked(), "本人豁免直返内容");
+        assertEquals("wx:owner", resp.content());
+        assertEquals(null, resp.demandDetail(), "demand 为 null 不得 NPE，需求详情为 null");
+        assertEquals(null, resp.demandMessage());
+        // 豁免分支不落解锁记录、不写需求记录（demand 缺失）
+        verify(unlockRepository, never()).save(any());
+        verify(demandRecordRepository, never()).save(any());
+    }
+
+    /**
+     * 普通用户无门槛联系方式免费解锁（末尾分支）：demand=null（无服务降级）时
+     * 同样不得 NPE——修复前第 764 行 recordDemand(...).detail() 同型缺陷。
+     */
+    @Test
+    void unlock_contact_regularUser_noGate_demandNull_returnsContentWithoutNpe() {
+        try (org.mockito.MockedStatic<org.springframework.transaction.support.TransactionSynchronizationManager> tsm =
+                     mockStatic(org.springframework.transaction.support.TransactionSynchronizationManager.class);
+             org.mockito.MockedStatic<org.quwuting.quwutingservice.security.UserContext> uc =
+                     mockStatic(org.quwuting.quwutingservice.security.UserContext.class)) {
+            Dancer dancer = new Dancer();
+            dancer.setId(9L);
+            dancer.setCreatedBy(99L); // 非本人、非 admin → 走正常解锁流程
+            dancer.setStatus(DancerStatus.NORMAL);
+            dancer.setContact("wx:user");
+            when(dancerRepository.findByIdAndDeletedFalse(9L)).thenReturn(Optional.of(dancer));
+            when(gateRepository.findByTargetTypeAndTargetId(
+                    PointsGateTargetType.DANCER_CONTACT, 9L)).thenReturn(Optional.empty());
+            // 未解锁（幂等检查放行）；无门槛 → cost=0 免费
+            when(unlockRepository.findByUserIdAndTargetTypeAndTargetId(1L,
+                    PointsGateTargetType.DANCER_CONTACT, 9L)).thenReturn(Optional.empty());
+            PointsAccount account = new PointsAccount();
+            account.setUserId(1L);
+            account.setBalance(5L);
+            when(accountRepository.findByUserId(1L)).thenReturn(Optional.of(account));
+
+            UnlockResponse resp = pointsService.unlock(1L, PointsGateTargetType.DANCER_CONTACT, 9L, null);
+
+            assertEquals(true, resp.unlocked(), "无门槛免费解锁直返内容");
+            assertEquals("wx:user", resp.content());
+            assertEquals(null, resp.demandDetail(), "demand 为 null 不得 NPE，需求详情为 null");
+            assertEquals(null, resp.demandMessage());
+            verify(unlockRepository).save(any());
+            verify(demandRecordRepository, never()).save(any());
+        }
     }
 }
