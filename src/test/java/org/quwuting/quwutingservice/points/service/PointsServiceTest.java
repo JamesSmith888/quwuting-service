@@ -14,6 +14,7 @@ import org.quwuting.quwutingservice.dancer.repository.DancerServiceRepository;
 import org.quwuting.quwutingservice.dancer.repository.DemandRecordRepository;
 import org.quwuting.quwutingservice.dancer.service.DancerDetailCacheService;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
 import org.quwuting.quwutingservice.points.dto.CheckInResponse;
 import org.quwuting.quwutingservice.points.dto.GifterResponse;
 import org.quwuting.quwutingservice.points.dto.GiftResponse;
@@ -85,6 +86,8 @@ class PointsServiceTest {
     private VenueHeatService venueHeatService;
     @Mock
     private DancerDetailCacheService dancerDetailCacheService;
+    @Mock
+    private OpsConfigService opsConfigService;
 
     private PointsService pointsService;
     @BeforeEach
@@ -92,7 +95,7 @@ class PointsServiceTest {
         pointsService = new PointsService(accountRepository, transactionRepository, checkinRepository,
                 gateRepository, unlockRepository, venueLookupService, dancerRepository,
                 dancerPhotoRepository, dancerServiceRepository, demandRecordRepository,
-                pointsProperties, venueHeatService, dancerDetailCacheService);
+                pointsProperties, venueHeatService, dancerDetailCacheService, opsConfigService);
         // 各测试按需 stub（Mockito strict stubs：不使用的 stubbing 会在测试级报多余）
     }
 

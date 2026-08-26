@@ -21,6 +21,13 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
     List<Dancer> findByIds(@Param("ids") List<Long> ids);
 
     /**
+     * 开启邀约中转的舞伴（2026-08-26，22 号文档：contact_relay=true）。
+     * 管理端邀约工作台待办列表的舞伴范围（数量少，全量拉取；含软删的排除）。
+     */
+    @Query("SELECT d FROM Dancer d WHERE d.contactRelay = true AND d.deleted = false")
+    List<Dancer> findRelayEnabled();
+
+    /**
      * 批量取资料标签列（2026-08-24，列表 enrichments 用）：返回
      * {id, profile_tags}——反序列化 + 字典解析由 DancerListCacheService 完成
      * （一次 IN 查询覆盖整页，规避 N+1）。

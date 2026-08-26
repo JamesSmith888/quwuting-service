@@ -24,6 +24,13 @@ import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
  *       离屏 canvas 图片绘制）与 {@code demandDetailText}（服务端权威拼接的多行
  *       详细文本，复制即用，前端零拼接）；{@code demandMessage} 为兼容保留
  *       （= demandDetail.demandMessage() 冗余）。</li>
+ *   <li>{@code demandId} / {@code demandStatus} / {@code expireAt}（2026-08-26 新增，
+ *       邀约中转，22-invite-relay-and-auto-release）——开启中转开关
+ *       （contact_relay）的舞伴：{@code demandStatus}=PENDING 表示邀约已提交、
+ *       等待舞伴批准（{@code content}/{@code demandMessage} 恒 null，前端渲染
+ *       「等待回复」态）；=APPROVED/AUTO_RELEASED 表示已获批、联系方式照常下发
+ *       （幂等直返）；{@code expireAt} = 24h 降级截止时间（PENDING 时下发，
+ *       前端倒计时）。未开启中转舞伴恒 null，行为与旧版完全一致。</li>
  * </ul>
  */
 public record UnlockResponse(
@@ -35,7 +42,10 @@ public record UnlockResponse(
         String contactImageUrl,
         String demandMessage,
         boolean freeToday,
-        DemandDetail demandDetail
+        DemandDetail demandDetail,
+        Long demandId,
+        String demandStatus,
+        java.time.LocalDateTime expireAt
 ) {
 
     /**

@@ -14,6 +14,12 @@ import java.time.LocalDateTime;
  * 用服务当前 label 兜底</b>，与详情页服务卡同源；服务已软删/下架 → null，前端省略该行）；
  * 时间/时长/位置 = DemandDuration / UserLocationOption 枚举 display 详情表述（parse 失败 =
  * 历史数据异常 → 防御性 null）。demandDetailText = 服务端权威多行文本（复制即用，前端零拼接）。
+ * <p>
+ * 2026-08-26 邀约中转（22 号文档）：加 {@code status}/{@code statusText}/{@code expireAt}/
+ * {@code contactText}/{@code contactImageUrl}/{@code demandMessage}——
+ * {@code statusText} = 客人侧状态文案（服务端权威，尊重友好原则，前端零拼接）；
+ * 联系方式字段<b>仅本人 + APPROVED/AUTO_RELEASED 时下发</b>（PENDING/REJECTED/EXPIRED
+ * 恒 null，防联系方式随未获批状态泄漏；null = 存量记录，前端按现状渲染）。
  */
 public record DemandDetailResponse(
         Long id,
@@ -28,5 +34,10 @@ public record DemandDetailResponse(
         String durationLabel,
         String locationLabel,
         String demandDetailText,
+        String status,
+        String statusText,
+        java.time.LocalDateTime expireAt,
+        String contactText,
+        String contactImageUrl,
         LocalDateTime createdAt) {
 }

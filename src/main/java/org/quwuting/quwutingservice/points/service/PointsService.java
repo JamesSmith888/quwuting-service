@@ -12,12 +12,15 @@ import org.quwuting.quwutingservice.dancer.enums.DancerServiceCategory;
 import org.quwuting.quwutingservice.dancer.enums.DancerServiceSubCategory;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.enums.DemandDuration;
+import org.quwuting.quwutingservice.dancer.enums.DemandStatus;
 import org.quwuting.quwutingservice.dancer.enums.UserLocationOption;
 import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerServiceRepository;
 import org.quwuting.quwutingservice.dancer.repository.DemandRecordRepository;
+import org.quwuting.quwutingservice.dancer.support.DemandDetailTexts;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
 import org.quwuting.quwutingservice.points.dto.*;
 import org.quwuting.quwutingservice.points.entity.DailyCheckin;
 import org.quwuting.quwutingservice.points.entity.PointsAccount;
@@ -53,6 +56,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -101,12 +105,16 @@ public class PointsService {
     /** 需求时间窗口天数（2026-08-25 改版：今天起 7 个具体日期快捷选项） */
     private static final int DEMAND_TIME_WINDOW_DAYS = 7;
 
-    /** 需求时间「近3天内」相对槽 code（2026-08-26：需求弹层默认时间选项，
-     *  消息拼接 = 「近3天内」；qwt_demand_records.time_slots 原样存本 code） */
-    private static final String DEMAND_TIME_WITHIN_3_DAYS = "WITHIN_3_DAYS";
+    /** 邀约中转超时（小时，2026-08-26，22 号文档）：PENDING 超时 = 24h 无回复，
+     *  按舞伴 autoRelease 开关自动降级（AUTO_RELEASED 自动发放 / EXPIRED 告知）；
+     *  前端 expireAt = createdAt + 本常量，倒计时展示 */
+    private static final int RELAY_TIMEOUT_HOURS = 24;
 
-    /** 需求时间「近3天内」消息拼接文案（2026-08-26；前端预览经同一常量镜像） */
-    private static final String DEMAND_TIME_WITHIN_3_DAYS_TEXT = "近3天内";
+    /** 需求时间「近3天内」相对槽 code 与文案（2026-08-26 起单一事实源在
+     *  {@link DemandDetailTexts}——本服务与 DemandRelayService 邀约单详情共用；
+     *  别名保持既有调用点可读性，取值恒一致） */
+    private static final String DEMAND_TIME_WITHIN_3_DAYS = DemandDetailTexts.TIME_WITHIN_3_DAYS;
+    private static final String DEMAND_TIME_WITHIN_3_DAYS_TEXT = DemandDetailTexts.TIME_WITHIN_3_DAYS_TEXT;
 
     /**
      * 验证消息按时段类别用词（2026-08-26 晚：对外展示仍用「按时段」（V46 合规词，
@@ -156,6 +164,8 @@ public class PointsService {
      *  设置 DANCER_CONTACT 门槛改变联系方式门槛值——经本入口级联失效内层统计缓存，
      *  单一失效入口，见 DancerDetailCacheService javadoc） */
     private final org.quwuting.quwutingservice.dancer.service.DancerDetailCacheService dancerDetailCacheService;
+    /** 运营配置（2026-08-26 联系方式「每日首免」开关，热更新即时生效） */
+    private final OpsConfigService opsConfigService;
 
     // ─── 账户（懒创建） ─────────────────────────────────────────────────────
 
@@ -599,11 +609,15 @@ public class PointsService {
      * 校验链：目标对当前用户可见 → 幂等（已解锁直接返回内容，不重复扣费）→
      * 费用计算 → 余额 → 原子扣减 → 写 UNLOCK 流水（仅真实扣费时）→ 写解锁记录。
      * <p>
-     * 2026-08-24 联系方式每日首免（需求 3）：targetType=DANCER_CONTACT 时——
+     * 2026-08-24 联系方式每日首免（需求 3；2026-08-26 V49 起受运营开关
+     * {@link OpsConfigService#KEY_DANCER_CONTACT_DAILY_FREE} 控制，默认 false =
+     * 下线）：targetType=DANCER_CONTACT 时——
      * <ul>
-     *   <li><b>无门槛舞伴恒免费</b>（gate 不存在 = admin 未设门槛，本来免费）；</li>
-     *   <li><b>有门槛舞伴每日首次获取免费</b>（今日已对任意有门槛舞伴解锁过
-     *       [免费或付费] 则不再免，按次消耗 contactCost）；</li>
+     *   <li><b>无门槛舞伴恒免费</b>（gate 不存在 = admin 未设门槛，本来免费，
+     *       与首免正交、不受开关影响）；</li>
+     *   <li><b>有门槛舞伴每日首次获取免费</b>（开关开启时：今日已对任意有门槛
+     *       舞伴解锁过 [免费或付费] 则不再免，按次消耗 contactCost；开关关闭 =
+     *       一律按门槛消耗 contactCost）；</li>
      *   <li><b>已解锁过的舞伴无需重复消耗</b>（幂等分支，不重复扣费）；</li>
      *   <li>免费解锁（无门槛 / 每日首免）不写扣费流水——PointsUnlock.transaction_id
      *       为 null（V42 迁移 DROP NOT NULL，与真实扣费区分）。</li>
@@ -635,27 +649,77 @@ public class PointsService {
         // 流程——详情页 onTapContact 一律 demand 模式，不区分视角；后端与详情组装
         // contactUnlocked 语义一致（本人/管理员恒已解锁）：直接返回内容 + 需求落库，
         // 不扣费、不写解锁记录、不消耗每日首免、不失效舞伴统计缓存）
-        if (contactType && isOwnerOrAdmin(userId, target.ownerUserId())) {
-            UnlockResponse.DemandDetail demandDetail = recordDemand(userId, targetId, demand);
+        // 2026-08-26 邀约中转修订（用户拍板 14:30）：contactRelay 舞伴<b>全员（含
+        // 本人/管理员）不豁免</b>——「邀约需舞伴批准」是舞伴设置的规则，admin/本人
+        // 同样走邀约流程（管理员暂时也不给特权）；admin/本人要看联系方式走
+        // dancer-edit 回显（详情接口对本人/管理员下发真实值，不依赖 unlock 豁免）。
+        if (contactType && !target.contactRelay() && isOwnerOrAdmin(userId, target.ownerUserId())) {
+            UnlockResponse.DemandDetail demandDetail = recordDemand(userId, targetId, demand, null).detail();
             return new UnlockResponse(true, currentBalance(userId), targetType, targetId,
                     target.content(), target.contactImageUrl(),
-                    demandDetail != null ? demandDetail.demandMessage() : null, false, demandDetail);
+                    demandDetail != null ? demandDetail.demandMessage() : null, false, demandDetail,
+                    null, null, null);
         }
         // 同一用户并发解锁串行化（防「双请求同时通过幂等检查 → 双双扣费」；
         // 锁必须在幂等检查之前获取，见 repository javadoc）
         unlockRepository.lockUserUnlock("unlock:" + userId);
+        // 邀约中转（2026-08-26，22 号文档）：开启 contact_relay 的舞伴——联系方式
+        // 把关权交还舞伴（平台管理员微信人工转发，舞伴回「给/不给」），客人提交
+        // 邀约后<b>不立即拿微信</b>，返回 PENDING 等待态。<b>全员（含本人/管理员）
+        // 不豁免</b>（用户拍板 2026-08-26 14:30：管理员暂时也不给特权）。本分支在
+        // 通用幂等检查之前——中转舞伴的「已发放」幂等<b>基于邀约状态而非
+        // PointsUnlock</b>（开启 contact_relay 前解锁的历史记录 = PointsUnlock 存在
+        // 但无获批邀约，不算获批，重走流程）：
+        // ① 已获批（存在 APPROVED/AUTO_RELEASED 邀约）→ 幂等直返（重新生成本次
+        //    需求描述落库，不重复扣费——同通用幂等分支行为）；
+        // ② 已存在 PENDING 邀约 → 返回等待态不新建（防重复骚扰舞伴）；
+        // ③ 无 → 落库 PENDING 返回等待态。
+        // demand 为 null（view 直达防御路径）且未获批 → 同样返回 PENDING 语义
+        // （demandId=null），绝不下发未获批的联系方式。中转模式不扣积分、不写
+        // 解锁记录——获批时由 DemandRelayService 写（避免「花了积分没拿到微信」
+        // 的纠纷，把关权从积分交给舞伴本人）。
+        if (contactType && target.contactRelay()) {
+            Optional<DemandRecord> approved = demandRecordRepository
+                    .findApprovedByUserIdAndDancerId(userId, targetId);
+            if (approved.isPresent()) {
+                UnlockResponse.DemandDetail demandDetail = recordDemand(userId, targetId, demand, null).detail();
+                String demandMessage = demandDetail != null ? demandDetail.demandMessage() : null;
+                return new UnlockResponse(true, currentBalance(userId), targetType, targetId,
+                        target.content(), target.contactImageUrl(), demandMessage, false, demandDetail,
+                        null, null, null);
+            }
+            DemandRecord pending = demandRecordRepository
+                    .findPendingByUserIdAndDancerId(userId, targetId).orElse(null);
+            DemandRecorded recorded = pending == null
+                    ? recordDemand(userId, targetId, demand, DemandStatus.PENDING.name()) : null;
+            Long demandId = pending != null ? pending.getId()
+                    : (recorded != null ? recorded.id() : null);
+            LocalDateTime expireAt = pending != null
+                    ? pending.getCreatedAt().plusHours(RELAY_TIMEOUT_HOURS)
+                    : (recorded != null && recorded.createdAt() != null
+                            ? recorded.createdAt().plusHours(RELAY_TIMEOUT_HOURS) : null);
+            return new UnlockResponse(false, currentBalance(userId), targetType, targetId,
+                    null, null, null, false, null, demandId, DemandStatus.PENDING.name(), expireAt);
+        }
         // 幂等：已解锁 → 直接返回内容（不重复扣费；串行化后此处判定确定可靠）。
         // 已解锁舞伴重新选需求（新意图/新时间）→ 重新生成需求描述并落库，不扣费。
+        // 2026-08-26 邀约中转：contactRelay 舞伴已在上方中转分支处理（基于邀约
+        // 状态幂等），此处仅非中转舞伴。
         if (unlockRepository.findByUserIdAndTargetTypeAndTargetId(userId, targetType, targetId).isPresent()) {
-            UnlockResponse.DemandDetail demandDetail = contactType ? recordDemand(userId, targetId, demand) : null;
+            UnlockResponse.DemandDetail demandDetail = contactType ? recordDemand(userId, targetId, demand, null).detail() : null;
             String demandMessage = demandDetail != null ? demandDetail.demandMessage() : null;
             return new UnlockResponse(true, currentBalance(userId), targetType, targetId,
-                    target.content(), target.contactImageUrl(), demandMessage, false, demandDetail);
+                    target.content(), target.contactImageUrl(), demandMessage, false, demandDetail,
+                    null, null, null);
         }
-        // 费用计算：无门槛恒免费；有门槛联系方式每日首免；其余按门槛扣费
+        // 费用计算：无门槛恒免费；有门槛联系方式每日首免（受运营开关
+        // dancer.contact.daily.free 控制，V49 默认 false = 下线——暂不提供首免，
+        // 一律按门槛扣费；开启后恢复：今日未对任意有门槛舞伴解锁过则首次免费）；
+        // 其余按门槛扣费
         int cost = (gate != null && !gate.isDeleted()) ? gate.getCost() : 0;
         boolean freeToday = false;
-        if (contactType && cost > 0) {
+        if (contactType && cost > 0
+                && opsConfigService.isEnabled(OpsConfigService.KEY_DANCER_CONTACT_DAILY_FREE, false)) {
             freeToday = !hasGatedContactUnlockToday(userId);
             if (freeToday) {
                 cost = 0;
@@ -697,10 +761,11 @@ public class PointsService {
         // afterCommit 失效舞伴统计缓存（对齐 DancerViewService 同款边界兜底——
         // 提交后失效保证并发读者回源必读到已提交数据；幂等分支无新数据不需失效）
         invalidateDancerStatsAfterCommit(targetType, targetId);
-        UnlockResponse.DemandDetail demandDetail = contactType ? recordDemand(userId, targetId, demand) : null;
+        UnlockResponse.DemandDetail demandDetail = contactType ? recordDemand(userId, targetId, demand, null).detail() : null;
         String demandMessage = demandDetail != null ? demandDetail.demandMessage() : null;
         return new UnlockResponse(true, newBalance, targetType, targetId,
-                target.content(), target.contactImageUrl(), demandMessage, freeToday, demandDetail);
+                target.content(), target.contactImageUrl(), demandMessage, freeToday, demandDetail,
+                null, null, null);
     }
 
     /**
@@ -734,6 +799,7 @@ public class PointsService {
                     dancer != null ? dancer.getCity() : null,
                     dancer != null && dancer.getStatus() == DancerStatus.NORMAL,
                     r.getMessage(),
+                    r.getStatus(),
                     r.getCreatedAt());
         });
     }
@@ -761,43 +827,25 @@ public class PointsService {
                 .orElseThrow(() -> new BusinessException(1001, "邀约不存在"));
         Dancer dancer = dancerRepository.findByIds(List.of(record.getDancerId()))
                 .stream().findFirst().orElse(null);
-        // 服务（serviceIds 落库恒恰好 1 项，recordDemand 校验；逐段防御历史脏数据）
-        DancerService service = null;
-        for (String raw : record.getServiceIds().split(",")) {
-            if (raw.isBlank()) {
-                continue;
-            }
-            try {
-                service = dancerServiceRepository.findByIdAndDeletedFalse(Long.parseLong(raw.trim()))
-                        .orElse(null);
-            } catch (NumberFormatException e) {
-                service = null;
-            }
-            if (service != null) {
-                break;
-            }
-        }
-        String serviceLabel = service != null ? service.getLabel() : null;
-        String timeDetailLabel = buildTimeDetailLabel(record.getTimeSlots());
-        String durationLabel = parseDemandDurationLabel(record.getDuration());
-        String locationLabel = parseUserLocationLabel(record.getUserLocation());
+        // 服务/时间/时长/位置详情表述（2026-08-26 抽公共方法 DemandDetailTexts——
+        // 与管理员邀约单详情同源派生；serviceIds 落库恒恰好 1 项，逐段防御历史脏数据）
+        String serviceLabel = DemandDetailTexts.resolveServiceLabel(record.getServiceIds(),
+                id -> dancerServiceRepository.findByIdAndDeletedFalse(id).orElse(null));
+        String timeDetailLabel = DemandDetailTexts.timeDetailLabel(record.getTimeSlots());
+        String durationLabel = DemandDetailTexts.durationLabel(record.getDuration());
+        String locationLabel = DemandDetailTexts.locationLabel(record.getUserLocation());
         // 多行详细文本（服务/时间/时长/位置，缺失行省略；与前端表格同源同序，复制即用）
-        StringBuilder detailText = new StringBuilder();
-        if (serviceLabel != null) {
-            detailText.append("服务：").append(serviceLabel);
-        }
-        if (timeDetailLabel != null) {
-            if (detailText.length() > 0) {
-                detailText.append('\n');
-            }
-            detailText.append("时间：").append(timeDetailLabel);
-        }
-        if (durationLabel != null) {
-            detailText.append('\n').append("时长：").append(durationLabel);
-        }
-        if (locationLabel != null) {
-            detailText.append('\n').append("位置：").append(locationLabel);
-        }
+        String detailText = DemandDetailTexts.detailText(serviceLabel, timeDetailLabel, durationLabel, locationLabel);
+        // 2026-08-26 邀约中转（22 号文档）：状态 + 客人友好状态文案（服务端权威，
+        // 前端零拼接）+ PENDING 时 expireAt（24h 降级截止）；联系方式字段仅本人 +
+        // APPROVED/AUTO_RELEASED 时下发（released()），其余状态恒 null——防联系
+        // 方式随未获批状态泄漏；status NULL（存量锚点记录）= 无中转语义，按现状
+        // 渲染（当时已拿到微信，不展示状态卡/联系方式行）。
+        DemandStatus status = DemandStatus.parseOrNull(record.getStatus());
+        boolean released = status != null && status.released();
+        // 联系方式仅获批发放时展示；dancer 软删（下架）→ 摘要已 null，不展示
+        String contactText = released && dancer != null ? dancer.getContact() : null;
+        String contactImageUrl = released && dancer != null ? dancer.getContactImageUrl() : null;
         return new DemandDetailResponse(
                 record.getId(),
                 record.getDancerId(),
@@ -811,51 +859,17 @@ public class PointsService {
                 durationLabel,
                 locationLabel,
                 detailText.toString(),
+                status != null ? status.name() : null,
+                status != null ? status.statusText() : null,
+                status == DemandStatus.PENDING
+                        ? record.getCreatedAt().plusHours(RELAY_TIMEOUT_HOURS) : null,
+                contactText,
+                contactImageUrl,
                 record.getCreatedAt());
     }
 
-    /** 时间详情表述（WITHIN_3_DAYS = 近3天内 + 可协商；具体日期 = M月D日 + 可协商；
-     *  历史数据日期非法 → 防御性 null） */
-    private static String buildTimeDetailLabel(String timeSlotCode) {
-        if (timeSlotCode == null || timeSlotCode.isBlank()) {
-            return null;
-        }
-        try {
-            if (DEMAND_TIME_WITHIN_3_DAYS.equals(timeSlotCode)) {
-                return DEMAND_TIME_WITHIN_3_DAYS_TEXT + "，具体哪天可与您协商";
-            }
-            return formatDemandDate(LocalDate.parse(timeSlotCode)) + "，具体时段可与您协商";
-        } catch (RuntimeException e) {
-            return null;
-        }
-    }
-
-    /** 时长详情表述（历史数据枚举异常 → 防御性 null，不打断详情页） */
-    private static String parseDemandDurationLabel(String code) {
-        if (code == null || code.isBlank()) {
-            return null;
-        }
-        try {
-            return DemandDuration.valueOf(code).display() + "，时长可商量";
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
-    }
-
-    /** 位置详情表述（历史数据枚举异常 → 防御性 null，不打断详情页） */
-    private static String parseUserLocationLabel(String code) {
-        if (code == null || code.isBlank()) {
-            return null;
-        }
-        try {
-            return UserLocationOption.valueOf(code).detailText();
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
-    }
-
-    /**
-     * 今日是否已对"任意有门槛舞伴"解锁过联系方式（2026-08-24 每日首免判定）：
+    /** 今日是否已对"任意有门槛舞伴"解锁过联系方式（2026-08-24 每日首免判定；
+     * 2026-08-26 V49 起仅当运营开关 dancer.contact.daily.free 开启时被调用）：
      * 取今日全部 DANCER_CONTACT 解锁（target_id = 舞伴 ID），逐个回查门槛——
      * 存在任一有门槛（cost>0 且未软删）即返回 true。无门槛舞伴的免费解锁不消耗
      * 每日首免额度（本来就免费，不应挤占"对有门槛舞伴"的免费机会）。
@@ -895,9 +909,16 @@ public class PointsService {
      *
      * @return 需求说明详情（含单行验证消息 demandMessage 与多行详细文本
      *         demandDetailText，2026-08-26 21-demand-detail-card；demand 为 null
-     *         或非联系方式场景返回 null）
+     *         或非联系方式场景返回 null）——2026-08-26 邀约中转改返回
+     *         {@link DemandRecorded}（detail + 落库记录 id + createdAt，
+     *         中转分支需 demandId/expireAt）
+     * @param status 邀约状态（2026-08-26 邀约中转：中转分支传 DemandStatus.PENDING.name()，
+     *               <b>必须落库</b>——管理端待办/防轰炸/24h 降级全部按 status='PENDING'
+     *               查询，缺省 null = 不设置（未中转，存量语义等价已获批）；曾因漏传
+     *               status 导致待办查不到、防轰炸失效，2026-08-26 修复）
      */
-    private UnlockResponse.DemandDetail recordDemand(Long userId, Long dancerId, UnlockRequest.DemandSelection demand) {
+    private DemandRecorded recordDemand(Long userId, Long dancerId,
+                                        UnlockRequest.DemandSelection demand, String status) {
         if (demand == null) {
             return null;
         }
@@ -951,6 +972,7 @@ public class PointsService {
         record.setDuration(duration != null ? duration.name() : null);
         record.setUserLocation(location);
         record.setMessage(message);
+        record.setStatus(status); // 邀约中转：PENDING；未中转 null（2026-08-26）
         demandRecordRepository.save(record);
         log.info("用户 {} 对舞伴 {} 提出需求：{}", userId, dancerId, message);
         // 2026-08-26 需求说明详情（21-demand-detail-card）：结构化字段供结果卡表格
@@ -959,17 +981,16 @@ public class PointsService {
         DancerService service = services.get(0);
         String timeSlotCode = timeSlotCodes.get(0);
         String timeLabel = DEMAND_TIME_WITHIN_3_DAYS.equals(timeSlotCode)
-                ? DEMAND_TIME_WITHIN_3_DAYS_TEXT : formatDemandDate(LocalDate.parse(timeSlotCode));
+                ? DEMAND_TIME_WITHIN_3_DAYS_TEXT : DemandDetailTexts.formatDate(LocalDate.parse(timeSlotCode));
         // 2026-08-26 邀约瘦身：详情表述（表格/文本/海报 = 给舞伴看的完整语义，无字数限制）
         // ——时间补「可协商」（近3天内=日期未定需沟通）、位置用 detailText 完整句；单行
         // 验证消息 buildDemandMessage 仍用 display 精简文案（加好友有字数限制），互证不混淆。
-        String timeDetailLabel = DEMAND_TIME_WITHIN_3_DAYS.equals(timeSlotCode)
-                ? timeLabel + "，具体哪天可与您协商"
-                : timeLabel + "，具体时段可与您协商";
-        String durationDetailLabel = duration != null ? duration.display() + "，时长可商量" : null;
-        String locationDetailLabel = (location != null && !location.isBlank())
-                ? UserLocationOption.valueOf(location).detailText() : null;
-        return new UnlockResponse.DemandDetail(
+        // 2026-08-26 抽公共方法：时间/时长/位置/多行文本全部经 DemandDetailTexts 派生
+        // （与 getMyDemand、管理员邀约单详情同源），本方法只补服务部分。
+        String timeDetailLabel = DemandDetailTexts.timeDetailLabel(timeSlotCode);
+        String durationDetailLabel = DemandDetailTexts.durationLabel(duration != null ? duration.name() : null);
+        String locationDetailLabel = DemandDetailTexts.locationLabel(location);
+        return new DemandRecorded(new UnlockResponse.DemandDetail(
                 dancer.getNickname(),
                 dancer.getCity(),
                 buildDemandServicePart(service, subCategory),
@@ -982,32 +1003,14 @@ public class PointsService {
                 durationDetailLabel,
                 locationDetailLabel,
                 message,
-                buildDemandDetailText(service, subCategory, timeDetailLabel, durationDetailLabel, locationDetailLabel));
+                DemandDetailTexts.detailText(buildDemandServicePart(service, subCategory),
+                        timeDetailLabel, durationDetailLabel, locationDetailLabel)),
+                record.getId(), record.getCreatedAt());
     }
 
-    /**
-     * 多行详细需求文本拼接（2026-08-26，21-demand-detail-card 出口 C「复制详情」——
-     * 服务端权威文案，前端零拼接；与表格结构化字段同源同序，粘贴微信聊天即完整
-     * 需求说明）。2026-08-26 邀约瘦身：只保留用户本次需求四要素行——服务/时间/时长/
-     * 位置（值 = 详情表述，无字数限制语义说透）；舞伴自己的静态信息（名字·城市/计费/
-     * 地点范围/预约要求/规则）不再重复（TA 均已设置知晓）；需求描述原文行一并移除
-     * （加好友验证消息已用过）。行格式「标签：值」，空值行省略（时长/位置未选）。
-     */
-    private static String buildDemandDetailText(DancerService service,
-                                                String subCategoryCode,
-                                                String timeDetailLabel,
-                                                String durationDetailLabel,
-                                                String locationDetailLabel) {
-        StringBuilder sb = new StringBuilder("服务：").append(buildDemandServicePart(service, subCategoryCode));
-        sb.append('\n').append("时间：").append(timeDetailLabel);
-        if (durationDetailLabel != null) {
-            sb.append('\n').append("时长：").append(durationDetailLabel);
-        }
-        if (locationDetailLabel != null) {
-            sb.append('\n').append("位置：").append(locationDetailLabel);
-        }
-        return sb.toString();
-    }
+    /** 需求落库结果（2026-08-26 邀约中转：detail + 记录 id + createdAt——
+     *  中转分支返回 PENDING 需 demandId（去重/详情）与 expireAt（= createdAt + 24h）） */
+    private record DemandRecorded(UnlockResponse.DemandDetail detail, Long id, LocalDateTime createdAt) {}
 
     /**
      * 添加好友需求描述拼接（2026-08-24 方案B 结构化三要素；
@@ -1039,7 +1042,7 @@ public class PointsService {
                                              String locationCode) {
         String servicePart = buildDemandMessageServicePart(service, subCategoryCode);
         String timePart = DEMAND_TIME_WITHIN_3_DAYS.equals(timeSlotCode)
-                ? DEMAND_TIME_WITHIN_3_DAYS_TEXT : formatDemandDate(LocalDate.parse(timeSlotCode));
+                ? DEMAND_TIME_WITHIN_3_DAYS_TEXT : DemandDetailTexts.formatDate(LocalDate.parse(timeSlotCode));
         StringBuilder sb = new StringBuilder("「去舞厅」：")
                 .append(servicePart).append(" · ").append(timePart);
         if (duration != null) {
@@ -1111,11 +1114,6 @@ public class PointsService {
         if (date.isBefore(today) || date.isAfter(today.plusDays(DEMAND_TIME_WINDOW_DAYS - 1))) {
             throw new BusinessException(1001, "所选日期已过期，请重新选择");
         }
-    }
-
-    /** 具体日期 → 消息拼接文案（2026-08-25：「M月D日」，如 8月1日） */
-    private static String formatDemandDate(LocalDate date) {
-        return date.getMonthValue() + "月" + date.getDayOfMonth() + "日";
     }
 
     /**
@@ -1251,7 +1249,7 @@ public class PointsService {
                 throw new BusinessException(1001, "该舞伴资料暂不可见");
             }
             PointsGate gate = gateRepository.findByTargetTypeAndTargetId(targetType, targetId).orElse(null);
-            return new UnlockTarget(gate, photo.getUrl(), null, null);
+            return new UnlockTarget(gate, photo.getUrl(), null, null, false, false);
         }
         Dancer dancer = dancerRepository.findByIdAndDeletedFalse(targetId)
                 .orElseThrow(() -> new BusinessException(1001, "舞伴不存在"));
@@ -1260,7 +1258,10 @@ public class PointsService {
         }
         PointsGate gate = gateRepository.findByTargetTypeAndTargetId(targetType, targetId).orElse(null);
         // 联系方式（2026-08-14 多形态：文本 contact + 图片 contactImageUrl 一并下发，解锁后展示）
-        return new UnlockTarget(gate, dancer.getContact(), dancer.getContactImageUrl(), dancer.getCreatedBy());
+        // 2026-08-26 邀约中转（22 号文档）：contactRelay = 开启中转（联系方式把关权交还
+        // 舞伴，客人提交邀约后不立即拿微信）；autoRelease = 24h 无回复自动降级策略
+        return new UnlockTarget(gate, dancer.getContact(), dancer.getContactImageUrl(), dancer.getCreatedBy(),
+                dancer.isContactRelay(), dancer.isAutoRelease());
     }
 
     /**
@@ -1276,6 +1277,8 @@ public class PointsService {
 
     /** 解锁目标解析结果（门槛 + 解锁内容 + 归属用户，一次解析避免重复查询；
      *  contactImageUrl 仅联系方式场景非空；ownerUserId 仅联系方式场景非空 =
-     *  舞伴创建者，供本人/管理员归属豁免判定） */
-    private record UnlockTarget(PointsGate gate, String content, String contactImageUrl, Long ownerUserId) {}
+     *  舞伴创建者，供本人/管理员归属豁免判定；contactRelay/autoRelease 仅联系
+     *  方式场景有意义 = 邀约中转开关与超时降级策略（2026-08-26，22 号文档） */
+    private record UnlockTarget(PointsGate gate, String content, String contactImageUrl, Long ownerUserId,
+                                boolean contactRelay, boolean autoRelease) {}
 }

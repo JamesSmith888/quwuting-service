@@ -137,5 +137,14 @@ public record DancerDetailResponse(
          * 服务地点的舞伴（服务范围 location_scope 配套）；false = 不出现该
          * 字段（绝大多数舞伴，零影响）。用户无关，随详情下发。
          */
-        boolean requireUserLocation
+        boolean requireUserLocation,
+        /**
+         * 邀约中转开关（2026-08-26，22 号文档；per-dancer，用户无关，随详情下发）：
+         * true = 该舞伴联系方式获取走「管理员中转 + 舞伴批准」流程（客人提交邀约后
+         * 不立即拿微信，unlock 返回 PENDING）。前端详情页/获取联系方式页据此派生
+         * 文案与流程；dancer-edit 回显。
+         */
+        boolean contactRelay,
+        /** 24h 无回复自动降级策略（2026-08-26；仅 contactRelay 有意义；dancer-edit 回显） */
+        boolean autoRelease
 ) {}

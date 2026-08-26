@@ -108,6 +108,34 @@ public class Dancer extends BaseEntity {
     private boolean requireUserLocation = false;
 
     /**
+     * 邀约中转开关（2026-08-26 新增，默认关闭；per-dancer 开关，V50 迁移）。
+     * <p>
+     * 语义：开启后该舞伴的联系方式获取改为<b>管理员中转 + 舞伴批准</b>流程
+     * （docs/agents/22）——客人填邀约单后不再直接拿到微信（unlock 返回
+     * PENDING），邀约进入管理员后台待办，由管理员微信人工转发给舞伴，舞伴回
+     * 「给/不给」，管理员一键发放/拒绝；24h 无回复按 autoRelease 自动降级。
+     * 关闭（默认）= 填单即得微信现状，存量舞伴零回归。面向在意「把关权」
+     * （过滤口嗨）的舞伴，如高流量舞伴。
+     */
+    @Column(nullable = false)
+    @ColumnDefault("false")
+    private boolean contactRelay = false;
+
+    /**
+     * 24h 无回复自动降级策略（2026-08-26 新增，默认开启；per-dancer 开关，
+     * V50 迁移；仅 contact_relay=true 时有意义）。
+     * <p>
+     * true = 24h 无回复自动发放联系方式（平台兜底，默认策略——客人不能被
+     * 无限期干等，转化要兜底）；false = 告知客人「暂未回复」（EXPIRED）。
+     * <b>高流量舞伴建议 false</b>：她明确在乎把关权（宁可客人流失，不让平台
+     * 代发微信）；配合 12h 管理员微信催办，降级成为「催过无回应」的兜底而非
+     * 「平台默默放行」。
+     */
+    @Column(nullable = false)
+    @ColumnDefault("true")
+    private boolean autoRelease = true;
+
+    /**
      * 当前所在城市（2026-08-26 新增，可空；V48 迁移）。
      * <p>
      * 语义：从已选常驻城市（{@code qwt_dancer_cities}）中再选中一个作为舞伴

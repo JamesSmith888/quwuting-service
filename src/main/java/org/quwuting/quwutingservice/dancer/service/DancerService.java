@@ -177,6 +177,10 @@ public class DancerService {
         dancer.setEarningsEnabled(request.earningsEnabled() != null && request.earningsEnabled());
         // 加好友需告知位置（2026-08-26：null = 关闭；per-dancer 开关，见 V47）
         dancer.setRequireUserLocation(request.requireUserLocation() != null && request.requireUserLocation());
+        // 邀约中转开关（2026-08-26，22 号文档：null = 关闭——存量零回归；per-dancer）
+        dancer.setContactRelay(request.contactRelay() != null && request.contactRelay());
+        // 24h 无回复自动降级策略（null = 开启——平台兜底不卡单；仅 contactRelay 有意义）
+        dancer.setAutoRelease(request.autoRelease() == null || request.autoRelease());
         // 资料标签（2026-08-24 字典化：id 数组 JSON；去重/去空/存在性校验后落库）
         dancer.setProfileTags(tagDictService.serializeIds(normalizeProfileTags(request.profileTags())));
         dancer.setStatus(adminApproved ? DancerStatus.NORMAL : DancerStatus.PENDING);
@@ -367,6 +371,10 @@ public class DancerService {
         dancer.setEarningsEnabled(request.earningsEnabled() != null && request.earningsEnabled());
         // 加好友需告知位置（2026-08-26：null = 关闭；per-dancer 开关，见 V47）
         dancer.setRequireUserLocation(request.requireUserLocation() != null && request.requireUserLocation());
+        // 邀约中转开关（2026-08-26，22 号文档：null = 关闭——存量零回归；per-dancer）
+        dancer.setContactRelay(request.contactRelay() != null && request.contactRelay());
+        // 24h 无回复自动降级策略（null = 开启——平台兜底不卡单；仅 contactRelay 有意义）
+        dancer.setAutoRelease(request.autoRelease() == null || request.autoRelease());
         // 资料标签（2026-08-24：全量覆盖语义——传 null/空 = 清除全部标签）
         dancer.setProfileTags(tagDictService.serializeIds(normalizeProfileTags(request.profileTags())));
         // REJECTED 资料编辑后重新送审（管理员直改仍由管理员后续流转，此处不覆盖）
@@ -743,7 +751,8 @@ public class DancerService {
                 pub.tags(), pub.venues(), pub.services(),
                 hasContact, contact, contactImageUrl, hideContact, contactCost, contactUnlocked,
                 earningsEnabled, earningsAdUnitId, pub.adViews(),
-                dancer.isRequireUserLocation());
+                dancer.isRequireUserLocation(),
+                dancer.isContactRelay(), dancer.isAutoRelease());
     }
 
     // ─── 服务范围（2026-08-24：admin 录入的黄页内容；详情公开读 + 管理端写） ─────

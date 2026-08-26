@@ -47,6 +47,14 @@ public class OpsConfigService {
      */
     public static final String KEY_DANCER_RECOGNITION_DAILY_SINGLE = "dancer.recognition.daily.single";
 
+    /**
+     * 联系方式「每日首免」开关（2026-08-26，默认 false = 下线；开启恢复）：
+     * 每个用户每天对「有积分门槛（cost>0）」的舞伴第一次获取联系方式免费
+     * （hasGatedContactUnlockToday 判定，任意有门槛舞伴消耗额度），无门槛舞伴
+     * 恒免费（gate 不存在）与首免正交、不受本开关影响。见 V49 迁移注释。
+     */
+    public static final String KEY_DANCER_CONTACT_DAILY_FREE = "dancer.contact.daily.free";
+
     private final OpsConfigRepository opsConfigRepository;
 
     /** 单键配置缓存（LoadingCache + Optional 承载"键不存在"——Caffeine 禁 null 值） */

@@ -146,7 +146,7 @@ class DancerServiceTest {
         });
 
         Long id = dancerService.createDancer(2L,
-                new UpsertDancerRequest("  小雅  ", null, " 舞姿优秀 ", null, "杭州", null, null, null, null, null, null, null, null, null), false);
+                new UpsertDancerRequest("  小雅  ", null, " 舞姿优秀 ", null, "杭州", null, null, null, null, null, null, null, null, null, null, null), false);
 
         assertEquals(10L, id);
         verify(dancerRepository).save(argThat(d ->
@@ -161,7 +161,7 @@ class DancerServiceTest {
     void createDancer_adminCreatesNormal() {
         when(dancerRepository.save(any(Dancer.class))).thenAnswer(inv -> inv.getArgument(0));
 
-        dancerService.createDancer(99L, new UpsertDancerRequest("后台舞伴", null, null, null, null, null, null, null, null, null, null, null, null, null), true);
+        dancerService.createDancer(99L, new UpsertDancerRequest("后台舞伴", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null), true);
 
         verify(dancerRepository).save(argThat(d ->
                 d.getStatus() == DancerStatus.NORMAL && d.getCreatedBy().equals(99L)));
@@ -170,7 +170,7 @@ class DancerServiceTest {
     @Test
     void createDancer_blankNickname_throws() {
         BusinessException ex = assertThrows(BusinessException.class,
-                () -> dancerService.createDancer(1L, new UpsertDancerRequest("   ", null, null, null, null, null, null, null, null, null, null, null, null, null), false));
+                () -> dancerService.createDancer(1L, new UpsertDancerRequest("   ", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null), false));
         assertEquals(1001, ex.getCode());
         verify(dancerRepository, never()).save(any());
     }
@@ -185,7 +185,7 @@ class DancerServiceTest {
         when(dancerVenueRepository.findByDancerIdAndVenueIdAndRelationAndDeletedFalse(
                 eq(7L), eq(5L), any())).thenReturn(Optional.empty());
 
-        dancerService.createDancer(1L, new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, 5L), false);
+        dancerService.createDancer(1L, new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, null, null, 5L), false);
 
         verify(venueLookupService).findById(5L); // 常驻舞厅存在性校验
         verify(dancerVenueRepository).save(argThat(dv ->
@@ -754,7 +754,7 @@ class DancerServiceTest {
                 .thenReturn(Collections.emptyList());
 
         DancerDetailResponse resp = dancerService.updateDancer(1L, 1L,
-                new UpsertDancerRequest("小雅2", "https://cdn/x.jpg", "新简介", "FEMALE", "上海", null, null, null, null, null, null, null, null, null),
+                new UpsertDancerRequest("小雅2", "https://cdn/x.jpg", "新简介", "FEMALE", "上海", null, null, null, null, null, null, null, null, null, null, null),
                 UserRole.USER);
 
         assertEquals("小雅2", resp.nickname());
@@ -778,7 +778,7 @@ class DancerServiceTest {
                 .thenReturn(Collections.emptyList());
 
         DancerDetailResponse resp = dancerService.updateDancer(1L, 1L,
-                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, null), UserRole.USER);
+                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null), UserRole.USER);
 
         assertEquals(DancerStatus.PENDING, resp.status(), "驳回后本人编辑 → 自动回到审核中（重新送审）");
     }
@@ -802,7 +802,7 @@ class DancerServiceTest {
                 .thenReturn(Collections.emptyList());
 
         dancerService.updateDancer(1L, 1L,
-                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, 9L), UserRole.USER);
+                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, null, null, 9L), UserRole.USER);
 
         verify(venueLookupService).findById(9L);                    // 新常驻舞厅存在性校验
         verify(dancerVenueRepository).save(argThat(dv -> dv.isDeleted())); // 旧 HOME 软删（Lombok boolean → isDeleted）
@@ -816,7 +816,7 @@ class DancerServiceTest {
 
         BusinessException ex = assertThrows(BusinessException.class,
                 () -> dancerService.updateDancer(99L, 1L,
-                        new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, null), UserRole.USER));
+                        new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null), UserRole.USER));
         assertEquals(1003, ex.getCode());
         verify(dancerRepository, never()).save(any());
     }
@@ -1029,7 +1029,7 @@ class DancerServiceTest {
         stubDetailDeps();
 
         DancerDetailResponse resp = dancerService.updateDancer(1L, 1L,
-                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, null), UserRole.USER);
+                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null), UserRole.USER);
 
         assertEquals(DancerVerificationStatus.PENDING_REVIEW, resp.verificationStatus(),
                 "本人编辑已认证资料 → 自动降级待复核（护栏：防认证挂在过期信息上）");
@@ -1048,7 +1048,7 @@ class DancerServiceTest {
         stubDetailDeps();
 
         DancerDetailResponse resp = dancerService.updateDancer(99L, 1L,
-                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, null), UserRole.ADMIN);
+                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null), UserRole.ADMIN);
 
         assertEquals(DancerVerificationStatus.VERIFIED, resp.verificationStatus(),
                 "管理员直改不触发待复核（已在进行管理动作，避免待办噪音）");
@@ -1064,7 +1064,7 @@ class DancerServiceTest {
         stubDetailDeps();
 
         DancerDetailResponse resp = dancerService.updateDancer(1L, 1L,
-                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, null), UserRole.USER);
+                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null), UserRole.USER);
 
         assertEquals(DancerVerificationStatus.UNVERIFIED, resp.verificationStatus(),
                 "从未认证的舞伴编辑不制造待复核噪音");
@@ -1081,7 +1081,7 @@ class DancerServiceTest {
         stubDetailDeps();
 
         DancerDetailResponse resp = dancerService.updateDancer(1L, 1L,
-                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, null), UserRole.USER);
+                new UpsertDancerRequest("小雅", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null), UserRole.USER);
 
         assertEquals(DancerVerificationStatus.PENDING_REVIEW, resp.verificationStatus(),
                 "撤销后修改资料 → 重新待复核（撤销→修改→复核恢复闭环）");

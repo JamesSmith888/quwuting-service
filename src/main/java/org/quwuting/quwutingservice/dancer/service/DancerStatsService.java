@@ -6,9 +6,14 @@ import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerStatsResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTotals;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTrendPoint;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerUnlockRecord;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerUnlockStat;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerViewSourceTrendPoint;
+import org.quwuting.quwutingservice.dancer.entity.Dancer;
+import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
+import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerStatsRepository;
+import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
 import org.springframework.stereotype.Service;
 
@@ -56,6 +61,8 @@ public class DancerStatsService {
 
     private final DancerStatsRepository dancerStatsRepository;
 
+    private final DancerRepository dancerRepository;
+
     private final LoadingCache<Long, DancerStatsResponse> statsCache = Caffeine.newBuilder()
             .maximumSize(500)
             .refreshAfterWrite(CACHE_REFRESH_SECONDS, TimeUnit.SECONDS)
@@ -75,6 +82,45 @@ public class DancerStatsService {
      */
     public void invalidate(Long dancerId) {
         statsCache.invalidate(dancerId);
+    }
+
+    /**
+     * 舞伴某内容类型的解锁记录明细（2026-08-26 新增，「解锁信息」条形点击 → 详情页）。
+     * <p>
+     * 实时查询（不走 {@link #statsCache}——明细是逐条行为记录，与聚合统计的缓存
+     * 时效语义不同，且解锁低频、单次查询开销可忽略）。
+     * <p>
+     * 口径（见 {@code DancerStatsRepository#findDancerUnlocks}）：解锁用户公开资料
+     * （软删用户排除）+ 内容描述（照片序号/短视频时长/联系方式）+ 解锁时间 +
+     * 本次花费积分（免费解锁 = 0），按解锁时间倒序。
+     * <p>
+     * 舞伴存在性 + 公开可见性校验（对齐 gifters {@code validateTargetVisible}：
+     * 明细含用户公开资料，仅对公开可见的舞伴开放，防止经不可见舞伴的解锁记录反查用户）。
+     *
+     * @param dancerId       舞伴 ID
+     * @param targetTypeName 内容类型（PointsGateTargetType.name()）；非法值 → 1001
+     */
+    public List<DancerUnlockRecord> unlocks(Long dancerId, String targetTypeName) {
+        Dancer dancer = dancerRepository.findByIdAndDeletedFalse(dancerId)
+                .orElseThrow(() -> new BusinessException(1001, "舞伴不存在"));
+        if (dancer.getStatus() != DancerStatus.NORMAL) {
+            throw new BusinessException(1001, "该舞伴资料暂不可见");
+        }
+        PointsGateTargetType targetType = safeTargetType(targetTypeName);
+        if (targetType == null) {
+            throw new BusinessException(1001, "参数错误");
+        }
+        return dancerStatsRepository.findDancerUnlocks(dancerId, targetType.name()).stream()
+                .map(row -> new DancerUnlockRecord(
+                        (Long) row[0],
+                        row[1] == null || ((String) row[1]).isBlank() ? null : (String) row[1],
+                        (String) row[2],
+                        targetType,
+                        unlockLabel(targetType),
+                        unlockTargetDesc(targetType, (Integer) row[4], (Integer) row[5]),
+                        (LocalDateTime) row[3],
+                        row[6] == null ? 0 : ((Number) row[6]).intValue()))
+                .toList();
     }
 
     /**
@@ -163,6 +209,30 @@ public class DancerStatsService {
             case DANCER_VIDEO -> "视频";
             case DANCER_CONTACT -> "联系方式";
         };
+    }
+
+    /**
+     * 解锁记录的内容描述（2026-08-26 新增，解锁详情页目标行）——后端权威派生，
+     * 前端零拼接：
+     * 照片 = "照片 N"（N = 相册展示序号 sort_order+1，多张照片可区分）；
+     * 短视频 = "短视频 · m:ss"（时长；未知时长 = 0 时省略）；
+     * 联系方式 = "联系方式"（舞伴实体字段，无细分）。
+     * 非媒体目标（联系方式）sortOrder/durationSeconds 恒 null。
+     */
+    private static String unlockTargetDesc(PointsGateTargetType targetType, Integer sortOrder, Integer durationSeconds) {
+        if (targetType == PointsGateTargetType.DANCER_PHOTO) {
+            int index = sortOrder != null ? sortOrder + 1 : 0;
+            return "照片 " + index;
+        }
+        if (targetType == PointsGateTargetType.DANCER_VIDEO) {
+            if (durationSeconds != null && durationSeconds > 0) {
+                int m = durationSeconds / 60;
+                int s = durationSeconds % 60;
+                return "短视频 · " + m + ":" + (s < 10 ? "0" + s : String.valueOf(s));
+            }
+            return "短视频";
+        }
+        return "联系方式";
     }
 
     /** 枚举名 → 枚举（未知/异常回退 null，上游按 null 兜底展示「其他」） */

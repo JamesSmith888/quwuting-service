@@ -8,8 +8,10 @@
 ## 定位
 
 可热更新的动态产品规则（区别于 `application.yaml` 的部署期静态配置）——运营经
-管理端修改后**即时生效（缓存失效），无需发版**。当前首个消费方 = Reaction
-「每日唯一表情」开关（`reaction.daily.single`，见 [`08-reaction-and-rating.md`](08-reaction-and-rating.md) · 「每日一票」）。
+管理端修改后**即时生效（缓存失效），无需发版**。当前消费方：
+- Reaction「每日唯一表情」开关（`reaction.daily.single`，见 [`08-reaction-and-rating.md`](08-reaction-and-rating.md) · 「每日一票」）；
+- 舞伴认可「每日一票」开关（`dancer.recognition.daily.single`，V31，默认 true）；
+- 联系方式「每日首免」开关（`dancer.contact.daily.free`，**V49（2026-08-26），默认 false = 下线**——每个用户每天对「有积分门槛」舞伴首次获取联系方式免费；关闭时一律按门槛扣积分，见 [`09-dancer-and-points.md`](09-dancer-and-points.md) · 积分解锁）。
 
 ## 数据模型（qwt_ops_config，V22 迁移）
 

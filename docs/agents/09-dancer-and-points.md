@@ -574,6 +574,11 @@ Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻
     （contact/contactImageUrl = null，无论无门槛/已解锁/未遮挡——防内容随详情泄漏），
     用户点击「获取联系方式」经 `POST /points/unlock` 实时查询返回（无门槛恒免费 /
     有门槛每日首免 / 已解锁幂等）；本人/管理员（dancer-edit 编辑回显）仍随详情下发。
+    <b>有门槛每日首免（V42，2026-08-24）受运营开关 `dancer.contact.daily.free`
+    控制（V49，2026-08-26，默认 false = 下线）</b>：开关开启 = 今日对任意有门槛
+    舞伴首次获取免费（`hasGatedContactUnlockToday` 判定，`UnlockResponse.freeToday`
+    驱动前端「今日首次 · 免费」）；开关关闭 = 一律按门槛扣积分、freeToday 恒 false
+    （前端展示自动收敛，见 [`16-ops-config.md`](16-ops-config.md)）。
     新增 `hasContact`（contact 或 contactImageUrl 任一非空）驱动前端入口渲染。
     UpsertDancerRequest 增 hideContact（null = 默认遮挡 true，旧客户端向后兼容）。
   - `qwt_dancer_photos.blur_url`（V25，可空）：<b>模糊占位图</b>（需求 4：

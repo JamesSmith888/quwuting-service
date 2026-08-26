@@ -15,6 +15,10 @@ import java.time.LocalDateTime;
  * <p>
  * 隐私克制：需求记录只存枚举/id/整句文案（DemandRecord javadoc），列表同样不额外回填
  * 服务/时间结构化字段——message 已含全部需求信息，前端零拼接。
+ * <p>
+ * 2026-08-26 邀约中转（22 号文档）：行加 {@code status}（DemandStatus code；
+ * NULL = 存量锚点记录，前端徽标兼容不渲染）——前端列表徽标区分
+ * 等待回复/已同意/暂不方便/已自动发放/暂未回复。
  */
 public record DemandRecordResponse(
         Long id,
@@ -24,5 +28,6 @@ public record DemandRecordResponse(
         String dancerCity,
         boolean dancerVisible,
         String message,
+        String status,
         LocalDateTime createdAt) {
 }

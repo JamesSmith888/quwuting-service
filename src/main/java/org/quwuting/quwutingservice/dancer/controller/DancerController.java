@@ -15,6 +15,7 @@ import org.quwuting.quwutingservice.dancer.dto.response.DancerServiceResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerStatsResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerSummaryResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTagsResponse;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerUnlockRecord;
 import org.quwuting.quwutingservice.dancer.dto.response.RecognizeResponse;
 import org.quwuting.quwutingservice.dancer.service.DancerService;
 import org.quwuting.quwutingservice.dancer.service.DancerStatsService;
@@ -151,6 +152,20 @@ public class DancerController {
     @GetMapping("/{id}/stats")
     public ApiResponse<DancerStatsResponse> stats(@PathVariable Long id) {
         return ApiResponse.ok(dancerStatsService.getStats(id));
+    }
+
+    /**
+     * 舞伴解锁记录明细（<b>公开访问</b>，2026-08-26 新增——对齐 stats / gifters
+     * 公开先例：响应为用户公开资料（昵称/头像）+ 解锁时间/内容描述/花费积分，
+     * 无身份敏感字段；「解锁信息」条形点击 → 详情页数据源）。
+     * targetType = PointsGateTargetType.name()（DANCER_PHOTO / DANCER_VIDEO /
+     * DANCER_CONTACT），实时查询按解锁时间倒序。
+     * 舞伴存在性 + 公开可见性校验（对齐 gifters validateTargetVisible）。
+     */
+    @GetMapping("/{id}/unlocks")
+    public ApiResponse<List<DancerUnlockRecord>> unlocks(@PathVariable Long id,
+                                                         @RequestParam String targetType) {
+        return ApiResponse.ok(dancerStatsService.unlocks(id, targetType));
     }
 
     /**

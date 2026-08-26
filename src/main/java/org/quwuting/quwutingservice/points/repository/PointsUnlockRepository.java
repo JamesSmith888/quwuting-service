@@ -3,6 +3,7 @@ package org.quwuting.quwutingservice.points.repository;
 import org.quwuting.quwutingservice.points.entity.PointsUnlock;
 import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -24,6 +25,36 @@ public interface PointsUnlockRepository extends JpaRepository<PointsUnlock, Long
      */
     @Query(value = "SELECT pg_advisory_xact_lock(hashtext(:lockKey))", nativeQuery = true)
     void lockUserUnlock(@Param("lockKey") String lockKey);
+
+    /**
+     * 解锁记录的<b>确定性原子写入</b>（2026-08-26 修复 DemandRelayService 的
+     * 「save + catch 23505」不可靠幂等——PointsUnlock 主键 IDENTITY，persist 即
+     * INSERT，撞唯一索引抛 DataIntegrityViolationException 后 Hibernate 已将事务
+     * 标记 rollback-only，即便 catch 吞掉异常，提交仍抛
+     * UnexpectedRollbackException = HTTP 500，见 22 号文档「工作台发放 500 根因」）。
+     * <p>
+     * 撞 UNIQUE(user_id, target_type, target_id)（qwt_uk_points_unlocks_user_target）
+     * 时 DO NOTHING 返回 0 行——调用方按受影响行数判定：0 = 已存在（幂等跳过，
+     * 同 user×dancer 此前已获批过），1 = 真实写入。与
+     * {@code PointsTransactionRepository#upsertEarn} 同范式（主代码零 catch 23505）。
+     * <p>
+     * <b>enum 必须传 name() 字符串</b>（同 upsertEarn 根因：原生 SQL 绑定 enum 默认
+     * ORDINAL → target_type 列落库序号而非枚举名，回查按 name() 匹配必然 0 条；
+     * 本列 @Enumerated(STRING)，传 name() 与实体派生回查一致）。
+     * transaction_id 传 NULL（获批解锁 = 免费解锁，无扣费流水；V42 DROP NOT NULL）。
+     *
+     * @return 受影响行数：1 = 写入成功；0 = 解锁记录已存在（幂等跳过）
+     */
+    @Modifying
+    @Query(value = "INSERT INTO qwt_points_unlocks " +
+                   "(user_id, target_type, target_id, transaction_id, created_at) " +
+                   "VALUES (:userId, :targetType, :targetId, NULL, :now) " +
+                   "ON CONFLICT (user_id, target_type, target_id) DO NOTHING",
+           nativeQuery = true)
+    int insertIfAbsent(@Param("userId") Long userId,
+                       @Param("targetType") String targetType,
+                       @Param("targetId") Long targetId,
+                       @Param("now") LocalDateTime now);
 
     /** 单用户单目标的解锁记录（幂等校验：已解锁 = 不重复扣费） */
     Optional<PointsUnlock> findByUserIdAndTargetTypeAndTargetId(

@@ -66,7 +66,7 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
      * 注意：getter 名与 SQL alias（小写）逐字匹配（同 DailyTrendRow 惯例）。
      */
     interface UnlockStatRow {
-        /** 内容类型（PointsGateTargetType.name()：DANCER_PHOTO / DANCER_CONTACT，可扩展） */
+        /** 内容类型（PointsGateTargetType.name()：DANCER_PHOTO / DANCER_VIDEO / DANCER_CONTACT，可扩展） */
         String getTargettype();
         /** 累计解锁人次（qwt_points_unlocks 行数） */
         Long getUnlockcount();
@@ -95,11 +95,14 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
     }
 
     /**
-     * 舞伴解锁信息聚合（2026-08-21 追加）：一条 DB 往返取回各内容类型的累计
-     * 解锁人次/人数 + 当前门槛积分。
+     * 舞伴解锁信息聚合（2026-08-21 追加；2026-08-26 补短视频分支）：一条 DB
+     * 往返取回各内容类型的累计解锁人次/人数 + 当前门槛积分。
      * <ul>
-     *   <li>照片（DANCER_PHOTO）target_id = qwt_dancer_photos.id，经子查询归集到
-     *       当前舞伴；联系方式（DANCER_CONTACT）target_id = 舞伴 ID 直连；</li>
+     *   <li>照片（DANCER_PHOTO）target_id = qwt_dancer_photos.id（kind='PHOTO'），
+     *       短视频（DANCER_VIDEO）target_id = qwt_dancer_photos.id（kind='VIDEO'，
+     *       2026-08-26 修复：旧 SQL 缺视频分支导致短视频解锁不入统计）；
+     *       二者均经子查询归集到当前舞伴；联系方式（DANCER_CONTACT）target_id =
+     *       舞伴 ID 直连；</li>
      *   <li>gate 只 join 未软删且 cost>0 的有效门槛（软删=清除门槛，历史解锁计数
      *       仍保留、cost 回落 0）；照片多张被解锁时 MAX(cost) = 最高解锁成本；</li>
      *   <li>仅返回解锁人次 &gt; 0 的类别（无解锁记录的类别不上行，前端空态=
@@ -121,12 +124,60 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
                   AND g.cost > 0
             WHERE (u.target_type = 'DANCER_PHOTO'
                    AND u.target_id IN (SELECT p.id FROM qwt_dancer_photos p
-                                       WHERE p.dancer_id = :dancerId))
+                                       WHERE p.dancer_id = :dancerId AND p.kind = 'PHOTO'))
+               OR (u.target_type = 'DANCER_VIDEO'
+                   AND u.target_id IN (SELECT p.id FROM qwt_dancer_photos p
+                                       WHERE p.dancer_id = :dancerId AND p.kind = 'VIDEO'))
                OR (u.target_type = 'DANCER_CONTACT' AND u.target_id = :dancerId)
             GROUP BY u.target_type
             ORDER BY unlockcount DESC
             """, nativeQuery = true)
     List<UnlockStatRow> countDancerUnlockStats(@Param("dancerId") Long dancerId);
+
+    /**
+     * 舞伴某内容类型的解锁记录明细（2026-08-26 新增，「解锁信息」条形点击 → 详情页）。
+     * <ul>
+     *   <li>JOIN qwt_users 取解锁用户公开资料（昵称/头像），软删用户排除
+     *       （对齐 gifters 先例）；</li>
+     *   <li>照片/视频 LEFT JOIN qwt_dancer_photos 取媒体描述列（sort_order 序号 /
+     *       duration_seconds 时长；联系方式无媒体行，该列为 null）；</li>
+     *   <li>LEFT JOIN qwt_points_transactions 取本次花费（免费解锁 transaction_id
+     *       为 null → COALESCE 兜底 0；花费 = -delta）；</li>
+     *   <li>target_type 归属口径与 {@link #countDancerUnlockStats} 完全一致
+     *       （照片/视频经 kind 归集到舞伴相册、联系方式直连舞伴 ID）；</li>
+     *   <li>排序 = 解锁时间倒序、id 倒序（最新解锁在前；解锁低频无分页）。</li>
+     * </ul>
+     * 返回 Object[]：{userId, nickname, avatarUrl, createdAt, sortOrder,
+     * durationSeconds, cost}。
+     *
+     * @param dancerId   舞伴 ID
+     * @param targetType PointsGateTargetType.name()（DANCER_PHOTO / DANCER_VIDEO / DANCER_CONTACT）
+     */
+    @Query(value = """
+            SELECT u.id AS userId,
+                   u.nickname AS nickname,
+                   u.avatar_url AS avatarUrl,
+                   ul.created_at AS createdAt,
+                   p.sort_order AS sortOrder,
+                   p.duration_seconds AS durationSeconds,
+                   COALESCE(-t.delta, 0) AS cost
+            FROM qwt_points_unlocks ul
+            JOIN qwt_users u ON u.id = ul.user_id AND u.deleted = false
+            LEFT JOIN qwt_dancer_photos p ON p.id = ul.target_id
+                 AND ul.target_type IN ('DANCER_PHOTO', 'DANCER_VIDEO')
+            LEFT JOIN qwt_points_transactions t ON t.id = ul.transaction_id
+            WHERE ul.target_type = :targetType
+              AND ((ul.target_type = 'DANCER_PHOTO'
+                    AND ul.target_id IN (SELECT p2.id FROM qwt_dancer_photos p2
+                                         WHERE p2.dancer_id = :dancerId AND p2.kind = 'PHOTO'))
+                OR (ul.target_type = 'DANCER_VIDEO'
+                    AND ul.target_id IN (SELECT p3.id FROM qwt_dancer_photos p3
+                                         WHERE p3.dancer_id = :dancerId AND p3.kind = 'VIDEO'))
+                OR (ul.target_type = 'DANCER_CONTACT' AND ul.target_id = :dancerId))
+            ORDER BY ul.created_at DESC, ul.id DESC
+            """, nativeQuery = true)
+    List<Object[]> findDancerUnlocks(@Param("dancerId") Long dancerId,
+                                     @Param("targetType") String targetType);
 
     /**
      * 舞伴全量历史累计指标聚合（2026-08-22 追加，「累计数据」汇总卡用）：一条 DB

@@ -75,4 +75,18 @@ public class DemandRecord {
     /** 服务端拼接的完整需求描述（与用户微信添加好友时粘贴的内容一致，审计用） */
     @Column(nullable = false, length = 120)
     private String message = "";
+
+    /**
+     * 邀约状态（2026-08-26 新增，V50；DemandStatus 枚举 code，可空）。
+     * <p>
+     * 语义：邀约中转状态机（docs/agents/22）——开启中转开关（contact_relay）的
+     * 舞伴，邀约提交后 = PENDING，管理员人工转发给舞伴后按舞伴回复置
+     * APPROVED/REJECTED，24h 无回复按 auto_release 置 AUTO_RELEASED/EXPIRED。
+     * <b>NULL = 存量锚点记录</b>（V42 前无状态语义，历史客人在当时已拿到微信，
+     * 等价 APPROVED，前端徽标兼容不渲染）。本表语义 = 锚点记录只写一次，status
+     * 是唯一允许更新的列（发放/拒绝/降级写路径，条件更新 WHERE status='PENDING'
+     * 天然幂等）。
+     */
+    @Column(length = 20)
+    private String status;
 }
