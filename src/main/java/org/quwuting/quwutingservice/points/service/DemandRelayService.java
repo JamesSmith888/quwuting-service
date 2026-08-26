@@ -10,6 +10,8 @@ import org.quwuting.quwutingservice.dancer.repository.DancerServiceRepository;
 import org.quwuting.quwutingservice.dancer.repository.DemandRecordRepository;
 import org.quwuting.quwutingservice.dancer.support.DemandDetailTexts;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.message.enums.MessageType;
+import org.quwuting.quwutingservice.message.service.MessageService;
 import org.quwuting.quwutingservice.points.dto.AdminDemandDetail;
 import org.quwuting.quwutingservice.points.dto.AdminDemandItem;
 import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
@@ -43,6 +45,11 @@ import java.util.stream.Collectors;
  * 舞伴解锁统计（dancer-stats）计入；客人提交邀约阶段不扣积分、不写解锁记录
  * （避免「花了积分没拿到微信」的纠纷，把关权从积分交给舞伴本人）。
  * <p>
+ * <b>状态变化 = 站内信通知</b>（2026-08-26）：发放/拒绝/自动降级实际流转时同事务
+ * 给客人发 {@code DEMAND_STATUS} 站内信（内容 = DemandStatus.statusText 权威文案，
+ * 软关联 DEMAND 深链邀约详情页）——客人「马上能收到消息」（消息红点），无需主动
+ * 刷新我的邀约；微信服务通知（订阅消息）为 22 号文档 P2，需模板 ID，另行评估。
+ * <p>
  * 一致性：发放/拒绝/降级全部走 {@code updateStatusIfPending}（WHERE
  * status='PENDING' 条件更新 = 天然幂等，重复操作/并发无竞态）；写解锁记录 =
  * <b>确定性原子写入</b>（{@code PointsUnlockRepository#insertIfAbsent} 原生
@@ -68,6 +75,8 @@ public class DemandRelayService {
     private final DancerServiceRepository dancerServiceRepository;
     private final UserRepository userRepository;
     private final PointsUnlockRepository unlockRepository;
+    /** 站内信（2026-08-26：邀约状态变化通知客人的站内通道，同事务写入） */
+    private final MessageService messageService;
     /** 舞伴详情缓存失效入口（2026-08-26：获批真实写入解锁记录后经 afterCommit 失效
      *  舞伴统计缓存——解锁改变 dancer-stats 输入（unlockStats 累计人次/人数），对齐
      *  PointsService 解锁写路径同款边界；幂等跳过（记录已存在）不需失效） */
@@ -190,6 +199,7 @@ public class DemandRelayService {
             throw new BusinessException(1001, "该邀约已处理");
         }
         writeUnlockIfAbsent(record);
+        notifyDemandStatus(record, DemandStatus.APPROVED);
         log.info("管理员发放邀约 {} 联系方式（舞伴 {}，客人 {}）", demandId, record.getDancerId(), record.getUserId());
     }
 
@@ -205,6 +215,7 @@ public class DemandRelayService {
         if (updated == 0) {
             throw new BusinessException(1001, "该邀约已处理");
         }
+        notifyDemandStatus(record, DemandStatus.REJECTED);
         log.info("管理员拒绝邀约 {}（舞伴 {}，客人 {}）", demandId, record.getDancerId(), record.getUserId());
     }
 
@@ -230,6 +241,7 @@ public class DemandRelayService {
                 if (release) {
                     writeUnlockIfAbsent(record);
                 }
+                notifyDemandStatus(record, release ? DemandStatus.AUTO_RELEASED : DemandStatus.EXPIRED);
                 handled++;
                 log.info("邀约 {} 超时降级：{}（舞伴 {} autoRelease={}）", record.getId(),
                         release ? "自动发放" : "告知未回复", record.getDancerId(), release);
@@ -283,5 +295,30 @@ public class DemandRelayService {
         } else {
             dancerDetailCacheService.invalidate(dancerId);
         }
+    }
+
+    /**
+     * 邀约状态站内信（2026-08-26：客人「马上能收到消息」的站内通道——管理员发放/
+     * 拒绝、24h 自动降级时同事务发送给客人，驱动 me 页「消息」入口 + tabBar 未读
+     * 徽标，点击直达邀约详情页，无需客人主动刷新「我的邀约」）。
+     * <p>
+     * 内容 = {@link DemandStatus#statusText()} 服务端权威友好文案（尊重友好原则，
+     * 前端零拼接）；幂等 = 调用方已按 {@code updateStatusIfPending} 实际流转（返回
+     * 行数 &gt; 0）守卫，重复操作/并发不重发；同事务失败整体回滚保证通知不丢。
+     * 软关联 DEMAND（深链邀约详情页 pages/demand-detail?id=）。
+     */
+    private void notifyDemandStatus(DemandRecord record, DemandStatus status) {
+        String title;
+        switch (status) {
+            case APPROVED -> title = "邀约已通过";
+            case REJECTED -> title = "邀约未通过";
+            case AUTO_RELEASED -> title = "联系方式已自动发放";
+            case EXPIRED -> title = "邀约已过期";
+            default -> {
+                return; // PENDING 不通知（等待态无需打扰）
+            }
+        }
+        messageService.create(record.getUserId(), MessageType.DEMAND_STATUS,
+                title, status.statusText(), "DEMAND", record.getId());
     }
 }

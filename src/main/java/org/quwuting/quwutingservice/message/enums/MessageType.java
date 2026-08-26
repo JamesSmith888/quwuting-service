@@ -39,5 +39,15 @@ public enum MessageType {
      * 状态变迁发一次）；撤销必附原因（延续"被指涉方有申辩权"——被撤销舞伴可查原因）。
      * 软关联 DANCER（深链舞伴详情页）。
      */
-    DANCER_VERIFICATION
+    DANCER_VERIFICATION,
+    /**
+     * 邀约状态变化（2026-08-26 新增，22 号文档「邀约中转」）：管理员发放/拒绝、
+     * 24h 自动降级（AUTO_RELEASED/EXPIRED）<b>实际流转时</b>同事务发送给客人——
+     * 客人提交邀约后「马上能收到消息」（驱动 me 页「消息」入口 + tabBar 未读徽标，
+     * 点击直达邀约详情），无需主动刷新「我的邀约」。
+     * 内容 = DemandStatus.statusText 服务端权威友好文案（尊重友好原则，前端零拼接）；
+     * 幂等 = 仅 updateStatusIfPending 实际流转（PENDING → 目标态）时发一次。
+     * 软关联 DEMAND（深链邀约详情页 pages/demand-detail?id=）。
+     */
+    DEMAND_STATUS
 }
