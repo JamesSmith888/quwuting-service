@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -103,4 +104,28 @@ public interface DancerPhotoRepository extends JpaRepository<DancerPhoto, Long> 
             """,
             nativeQuery = true)
     Page<Object[]> findAdminPage(@Param("status") String status, Pageable pageable);
+
+    /**
+     * 批量舞伴相册最近更新时间（2026-08-26 晚：列表 / 详情「最近更新了相册」信号——
+     * 取每个舞伴最新一张 PUBLIC 媒体的 created_at；一次 IN 查询覆盖整页，规避 N+1）。
+     * 返回 Object[]{dancerId, maxCreatedAt}（无公开媒体的舞伴不出现于结果）。
+     */
+    @Query(value = """
+            SELECT p.dancer_id, MAX(p.created_at)
+            FROM qwt_dancer_photos p
+            WHERE p.dancer_id IN :dancerIds AND p.status = 'PUBLIC' AND p.deleted = false
+            GROUP BY p.dancer_id
+            """, nativeQuery = true)
+    List<Object[]> findLatestPublicCreatedAtByDancerIds(@Param("dancerIds") List<Long> dancerIds);
+
+    /**
+     * 单舞伴相册最近更新时间（2026-08-26 晚：详情页「最近更新了相册」信号——
+     * 最新一张 PUBLIC 媒体的 created_at；无公开媒体返回 empty）。
+     */
+    @Query(value = """
+            SELECT MAX(p.created_at)
+            FROM qwt_dancer_photos p
+            WHERE p.dancer_id = :dancerId AND p.status = 'PUBLIC' AND p.deleted = false
+            """, nativeQuery = true)
+    Optional<LocalDateTime> findLatestPublicCreatedAtByDancerId(@Param("dancerId") Long dancerId);
 }

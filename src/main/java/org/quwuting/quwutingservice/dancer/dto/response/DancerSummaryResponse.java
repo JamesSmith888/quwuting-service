@@ -5,6 +5,7 @@ import org.quwuting.quwutingservice.dancer.enums.DancerVerificationStatus;
 import org.quwuting.quwutingservice.tagdict.dto.response.TagItemResponse;
 
 import java.util.List;
+import java.time.LocalDateTime;
 /**
  * 舞伴列表条目（列表页卡片数据源）。
  * <p>
@@ -81,5 +82,16 @@ public record DancerSummaryResponse(
          * 城市筛选「全部」仍可见（服务范围不限地域）；同时提供线下服务的舞伴
          * 本字段同样为 true（线上可约是独立于城市的服务属性）。
          */
-        boolean onlineService
+        boolean onlineService,
+        /**
+         * 相册最近一次更新时间（2026-08-26 晚：列表卡片「最近更新了相册」信号——
+         * = 最新一张 PUBLIC 照片 / 短视频的 created_at；无公开媒体 = null）。
+         * 前端据 {@code lastContactUpdatedAt} 与本站择最近者、且均在 3 天内才提示。
+         */
+        LocalDateTime lastAlbumUpdatedAt,
+        /**
+         * 联系方式最近一次变更时间（2026-08-26 晚：列表卡片「最近更新了联系方式」信号——
+         * = Dancer.contactUpdatedAt；从未更新过 = null）。与本站择最近者提示。
+         */
+        LocalDateTime lastContactUpdatedAt
 ) {}

@@ -206,4 +206,14 @@ public class Dancer extends BaseEntity {
      */
     @Column(length = 500)
     private String profileTags;
+
+    /**
+     * 联系方式最近一次变更时间（2026-08-26 晚 新增，可空；V51 迁移）。
+     * <p>
+     * 语义：contact / contact_image_url 任一有变更且变更后非空 → 服务层写入
+     * LocalDateTime.now()。用于列表 / 详情「最近更新了联系方式」信号——与
+     * Dancer.updated_at（任意字段变更都跳动）正交，专指联系方式这一项。
+     * 存量舞伴恒 NULL（前端不渲染该信号）；列无 NOT NULL / 无 DEFAULT。
+     */
+    private LocalDateTime contactUpdatedAt;
 }

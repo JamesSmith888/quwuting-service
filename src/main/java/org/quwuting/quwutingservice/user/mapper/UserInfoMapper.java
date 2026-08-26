@@ -14,7 +14,10 @@ public class UserInfoMapper {
                 user.getOpenId(),
                 user.getNickname(),
                 user.getAvatarUrl(),
-                user.getRole()
+                user.getRole(),
+                user.getAge(),
+                user.getGender(),
+                user.getCity()
         );
     }
 }

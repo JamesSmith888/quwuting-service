@@ -29,8 +29,8 @@ public class UserService {
     }
 
     /**
-     * 更新用户资料（昵称 / 头像，按请求中提供的字段局部更新）。
-     * nickname 与 avatarUrl 至少提供一个，否则抛 1005 参数错误。
+     * 更新用户资料（昵称 / 头像 / 年龄 / 性别 / 城市，按请求中提供的字段局部更新）。
+     * 至少提供一个字段，否则抛 1005 参数错误。
      */
     @Transactional
     public UserInfoResponse updateProfile(Long userId, UpdateProfileRequest request) {
@@ -38,8 +38,13 @@ public class UserService {
 
         String nickname = request.nickname() == null ? null : request.nickname().trim();
         String avatarUrl = request.avatarUrl() == null ? null : request.avatarUrl().trim();
-        if (isBlank(nickname) && isBlank(avatarUrl)) {
-            throw new BusinessException(1005, "昵称或头像至少提供一项");
+        Integer age = request.age();
+        String gender = request.gender() == null ? null : request.gender().trim().toUpperCase();
+        String city = request.city() == null ? null : request.city().trim();
+        boolean hasField = !isBlank(nickname) || !isBlank(avatarUrl)
+                || age != null || !isBlank(gender) || !isBlank(city);
+        if (!hasField) {
+            throw new BusinessException(1005, "请至少提供一项资料");
         }
         if (!isBlank(nickname)) {
             user.setNickname(nickname);
@@ -47,6 +52,21 @@ public class UserService {
         if (!isBlank(avatarUrl)) {
             imageValidator.validate(avatarUrl);
             user.setAvatarUrl(avatarUrl);
+        }
+        if (age != null) {
+            if (age < 0 || age > 120) {
+                throw new BusinessException(1005, "年龄需在 0-120 之间");
+            }
+            user.setAge(age);
+        }
+        if (!isBlank(gender)) {
+            if (!"MALE".equals(gender) && !"FEMALE".equals(gender)) {
+                throw new BusinessException(1005, "性别取值非法");
+            }
+            user.setGender(gender);
+        }
+        if (!isBlank(city)) {
+            user.setCity(city);
         }
         userRepository.save(user);
         return userInfoMapper.toResponse(user);

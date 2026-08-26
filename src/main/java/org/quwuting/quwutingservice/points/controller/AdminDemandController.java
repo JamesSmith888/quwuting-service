@@ -14,6 +14,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.List;
+
 /**
  * 邀约工作台管理端接口（2026-08-26，22-invite-relay-and-auto-release；仅 ADMIN）。
  * <p>
@@ -37,6 +39,22 @@ public class AdminDemandController {
             @RequestParam(defaultValue = "20") int size) {
         UserContext.requireAdmin();
         return ApiResponse.ok(demandRelayService.listPending(page, size));
+    }
+
+    /** 邀约工作台列表（GET /admin/demands?scope=pending|processed|all，分页倒序；
+     *  单一列表端点覆盖 待处理/已处理/全部 三视图——scope 为查询正交维度，与状态机
+     *  解耦；非法/缺省 scope 回退 pending）。行含 status（列表自描述，已处理视图直接
+     *  渲染状态）。待办红点仍走 /pending-count，不受影响。 */
+    @GetMapping
+    public ApiResponse<Page<AdminDemandItem>> list(
+            @RequestParam(defaultValue = "pending") String scope,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        UserContext.requireAdmin();
+        if (!List.of("pending", "processed", "all").contains(scope)) {
+            scope = "pending";
+        }
+        return ApiResponse.ok(demandRelayService.listByScope(scope, page, size));
     }
 
     /** 待办总数（GET /admin/demands/pending-count；me 页「邀约工作台」入口红点

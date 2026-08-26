@@ -84,17 +84,36 @@ public class DemandRelayService {
 
     /**
      * 邀约工作台待办列表（PENDING 分页倒序，新邀约在前）。
-     * 舞伴范围 = 全部开启中转（contact_relay=true）的舞伴（数量少，全量拉取）；
-     * 行含舞伴摘要 + 客人公开资料 + message 原文 + 超 12h 催办标记。
+     * 委交给 {@link #listByScope(String, int, int)}（scope=pending），避免 待处理/已处理/
+     * 全部 三视图重复映射逻辑——scope 是列表查询的正交维度，与状态机解耦。
      */
     public Page<AdminDemandItem> listPending(int page, int size) {
+        return listByScope("pending", page, size);
+    }
+
+    /**
+     * 邀约工作台列表（按 scope 过滤；scope=pending → PENDING / processed → 终态
+     * （APPROVED/REJECTED/AUTO_RELEASED/EXPIRED）/ all → 全部中转记录（不限状态））。
+     * 舞伴范围 = 全部开启中转（contact_relay=true）的舞伴；行含舞伴摘要 + 客人公开资料
+     * + message 原文 + 超 12h 催办标记 + status（列表行自描述，已处理视图直接渲染状态，
+     * 无需再查详情）。映射逻辑三视图共用（单一事实源），仅底层查询按 scope 选择。
+     */
+    public Page<AdminDemandItem> listByScope(String scope, int page, int size) {
         List<Long> relayDancerIds = dancerRepository.findRelayEnabled().stream()
                 .map(Dancer::getId).toList();
+        PageRequest pr = PageRequest.of(page, Math.min(Math.max(size, 1), 50));
         if (relayDancerIds.isEmpty()) {
-            return Page.empty(PageRequest.of(page, Math.min(Math.max(size, 1), 50)));
+            return Page.empty(pr);
         }
-        Page<DemandRecord> records = demandRecordRepository.findPendingByDancerIds(
-                relayDancerIds, PageRequest.of(page, Math.min(Math.max(size, 1), 50)));
+        Page<DemandRecord> records;
+        if ("processed".equals(scope)) {
+            records = demandRecordRepository.findByDancerIdsAndStatuses(relayDancerIds,
+                    List.of("APPROVED", "REJECTED", "AUTO_RELEASED", "EXPIRED"), pr);
+        } else if ("all".equals(scope)) {
+            records = demandRecordRepository.findByDancerIds(relayDancerIds, pr);
+        } else {
+            records = demandRecordRepository.findPendingByDancerIds(relayDancerIds, pr);
+        }
         List<Long> dancerIds = records.getContent().stream()
                 .map(DemandRecord::getDancerId).distinct().toList();
         List<Long> userIds = records.getContent().stream()
@@ -121,7 +140,8 @@ public class DemandRelayService {
                     user != null ? user.getAvatarUrl() : null,
                     user != null ? Math.max(0, Duration.between(user.getCreatedAt(), LocalDateTime.now()).toDays()) : 0,
                     r.getMessage(),
-                    r.getCreatedAt().isBefore(remindBefore));
+                    r.getCreatedAt().isBefore(remindBefore),
+                    r.getStatus());
         });
     }
 

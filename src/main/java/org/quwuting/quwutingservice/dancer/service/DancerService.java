@@ -21,6 +21,7 @@ import org.quwuting.quwutingservice.dancer.enums.DancerPhotoKind;
 import org.quwuting.quwutingservice.dancer.enums.DancerPhotoStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerServiceCategory;
 import org.quwuting.quwutingservice.dancer.enums.DancerServiceSubCategory;
+import org.quwuting.quwutingservice.dancer.enums.DancerSortMode;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerVenueRelation;
 import org.quwuting.quwutingservice.dancer.enums.DancerVerificationAction;
@@ -349,6 +350,10 @@ public class DancerService {
         if (!canManage(dancer, userId, currentRole)) {
             throw new BusinessException(1003, "无编辑权限");
         }
+        // 联系方式旧值（2026-08-26 晚：变更检测——联系方式有变更且非空才刷新
+        // contactUpdatedAt；与 Dancer.updated_at（任意字段变更都跳动）正交，专指联系方式）
+        final String oldContact = dancer.getContact();
+        final String oldContactImageUrl = dancer.getContactImageUrl();
         String nickname = TextSanitizer.sanitize(request.nickname(), 30);
         if (nickname.isEmpty()) {
             throw new BusinessException(1001, "昵称不能为空");
@@ -368,6 +373,15 @@ public class DancerService {
         dancer.setContactImageUrl(sanitizeContactImageUrl(request.contactImageUrl()));
         dancer.setContact(TextSanitizer.sanitize(request.contact(), 100));
         dancer.setHideContact(request.hideContact() == null || request.hideContact());
+        // 联系方式更新时间（2026-08-26 晚）：联系方式有变更且变更后仍非空 → 记录现在时刻
+        // （清空联系方式不算「更新」——前端信号只提示「最近更新了联系方式」的舞伴）
+        boolean contactChanged = !Objects.equals(oldContact, dancer.getContact())
+                || !Objects.equals(oldContactImageUrl, dancer.getContactImageUrl());
+        boolean contactPresent = (dancer.getContact() != null && !dancer.getContact().isBlank())
+                || (dancer.getContactImageUrl() != null && !dancer.getContactImageUrl().isBlank());
+        if (contactChanged && contactPresent) {
+            dancer.setContactUpdatedAt(LocalDateTime.now());
+        }
         dancer.setEarningsEnabled(request.earningsEnabled() != null && request.earningsEnabled());
         // 加好友需告知位置（2026-08-26：null = 关闭；per-dancer 开关，见 V47）
         dancer.setRequireUserLocation(request.requireUserLocation() != null && request.requireUserLocation());
@@ -470,16 +484,25 @@ public class DancerService {
     // ─── 列表 / 详情 ───────────────────────────────────────────────────────────
 
     /**
-     * 公开舞伴列表（仅 NORMAL），按近7天认可倒序分页。
+     * 公开舞伴列表（仅 NORMAL），按排序模式分页（2026-08-26 晚排序升级）：
+     * <ul>
+     *   <li>{@link DancerSortMode#HOT}（默认）：组合分 = 近7天认可数 + 新鲜度加成
+     *       （新舞伴 14 天 +2 / 近 3 天更新过相册或联系方式 +2），同分按近 30 天收藏数
+     *       （2026-08-26 由近30天积分替换——原积分口径偏向收费舞伴，见
+     *       DancerRepository#findPublicPage），再按 id 倒序兜底（新资料优先）；</li>
+     *   <li>{@link DancerSortMode#LATEST}：id 倒序（新资料在前，冷启动曝光通道）。</li>
+     * </ul>
+     * sort 为 null/空串 → HOT 兜底（旧客户端不传零回归）；非法值 → 1001。
      * <p>
      * 2026-08-22 性能根因修复：用户无关部分（主查询行 + Top 标签/常驻舞厅/封面/浏览量
      * enrichments）整体走 {@link DancerListCacheService}（60s refresh-ahead + 写路径失效），
      * 列表接口 DB 往返 ~7 次 → ~2 次；个人态（今日已认可 ID / 今日投票标签）恒实时查询
      * （严禁进用户无关缓存，列表卡片 chips 活跃态数据源）。写路径（认可/收藏/编辑/照片
-     * 增删审/状态流转/认证/新建）经 {@link #invalidateListCache()} 显式失效。
+     * 增删审/状态流转/认证/新建）经 {@link #invalidateListCache()} 显式失效——排序含
+     * 近30天收藏 tie-break，故收藏 add·remove 亦在失效矩阵内（2026-08-26 起）。
      */
     @Transactional(readOnly = true)
-    public Page<DancerSummaryResponse> listPublic(String city, String serviceCategory,
+    public Page<DancerSummaryResponse> listPublic(String city, String serviceCategory, String sort,
                                                   int page, int size, Long currentUserId) {
         Pageable pageable = sanePage(page, size);
         // 服务类别筛选（2026-08-24 需求优先匹配）：非法类别 code → 1001（枚举解析防御）
@@ -487,9 +510,14 @@ public class DancerService {
         if (serviceCategory != null && !serviceCategory.isBlank()) {
             category = DancerServiceCategory.parse(serviceCategory);
         }
+        // 排序模式（2026-08-26 晚新增）：null/空串 → HOT 兜底（旧客户端零回归）
+        DancerSortMode sortMode = DancerSortMode.HOT;
+        if (sort != null && !sort.isBlank()) {
+            sortMode = DancerSortMode.parse(sort);
+        }
         // 用户无关公共部分（缓存：单飞 + refresh-ahead，见 DancerListCacheService）
         DancerListCacheService.ListPublicPart part = listCacheService.get(city,
-                category != null ? category.name() : null, pageable);
+                category != null ? category.name() : null, sortMode.name(), pageable);
         List<Object[]> rows = part.rows();
         if (rows.isEmpty()) {
             return new PageImpl<>(Collections.emptyList(), pageable, part.totalElements());
@@ -554,6 +582,7 @@ public class DancerService {
         }
         dancerFavoriteRepository.upsertFavorite(userId, dancerId, LocalDateTime.now());
         detailCacheService.invalidate(dancerId); // 收藏趋势输入（favoriteTrend）真实写入后失效
+        invalidateListCache(); // 2026-08-26 排序升级：近30天收藏数参与 HOT 排序 tie-break
     }
 
     /**
@@ -571,6 +600,7 @@ public class DancerService {
                     dancerFavoriteRepository.save(fav);
                     // 列表/详情收藏态变化（统计缓存无实质影响，保持写路径一致约定）
                     detailCacheService.invalidate(dancerId);
+                    invalidateListCache(); // 2026-08-26 排序升级：近30天收藏数参与 HOT 排序 tie-break
                 });
     }
 
@@ -597,6 +627,11 @@ public class DancerService {
             countsById.put((Long) row[0], new long[]{
                     ((Number) row[6]).longValue(), ((Number) row[7]).longValue(), ((Number) row[8]).longValue()});
         }
+        // 最近更新信号（2026-08-26 晚：相册 = 最新 PUBLIC 媒体 created_at；联系方式 =
+        // Dancer.contactUpdatedAt——批量一次 IN 查询，规避 N+1；前端择最近者且 3 天内才提示）
+        List<Long> ids = content.stream().map(r -> (Long) r[0]).toList();
+        Map<Long, LocalDateTime> albumLatest = albumLatestUpdatedAtByDancerIds(ids);
+        Map<Long, LocalDateTime> contactUpdated = contactUpdatedAtByDancerIds(ids);
 
         List<DancerSummaryResponse> summaries = new ArrayList<>(content.size());
         for (Object[] row : content) {
@@ -613,7 +648,8 @@ public class DancerService {
                     en.tagsById().getOrDefault(id, Collections.emptyList()),
                     en.viewCounts().getOrDefault(id, 0L),
                     buildMediaPreviews(en.mediaPreviewsById().get(id), unlockedMediaIds, showAllMedia),
-                    en.onlineServiceDancerIds().contains(id)));
+                    en.onlineServiceDancerIds().contains(id),
+                    albumLatest.get(id), contactUpdated.get(id)));
         }
         return summaries;
     }
@@ -669,6 +705,37 @@ public class DancerService {
             unlocked.addAll(pointsService.unlockedIds(currentUserId, PointsGateTargetType.DANCER_VIDEO, videoIds));
         }
         return unlocked;
+    }
+
+    /**
+     * 批量舞伴相册最近更新时间（2026-08-26 晚：列表「最近更新了相册」信号）——
+     * 取每个舞伴最新一张 PUBLIC 照片/短视频的 created_at；一次 IN 查询覆盖整页。
+     * 无公开媒体的舞伴不在结果中（前端不提示）。
+     */
+    private Map<Long, LocalDateTime> albumLatestUpdatedAtByDancerIds(Collection<Long> ids) {
+        if (ids.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<Long, LocalDateTime> map = new HashMap<>();
+        for (Object[] row : photoRepository.findLatestPublicCreatedAtByDancerIds(new ArrayList<>(ids))) {
+            map.put((Long) row[0], (LocalDateTime) row[1]);
+        }
+        return map;
+    }
+
+    /**
+     * 批量舞伴联系方式更新时间（2026-08-26 晚：列表「最近更新了联系方式」信号）——
+     * Dancer.contactUpdatedAt 批量拉取；未更新过的舞伴不在结果中（前端不提示）。
+     */
+    private Map<Long, LocalDateTime> contactUpdatedAtByDancerIds(Collection<Long> ids) {
+        if (ids.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<Long, LocalDateTime> map = new HashMap<>();
+        for (Object[] row : dancerRepository.findContactUpdatedAtByDancerIds(new ArrayList<>(ids))) {
+            map.put((Long) row[0], (LocalDateTime) row[1]);
+        }
+        return map;
     }
 
     /** 公开舞伴的常驻城市词表（列表页城市筛选数据源，聚合真实数据） */
@@ -741,6 +808,11 @@ public class DancerService {
         // 反序列化 + 字典解析（text + description，长按/点击弹说明的权威文案））
         List<TagItemResponse> profileTags =
                 tagDictService.resolveOrdered(tagDictService.deserializeIds(dancer.getProfileTags()));
+        // 最近更新信号（2026-08-26 晚）：相册 = 最新一张 PUBLIC 媒体 created_at；
+        // 联系方式 = Dancer.contactUpdatedAt（实体已加载，零额外查询）
+        LocalDateTime lastAlbumUpdatedAt =
+                photoRepository.findLatestPublicCreatedAtByDancerId(dancerId).orElse(null);
+        LocalDateTime lastContactUpdatedAt = dancer.getContactUpdatedAt();
         return new DancerDetailResponse(
                 dancer.getId(), dancer.getNickname(), dancer.getAvatarUrl(), dancer.getBio(),
                 dancer.getGender(), dancer.getCity(), pub.cities(), dancer.getCurrentCity(), profileTags, dancer.getStatus(),
@@ -752,7 +824,8 @@ public class DancerService {
                 hasContact, contact, contactImageUrl, hideContact, contactCost, contactUnlocked,
                 earningsEnabled, earningsAdUnitId, pub.adViews(),
                 dancer.isRequireUserLocation(),
-                dancer.isContactRelay(), dancer.isAutoRelease());
+                dancer.isContactRelay(), dancer.isAutoRelease(),
+                lastAlbumUpdatedAt, lastContactUpdatedAt);
     }
 
     // ─── 服务范围（2026-08-24：admin 录入的黄页内容；详情公开读 + 管理端写） ─────
@@ -1259,6 +1332,8 @@ public class DancerService {
         DancerListCacheService.ListEnrichments en = listCacheService.computeEnrichments(ids);
         Set<Long> myTodayIds = fetchMyTodayIds(ids, userId);
         Map<Long, List<String>> myTagsById = fetchMyTodayTags(ids, userId);
+        // 最近更新信号（2026-08-26 晚）：相册批量一次 IN 查询；联系方式实体已含
+        Map<Long, LocalDateTime> albumLatest = albumLatestUpdatedAtByDancerIds(ids);
 
         List<DancerSummaryResponse> result = new ArrayList<>(dancers.size());
         for (Dancer d : dancers) {
@@ -1274,7 +1349,8 @@ public class DancerService {
                     en.viewCounts().getOrDefault(d.getId(), 0L),
                     // 本人视角：所有媒体恒解锁（showAllMedia=true，见 buildMediaPreviews）
                     buildMediaPreviews(en.mediaPreviewsById().get(d.getId()), Collections.emptySet(), true),
-                    en.onlineServiceDancerIds().contains(d.getId())));
+                    en.onlineServiceDancerIds().contains(d.getId()),
+                    albumLatest.get(d.getId()), d.getContactUpdatedAt()));
         }
         return result;
     }

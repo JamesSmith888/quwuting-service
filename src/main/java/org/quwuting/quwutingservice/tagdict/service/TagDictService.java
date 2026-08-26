@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.text.TextSanitizer;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.tagdict.dto.request.CreateTagDictRequest;
+import org.quwuting.quwutingservice.tagdict.dto.request.UpdateTagDictRequest;
 import org.quwuting.quwutingservice.tagdict.dto.response.TagItemResponse;
 import org.quwuting.quwutingservice.tagdict.entity.TagDict;
 import org.quwuting.quwutingservice.tagdict.enums.TagScope;
@@ -75,6 +76,23 @@ public class TagDictService {
     }
 
     /**
+     * 更新标签展示配色（2026-08-26，标签级配色；低频管理操作）：
+     * color 为 null = 不修改；空串 = 清除配色；否则校验 hex 格式（DTO @Pattern 已校验）
+     * 后落库。返回最新条目（含新 color，前端本地收敛无需重拉字典）。
+     */
+    @Transactional
+    public TagItemResponse updateColor(Long adminId, Long id, UpdateTagDictRequest request) {
+        TagDict tag = tagDictRepository.findById(id)
+                .filter(t -> !t.isDeleted())
+                .orElseThrow(() -> new BusinessException(1001, "标签不存在或已删除"));
+        String color = request.color();
+        if (color != null) {
+            tag.setColor(color.isBlank() ? null : color);
+        }
+        return toItem(tagDictRepository.save(tag));
+    }
+
+    /**
      * 按 id 批量解析（一次 IN 查询；含停用标签——历史关联不因停用而消失）。
      * 返回 Map（消费方按自身 id 数组顺序取值，保序责任在消费方）。
      */
@@ -129,7 +147,7 @@ public class TagDictService {
     }
 
     private static TagItemResponse toItem(TagDict t) {
-        return new TagItemResponse(t.getId(), t.getText(), t.getDescription());
+        return new TagItemResponse(t.getId(), t.getText(), t.getDescription(), t.getColor());
     }
 
     /** scope 归一（非法/缺省 → DANCER，防脏参数产生空列表） */

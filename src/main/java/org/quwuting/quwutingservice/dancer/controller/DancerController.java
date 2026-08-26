@@ -61,15 +61,19 @@ public class DancerController {
      * 支持按常驻城市筛选（city 可选）与<b>服务类别筛选</b>（serviceCategory 可选，
      * 2026-08-24 需求优先匹配：命中"存在 ≥1 个在用且类别匹配的服务"的舞伴，
      * 枚举 code = PACKAGE/DANCE/BAR/ONLINE_CHAT/OTHER）；
-     * 排序由后端完成（近7天认可倒序，见 DancerService#listPublic）。
+     * <b>排序模式</b>（sort 可选，2026-08-26 晚新增）：
+     * HOT（默认，组合分 = 近7天认可 + 新鲜度加成 + 近30天收藏 tie-break）/
+     * LATEST（id 倒序，新资料在前）；null/空串 → HOT 兜底（旧客户端零回归），
+     * 非法值 → 1001。排序细节见 DancerService#listPublic。
      */
     @GetMapping
     public ApiResponse<Page<DancerSummaryResponse>> list(
             @RequestParam(required = false) String city,
             @RequestParam(required = false) String serviceCategory,
+            @RequestParam(required = false) String sort,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "10") int size) {
-        return ApiResponse.ok(dancerService.listPublic(city, serviceCategory, page, size,
+        return ApiResponse.ok(dancerService.listPublic(city, serviceCategory, sort, page, size,
                 UserContext.getCurrentUserId()));
     }
 

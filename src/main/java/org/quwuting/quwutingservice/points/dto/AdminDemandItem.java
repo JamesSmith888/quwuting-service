@@ -12,6 +12,10 @@ import java.time.LocalDateTime;
  * 建议管理员微信催办一次，降级前缓冲）。
  * <p>
  * 隐私克制：不下发客人真实联系方式（openId 等）；只有 message 需求文本。
+ * <p>
+ * 2026-08-26 工作台历史视图：新增 {@code status}（DemandStatus code，可空）——列表行
+ * 自描述，使"已处理/全部"视图无需再查详情即可渲染状态徽标；Pending 列表同样下发
+ * （值恒 PENDING），前端按 scope 决定是否展示，避免列表/详情双口径。
  */
 public record AdminDemandItem(
         Long id,
@@ -24,5 +28,6 @@ public record AdminDemandItem(
         String userAvatarUrl,
         long userJoinedDays,
         String message,
-        boolean over12h) {
+        boolean over12h,
+        String status) {
 }

@@ -58,12 +58,15 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
         Long getViewsearchcount();
         /** 当日来源=VENUE 浏览数（门店详情页同城舞伴入口进入，2026-08-21 新增——「浏览来源」图第四序列） */
         Long getViewvenuecount();
+        /** 当日联系方式需求数（qwt_demand_records 按 created_at 分组，2026-08-26 追加——「需求趋势」图用） */
+        Long getDemandcount();
     }
 
     /**
-     * 舞伴「用户解锁信息」统计行投影（2026-08-21 追加，非时间序列——解锁低频
-     * 离散事件，无按天趋势语义；按内容类型聚合累计值，驱动前端横向条形图）。
-     * 注意：getter 名与 SQL alias（小写）逐字匹配（同 DailyTrendRow 惯例）。
+     * 舞伴「用户解锁信息」统计行投影（2026-08-21 追加；2026-08-26 补免费解锁细分，
+     * 非时间序列——解锁低频离散事件，无按天趋势语义；按内容类型聚合累计值，
+     * 驱动前端横向条形图）。注意：getter 名与 SQL alias（小写）逐字匹配
+     * （同 DailyTrendRow 惯例）。
      */
     interface UnlockStatRow {
         /** 内容类型（PointsGateTargetType.name()：DANCER_PHOTO / DANCER_VIDEO / DANCER_CONTACT，可扩展） */
@@ -74,12 +77,14 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
         Long getUniqueusers();
         /** 当前门槛积分（未软删且 cost>0 的被解锁目标的 MAX(cost)，无 = 0） */
         Integer getCost();
+        /** 免费解锁人次（transaction_id IS NULL——无门槛免费 / 每日首免，2026-08-26 追加） */
+        Long getFreecount();
     }
 
     /**
-     * 舞伴全量历史累计指标行投影（2026-08-22 追加，非时间序列——「累计数据」
-     * 汇总卡用：总收藏数/总浏览数等常见指标一览）。getter 名与 SQL alias（小写）
-     * 逐字匹配（同 DailyTrendRow 惯例）。
+     * 舞伴全量历史累计指标行投影（2026-08-22 追加；2026-08-26 补需求计数，
+     * 非时间序列——「累计数据」汇总卡用：总收藏数/总浏览数等常见指标一览）。
+     * getter 名与 SQL alias（小写）逐字匹配（同 DailyTrendRow 惯例）。
      */
     interface TotalsRow {
         /** 累计认可数（每日一记，deleted=false） */
@@ -92,6 +97,8 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
         Long getSharecount();
         /** 收到礼物价值累计（SUM(-delta)） */
         Long getPointstotal();
+        /** 累计需求人次（qwt_demand_records 行数，2026-08-26 追加） */
+        Long getDemandcount();
     }
 
     /**
@@ -105,6 +112,8 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
      *       舞伴 ID 直连；</li>
      *   <li>gate 只 join 未软删且 cost>0 的有效门槛（软删=清除门槛，历史解锁计数
      *       仍保留、cost 回落 0）；照片多张被解锁时 MAX(cost) = 最高解锁成本；</li>
+     *   <li>freecount = transaction_id IS NULL 的免费解锁人次（无门槛免费 / 每日
+     *       首免——V42 起 DROP NOT NULL，免费解锁不写扣费流水，2026-08-26 追加）；</li>
      *   <li>仅返回解锁人次 &gt; 0 的类别（无解锁记录的类别不上行，前端空态=
      *       「暂无解锁记录」）；排序 = 人次降序（热度优先）。</li>
      * </ul>
@@ -115,7 +124,8 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
             SELECT u.target_type AS targettype,
                    COUNT(*) AS unlockcount,
                    COUNT(DISTINCT u.user_id) AS uniqueusers,
-                   COALESCE(MAX(g.cost), 0) AS cost
+                   COALESCE(MAX(g.cost), 0) AS cost,
+                   COUNT(*) FILTER (WHERE u.transaction_id IS NULL) AS freecount
             FROM qwt_points_unlocks u
             LEFT JOIN qwt_points_gates g
                    ON g.target_type = u.target_type
@@ -180,10 +190,11 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
                                      @Param("targetType") String targetType);
 
     /**
-     * 舞伴全量历史累计指标聚合（2026-08-22 追加，「累计数据」汇总卡用）：一条 DB
-     * 往返取回 认可/收藏/浏览/分享/礼物价值 五类全量累计值。五组标量子查询各扫一次
-     * 目标表（与趋势 mega-query 同源表同口径，仅去掉窗口过滤取全量）——统计页打开
-     * 时该查询与趋势查询并行两趟，但均为索引覆盖扫描，条目量级下开销可接受。
+     * 舞伴全量历史累计指标聚合（2026-08-22 追加；2026-08-26 补需求计数，「累计
+     * 数据」汇总卡用）：一条 DB 往返取回 认可/收藏/浏览/分享/礼物价值/需求 六类
+     * 全量累计值。六组标量子查询各扫一次目标表（与趋势 mega-query 同源表同口径，
+     * 仅去掉窗口过滤取全量）——统计页打开时该查询与趋势查询并行两趟，但均为索引
+     * 覆盖扫描，条目量级下开销可接受。
      *
      * @param dancerId 舞伴 ID
      */
@@ -197,13 +208,15 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
                    (SELECT COUNT(*) FROM qwt_dancer_shares
                     WHERE dancer_id = :dancerId AND event_type = 'SHARE') AS sharecount,
                    (SELECT COALESCE(SUM(-delta), 0) FROM qwt_points_transactions
-                    WHERE target_type = 'DANCER' AND target_id = :dancerId AND delta < 0) AS pointstotal
+                    WHERE target_type = 'DANCER' AND target_id = :dancerId AND delta < 0) AS pointstotal,
+                   (SELECT COUNT(*) FROM qwt_demand_records
+                    WHERE dancer_id = :dancerId) AS demandcount
             """, nativeQuery = true)
     TotalsRow countDancerTotals(@Param("dancerId") Long dancerId);
 
     /**
      * 舞伴统计趋势 mega-query：一条 DB 往返取回 认可/收藏/礼物价值/分享/浏览
-     * （含来源分列）八组按天时间序列。结构与门店 countDailyTrends 完全同构
+     * （含来源分列）+ 需求 九组按天时间序列。结构与门店 countDailyTrends 完全同构
      * （骨架 generate_series + 各源表 LEFT JOIN，天然补零）。
      *
      * @param dancerId     舞伴 ID
@@ -223,7 +236,8 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
                    COALESCE(v.list_cnt, 0) AS viewlistcount,
                    COALESCE(v.share_cnt, 0) AS viewsharecount,
                    COALESCE(v.search_cnt, 0) AS viewsearchcount,
-                   COALESCE(v.venue_cnt, 0) AS viewvenuecount
+                   COALESCE(v.venue_cnt, 0) AS viewvenuecount,
+                   COALESCE(dm.cnt, 0) AS demandcount
             FROM (SELECT generate_series(CAST(:sinceDate AS timestamp), CAST(:asOfDate AS timestamp), interval '1 day')::date AS day) AS d
             LEFT JOIN (SELECT recognition_date AS day, COUNT(*) AS cnt
                        FROM qwt_dancer_recognitions
@@ -260,6 +274,13 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
                   AND view_date >= :sinceDate AND view_date < :untilDate
                 GROUP BY 1
             ) v ON v.day = d.day
+            -- 2026-08-26：需求（qwt_demand_records.created_at 按天分组，timestamptz
+            -- 上界 = 请求时刻 now，与收藏/礼物/分享同窗口）——「需求趋势」图数据源
+            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS cnt
+                       FROM qwt_demand_records
+                       WHERE dancer_id = :dancerId
+                         AND created_at >= :windowSince AND created_at < :windowUntil
+                       GROUP BY 1) dm ON dm.day = d.day
             ORDER BY d.day
             """, nativeQuery = true)
     List<DailyTrendRow> countDancerDailyTrends(@Param("dancerId") Long dancerId,
@@ -268,4 +289,47 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
                                                @Param("untilDate") LocalDate untilDate,
                                                @Param("windowSince") LocalDateTime windowSince,
                                                @Param("windowUntil") LocalDateTime windowUntil);
+
+    /**
+     * 舞伴「需求热度」统计行投影（2026-08-26 追加，非时间序列——需求按服务类别
+     * 聚合累计值，驱动前端横向条形图）。getter 名与 SQL alias（小写）逐字匹配
+     * （同 DailyTrendRow 惯例）。
+     */
+    interface DemandStatRow {
+        /** 服务类别（DancerServiceCategory.name()：PACKAGE / DANCE / ONLINE_CHAT / OTHER） */
+        String getCategory();
+        /** 需求次数（该类别服务被选中次数） */
+        Long getDemandcount();
+        /** 提出需求的去重人数（按 user_id） */
+        Long getUniqueusers();
+    }
+
+    /**
+     * 舞伴需求热度聚合（2026-08-26 追加，「需求热度」横向条形图用）：一条 DB
+     * 往返取回各服务类别的需求次数 / 去重人数。
+     * <ul>
+     *   <li>数据源 = qwt_demand_records（V42，获取联系方式前的需求选择，锚点记录
+     *       只写一次）；service_ids 逗号串经 {@code string_to_array + unnest} 拆解
+     *       JOIN qwt_dancer_services 取类别（业务写路径强制每需求恰好 1 项服务，
+     *       历史脏数据多值时按服务逐条计数——同一需求跨类别的极端情况按条计，
+     *       与「人次」语义一致）；</li>
+     *   <li>服务恒存在（V42 起纯软删设计，无物理删除路径）；类别未知（脏数据）在
+     *       service 层回退「其他」展示；</li>
+     *   <li>排序 = 需求次数降序（热度优先），次数为 0 的类别不上行。</li>
+     * </ul>
+     *
+     * @param dancerId 舞伴 ID
+     */
+    @Query(value = """
+            SELECT s.category AS category,
+                   COUNT(*) AS demandcount,
+                   COUNT(DISTINCT d.user_id) AS uniqueusers
+            FROM qwt_demand_records d
+            CROSS JOIN LATERAL unnest(string_to_array(d.service_ids, ',')) AS sid
+            JOIN qwt_dancer_services s ON s.id = CAST(sid AS bigint)
+            WHERE d.dancer_id = :dancerId
+            GROUP BY s.category
+            ORDER BY demandcount DESC
+            """, nativeQuery = true)
+    List<DemandStatRow> countDancerDemandStats(@Param("dancerId") Long dancerId);
 }

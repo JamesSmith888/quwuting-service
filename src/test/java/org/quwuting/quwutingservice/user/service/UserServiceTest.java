@@ -64,7 +64,7 @@ class UserServiceTest {
         when(userRepository.save(any(User.class))).thenAnswer(inv -> inv.getArgument(0));
 
         UserInfoResponse resp = userService.updateProfile(
-                1L, new UpdateProfileRequest("  舞友小王  ", null));
+                1L, new UpdateProfileRequest("  舞友小王  ", null, null, null, null));
 
         assertEquals("舞友小王", resp.nickname(), "昵称应去除首尾空白");
         assertEquals("舞友小王", user.getNickname());
@@ -76,7 +76,7 @@ class UserServiceTest {
         when(userRepository.findByIdAndDeletedFalse(99L)).thenReturn(Optional.empty());
 
         BusinessException ex = assertThrows(BusinessException.class,
-                () -> userService.updateProfile(99L, new UpdateProfileRequest("昵称", null)));
+                () -> userService.updateProfile(99L, new UpdateProfileRequest("昵称", null, null, null, null)));
         assertEquals(1004, ex.getCode());
     }
 

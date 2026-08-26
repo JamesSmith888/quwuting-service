@@ -124,6 +124,29 @@
     上传时前端 `generateBlurImage` 生成，未解锁下发 blurUrl 作遮罩）；
   - 门槛设置复用 `POST /points/gates`（cost 0~maxCost，前端 dancer-edit 视频卡角标；
     统计 `DancerStatsService.unlockLabel` 加 DANCER_VIDEO → "视频"）。
+- **最近更新信号（2026-08-26 晚：列表卡片/详情页低调提示「最近更新了相册 / 联系方式」，
+  正常样式不突出、不侵入核心业务区）**：
+  - `DancerSummaryResponse` / `DancerDetailResponse` 均追加 `lastAlbumUpdatedAt` /
+    `lastContactUpdatedAt`（LocalDateTime，`@JsonFormat("yyyy-MM-dd HH:mm:ss")`；null = 无信号）；
+  - **相册**：= 最新一张 PUBLIC 照片/短视频的 `created_at`（派生值，不落库）——
+    `DancerPhotoRepository.findLatestPublicCreatedAtByDancerId(s)`（批量版
+    `findLatestPublicCreatedAtByDancerIds` 供列表 buildSummaries 一次 IN 查询规避 N+1）；
+  - **联系方式**：= `Dancer.contactUpdatedAt`（V51 迁移新增列，NULL 可空）——
+    `updateDancer` 中联系方式（contact / contact_image_url）有变更且变更后非空才写入
+    `LocalDateTime.now()`（清空不算更新；与 `Dancer.updated_at` 任意字段变更都跳动正交）；
+  - **列表三处装配**（listPublic / listFavorites / listMyDancers）共用 buildSummaries +
+    `albumLatestUpdatedAtByDancerIds` / `contactUpdatedAtByDancerIds` 批量 helper；
+  - **展示位置（借鉴美团/大众点评卡片 footer 弱信息行 + 闲鱼详情页就近区块模式）**：
+    列表卡片 = 并入底部 meta 行（<b>紧邻「👁 浏览数」左侧</b>，右下角 meta 簇
+    「近三天更新了相册 👁 1.2K」，卡片高度零变化、不占正文区）；详情页 =
+    <b>就近区块</b>——相册区标题行尾「最近更新」（`.gallery-recent-update`）、
+    联系TA 区块标题行尾「最近更新」（`.cell-group-title-suffix`，额外要求 hasContact，
+    清空联系方式后不提示）；身份区（头像/昵称/meta 压图区）不放；
+  - **前端派生与文案**：列表 = `utils/timeAgo.ts deriveRecentUpdateText`（两信号择
+    最近者且 3 天内，单一文案「近三天更新了相册/联系方式」）；详情 = 就近区块已自
+    述（标题即 相册/联系TA），文案用简短「最近更新」，由
+    `isWithinDays(lastXxxUpdatedAt, RECENT_UPDATE_DAYS)` 分别派生 albumRecentText /
+    contactRecentText（`RECENT_UPDATE_DAYS = 3` 常量共享）。
 
 ### 认可模型（每日一记 → 2026-08-15 单票换票 + 可配置多选，复用 Reaction 的 anti-刷票设计）
 
@@ -152,7 +175,10 @@
   同口径）；`recognitionDate` 只承载"每日唯一"语义；「最近认可」动态（昨天 +3 前天 +5）按
   `recognitionDate` 自然日聚合——两套时间语义职责分离，同 VenueReaction 的 reactionDate/createdAt 约定
 - 排序时间属性优先：公开列表按 **count7d 倒序**而非 countAll——"被认可的历史总量"不应让
-  活跃度低的旧资料长期霸榜（舞厅/舞伴场景具有明显时间属性）
+  活跃度低的旧资料长期霸榜（舞厅/舞伴场景具有明显时间属性）。**2026-08-26 晚排序升级**
+  （`findPublicPage` + `DancerSortMode`，见「列表排序」）：HOT 默认 = 组合分（count7d +
+  新舞伴 14 天 +2 / 近 3 天更新相册或联系方式 +2）→ 近 30 天收藏数（tie-break）→ id 倒序；
+  LATEST = id 倒序（冷启动曝光通道）
 
 ### 标签字典（DancerTagCode，后台维护）
 
@@ -174,22 +200,33 @@ countToday/count7d/count30d（count = countAll 兼容列表 topTags），详情�
   `scope`（DANCER 舞伴 / VENUE 门店预留——门店未来可从自由文本 tags 迁移到本字典，
   即"标签系统套用门店"的落点）、`text`（展示名，同 scope 唯一，部分唯一索引
   `uk_qwt_tag_dict_scope_text`）、`description`（说明文案——用户长按/点击标签弹层的权威
-  文案，如「龙女」用「听障舞者版」尊重说明）、`sort_order`/`active`/`created_by`。
+  文案，如「龙女」用「听障舞者版」尊重说明）、`color`（展示配色 hex，可空 = 默认样式）、
+  `sort_order`/`active`/`created_by`。
   管理员可新增（`POST /admin/tag-dict`，requireAdmin；同 scope+text 已存在 → 1001），
-  公开读 `GET /tag-dict?scope=DANCER`（编辑页表单可选标签数据源）。
+  可更新展示配色（`PUT /admin/tag-dict/{id}`，color 空串 = 清除、null = 不修改；
+  2026-08-26 V52），公开读 `GET /tag-dict?scope=DANCER`（编辑页表单可选标签数据源）。
 - **舞伴关联 `qwt_dancers.profile_tags`**：字典 **id 数组 JSON**（如 `[1,3]`；null/空 = 无标签）。
   存 id 而非 text——标签重命名/改说明不影响历史关联（对比门店存 text 无法重命名）。
   编辑为**全量覆盖语义**（传 null/空 = 清除，与多城市/常驻舞厅同「编辑 = 变更而非追加」约定）；
   写入前 `normalizeProfileTags` 去 null/去重/剔除字典不存在的 id（纵深防御）。
 - **响应**：`DancerSummaryResponse`/`DancerDetailResponse` 新增 `profileTags:
-  List<TagItemResponse>`（id/text/description，按字典顺序；空列表 = 无标签）。
+  List<TagItemResponse>`（id/text/description/color，按字典顺序；空列表 = 无标签；
+  color 可空 = 默认样式——详情/列表 chip 渲染数据源，2026-08-26 V52）。
   详情从 dancer 主行反序列化 + 字典解析（实体已加载，零额外主查询）；列表走
   `DancerListCacheService` 批量 enrichments（`findProfileTagsByDancerIds` + 一次字典 IN，
   规避 N+1；写路径 `invalidateListCache`/`detailCacheService.invalidate` 已内联覆盖）。
   **含停用标签**：resolveByIds 不筛 active——历史关联不因字典停用而消失。
-- **前端**：dancer-edit 表单「标签」区 = 字典 chips 多选（长按弹说明）+「新增标签」弹窗
-  （输入名+说明，POST 后回填并选中）；dancers 列表卡片昵称下方 / dancer-detail 身份区下方
-  展示 chips，点击/长按弹说明（复用全局 `.recognition-desc-*` 弹层原语）。
+- **前端**：dancer-edit 表单「标签」区 = 字典 chips 多选 +「新增标签」弹窗
+  （输入名+说明，POST 后回填并选中）；**2026-08-26 标签级配色**——长按标签弹出配色控件
+  （场景色板 + 自定义 hex + 清除配色，说明文案并入弹层顶部，替代原「长按弹说明」；
+  点选/应用即 `PUT /admin/tag-dict/{id}` 即时落库，本地收敛不重拉字典），chip 左侧
+  色点 = 已配色指示；dancers 列表卡片昵称下方 / dancer-detail 身份区下方展示 chips，
+  点击/长按弹说明（复用全局 `.recognition-desc-*` 弹层原语），有配色时 chip 背景 = color +
+  按亮度算对比文字色（`constants/tag-colors.ts` decorateTagColors 预派生 colorStyle，
+  WXML 零分支）。场景色板 = `constants/tag-colors.ts` TAG_COLOR_SCENARIOS（暖阳/莓粉/
+  清新/深海/莫兰迪 5 套预设，前端静态，非后端配置）。
+  ⚠️ 配色为**字典级**：改色影响所有舞伴同标签展示（编辑页底部有提示）；详情/列表缓存
+  60s 内可能展示旧色（缓存 TTL，与其它字典变更一致，可接受）。
 
 **V41 描述修订（2026-08-24）**：「线上/线下」初始 description 存在两处问题——
 ① 互斥表述失实（「仅提供线上…不提供线下见面伴舞」/「以线下见面伴舞为主」，同一舞伴
@@ -214,7 +251,7 @@ V41 迁移 UPDATE 为简短中性对称文案：线上「可提供线上互动�
 
 | 接口 | 鉴权 | 说明 |
 |---|---|---|
-| GET /dancers | 软鉴权 | 列表（仅 NORMAL；city 可选；按 count7d 倒序分页；登录含 myRecognizedToday + **myTags（2026-08-19 今日投票 code，列表 reaction 区域 chip 活跃态）**；topTags **全量下发**（2026-08-19 去截断）；含 coverPhotoUrl + **mediaPreviews（2026-08-24 晚：照片+视频混合前 4 个 PUBLIC 媒体，付费未解锁仅薄码，解锁态按当前用户实时组装）** + **onlineService（2026-08-24：存在在用 ONLINE_CHAT（线上陪聊）服务 → 列表卡片「线上」胶囊）**） |
+| GET /dancers | 软鉴权 | 列表（仅 NORMAL；city 可选；**sort 可选排序模式（2026-08-26 晚：HOT 默认 / LATEST，见「列表排序」）**；登录含 myRecognizedToday + **myTags（2026-08-19 今日投票 code，列表 reaction 区域 chip 活跃态）**；topTags **全量下发**（2026-08-19 去截断）；含 coverPhotoUrl + **mediaPreviews（2026-08-24 晚：照片+视频混合前 4 个 PUBLIC 媒体，付费未解锁仅薄码，解锁态按当前用户实时组装）** + **onlineService（2026-08-24：存在在用 ONLINE_CHAT（线上陪聊）服务 → 列表卡片「线上」胶囊）**） |
 | GET /dancers/cities | 软鉴权 | 常驻城市词表（聚合真实数据，2026-08-10 激活列表页城市筛选） |
 | POST /dancers | 登录 | 舞伴主动注册 → PENDING；返回新建 ID |
 | GET /dancers/{id} | 软鉴权 | 详情（可见性校验；登录含 isMine + myRecognizedToday + **myTags（2026-08-15 今日认可携带标签，chip 活跃态数据源）** + **favorite（2026-08-14 服务端权威收藏态）** + 四窗口统计 + 近7日每日认可 + **标签聚合（2026-08-15 四窗口：countAll/countToday/count7d/count30d）** + 常去/出现舞厅 + 相册 photos（按身份过滤）） |
@@ -235,6 +272,29 @@ V41 迁移 UPDATE 为简短中性对称文案：线上「可提供线上互动�
 | POST /dancers/{id}/favorite/remove | 登录 | **取消收藏**（幂等软删；行保留——HIDDEN 下架后恢复 NORMAL 自动重现） |
 | GET /dancers/{id}/stats | 仅本人/管理员 | **舞伴统计**（六组近30天趋势：认可/收藏/礼物价值/分享/浏览+浏览来源；<b>舞伴是自然人，统计属精细行为数据，仅本人+管理员可查看</b>——未登录 401/非本人 1003；缓存 60s refresh-ahead，2026-08-14） |
 | POST /dancers/{id}/view | 软鉴权 | **浏览埋点**（body {source} 可空；按天按来源去重，匿名 60s IP 频控，2026-08-14） |
+
+### 列表排序（2026-08-26 晚新增：DancerSortMode）
+
+**根因**（2026-08-26 排序缺陷评审）：① 新舞伴认可数为 0，靠第三级 id 兜底永远沉底——
+冷启动死循环（看不到 → 得不到认可 → 更看不到）；② tie-break「近30天收到积分」仅设付费
+门槛的舞伴非零、免费恒 0，同分时系统性偏向"收费型"，混入商业模式信号；③ 排序只有「认可」
+单一维度，V51 已建的「最近更新」信号（相册/联系方式）未参与。
+
+**HOT（默认）组合分**（`findPublicPage` SQL 单查询，CASE 分支）：
+1. `count7d`（近7天认可，主导信号，滚动锚点 now-7d——时间属性优先，避免老数据霸榜）
+2. `+2` 新舞伴（`created_at >= now-14d`，冷启动保护期）；`+2` 近 3 天更新过相册
+   （最新 PUBLIC 媒体 created_at）或联系方式（`contact_updated_at`）任一——「正在维护
+   资料」的活跃信号；两者可叠加（+4）
+3. 近 30 天收藏数（`qwt_dancer_favorites`，tie-break——口径中性，替代原积分信号）
+4. id 倒序（兜底 + 分页稳定）
+
+**LATEST**：id 倒序（新资料在前；筛选条件与 HOT 完全一致，仅排序不同）。
+
+**联动**：缓存 key 含 sort 维度（HOT/LATEST 各自缓存）；收藏 add·remove 纳入列表缓存
+失效矩阵（收藏数参与排序）；窗口参数：sinceNew=now-14d、sinceFresh=now-3d（
+`DancerListCacheService.compute` 现算）。前端 dancers 页「热门/最新」切换 chip（激活态
+accent 实底 + 白字，与城市 chip 同族）。后续扩展（P2，未实现）：每日 0 点预聚合计数表
+（排序读物化表，消抖动 + 降聚合成本）、运营置顶、门店上下文排序。
 
 ### 舞伴收藏（2026-08-14：能力平权，根因驱动）
 
@@ -527,7 +587,10 @@ Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻
 ### 排名接入与权重校准（V2 三阶段机制）
 
 - **venue**：热度公式加 `近30天收到积分 × app.points.heat-weight`——三处镜像（`VenueHeatService` + `VenueRepository.HEAT_SCORE` + `findHotVenueIds`）经 `VenueHeatWeights` 常量拼接 + `:pointsWeight` 参数注入（见「场所热度 → 热度公式 → 权重收敛」）；`countHeatCounters` 加 `pointsreceivedtotal/pointsreceived30d` 标量；`countDailyTrends` 加第五序列 `points`（`DailyTrendRow.getPoints()`）；
-- **dancer**：无热度公式，积分仅作**次级排序信号**（`findPublicPage`：近7天认可 DESC → 近30天收到积分 DESC → id DESC，tie-break 不影响认可主导口径）；是否升级为加权在 P2 按数据定；
+- **dancer**：无热度公式，积分不再参与排序（2026-08-26 晚：原「近30天收到积分」tie-break
+  替换为**近30天收藏数**——积分口径仅收费舞伴非零，同分时系统性偏向"收费型"、混入商业
+  模式信号；收藏零成本表达长期兴趣、口径中性，见「列表排序」）；是否引入综合加权在 P2
+  按数据定；
 - **权重校准 SOP（禁止拍脑袋）**：① 初始保守值 heat-weight=2 → ② 上线约 2 周采集基线（各门店积分贡献占比 = 积分得分/热度总分 的中位数/P90）→ ③ 目标区间 [5%, 15%]：超 15% 降权（减半）或收紧发放；低于 5% 适度升权或提高采纳奖励。只改 `app.points.heat-weight` 一处，公式文案后端下发自动同步。
 
 ### 接口

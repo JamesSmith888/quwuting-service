@@ -4,15 +4,16 @@ import java.util.List;
 
 /**
  * 舞伴统计响应体（GET /dancers/{id}/stats，2026-08-14 舞伴统计图第一期，
- * 2026-08-21 追加解锁信息统计，2026-08-22 追加累计指标 totals）。
+ * 2026-08-21 追加解锁信息统计，2026-08-22 追加累计指标 totals，
+ * 2026-08-26 追加需求趋势/需求热度——对齐舞伴模块服务与联系方式需求的新增内容）。
  * <p>
- * 六组近30天每日时间序列（含今日，骨架 31 天，服务端补零），供前端舞伴统计页
- * 六张趋势图渲染（认可/收藏/礼物价值/分享/浏览 + 浏览来源）+ 一组「用户解锁信息」
- * 分类聚合（unlockStats，前端横向条形图）+ 一组全量历史累计指标（totals，
- * 前端「累计数据」汇总卡：总收藏数/总浏览数等常见指标）。与门店
- * {@code VenueHeatResponse} 的趋势字段同模式（countDailyTrends 骨架 + 实时口径），
- * 但只含时间序列与累计指标、不含热度指数——舞伴域暂无热度公式（第一期范围，见
- * 前端 docs/agents/09「舞伴统计」）。
+ * 七组近30天每日时间序列（含今日，骨架 31 天，服务端补零），供前端舞伴统计页
+ * 七张趋势图渲染（认可/收藏/礼物价值/分享/浏览/需求 + 浏览来源）+ 一组「用户解锁
+ * 信息」分类聚合（unlockStats，前端横向条形图）+ 一组「需求热度」分类聚合
+ * （demandStats，按服务类别）+ 一组全量历史累计指标（totals，前端「累计数据」
+ * 汇总卡：总收藏数/总浏览数等常见指标）。与门店 {@code VenueHeatResponse} 的
+ * 趋势字段同模式（countDailyTrends 骨架 + 实时口径），但只含时间序列与累计指标、
+ * 不含热度指数——舞伴域暂无热度公式（第一期范围，见前端 docs/agents/09「舞伴统计」）。
  */
 public record DancerStatsResponse(
         /**
@@ -59,9 +60,23 @@ public record DancerStatsResponse(
          */
         List<DancerUnlockStat> unlockStats,
         /**
+         * 近30天每日联系方式需求数趋势（2026-08-26 追加，「需求趋势」折线图用）。
+         * 数据源 = qwt_demand_records（V42：用户获取联系方式前必须选择本次需求，
+         * 每次选择落库）按 created_at 分组——"多少人想约 TA"的时域信号，
+         * 与浏览/分享趋势同窗口（骨架 31 天补零，实时口径）。
+         */
+        List<DancerTrendPoint> demandTrend,
+        /**
+         * 需求热度分类聚合（2026-08-26 追加，「需求热度」横向条形图用）。
+         * 按服务类别（PACKAGE/DANCE/ONLINE_CHAT/OTHER）聚合 qwt_demand_records
+         * 关联 qwt_dancer_services 的需求次数/去重人数——"用户最需要 TA 的哪类
+         * 服务"（非口嗨量化）。非时间序列，排序 = 需求次数降序。
+         */
+        List<DancerDemandStat> demandStats,
+        /**
          * 全量历史累计指标（2026-08-22 追加，「累计数据」汇总卡用——总收藏数 /
          * 总浏览数等常见指标一览）。与各趋势序列同源同口径，仅窗口不同（累计=全量，
-         * 趋势=近30天）；浏览/认可/收藏/分享/礼物价值五类，见 {@link DancerTotals}。
+         * 趋势=近30天）；浏览/认可/收藏/分享/礼物价值/需求六类，见 {@link DancerTotals}。
          */
         DancerTotals totals,
         /**

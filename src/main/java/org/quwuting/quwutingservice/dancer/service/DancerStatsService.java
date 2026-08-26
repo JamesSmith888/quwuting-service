@@ -4,12 +4,14 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerStatsResponse;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerDemandStat;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTotals;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTrendPoint;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerUnlockRecord;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerUnlockStat;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerViewSourceTrendPoint;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
+import org.quwuting.quwutingservice.dancer.enums.DancerServiceCategory;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerStatsRepository;
@@ -25,18 +27,21 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 舞伴统计服务（2026-08-14 舞伴统计图第一期）。
+ * 舞伴统计服务（2026-08-14 舞伴统计图第一期；2026-08-26 追加需求趋势/需求热度——
+ * 对齐舞伴模块服务与联系方式需求的新增内容）。
  * <p>
  * 对齐门店热度服务（{@code VenueHeatService}）的「内嵌 Caffeine refresh-ahead」缓存
  * 模式（能力平权：统计接口同模式，但舞伴域暂无热度公式，只含趋势时间序列 +
- * 累计指标 totals + 解锁信息）：
+ * 累计指标 totals + 解锁信息 + 需求热度）：
  * <ul>
  *   <li>{@code refreshAfterWrite(60s)}：条目写入 60s 后，下一次访问立即返回旧值并
  *       异步回源刷新（单飞：同键并发只触发一次回源）——统计页高频滚动浏览场景下
  *       返回旧值可接受，回源期间不阻塞调用方；</li>
  *   <li>新鲜度主保障是写路径显式 {@link #invalidate}（浏览/认可/收藏/礼物/分享/
- *       解锁，2026-08-21 解锁入矩阵——解锁改变 unlockStats 输入），
- *       与门店「写路径缓存失效」矩阵同约定——refresh-ahead 只是兜底；</li>
+ *       解锁，2026-08-21 解锁入矩阵——解锁改变 unlockStats 输入；需求记录随解锁
+ *       写路径一并写入，同一失效入口覆盖 demandTrend/demandStats，2026-08-26
+ *       确认无需新增失效点），与门店「写路径缓存失效」矩阵同约定——refresh-ahead
+ *       只是兜底；</li>
  *   <li>不校验舞伴存在性/可见性：统计接口由详情页进入（详情已校验），冷门舞伴
  *       统计为空序列属正常（空图恒渲染，前端承接）；对不存在的舞伴返回全零序列，
  *       不会暴露任何敏感信息（纯计数时间序列）。</li>
@@ -145,6 +150,7 @@ public class DancerStatsService {
         List<DancerTrendPoint> pointsTrend = new ArrayList<>(TREND_WINDOW_DAYS + 1);
         List<DancerTrendPoint> shareTrend = new ArrayList<>(TREND_WINDOW_DAYS + 1);
         List<DancerTrendPoint> viewTrend = new ArrayList<>(TREND_WINDOW_DAYS + 1);
+        List<DancerTrendPoint> demandTrend = new ArrayList<>(TREND_WINDOW_DAYS + 1);
         List<DancerViewSourceTrendPoint> viewSourceTrend = new ArrayList<>(TREND_WINDOW_DAYS + 1);
         for (DancerStatsRepository.DailyTrendRow row : dancerStatsRepository.countDancerDailyTrends(
                 dancerId, sinceDate, asOfDate, untilDate, windowSince, windowUntil)) {
@@ -154,6 +160,9 @@ public class DancerStatsService {
             pointsTrend.add(new DancerTrendPoint(day, orZero(row.getPoints())));
             shareTrend.add(new DancerTrendPoint(day, orZero(row.getSharecount())));
             viewTrend.add(new DancerTrendPoint(day, orZero(row.getViewcount())));
+            // 联系方式需求数（2026-08-26 追加，「需求趋势」图用——qwt_demand_records
+            // created_at 按天分组，与分享同窗口同实时口径）
+            demandTrend.add(new DancerTrendPoint(day, orZero(row.getDemandcount())));
             // other = 全量 - list - share - search - venue（同源口径交叉校验；直接 COUNT 亦可，减法省一次扫描）
             viewSourceTrend.add(new DancerViewSourceTrendPoint(
                     day,
@@ -181,19 +190,48 @@ public class DancerStatsService {
                     row.getCost() != null ? row.getCost() : 0));
         }
         unlockStats.sort(Comparator.comparingLong(DancerUnlockStat::unlockCount).reversed());
-        // 全量历史累计指标（2026-08-22 追加，「累计数据」汇总卡用）：与趋势序列同源
-        // 同口径、仅窗口不同（累计=全量）——独立一条往返（合并进 mega-query 会破坏
-        // 骨架 GROUP BY 语义，标量子查询更直接）。
+        // 需求热度分类聚合（2026-08-26 追加）：按服务类别聚合 qwt_demand_records
+        // 关联 qwt_dancer_services 的需求次数/去重人数——"用户最需要 TA 的哪类
+        // 服务"（非口嗨量化）；repository 已按次数降序且过滤 0 记录类别。
+        List<DancerDemandStat> demandStats = new ArrayList<>();
+        for (DancerStatsRepository.DemandStatRow row : dancerStatsRepository.countDancerDemandStats(dancerId)) {
+            demandStats.add(new DancerDemandStat(
+                    row.getCategory(),
+                    demandLabel(row.getCategory()),
+                    orZero(row.getDemandcount()),
+                    orZero(row.getUniqueusers())));
+        }
+        // 全量历史累计指标（2026-08-22 追加；2026-08-26 补需求计数，「累计数据」
+        // 汇总卡用）：与趋势序列同源同口径、仅窗口不同（累计=全量）——独立一条往返
+        // （合并进 mega-query 会破坏骨架 GROUP BY 语义，标量子查询更直接）。
         DancerStatsRepository.TotalsRow totalsRow = dancerStatsRepository.countDancerTotals(dancerId);
         DancerTotals totals = new DancerTotals(
                 orZero(totalsRow.getRecognitioncount()),
                 orZero(totalsRow.getFavoritecount()),
                 orZero(totalsRow.getViewcount()),
                 orZero(totalsRow.getSharecount()),
-                orZero(totalsRow.getPointstotal()));
+                orZero(totalsRow.getPointstotal()),
+                orZero(totalsRow.getDemandcount()));
         return new DancerStatsResponse(
                 recognitionTrend, favoriteTrend, pointsTrend, shareTrend,
-                viewTrend, viewSourceTrend, unlockStats, totals, asOfDate.toString());
+                viewTrend, viewSourceTrend, unlockStats, demandTrend, demandStats,
+                totals, asOfDate.toString());
+    }
+
+    /**
+     * 服务类别展示名（2026-08-26 追加，需求热度条形图用）：类别默认标签
+     * （按时段 / 舞厅跳舞 / 线上聊天 / 其他）——服务端权威，新增类别免前端改动。
+     * 未知类别回退枚举名（防御性：脏数据/新枚举上线而映射漏更时仍可读）。
+     */
+    private static String demandLabel(String category) {
+        if (category == null || category.isBlank()) {
+            return "其他";
+        }
+        try {
+            return DancerServiceCategory.valueOf(category).defaultLabel();
+        } catch (IllegalArgumentException e) {
+            return category;
+        }
     }
 
     /**

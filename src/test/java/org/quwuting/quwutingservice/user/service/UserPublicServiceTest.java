@@ -8,6 +8,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.points.entity.PointsAccount;
+import org.quwuting.quwutingservice.points.repository.PointsAccountRepository;
 import org.quwuting.quwutingservice.user.dto.response.UserProfileResponse;
 import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.enums.UserRole;
@@ -29,15 +31,17 @@ class UserPublicServiceTest {
     private UserRepository userRepository;
     @Mock
     private DancerRepository dancerRepository;
+    @Mock
+    private PointsAccountRepository pointsAccountRepository;
 
     private UserPublicService userPublicService;
 
     @BeforeEach
     void setUp() {
-        userPublicService = new UserPublicService(userRepository, dancerRepository);
+        userPublicService = new UserPublicService(userRepository, dancerRepository, pointsAccountRepository);
     }
 
-    /** 正常返回：公开资料 + 加入天数 + TA 创建的公开舞伴（仅 NORMAL，Repository 已过滤） */
+    /** 正常返回：公开资料 + 加入天数 + 积分余额 + TA 创建的公开舞伴（仅 NORMAL，Repository 已过滤） */
     @Test
     void getProfile_returnsPublicProfileWithDancers() {
         User user = new User();
@@ -53,16 +57,39 @@ class UserPublicServiceTest {
         d1.setCity("杭州市");
         when(dancerRepository.findPublicByCreatedBy(1L)).thenReturn(List.of(d1));
 
+        PointsAccount account = new PointsAccount();
+        account.setUserId(1L);
+        account.setBalance(320);
+        when(pointsAccountRepository.findByUserId(1L)).thenReturn(Optional.of(account));
+
         UserProfileResponse resp = userPublicService.getProfile(1L);
 
         assertEquals(1L, resp.id());
         assertEquals("舞友甲", resp.nickname());
         assertEquals("USER", resp.role());
         assertEquals(10, resp.joinedDays(), "加入天数 = createdAt → 今天");
+        assertEquals(320, resp.pointsBalance(), "积分余额 = 账户快照");
         assertEquals(1, resp.dancers().size());
         assertEquals(5L, resp.dancers().get(0).id());
         assertEquals("小美", resp.dancers().get(0).nickname());
         assertEquals("杭州市", resp.dancers().get(0).city());
+    }
+
+    /** 无积分账户（从未参与积分活动）：积分余额恒 0，不因缺行报错 */
+    @Test
+    void getProfile_noPointsAccount_returnsZeroBalance() {
+        User user = new User();
+        user.setId(2L);
+        user.setNickname("新舞友");
+        user.setRole(UserRole.USER);
+        user.setCreatedAt(LocalDateTime.now().minusDays(1));
+        when(userRepository.findByIdAndDeletedFalse(2L)).thenReturn(Optional.of(user));
+        when(dancerRepository.findPublicByCreatedBy(2L)).thenReturn(List.of());
+        when(pointsAccountRepository.findByUserId(2L)).thenReturn(Optional.empty());
+
+        UserProfileResponse resp = userPublicService.getProfile(2L);
+
+        assertEquals(0, resp.pointsBalance(), "无账户行 → 0");
     }
 
     /** 用户不存在/已软删：1004（与 UserService.requireUser 同契约） */

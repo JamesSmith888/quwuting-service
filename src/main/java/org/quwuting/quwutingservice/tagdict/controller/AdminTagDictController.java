@@ -5,9 +5,12 @@ import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.tagdict.dto.request.CreateTagDictRequest;
+import org.quwuting.quwutingservice.tagdict.dto.request.UpdateTagDictRequest;
 import org.quwuting.quwutingservice.tagdict.dto.response.TagItemResponse;
 import org.quwuting.quwutingservice.tagdict.service.TagDictService;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -16,6 +19,8 @@ import org.springframework.web.bind.annotation.RestController;
  * 标签字典管理端接口（2026-08-24，仅平台管理员）。
  * POST /admin/tag-dict — 管理员新增标签（text + 可选 description + 可选 scope，
  * 入字典后立即可选；同 scope + text 已存在 → 1001「该标签已存在」）。
+ * PUT /admin/tag-dict/{id} — 管理员更新标签条目（2026-08-26：展示配色 color；
+ * color 空串 = 清除配色；null = 不修改）。
  * 低频管理操作：无缓存、无失效矩阵（编辑页每次进入拉取最新字典）。
  */
 @RestController
@@ -30,5 +35,13 @@ public class AdminTagDictController {
     public ApiResponse<TagItemResponse> create(@Valid @RequestBody CreateTagDictRequest request) {
         Long adminId = UserContext.requireAdmin();
         return ApiResponse.ok(tagDictService.create(adminId, request));
+    }
+
+    /** 管理员更新标签条目（2026-08-26：展示配色；返回最新条目，前端本地收敛） */
+    @PutMapping("/{id}")
+    public ApiResponse<TagItemResponse> update(@PathVariable Long id,
+                                               @Valid @RequestBody UpdateTagDictRequest request) {
+        Long adminId = UserContext.requireAdmin();
+        return ApiResponse.ok(tagDictService.updateColor(adminId, id, request));
     }
 }

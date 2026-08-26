@@ -9,6 +9,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -59,6 +60,19 @@ public interface DemandRecordRepository extends JpaRepository<DemandRecord, Long
      *  管理端发放/拒绝动作自然归零；无独立已读态） */
     @Query("SELECT COUNT(d) FROM DemandRecord d WHERE d.dancerId IN :dancerIds AND d.status = 'PENDING'")
     long countPendingByDancerIds(@Param("dancerIds") Iterable<Long> dancerIds);
+
+    /** 管理端邀约列表（按状态集合过滤；processed 终态视图——APPROVED/REJECTED/
+     *  AUTO_RELEASED/EXPIRED；dancerIds = 中转舞伴集合，分页倒序）。与 findPendingByDancerIds
+     *  同口径，仅把固定 PENDING 改为入参状态集合——scope 是列表查询的正交维度，
+     *  与状态机解耦（2026-08-26 工作台历史视图：三视图共用一套映射）。 */
+    @Query("SELECT d FROM DemandRecord d WHERE d.dancerId IN :dancerIds AND d.status IN :statuses ORDER BY d.id DESC")
+    Page<DemandRecord> findByDancerIdsAndStatuses(@Param("dancerIds") Iterable<Long> dancerIds,
+                                                  @Param("statuses") List<String> statuses, Pageable pageable);
+
+    /** 管理端邀约列表（全部中转记录，不限状态；dancerIds = 中转舞伴集合，分页倒序）。
+     *  "全部"视图用——含 legacy NULL 状态记录（存量中转舞伴历史），与状态机解耦。 */
+    @Query("SELECT d FROM DemandRecord d WHERE d.dancerId IN :dancerIds ORDER BY d.id DESC")
+    Page<DemandRecord> findByDancerIds(@Param("dancerIds") Iterable<Long> dancerIds, Pageable pageable);
 
     /** 定时降级扫描：超时仍 PENDING 的邀约（24h 无回复） */
     @Query("SELECT d FROM DemandRecord d WHERE d.status = 'PENDING' AND d.createdAt <= :deadline")

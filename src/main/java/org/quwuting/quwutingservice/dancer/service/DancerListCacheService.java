@@ -7,6 +7,7 @@ import org.quwuting.quwutingservice.dancer.DancerTagCode;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTagStat;
 import org.quwuting.quwutingservice.dancer.enums.DancerPhotoKind;
 import org.quwuting.quwutingservice.dancer.enums.DancerServiceCategory;
+import org.quwuting.quwutingservice.dancer.enums.DancerSortMode;
 import org.quwuting.quwutingservice.dancer.enums.DancerVenueRelation;
 import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionTagRepository;
@@ -37,7 +38,7 @@ import java.util.stream.Collectors;
  * 舞伴公开列表「用户无关部分」聚合缓存（2026-08-22 性能根因修复，性能核心之二）。
  * <p>
  * <b>根因</b>：DancerService#listPublic 原本对每次列表请求顺序执行约 7 次 DB 往返——
- * 主查询（findPublicPage：认可全表聚合子查询 + 积分聚合子查询 + 排序）一次 +
+ * 主查询（findPublicPage：认可全表聚合子查询 + 收藏聚合子查询 + 排序）一次 +
  * buildSummaries 六次批量查询（Top 标签 / 常驻舞厅名 / 封面 / 个人今日认可 ×2 / 累计浏览量）。
  * Supabase 为跨洲远程库、单次往返 300~500ms，列表接口实测 2~3.5s 慢加载；
  * 其中绝大多数查询与「当前请求用户」无关（纯舞伴级聚合），却在每个请求重复执行。
@@ -45,7 +46,8 @@ import java.util.stream.Collectors;
  * <b>方案</b>（对齐 {@link DancerDetailCacheService} 的 refresh-ahead 缓存范式，
  * 与门店 {@code hotVenueIds} 的 allEntries 失效先例）：把与用户无关的列表部分
  * （主查询行 + Top 标签 + 常驻舞厅名 + 封面 + 累计浏览量）整体打包为一个
- * Caffeine LoadingCache 条目——key = city|page|size：
+ * Caffeine LoadingCache 条目——key = city|serviceCategory|sort|page|size
+ * （sort 为 2026-08-26 晚排序模式维度，HOT/LATEST 各自缓存）：
  * <ul>
  *   <li>60s refresh-ahead + 30min 绝对过期 + 500 条上限（同 DancerDetailCacheService）；</li>
  *   <li>新鲜度主保障是写路径显式 {@link #invalidateAll()}（唯一失效入口）——
@@ -151,10 +153,12 @@ public class DancerListCacheService {
      * @param city            城市筛选（null = 全部，与 DancerService.listPublic 同参数语义）
      * @param serviceCategory 服务类别筛选（2026-08-24 需求优先匹配；null = 全部——
      *                        命中"存在 ≥1 个在用且类别匹配的服务"的舞伴）
+     * @param sort            排序模式（DancerSortMode.name()：HOT/LATEST，2026-08-26 晚——
+     *                        参与缓存 key，两种排序各自缓存互不干扰）
      * @param pageable        分页（page/size 参与缓存 key；compute 内重新构造 Pageable 查询）
      */
-    public ListPublicPart get(String city, String serviceCategory, Pageable pageable) {
-        return cache.get(key(city, serviceCategory, pageable.getPageNumber(), pageable.getPageSize()));
+    public ListPublicPart get(String city, String serviceCategory, String sort, Pageable pageable) {
+        return cache.get(key(city, serviceCategory, sort, pageable.getPageNumber(), pageable.getPageSize()));
     }
 
     /**
@@ -166,10 +170,10 @@ public class DancerListCacheService {
         cache.invalidateAll();
     }
 
-    /** 缓存 key（城市名/类别 code 来自标准词表与枚举，不含 '|'，安全分隔） */
-    private static String key(String city, String serviceCategory, int page, int size) {
+    /** 缓存 key（城市名/类别 code/排序来自标准词表与枚举，不含 '|'，安全分隔） */
+    private static String key(String city, String serviceCategory, String sort, int page, int size) {
         return (city == null ? "" : city) + "|" + (serviceCategory == null ? "" : serviceCategory)
-                + "|" + page + "|" + size;
+                + "|" + (sort == null ? "" : sort) + "|" + page + "|" + size;
     }
 
     /** 聚合计算（缓存 loader，勿直接调用——经 {@link #get} 走缓存）。 */
@@ -177,12 +181,18 @@ public class DancerListCacheService {
         String[] parts = key.split("\\|", -1);
         String city = parts[0].isEmpty() ? null : parts[0];
         String serviceCategory = parts[1].isEmpty() ? null : parts[1];
-        int page = Integer.parseInt(parts[2]);
-        int size = Integer.parseInt(parts[3]);
+        // 2026-08-26 晚：排序模式参与缓存 key（HOT/LATEST 各自缓存）；空 = 旧条目兜底 HOT
+        String sort = parts[2].isEmpty() ? DancerSortMode.HOT.name() : parts[2];
+        int page = Integer.parseInt(parts[3]);
+        int size = Integer.parseInt(parts[4]);
         LocalDateTime now = LocalDateTime.now();
         Page<Object[]> rows = dancerRepository.findPublicPage(
-                city, serviceCategory, LocalDate.now().atStartOfDay() /* 今日锚点 = 今日0点 */,
+                sort,
+                city, serviceCategory,
+                LocalDate.now().atStartOfDay() /* 今日锚点 = 今日0点 */,
                 now.minusDays(7), now.minusDays(30),
+                now.minusDays(14) /* 新舞伴保护期窗口 */,
+                now.minusDays(3) /* 新鲜度窗口（相册/联系方式 3 天内更新） */,
                 org.springframework.data.domain.PageRequest.of(page, size));
         List<Long> ids = rows.getContent().stream().map(r -> (Long) r[0]).toList();
         return new ListPublicPart(rows.getContent(), rows.getTotalElements(), computeEnrichments(ids));

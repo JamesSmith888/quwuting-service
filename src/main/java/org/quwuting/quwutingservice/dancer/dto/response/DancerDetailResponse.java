@@ -73,7 +73,7 @@ public record DancerDetailResponse(
         DancerRecognitionStats stats,
         /** 收到积分总数（target_type='DANCER' 全量，2026-08-10 V2） */
         long pointsReceivedTotal,
-        /** 近30天收到积分（驱动舞伴列表次级排序信号） */
+        /** 近30天收到积分（2026-08-26 起不再参与列表排序——排序 tie-break 改用近30天收藏数） */
         long pointsReceived30d,
         /** 收到礼物聚合（code → 件数，2026-08-12 礼物化：「收获的支持」礼物墙） */
         List<org.quwuting.quwutingservice.points.dto.GiftCountResponse> giftsReceived,
@@ -146,5 +146,16 @@ public record DancerDetailResponse(
          */
         boolean contactRelay,
         /** 24h 无回复自动降级策略（2026-08-26；仅 contactRelay 有意义；dancer-edit 回显） */
-        boolean autoRelease
+        boolean autoRelease,
+        /**
+         * 相册最近一次更新时间（2026-08-26 晚：详情页「最近更新了相册」信号——
+         * = 最新一张 PUBLIC 照片 / 短视频的 created_at；无公开媒体 = null）。
+         * 前端据 {@code lastContactUpdatedAt} 与本站择最近者、且均在 3 天内才提示。
+         */
+        @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime lastAlbumUpdatedAt,
+        /**
+         * 联系方式最近一次变更时间（2026-08-26 晚：详情页「最近更新了联系方式」信号——
+         * = Dancer.contactUpdatedAt；从未更新过 = null）。与本站择最近者提示。
+         */
+        @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime lastContactUpdatedAt
 ) {}

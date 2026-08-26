@@ -35,6 +35,17 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
     @Query("SELECT d.id, d.profileTags FROM Dancer d WHERE d.id IN :ids AND d.deleted = false")
     List<Object[]> findProfileTagsByDancerIds(@Param("ids") List<Long> ids);
 
+    /**
+     * 批量取联系方式更新时间（2026-08-26 晚：列表 / 详情「最近更新了联系方式」信号——
+     * 返回 {id, contact_updated_at}（未更新过 = NULL；一次 IN 查询覆盖整页，规避 N+1）。
+     */
+    @Query(value = """
+            SELECT d.id, d.contact_updated_at
+            FROM qwt_dancers d
+            WHERE d.id IN :ids AND d.deleted = false
+            """, nativeQuery = true)
+    List<Object[]> findContactUpdatedAtByDancerIds(@Param("ids") List<Long> ids);
+
     /** 我的舞伴主页列表（创建人视角，含 PENDING/HIDDEN 自有资料） */
     List<Dancer> findByCreatedByAndDeletedFalseOrderByUpdatedAtDesc(Long createdBy);
 
@@ -72,24 +83,34 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
     List<String> findPublicCities();
 
     /**
-     * 公开舞伴列表（仅 NORMAL），按近7天认可数倒序（时间属性优先，避免老数据永久占优），
-     * <b>同分以近30天收到积分倒序为次级信号（2026-08-10 V2 新增：积分 = 用户"表达支持"
-     * 的量化信号，不影响认可主导口径，仅作 tie-break——是否升级为加权在 P2 按数据定）</b>，
-     * 再以 id 倒序兜底（新资料优先）。返回 Object[]：
-     * {id, nickname, avatar_url, bio, gender, city, count_all, count_today, count_7d,
-     *  verification_status}（verification_status 追加于末尾，2026-08-14 官方认证）。
+     * 公开舞伴列表（仅 NORMAL），按排序模式分页（2026-08-26 晚排序升级）。
      * <p>
-     * 近7天窗口为滚动锚点（createdAt >= now-7d，与 Reaction 同口径）；排序只依据
-     * count7d 而非 countAll——"被认可的历史总量"不应让活跃度低的旧资料长期霸榜。
-     * countQuery 与主查询共用城市过滤条件，保证分页总数与筛选一致。
+     * <b>HOT（默认，sortMode='HOT'）</b>——组合分倒序：
+     * <ol>
+     *   <li><b>近7天认可数 cnt7</b>（主导信号，滚动锚点 now-7d，与 Reaction 同口径；
+     *       刻意不用 countAll——"被认可的历史总量不应让活跃度低的旧资料长期霸榜"）</li>
+     *   <li><b>新鲜度加成 +2/+4</b>：新舞伴（created_at &gt;= now-14d）+2；
+     *       近 3 天更新过相册（最新 PUBLIC 媒体 created_at，V51 信号）或联系方式
+     *       （contact_updated_at）任一 &gt;= now-3d 再 +2——冷启动曝光通道 +
+     *       "正在维护资料"的活跃信号（2026-08-26 晚新增）</li>
+     *   <li><b>近30天收藏数 fav30d</b>（tie-break，2026-08-26 由近30天收到积分
+     *       points30d 替换——原口径 SUM(-delta) 仅收费舞伴非零、同分时系统性偏向
+     *       "收费型"，混入商业模式信号；收藏零成本表达长期兴趣，口径中性）</li>
+     *   <li><b>id 倒序</b>（兜底，新资料优先 + 分页稳定）</li>
+     * </ol>
+     * <b>LATEST（sortMode='LATEST'）</b>——id 倒序（新资料在前，纯"最新"口径；
+     * 新舞伴不受认可数为 0 的沉底约束）。筛选条件与 HOT 完全一致（城市/服务类别
+     * 均生效），仅排序不同。
      * <p>
-     * 2026-08-14 多城市（V29 迁移）：城市筛选升级为"主城市 OR 子表命中"——
-     * 舞伴可常驻最多 3 个城市，按任意城市筛选都应命中（EXISTS 子查询，走
-     * qwt_idx_dancer_cities_dancer/city 索引）。
+     * 城市筛选：主城市 OR 子表命中（qwt_dancer_cities，V29 多城市）；V38 起
+     * 精确相等 OR qwt_city_key 归一相等（历史手填「南通」与标准「南通市」互相命中）。
+     * 服务类别筛选：存在 ≥1 个在用且类别匹配的服务（qwt_dancer_services）。
+     * countQuery 与主查询共用过滤条件，保证分页总数与筛选一致。
      * <p>
-     * 2026-08-21（V38 迁移）：城市匹配升级为「精确相等 OR qwt_city_key 归一相等」
-     * ——历史手填「南通」与标准「南通市」互相命中（匹配层防御：即使未来绕过表单
-     * 的写入再次产生不带「市」城市值，同城筛选/门店同城舞伴入口也不失效）。
+     * 返回 Object[]：{id, nickname, avatar_url, bio, gender, city, count_all,
+     * count_today, count_7d, verification_status}（verification_status 追加于末尾，
+     * 2026-08-14 官方认证）。排序用列（cnt7/score/fav30d）不参与 SELECT——消费方
+     * 行解析与旧契约完全一致。
      */
     @Query(value = """
             SELECT d.id, d.nickname, d.avatar_url, d.bio, d.gender, d.city,
@@ -106,11 +127,17 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
                 GROUP BY dancer_id
             ) a ON a.dancer_id = d.id
             LEFT JOIN (
-                SELECT target_id AS dancer_id, SUM(-delta) AS points30d
-                FROM qwt_points_transactions
-                WHERE target_type = 'DANCER' AND delta < 0 AND created_at >= :since30d
-                GROUP BY target_id
-            ) p ON p.dancer_id = d.id
+                SELECT dancer_id, COUNT(*) AS fav30d
+                FROM qwt_dancer_favorites
+                WHERE deleted = false AND created_at >= :since30d
+                GROUP BY dancer_id
+            ) f ON f.dancer_id = d.id
+            LEFT JOIN (
+                SELECT dancer_id, MAX(created_at) AS album_max
+                FROM qwt_dancer_photos
+                WHERE status = 'PUBLIC' AND deleted = false
+                GROUP BY dancer_id
+            ) ph ON ph.dancer_id = d.id
             WHERE d.status = 'NORMAL' AND d.deleted = false
               AND (:city IS NULL OR d.city = :city OR qwt_city_key(d.city) = qwt_city_key(:city)
                    OR EXISTS (
@@ -121,7 +148,16 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
                         SELECT 1 FROM qwt_dancer_services s
                         WHERE s.dancer_id = d.id AND s.deleted = false AND s.active = true
                           AND s.category = :serviceCategory))
-            ORDER BY COALESCE(a.cnt7, 0) DESC, COALESCE(p.points30d, 0) DESC, d.id DESC
+            ORDER BY
+              CASE WHEN :sortMode = 'LATEST' THEN 0
+                   ELSE COALESCE(a.cnt7, 0)
+                      + CASE WHEN d.created_at >= :sinceNew THEN 2 ELSE 0 END
+                      + CASE WHEN COALESCE(GREATEST(ph.album_max, d.contact_updated_at),
+                                           TIMESTAMP '1970-01-01 00:00:00') >= :sinceFresh
+                             THEN 2 ELSE 0 END
+              END DESC,
+              CASE WHEN :sortMode = 'LATEST' THEN 0 ELSE COALESCE(f.fav30d, 0) END DESC,
+              d.id DESC
             """,
             countQuery = """
             SELECT COUNT(*) FROM qwt_dancers d
@@ -137,11 +173,14 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
                           AND s.category = :serviceCategory))
             """,
             nativeQuery = true)
-    Page<Object[]> findPublicPage(@Param("city") String city,
+    Page<Object[]> findPublicPage(@Param("sortMode") String sortMode,
+                                  @Param("city") String city,
                                   @Param("serviceCategory") String serviceCategory,
                                   @Param("sinceToday") LocalDateTime sinceToday,
                                   @Param("since7d") LocalDateTime since7d,
                                   @Param("since30d") LocalDateTime since30d,
+                                  @Param("sinceNew") LocalDateTime sinceNew,
+                                  @Param("sinceFresh") LocalDateTime sinceFresh,
                                   Pageable pageable);
 
     /**

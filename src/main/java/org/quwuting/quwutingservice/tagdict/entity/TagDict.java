@@ -44,6 +44,15 @@ public class TagDict extends BaseEntity {
     @ColumnDefault("''")
     private String description = "";
 
+    /**
+     * 展示配色（2026-08-26，标签级配色）：hex 展示色（如 #E63946），
+     * 详情/列表的 profileTags chip 背景 = 本值 + 按亮度算对比文字色；
+     * NULL/空串 = 默认样式（前端不渲染彩色 chip）。存标签字典而非「舞伴×标签」
+     * 关联——同一标签在所有舞伴处同色（跨舞伴视觉一致）。
+     */
+    @Column(length = 20)
+    private String color;
+
     /** 展示排序（小在前；编辑页可选列表按此排序） */
     @Column(nullable = false)
     @ColumnDefault("0")

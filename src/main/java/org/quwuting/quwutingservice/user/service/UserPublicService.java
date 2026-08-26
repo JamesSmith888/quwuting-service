@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.points.repository.PointsAccountRepository;
 import org.quwuting.quwutingservice.user.dto.response.UserDancerResponse;
 import org.quwuting.quwutingservice.user.dto.response.UserProfileResponse;
 import org.quwuting.quwutingservice.user.entity.User;
@@ -21,8 +22,12 @@ import java.util.List;
  * 用户公开主页服务（2026-08-12：礼物赠送者 → 用户详情页）。
  * <p>
  * 隐私边界（与舞伴域同精神）：只聚合**公开可展示**的信息——用户资料字段
- * （昵称/头像/角色/加入时间）与 TA 创建的 NORMAL 舞伴；绝不触碰 openId、
- * 积分余额、流水等私人数据。PENDING/HIDDEN 舞伴天然排除（Repository 过滤）。
+ * （昵称/头像/角色/加入时间/积分余额）与 TA 创建的 NORMAL 舞伴；绝不触碰
+ * openId、流水明细等私人数据。PENDING/HIDDEN 舞伴天然排除（Repository 过滤）。
+ * <p>
+ * 2026-08-26 积分余额：积分 = 平台内虚拟社区贡献值（非实名身份信息），仅经
+ * 用户主动分享邀约的自愿展示场景下发（邀约落地页访客信息卡），不面向公众；
+ * 若提审再次驳回 → 移除字段与前端展示即可（见 UserProfileResponse 注释）。
  */
 @Slf4j
 @Service
@@ -34,6 +39,7 @@ public class UserPublicService {
 
     private final UserRepository userRepository;
     private final DancerRepository dancerRepository;
+    private final PointsAccountRepository pointsAccountRepository;
 
     /** 用户公开主页（公开只读；用户不存在/已软删 → 1004） */
     @Transactional(readOnly = true)
@@ -43,6 +49,10 @@ public class UserPublicService {
         List<UserDancerResponse> dancers = dancerRepository.findPublicByCreatedBy(userId).stream()
                 .map(this::toDancerResponse)
                 .toList();
+        // 积分余额 = 账户读写快照（无账户行 = 从未参与积分活动，恒 0，见 PointsAccount 注释）
+        long pointsBalance = pointsAccountRepository.findByUserId(userId)
+                .map(a -> a.getBalance())
+                .orElse(0L);
         LocalDateTime createdAt = user.getCreatedAt();
         long joinedDays = createdAt == null ? 0 :
                 Math.max(0, ChronoUnit.DAYS.between(createdAt.toLocalDate(), LocalDate.now()));
@@ -50,7 +60,8 @@ public class UserPublicService {
                 ? NICKNAME_FALLBACK : user.getNickname();
         return new UserProfileResponse(
                 user.getId(), nickname, user.getAvatarUrl(), user.getRole().name(),
-                createdAt, joinedDays, dancers);
+                createdAt, joinedDays, pointsBalance, dancers,
+                user.getAge(), user.getGender(), user.getCity());
     }
 
     private UserDancerResponse toDancerResponse(Dancer d) {
