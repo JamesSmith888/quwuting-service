@@ -57,6 +57,7 @@ import tools.jackson.databind.ObjectMapper;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -488,13 +489,22 @@ public class VenueService {
      * 照片直插（校验 + 落库，上传/创建共用）：URL 逐个过 ImageContentValidator
      * （08-12 安全约定：图片 URL 落库字段必须挂载内容级校验，防外部 URL 绕过存储桶
      * 防线）；sortOrder 从当前最大 +1 追加，维持上传序。status 由调用方按写者身份分派。
+     * <p>
+     * 2026-08-27 幂等去重（批量重复入库同族修复，逻辑同 DancerService.addPhotos）：
+     * 已入库（未软删）/本请求重复的 URL 整项跳过；已入库即已通过校验，跳过不重复
+     * 校验（安全防线不因去重而削弱）。
      */
     private void persistPhotosDirect(Long venueId, Long userId, List<String> urls, VenuePhotoStatus status) {
+        Set<String> existing = new HashSet<>(venuePhotoRepository.findUrlsByVenueIdAndDeletedFalse(venueId));
+        Set<String> seen = new HashSet<>();
         int nextOrder = venuePhotoRepository.findMaxSortOrder(venueId) + 1;
         for (String raw : urls) {
             String clean = TextSanitizer.sanitize(raw, 500);
             if (clean.isEmpty() || !clean.startsWith("http")) {
                 throw new BusinessException(1001, "照片地址不合法");
+            }
+            if (existing.contains(clean) || !seen.add(clean)) {
+                continue;
             }
             imageValidator.validate(clean);
             VenuePhoto photo = new VenuePhoto();

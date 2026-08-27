@@ -16,6 +16,11 @@ public interface DancerPhotoRepository extends JpaRepository<DancerPhoto, Long> 
     /** 舞伴全部照片（详情页/编辑页，按展示顺序——上传序）；PENDING/REJECTED 是否回显由服务层可见性过滤 */
     List<DancerPhoto> findByDancerIdAndDeletedFalseOrderBySortOrderAscIdAsc(Long dancerId);
 
+    /** 舞伴全部已入库照片 URL（未软删；2026-08-27 幂等去重查询——新增请求对已存在
+     *  URL 整项跳过（含伴生字段），配合前端 added 增量 + 串行队列，杜绝批量上传重复入库） */
+    @Query("SELECT p.url FROM DancerPhoto p WHERE p.dancerId = :dancerId AND p.deleted = false")
+    List<String> findUrlsByDancerIdAndDeletedFalse(@Param("dancerId") Long dancerId);
+
     Optional<DancerPhoto> findByIdAndDeletedFalse(Long id);
 
     /** 当前最大展示顺序（新照片 sortOrder = max + 1；无照片返回 0）。

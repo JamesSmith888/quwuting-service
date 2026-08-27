@@ -16,6 +16,11 @@ public interface VenuePhotoRepository extends JpaRepository<VenuePhoto, Long> {
     /** 门店全部照片（管理入口/编辑页，按展示顺序——上传序）；状态过滤由服务层可见性规则负责 */
     List<VenuePhoto> findByVenueIdAndDeletedFalseOrderBySortOrderAscIdAsc(Long venueId);
 
+    /** 门店全部已入库照片 URL（未软删；2026-08-27 幂等去重查询——新增请求对已存在
+     *  URL 整项跳过，配合前端 added 增量 + 串行队列，杜绝批量上传重复入库） */
+    @Query("SELECT p.url FROM VenuePhoto p WHERE p.venueId = :venueId AND p.deleted = false")
+    List<String> findUrlsByVenueIdAndDeletedFalse(@Param("venueId") Long venueId);
+
     Optional<VenuePhoto> findByIdAndDeletedFalse(Long id);
 
     /**

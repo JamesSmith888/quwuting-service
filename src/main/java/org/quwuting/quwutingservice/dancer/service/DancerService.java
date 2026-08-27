@@ -1385,11 +1385,23 @@ public class DancerService {
         // 模糊图（2026-08-14 需求：收费照片详情页"模糊可见轮廓"占位）——与 urls 按
         // index 一一对应；缺省/为空时该照片无模糊图（详情页未解锁回退纯锁占位）
         List<String> blurList = blurUrls == null ? Collections.emptyList() : blurUrls;
+        // 幂等去重（2026-08-27 批量重复入库根因修复的纵深防线；前端已消费 image-upload
+        // added 增量 + 串行队列，后端再兜底一层）：
+        // - existing = 该舞伴已入库（未软删）URL；
+        // - seen = 本请求内已处理的 clean URL（同一请求重复提交同一 URL 只取第一次）。
+        // 重复项<b>整项跳过</b>（含伴生 blurUrl 与 sortOrder 消费，保对齐）：已入库即已
+        // 通过 ImageContentValidator 校验，无需重复校验（安全防线不因跳过而削弱）。
+        Set<String> existing = new HashSet<>(photoRepository.findUrlsByDancerIdAndDeletedFalse(dancerId));
+        Set<String> seen = new HashSet<>();
         int nextOrder = maxSortOrder(dancerId) + 1;
+        int inserted = 0;
         for (int i = 0; i < urls.size(); i++) {
             String clean = TextSanitizer.sanitize(urls.get(i), 500);
             if (clean.isEmpty() || !clean.startsWith("http")) {
                 throw new BusinessException(1001, "照片地址不合法");
+            }
+            if (existing.contains(clean) || !seen.add(clean)) {
+                continue;
             }
             imageValidator.validate(clean);
             DancerPhoto photo = new DancerPhoto();
@@ -1404,9 +1416,12 @@ public class DancerService {
             photo.setCreatedBy(userId);
             photo.setSortOrder(nextOrder++);
             photoRepository.save(photo);
+            inserted++;
         }
-        // 相册变化可能影响列表封面（封面 = 展示序最小 PUBLIC 照片）——列表缓存失效
-        invalidateListCache();
+        if (inserted > 0) {
+            // 相册变化可能影响列表封面（封面 = 展示序最小 PUBLIC 照片）——列表缓存失效
+            invalidateListCache();
+        }
         return fetchPhotos(dancerId, true, userId);
     }
 
@@ -1435,11 +1450,20 @@ public class DancerService {
         List<String> coverList = req.coverUrls() == null ? Collections.emptyList() : req.coverUrls();
         List<String> blurList = req.blurUrls() == null ? Collections.emptyList() : req.blurUrls();
         List<Integer> durationList = req.durations() == null ? Collections.emptyList() : req.durations();
+        // 幂等去重（2026-08-27 批量重复入库同族修复，逻辑同 addPhotos）：
+        // 已入库/本请求重复的 URL 整项跳过（含伴生 coverUrl/blurUrl/duration 与 sortOrder
+        // 消费，保 index 对齐）；已入库即已通过校验，跳过不重复校验（安全防线不削弱）。
+        Set<String> existing = new HashSet<>(photoRepository.findUrlsByDancerIdAndDeletedFalse(dancerId));
+        Set<String> seen = new HashSet<>();
         int nextOrder = maxSortOrder(dancerId) + 1;
+        int inserted = 0;
         for (int i = 0; i < urls.size(); i++) {
             String clean = TextSanitizer.sanitize(urls.get(i), 500);
             if (clean.isEmpty() || !clean.startsWith("http")) {
                 throw new BusinessException(1001, "视频地址不合法");
+            }
+            if (existing.contains(clean) || !seen.add(clean)) {
+                continue;
             }
             imageValidator.validateVideoUrl(clean); // 域名白名单 + 扩展名（不下载，见校验器 javadoc）
             DancerPhoto video = new DancerPhoto();
@@ -1475,8 +1499,11 @@ public class DancerService {
             video.setCreatedBy(userId);
             video.setSortOrder(nextOrder++);
             photoRepository.save(video);
+            inserted++;
         }
-        invalidateListCache();
+        if (inserted > 0) {
+            invalidateListCache();
+        }
         return fetchPhotos(dancerId, true, userId);
     }
 
