@@ -82,4 +82,13 @@ public interface DemandRecordRepository extends JpaRepository<DemandRecord, Long
     @Modifying(clearAutomatically = true)
     @Query("UPDATE DemandRecord d SET d.status = :to WHERE d.id = :id AND d.status = 'PENDING'")
     int updateStatusIfPending(@Param("id") Long id, @Param("to") String to);
+
+    /**
+     * 该客人与该舞伴的履约确认数（「与 TA 已合作 N 次」，2026-08-27，V54，
+     * docs/agents/23「P1 履约闭环」）：fulfilled_at 非空 = 客人已确认履约。
+     * 走 idx_qwt_demand_records_user_dancer 索引；计数含本次已确认的邀约。
+     */
+    @Query("SELECT COUNT(d) FROM DemandRecord d WHERE d.userId = :userId " +
+            "AND d.dancerId = :dancerId AND d.fulfilledAt IS NOT NULL")
+    long countConfirmedByUserAndDancer(@Param("userId") Long userId, @Param("dancerId") Long dancerId);
 }

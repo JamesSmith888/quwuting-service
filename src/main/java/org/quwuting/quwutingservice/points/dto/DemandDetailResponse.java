@@ -20,6 +20,10 @@ import java.time.LocalDateTime;
  * {@code statusText} = 客人侧状态文案（服务端权威，尊重友好原则，前端零拼接）；
  * 联系方式字段<b>仅本人 + APPROVED/AUTO_RELEASED 时下发</b>（PENDING/REJECTED/EXPIRED
  * 恒 null，防联系方式随未获批状态泄漏；null = 存量记录，前端按现状渲染）。
+ * <p>
+ * 2026-08-27 履约闭环（docs/agents/23）：加 {@code fulfilledAt}/{@code cooperationCount}——
+ * fulfilledAt = 本次邀约履约确认时间（null = 未确认，前端渲染「确认完成邀约」按钮）；
+ * cooperationCount = 该客人与该舞伴的履约确认数（含本次，「与 TA 已合作 N 次」）。
  */
 public record DemandDetailResponse(
         Long id,
@@ -39,5 +43,7 @@ public record DemandDetailResponse(
         java.time.LocalDateTime expireAt,
         String contactText,
         String contactImageUrl,
-        LocalDateTime createdAt) {
+        LocalDateTime createdAt,
+        LocalDateTime fulfilledAt,
+        long cooperationCount) {
 }

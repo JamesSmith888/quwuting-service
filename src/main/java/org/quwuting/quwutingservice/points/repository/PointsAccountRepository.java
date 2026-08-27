@@ -6,6 +6,8 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 
 public interface PointsAccountRepository extends JpaRepository<PointsAccount, Long> {
@@ -35,4 +37,12 @@ public interface PointsAccountRepository extends JpaRepository<PointsAccount, Lo
             WHERE pa.userId = :userId
             """)
     int addBalance(@Param("userId") Long userId, @Param("amount") long amount);
+
+    /**
+     * 批量余额快照（2026-08-27 管理端用户列表聚合，docs/agents/23）：一次查询
+     * 覆盖一页用户，避免 N+1。返回 Object[]{userId, balance}；无账户用户不出现在
+     * 结果（从未参与积分活动，调用方按 0 兜底，见 PointsAccount 注释）。
+     */
+    @Query("SELECT a.userId, a.balance FROM PointsAccount a WHERE a.userId IN :userIds")
+    List<Object[]> findBalancesByUserIds(@Param("userIds") Collection<Long> userIds);
 }

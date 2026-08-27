@@ -33,7 +33,8 @@ import java.time.LocalDateTime;
 @Entity
 @Table(name = "qwt_demand_records", indexes = {
         @Index(name = "idx_qwt_demand_records_user", columnList = "user_id, created_at"),
-        @Index(name = "idx_qwt_demand_records_dancer", columnList = "dancer_id, created_at")
+        @Index(name = "idx_qwt_demand_records_dancer", columnList = "dancer_id, created_at"),
+        @Index(name = "idx_qwt_demand_records_user_dancer", columnList = "user_id, dancer_id")
 })
 public class DemandRecord {
 
@@ -89,4 +90,16 @@ public class DemandRecord {
      */
     @Column(length = 20)
     private String status;
+
+    /**
+     * 履约确认时间（2026-08-27 新增，V54；docs/agents/23「P1 履约闭环」）。
+     * <p>
+     * 非空 = 客人已确认本次邀约履约完成（幂等写一次，不更新）——「与舞伴已合作
+     * N 次」的私域履约信号（仅本人邀约详情 + 管理端邀约单可见，不公开广播）；
+     * NULL = 未确认（含存量记录，前端不渲染履约卡）。仅邀约已获批
+     * （APPROVED/AUTO_RELEASED 或存量 NULL 等价已发放）可确认，由
+     * DemandFulfillmentService 应用层校验。
+     */
+    @Column
+    private LocalDateTime fulfilledAt;
 }

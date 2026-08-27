@@ -11,6 +11,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -62,4 +63,15 @@ public interface VenueClaimRepository extends JpaRepository<VenueClaim, Long>, J
 
     /** 管理端分页列表（Specification 组合状态筛选） */
     Page<VenueClaim> findAll(org.springframework.data.jpa.domain.Specification<VenueClaim> spec, Pageable pageable);
+
+    /**
+     * 批量统计：指定用户集某状态的认领工单数（2026-08-27 贡献档案/管理端用户列表
+     * 聚合，docs/agents/23）：认领贡献只计 APPROVED（通过 = 真实贡献；PENDING/
+     * REJECTED/WITHDRAWN 不计）。返回 Object[]{userId, count}；无匹配用户不出现在
+     * 结果（调用方按 0 兜底）。
+     */
+    @Query("SELECT c.userId, COUNT(c) FROM VenueClaim c " +
+           "WHERE c.userId IN :userIds AND c.status = :status GROUP BY c.userId")
+    List<Object[]> countGroupByUserIdsAndStatus(@Param("userIds") Collection<Long> userIds,
+                                                @Param("status") ClaimStatus status);
 }

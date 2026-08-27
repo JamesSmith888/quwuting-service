@@ -121,6 +121,23 @@ app:
     gate:
       # 单点门槛积分上限（cost>0 设置门槛、≤ 本值；cost=0 清除门槛 = 免费）
       max-cost: 50
+  # 社区贡献档案配置（2026-08-27，docs/agents/23：贡献值 = 各行为计数 × 权重，
+  # 等级 = 阈值匹配的荣誉称号，无利益挂钩——运营可调参数，改配置重启即生效）
+  contribution:
+    # 上报采纳权重（信息上报 + 暂停营业报告，采纳才计）
+    report-reward: 2
+    # 每日打卡权重
+    check-in-reward: 1
+    # 舞伴认可权重
+    recognition-reward: 1
+    # 门店认领通过权重（ClaimStatus=APPROVED）
+    claim-reward: 2
+    # 分享权重（门店 + 舞伴分享动作 SHARE）
+    share-reward: 1
+    # 舞伴收藏权重
+    favorite-reward: 1
+    # 等级阈值（升序 5 个，对应 ContributionLevel 五级；score ≥ 最大阈值 = 最高级）
+    level-thresholds: [0, 10, 50, 150, 400]
   # 舞伴创作者收益计划（2026-08-14）：激励视频广告位 ID——运营可调参数（更换广告位
   # 无需发版），由后端下发到舞伴详情响应（earningsAdUnitId），前端零硬编码。
   # 需小程序开通流量主后填真实广告位；留空 = 未配置，详情页不渲染广告入口。

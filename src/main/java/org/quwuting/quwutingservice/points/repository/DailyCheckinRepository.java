@@ -6,6 +6,8 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDate;
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 
 public interface DailyCheckinRepository extends JpaRepository<DailyCheckin, Long> {
@@ -23,4 +25,12 @@ public interface DailyCheckinRepository extends JpaRepository<DailyCheckin, Long
      */
     @Query(value = "SELECT pg_advisory_xact_lock(hashtext(:lockKey))", nativeQuery = true)
     void lockUserCheckin(@Param("lockKey") String lockKey);
+
+    /**
+     * 批量统计：指定用户集的打卡天数（2026-08-27 贡献档案/管理端用户列表聚合，
+     * docs/agents/23）：UNIQUE(user_id, checkin_date) 保证一人一天一行，条数 = 天数。
+     * 返回 Object[]{userId, count}；无打卡用户不出现在结果（调用方按 0 兜底）。
+     */
+    @Query("SELECT c.userId, COUNT(c) FROM DailyCheckin c WHERE c.userId IN :userIds GROUP BY c.userId")
+    List<Object[]> countGroupByUserIds(@Param("userIds") Collection<Long> userIds);
 }

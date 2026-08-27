@@ -8,6 +8,7 @@ import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -155,4 +156,13 @@ public interface DancerRecognitionRepository extends JpaRepository<DancerRecogni
     @Query("SELECT r.id, r.dancerId, r.recognitionDate FROM DancerRecognition r " +
            "WHERE r.userId = :userId AND r.deleted = false ORDER BY r.createdAt DESC")
     List<Object[]> findMyRecognitions(@Param("userId") Long userId);
+
+    /**
+     * 批量统计：指定用户集的认可次数（2026-08-27 贡献档案/管理端用户列表聚合，
+     * docs/agents/23）：软删（取消认可）行不计。返回 Object[]{userId, count}；
+     * 无认可用户不出现在结果（调用方按 0 兜底）。
+     */
+    @Query("SELECT r.userId, COUNT(r) FROM DancerRecognition r " +
+           "WHERE r.userId IN :userIds AND r.deleted = false GROUP BY r.userId")
+    List<Object[]> countGroupByUserIds(@Param("userIds") Collection<Long> userIds);
 }

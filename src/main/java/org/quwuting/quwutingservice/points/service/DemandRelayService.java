@@ -168,6 +168,10 @@ public class DemandRelayService {
         String durationLabel = DemandDetailTexts.durationLabel(record.getDuration());
         String locationLabel = DemandDetailTexts.locationLabel(record.getUserLocation());
         String detailText = DemandDetailTexts.detailText(serviceLabel, timeLabel, durationLabel, locationLabel);
+        // 2026-08-27 履约闭环（docs/agents/23）：该客人与该舞伴的履约确认数
+        // （「与 TA 已合作 N 次」）——管理员转发邀约时可参考/告知舞伴（私域信号）
+        long cooperationCount = demandRecordRepository.countConfirmedByUserAndDancer(
+                record.getUserId(), record.getDancerId());
         return new AdminDemandDetail(
                 record.getId(),
                 record.getCreatedAt(),
@@ -186,7 +190,8 @@ public class DemandRelayService {
                 durationLabel,
                 locationLabel,
                 detailText,
-                record.getStatus());
+                record.getStatus(),
+                cooperationCount);
     }
 
     /**

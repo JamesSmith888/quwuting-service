@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -75,4 +76,13 @@ public interface DancerFavoriteRepository extends JpaRepository<DancerFavorite, 
     List<Object[]> findFavoriteDancersByUserId(@Param("userId") Long userId,
                                                @Param("sinceToday") LocalDateTime sinceToday,
                                                @Param("since7d") LocalDateTime since7d);
+
+    /**
+     * 批量统计：指定用户集的收藏位次（2026-08-27 贡献档案/管理端用户列表聚合，
+     * docs/agents/23）：软删行不计（restore 语义，见 V27 注释）。
+     * 返回 Object[]{userId, count}；无收藏用户不出现在结果（调用方按 0 兜底）。
+     */
+    @Query("SELECT f.userId, COUNT(f) FROM DancerFavorite f " +
+           "WHERE f.userId IN :userIds AND f.deleted = false GROUP BY f.userId")
+    List<Object[]> countGroupByUserIds(@Param("userIds") Collection<Long> userIds);
 }

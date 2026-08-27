@@ -846,6 +846,10 @@ public class PointsService {
         // 联系方式仅获批发放时展示；dancer 软删（下架）→ 摘要已 null，不展示
         String contactText = released && dancer != null ? dancer.getContact() : null;
         String contactImageUrl = released && dancer != null ? dancer.getContactImageUrl() : null;
+        // 2026-08-27 履约闭环（docs/agents/23）：fulfilledAt（本次履约确认时间，
+        // null = 未确认）+ cooperationCount（该客人与该舞伴的履约确认数，含本次）
+        long cooperationCount = demandRecordRepository.countConfirmedByUserAndDancer(
+                userId, record.getDancerId());
         return new DemandDetailResponse(
                 record.getId(),
                 record.getDancerId(),
@@ -865,7 +869,9 @@ public class PointsService {
                         ? record.getCreatedAt().plusHours(RELAY_TIMEOUT_HOURS) : null,
                 contactText,
                 contactImageUrl,
-                record.getCreatedAt());
+                record.getCreatedAt(),
+                record.getFulfilledAt(),
+                cooperationCount);
     }
 
     /** 今日是否已对"任意有门槛舞伴"解锁过联系方式（2026-08-24 每日首免判定；

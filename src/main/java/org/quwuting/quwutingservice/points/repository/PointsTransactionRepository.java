@@ -11,6 +11,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -177,4 +178,15 @@ public interface PointsTransactionRepository extends JpaRepository<PointsTransac
     List<Object[]> findGifters(@Param("targetType") PointsTargetType targetType,
                                @Param("targetId") Long targetId,
                                @Param("giftCode") String giftCode);
+
+    /**
+     * 批量统计：指定用户集 × 来源类型的流水条数（2026-08-27 贡献档案/管理端用户
+     * 列表聚合，docs/agents/23）：一次 GROUP BY 覆盖一页用户，避免 N+1。
+     * 返回 Object[]{userId, count}；无流水用户不出现在结果（调用方按 0 兜底）。
+     * 幂等唯一键保证每个来源至多一条流水，条数 = 行为次数。
+     */
+    @Query("SELECT t.userId, COUNT(t) FROM PointsTransaction t " +
+           "WHERE t.userId IN :userIds AND t.sourceType IN :types GROUP BY t.userId")
+    List<Object[]> countByUserIdsAndSourceTypes(@Param("userIds") Collection<Long> userIds,
+                                                @Param("types") Collection<PointsSourceType> types);
 }

@@ -12,6 +12,10 @@ import java.time.LocalDateTime;
  * + over12h（等待超 12h = 建议管理员微信催办一次）+ status（邀约状态，非 PENDING
  * 时前端禁用发放/拒绝）。
  * <p>
+ * 2026-08-27 履约闭环（docs/agents/23）：加 {@code cooperationCount}——该客人与
+ * 该舞伴的履约确认数（「与 TA 已合作 N 次」），管理员转发邀约时可参考/告知舞伴
+ * （私域信号，不公开广播）。
+ * <p>
  * 隐私克制（同待办列表）：不下发客人真实联系方式（openId 等）；只有 message
  * 需求文本。
  */
@@ -33,5 +37,7 @@ public record AdminDemandDetail(
         String durationLabel,
         String locationLabel,
         String demandDetailText,
-        String status) {
+        String status,
+        /** 该客人与该舞伴的履约确认数（「与 TA 已合作 N 次」，私域信号） */
+        long cooperationCount) {
 }

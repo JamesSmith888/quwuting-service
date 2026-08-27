@@ -4,8 +4,10 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.points.dto.CheckInResponse;
+import org.quwuting.quwutingservice.points.dto.ContributionResponse;
 import org.quwuting.quwutingservice.points.dto.DemandDetailResponse;
 import org.quwuting.quwutingservice.points.dto.DemandRecordResponse;
+import org.quwuting.quwutingservice.points.dto.FulfillmentResponse;
 import org.quwuting.quwutingservice.points.dto.GifterResponse;
 import org.quwuting.quwutingservice.points.dto.GiftRequest;
 import org.quwuting.quwutingservice.points.dto.GiftResponse;
@@ -16,6 +18,8 @@ import org.quwuting.quwutingservice.points.dto.UnlockRequest;
 import org.quwuting.quwutingservice.points.dto.UnlockResponse;
 import org.quwuting.quwutingservice.points.dto.UpsertGateRequest;
 import org.quwuting.quwutingservice.points.enums.PointsTargetType;
+import org.quwuting.quwutingservice.points.service.ContributionService;
+import org.quwuting.quwutingservice.points.service.DemandFulfillmentService;
 import org.quwuting.quwutingservice.points.service.PointsService;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.springframework.data.domain.Page;
@@ -36,6 +40,8 @@ import java.util.List;
 public class PointsController {
 
     private final PointsService pointsService;
+    private final ContributionService contributionService;
+    private final DemandFulfillmentService demandFulfillmentService;
 
     /** 每日打卡（幂等：今日已打卡返回 checkedIn=false，不重复发分） */
     @PostMapping("/check-in")
@@ -140,5 +146,26 @@ public class PointsController {
     @GetMapping("/demands/{id}")
     public ApiResponse<DemandDetailResponse> demandDetail(@PathVariable Long id) {
         return ApiResponse.ok(pointsService.getMyDemand(UserContext.requireAuth(), id));
+    }
+
+    /**
+     * 社区贡献档案（2026-08-27，需登录；docs/agents/23）：用户自己看自己的贡献
+     * 聚合记录——贡献值 + 等级称号 + 各维度计数（上报采纳/打卡/认可/认领/分享/
+     * 收藏）。只记录、不消耗、不公开广播（合规边界见 ContributionService）。
+     */
+    @GetMapping("/contributions")
+    public ApiResponse<ContributionResponse> contributions() {
+        return ApiResponse.ok(contributionService.summary(UserContext.requireAuth()));
+    }
+
+    /**
+     * 确认履约（2026-08-27，需登录 + 本人；docs/agents/23「P1 履约闭环」）：
+     * 客人确认本次邀约已履约完成 → 累计「与舞伴已合作 N 次」（私域信号，仅本人
+     * 邀约详情 + 管理端邀约单可见）。幂等：已确认返回 confirmed=false + 既有数据；
+     * 仅已获批发放联系方式的邀约可确认（未获批 → 1001）。
+     */
+    @PostMapping("/demands/{id}/confirm")
+    public ApiResponse<FulfillmentResponse> confirmFulfillment(@PathVariable Long id) {
+        return ApiResponse.ok(demandFulfillmentService.confirm(UserContext.requireAuth(), id));
     }
 }
