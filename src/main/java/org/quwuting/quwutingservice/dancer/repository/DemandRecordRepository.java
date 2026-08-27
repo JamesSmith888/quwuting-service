@@ -9,6 +9,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -110,6 +111,38 @@ public interface DemandRecordRepository extends JpaRepository<DemandRecord, Long
     boolean existsByOriginDemandId(Long originDemandId);
 
     /**
+     * 邀约被查看条件更新（2026-08-27，V56，docs/agents/25「分享闭环自动化」）：
+     * 舞伴打开邀约落地页（demand-invite，分享卡片携带 demandId）时置
+     * share_opened_at（WHERE share_opened_at IS NULL = 幂等只置第一次）——
+     * 平台自动感知"分享生效"，客人侧「TA 已查看你的邀约」零操作可见。
+     * 返回 0 = 已置过（幂等成功）或邀约不存在。
+     */
+    @Modifying(clearAutomatically = true)
+    @Query("UPDATE DemandRecord d SET d.shareOpenedAt = :at " +
+            "WHERE d.id = :id AND d.shareOpenedAt IS NULL")
+    int updateShareOpenedIf(@Param("id") Long id, @Param("at") LocalDateTime at);
+
+    /**
+     * 客人反馈条件更新（2026-08-27，V56，docs/agents/25「反馈闭环」）：客人对
+     * 已解锁邀约提交「没加上 TA？」反馈时置 guest_feedback + feedback_requested_at
+     * （WHERE feedback_requested_at IS NULL = 幂等只置一次——防重复提交重复返还
+     * 积分；返还幂等键 (user, UNLOCK_REFUND, demandId) 双保险）。返回 0 =
+     * 已反馈过（幂等成功）或邀约不存在。
+     */
+    @Modifying(clearAutomatically = true)
+    @Query("UPDATE DemandRecord d SET d.guestFeedback = :feedback, d.feedbackRequestedAt = :at " +
+            "WHERE d.id = :id AND d.feedbackRequestedAt IS NULL")
+    int updateFeedbackIf(@Param("id") Long id, @Param("feedback") String feedback, @Param("at") LocalDateTime at);
+
+    /**
+     * 该 user×dancer 最近一条邀约（2026-08-27，V56，docs/agents/25「进行中邀约」：
+     * 舞伴详情页「进行中邀约」卡数据源——客人返回详情页时不再"邀约单消失"，
+     * 恒可见最近一次邀约的时间/状态/被查看/履约入口）。走
+     * idx_qwt_demand_records_user_dancer 索引，一条轻量查询。
+     */
+    Optional<DemandRecord> findTopByUserIdAndDancerIdOrderByIdDesc(Long userId, Long dancerId);
+
+    /**
      * 该客人与该舞伴的履约确认数（「与 TA 已合作 N 次」，2026-08-27，V54，
      * docs/agents/23「P1 履约闭环」）：fulfilled_at 非空 = 客人已确认履约。
      * 走 idx_qwt_demand_records_user_dancer 索引；计数含本次已确认的邀约。
@@ -131,4 +164,39 @@ public interface DemandRecordRepository extends JpaRepository<DemandRecord, Long
             "GROUP BY d.userId, d.dancerId")
     List<Object[]> countConfirmedGroupByUserIdsAndDancerIds(
             @Param("userIds") Iterable<Long> userIds, @Param("dancerIds") Iterable<Long> dancerIds);
+
+    /**
+     * 批量统计：指定用户集的需求单总数（2026-08-27 用户管理增强——列表行
+     * 「需求 N」+ 详情需求概览）。返回 Object[]{userId, count}。
+     */
+    @Query("SELECT d.userId, COUNT(d) FROM DemandRecord d " +
+            "WHERE d.userId IN :userIds GROUP BY d.userId")
+    List<Object[]> countGroupByUserIds(@Param("userIds") Collection<Long> userIds);
+
+    /**
+     * 批量统计：指定用户集的履约确认数（2026-08-27 用户管理增强——列表行
+     * 「履约 N」+ 详情需求概览）。fulfilled_at 非空 = 客人已确认履约（V54）。
+     * 返回 Object[]{userId, count}；无确认用户不出现在结果。
+     */
+    @Query("SELECT d.userId, COUNT(d) FROM DemandRecord d " +
+            "WHERE d.userId IN :userIds AND d.fulfilledAt IS NOT NULL GROUP BY d.userId")
+    List<Object[]> countFulfilledGroupByUserIds(@Param("userIds") Collection<Long> userIds);
+
+    /**
+     * 批量统计：指定用户集 × 邀约状态的需求单分布（2026-08-27 用户管理增强——
+     * 详情页需求概览按状态分布）。返回 Object[]{userId, status, count}；
+     * <b>存量 NULL 状态 = APPROVED</b>（COALESCE，V42 前无状态语义、历史客人
+     * 当时已拿到微信，与 22 号文档状态机语义一致）。
+     */
+    @Query("SELECT d.userId, COALESCE(d.status, 'APPROVED'), COUNT(d) FROM DemandRecord d " +
+            "WHERE d.userId IN :userIds GROUP BY d.userId, COALESCE(d.status, 'APPROVED')")
+    List<Object[]> countByUserAndStatusGroup(@Param("userIds") Collection<Long> userIds);
+
+    /**
+     * 批量统计：指定用户集的最近邀约时间（2026-08-27 用户管理增强——「最近活跃」
+     * 四源之一：邀约 = 主动寻找舞伴的高信号行为）。返回 Object[]{userId, MAX(createdAt)}。
+     */
+    @Query("SELECT d.userId, MAX(d.createdAt) FROM DemandRecord d " +
+            "WHERE d.userId IN :userIds GROUP BY d.userId")
+    List<Object[]> findLatestGroupByUserIds(@Param("userIds") Collection<Long> userIds);
 }

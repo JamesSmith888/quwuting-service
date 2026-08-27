@@ -157,5 +157,28 @@ public record DancerDetailResponse(
          * 联系方式最近一次变更时间（2026-08-26 晚：详情页「最近更新了联系方式」信号——
          * = Dancer.contactUpdatedAt；从未更新过 = null）。与本站择最近者提示。
          */
-        @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime lastContactUpdatedAt
-) {}
+        @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime lastContactUpdatedAt,
+        /**
+         * 我的进行中邀约摘要（2026-08-27，V56，docs/agents/25「邀约生命周期」）：
+         * 当前用户与该舞伴最近一条邀约——详情页「进行中邀约」卡数据源（客人返回
+         * 详情页不再"邀约单消失"，恒可见最近一次邀约的时间/状态/被查看/履约入口）。
+         * 登录用户且与该舞伴有过邀约时非空；匿名/无邀约 = null。用户相关字段
+         * （不入公共缓存，实时轻量查询）；本人邀约记录天然隔离，仅本人可见。
+         */
+        RecentDemand recentDemand
+) {
+    /**
+     * 进行中邀约轻量摘要（2026-08-27，V56）：只下发驱动展示的最小字段——
+     * id（跳邀约详情）、createdAt（「N 天前」）、status（徽标）、shareOpened
+     * （「TA 已查看你的邀约」，分享闭环自动感知）、fulfilled（履约入口态）。
+     * 联系方式/验证消息等敏感内容一律在邀约详情页（GET /points/demands/{id}）
+     * 另行下发，此处零泄漏。
+     */
+    public record RecentDemand(
+            Long id,
+            @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime createdAt,
+            String status,
+            boolean shareOpened,
+            boolean fulfilled
+    ) {}
+}

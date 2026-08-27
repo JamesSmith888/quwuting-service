@@ -79,6 +79,7 @@ class VenueHeatServiceTest {
                 .thenReturn(counters);
         when(counters.getPv()).thenReturn(0L);
         when(counters.getUv()).thenReturn(0L);
+        when(counters.getWeightedviews30d()).thenReturn(0.0);
         when(counters.getFavtotal()).thenReturn(0L);
         when(counters.getFavrecent()).thenReturn(0L);
         when(counters.getPosttotal()).thenReturn(0L);
@@ -216,6 +217,25 @@ class VenueHeatServiceTest {
         assertEquals(1L, resp.viewSourceTrend().get(0).search(), "浏览来源应回填搜索结果进入数");
         assertEquals(0L, resp.viewSourceTrend().get(0).other(), "other = 全量 10 − list 7 − share 2 − search 1");
         assertEquals(5L, resp.viewSourceTrend().get(1).other(), "全来源 0 时 other = 全量 5");
+    }
+
+    @Test
+    void viewContributionIsLogCompressedOfWeightedViews() {
+        stubZeroCounters();
+        // 无浏览：加权浏览=0 → ln(1+0)=0，浏览贡献 0，简洁规则展示"浏览贡献 0"
+        VenueHeatResponse resp0 = heatService.getHeat(1L);
+        assertEquals(0L, resp0.heatScore(), "无浏览时浏览贡献为 0");
+        assertTrue(resp0.formulaText().contains("浏览贡献 0"), "无浏览时简洁规则应展示浏览贡献 0");
+
+        // 加权浏览 100（如 200 次 LIST×0.5，或 100 次 OTHER）：ln(1+100)=4.615 → round=5
+        // 验证对数压缩语义——线性口径下 100 次浏览会贡献 100 分，压缩后仅 5 分，
+        // 头部店浏览量不再以线性差距碾压长尾门店（马太效应修复）。
+        when(counters.getWeightedviews30d()).thenReturn(100.0);
+        heatService.invalidate(1L); // 缓存刷新：同一 venueId 首次调用已缓存 0 浏览结果
+        VenueHeatResponse resp = heatService.getHeat(1L);
+        assertEquals(5L, resp.heatScore(), "浏览贡献 = round(ln(1+100)) = 5（对数压缩压制线性量级）");
+        assertTrue(resp.formulaText().contains("浏览贡献 5"), "简洁规则应展示压缩后的浏览贡献");
+        assertTrue(resp.formulaDetail().contains("100.0 → 5"), "完整规则应展示加权输入到压缩贡献的换算");
     }
 
     // ── 状态可信度（2026-08-08 三维矩阵：状态类型 × 稳定性 × 持续天数） ────────────

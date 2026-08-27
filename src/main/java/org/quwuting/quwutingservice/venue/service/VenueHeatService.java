@@ -27,7 +27,9 @@ import java.util.concurrent.TimeUnit;
 /**
  * 场所热度计算服务（多维度聚合）。
  * <p>
- * 热度指数 = 浏览量 × W_VIEW + 收藏总数 × W_FAVORITE + 近期新增收藏 × W_NEW_FAVORITE
+ * 热度指数 = 浏览贡献（ln(1+加权浏览)，来源加权列表0.5/其他1/搜索1.5/分享2 + 近7天×2，
+ *           2026-08-27 重构——原线性 PV×1 被马太反馈循环放大，见 VenueHeatWeights）
+ *           + 收藏总数 × W_FAVORITE + 近期新增收藏 × W_NEW_FAVORITE
  *           + 动态总数 × W_POST + 近期评价数 × W_RATING + 近30天正向 Reaction × W_REACTION
  *           + 满意度偏移 × W_SATISFACTION（无评分时为 0）。
  * <p>
@@ -200,6 +202,11 @@ public class VenueHeatService {
                 POSITIVE_REACTION_CODES, NEGATIVE_REACTION_CODES);
         long viewCount30d = orZero(counters.getPv());
         long viewUv30d = orZero(counters.getUv());
+        // 加权浏览贡献输入（2026-08-27）：来源质量加权 + 近7天时效因子的 30 天合计，
+        // 热度公式浏览项 = round(ln(1 + 本值))——线性 PV 计数被重构，见 VenueHeatWeights
+        // 浏览贡献注释（马太效应反馈循环修复）。viewCount30d（原始 PV）仅作展示用。
+        double weightedViews30d = orZeroDouble(counters.getWeightedviews30d());
+        long viewComponent = Math.round(Math.log1p(weightedViews30d));
         long favoriteCount = orZero(counters.getFavtotal());
         long newFavoriteCount30d = orZero(counters.getFavrecent());
         long postCount = orZero(counters.getPosttotal());
@@ -255,7 +262,7 @@ public class VenueHeatService {
                 ? Math.round(satisfactionOffset * VenueHeatWeights.SATISFACTION)
                 : 0;
         long pointsWeight = pointsProperties.heatWeight();
-        long rawHeatScore = viewCount30d * VenueHeatWeights.VIEW
+        long rawHeatScore = viewComponent
                 + favoriteCount * VenueHeatWeights.FAVORITE
                 + newFavoriteCount30d * VenueHeatWeights.NEW_FAVORITE
                 + postCount * VenueHeatWeights.POST
@@ -270,35 +277,45 @@ public class VenueHeatService {
         long heatScore = Math.max(HEAT_SCORE_FLOOR, rawHeatScore);
 
         // ── 公式文案（权重唯一事实源在后端，前端直接渲染，禁止前端硬编码权重） ──
+        // 2026-08-27 文案重构（用户反馈：技术符号堆叠看不懂）：
+        //   formulaText  = 默认展示的「中等简洁规则」——人话 + 当前各分项数据，
+        //                  无 ln/加权符号；前端默认展示，问号入口可收起的完整版在 formulaDetail。
+        //   formulaDetail = 点击展开的「完整规则」——条目化分项说明，保留规则细节。
+        String weightedViewsText = String.format("%.1f", weightedViews30d);
         String satisfactionTerm = satisfactionScore != null
-                ? String.format(" + %.1f×20", satisfactionOffset)
+                ? String.format(" · 满意度偏移 %.1f×20", satisfactionOffset)
                 : "";
         String clampSuffix = heatClamped ? "（满意度负偏移按0计）" : "";
-        String formulaText = heatScore + " = " + viewCount30d + "×" + VenueHeatWeights.VIEW + " + " + favoriteCount
-                + "×" + VenueHeatWeights.FAVORITE + " + " + newFavoriteCount30d + "×" + VenueHeatWeights.NEW_FAVORITE
-                + " + " + postCount + "×" + VenueHeatWeights.POST + " + " + ratingCount30d + "×" + VenueHeatWeights.RATING
-                + " + " + positiveReactionCount30d + "×" + VenueHeatWeights.REACTION
-                + " + " + pointsReceived30d + "×" + pointsWeight
+        String formulaText = "热度 " + heatScore + " = 近30天人气：浏览贡献 " + viewComponent
+                + "（来源加权+近7天翻倍）· 收藏 " + favoriteCount + "×" + VenueHeatWeights.FAVORITE
+                + " · 新增收藏 " + newFavoriteCount30d + "×" + VenueHeatWeights.NEW_FAVORITE
+                + " · 动态 " + postCount + "×" + VenueHeatWeights.POST
+                + " · 评分 " + ratingCount30d + "×" + VenueHeatWeights.RATING
+                + " · 正向反馈 " + positiveReactionCount30d + "×" + VenueHeatWeights.REACTION
+                + " · 礼物 " + pointsReceived30d + "×" + pointsWeight
                 + satisfactionTerm + clampSuffix;
-        String formulaDetail = "站内热度公式：浏览量(" + viewCount30d + ")×" + VenueHeatWeights.VIEW + " + 收藏总数("
-                + favoriteCount + ")×" + VenueHeatWeights.FAVORITE
-                + " + 近30天新增收藏(" + newFavoriteCount30d + ")×" + VenueHeatWeights.NEW_FAVORITE
-                + " + 动态总数(" + postCount + ")×" + VenueHeatWeights.POST
-                + " + 近30天评分数(" + ratingCount30d + ")×" + VenueHeatWeights.RATING
-                + " + 近30天正向反馈(" + positiveReactionCount30d + ")×" + VenueHeatWeights.REACTION
-                + " + 近30天收到礼物价值(" + pointsReceived30d + ")×" + pointsWeight
-                + (satisfactionScore != null
-                        ? String.format(" + 满意度偏移(%.1f)×20", satisfactionOffset)
-                        : "")
-                + "。满意度为各体验维度等权均分（满分10），6分为中性基准、高于6加分低于6减分；"
-                + (satisfactionScore != null
-                        ? "当前满意度" + satisfactionScore + "分。"
-                        : "当前评价人数不足3人，满意度不参与计算。")
-                + "负向反馈（如服务问题、排队太久）不计入站内热度，单独展示。"
-                + "积分权重为运营可调参数（当前×" + pointsWeight + "），按数据分布校准。"
-                + (heatClamped
-                        ? "满意度负偏移使总分低于0，站内热度按0计（不出现负热度）。"
-                        : "");
+
+        StringBuilder detail = new StringBuilder();
+        detail.append("完整计算规则（近30天）：\n");
+        detail.append("· 浏览贡献 ").append(viewComponent).append(" 分：按来源加权（列表×0.5 / 其他×1 / 搜索×1.5 / 分享×2）、近7天翻倍，再压缩取整（加权 ")
+                .append(weightedViewsText).append(" → ").append(viewComponent)
+                .append(" 分）——降低“排得靠前→看的人多”造成的热度虚高，更反映主动兴趣\n");
+        detail.append("· 收藏总数×").append(VenueHeatWeights.FAVORITE).append("：当前 ").append(favoriteCount).append(" 次\n");
+        detail.append("· 近30天新增收藏×").append(VenueHeatWeights.NEW_FAVORITE).append("：当前 ").append(newFavoriteCount30d).append(" 次\n");
+        detail.append("· 动态总数×").append(VenueHeatWeights.POST).append("：当前 ").append(postCount).append(" 条\n");
+        detail.append("· 近30天评分数×").append(VenueHeatWeights.RATING).append("：当前 ").append(ratingCount30d).append(" 条\n");
+        detail.append("· 近30天正向反馈×").append(VenueHeatWeights.REACTION).append("：当前 ").append(positiveReactionCount30d)
+                .append(" 条（服务问题、排队太久等负向反馈不计入，单独展示）\n");
+        detail.append("· 近30天收到礼物价值×").append(pointsWeight).append("：当前 ").append(pointsReceived30d).append(" 分\n");
+        detail.append(satisfactionScore != null
+                ? "当前满意度 " + satisfactionScore + " 分。"
+                : "当前评价人数不足3人，满意度不参与计算。");
+        detail.append("满意度为各体验维度等权均分（满分10），6分为中性基准、高于6加分、低于6减分。\n");
+        detail.append("积分权重为运营可调参数（当前×").append(pointsWeight).append("）。");
+        if (heatClamped) {
+            detail.append("满意度负偏移使总分低于0，站内热度按0计（不出现负热度）。");
+        }
+        String formulaDetail = detail.toString();
 
         // ── 状态可信度（三维判定：状态类型 × 稳定性 × 持续天数；活跃报告 override） ──
         StatusConfidenceResult confidence = computeStatusConfidence(
@@ -331,6 +348,11 @@ public class VenueHeatService {
 
     private static long orZero(Long value) {
         return value != null ? value : 0L;
+    }
+
+    /** 加权浏览输入可能为 null（无浏览记录时子查询返回 NULL）→ 按 0 计 */
+    private static double orZeroDouble(Double value) {
+        return value != null ? value : 0.0;
     }
 
     /**

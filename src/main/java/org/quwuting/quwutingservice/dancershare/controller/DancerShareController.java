@@ -43,7 +43,10 @@ public class DancerShareController {
 
     /**
      * 记录一次分享打开（被分享者打开舞伴详情页且路径携带 share_from 时触发）。
-     * POST /dancers/{id}/share-opens  body: {"shareFrom": 123}（可选）
+     * POST /dancers/{id}/share-opens  body: {"shareFrom": 123, "demandId": 456}（可选）
+     * demandId（2026-08-27，V56，docs/agents/25「分享闭环自动化」）：邀约落地页
+     * 打开时透传——服务端同步置该邀约 share_opened_at（幂等），客人侧
+     * 「TA 已查看你的邀约」零操作自动感知。
      */
     @PostMapping("/{id}/share-opens")
     public ApiResponse<Void> recordShareOpen(
@@ -51,7 +54,8 @@ public class DancerShareController {
             @Valid @RequestBody(required = false) RecordShareOpenRequest request
     ) {
         Long shareFrom = request != null ? request.shareFrom() : null;
-        dancerShareService.recordOpen(id, UserContext.getCurrentUserId(), shareFrom);
+        Long demandId = request != null ? request.demandId() : null;
+        dancerShareService.recordOpen(id, UserContext.getCurrentUserId(), shareFrom, demandId);
         return ApiResponse.ok(null);
     }
 }

@@ -49,6 +49,12 @@ public class DancerShareService {
      * 真实记录后须失效；OPEN 回流事件不输入分享趋势，不失效。
      */
     private final org.quwuting.quwutingservice.dancer.service.DancerDetailCacheService dancerDetailCacheService;
+    /**
+     * 邀约被查看感知（2026-08-27，V56，docs/agents/25「分享闭环自动化」）：
+     * OPEN 事件携带 demandId 时置该邀约 share_opened_at（幂等只置第一次）——
+     * 客人侧「TA 已查看你的邀约」零操作自动感知，平台自动确认"分享生效"。
+     */
+    private final org.quwuting.quwutingservice.dancer.repository.DemandRecordRepository demandRecordRepository;
 
     /**
      * 记录一次分享动作（SHARE 事件）。
@@ -89,9 +95,13 @@ public class DancerShareService {
      * @param dancerId  舞伴 ID
      * @param userId    打开者用户 ID，匿名时为 null
      * @param shareFrom 原分享者用户 ID（分享路径 share_from 参数），可空
+     * @param demandId  分享卡片携带的邀约 id（2026-08-27，V56，docs/agents/25
+     *                  「分享闭环自动化」；邀约落地页打开时透传，非邀约分享 = null）
+     *                  ——非空则同步置该邀约 share_opened_at（幂等只置第一次），
+     *                  客人侧「TA 已查看你的邀约」零操作自动感知
      */
     @Transactional
-    public void recordOpen(Long dancerId, Long userId, Long shareFrom) {
+    public void recordOpen(Long dancerId, Long userId, Long shareFrom, Long demandId) {
         if (isRateLimited(dancerId, userId)) {
             return;
         }
@@ -101,6 +111,12 @@ public class DancerShareService {
         open.setEventType(ShareEventType.OPEN);
         open.setShareFrom(shareFrom);
         dancerShareRepository.save(open);
+        // 邀约被查看感知（分享闭环）：OPEN 事件携带 demandId = 舞伴打开了邀约
+        // 落地页——置 share_opened_at（WHERE IS NULL 幂等；与 OPEN 记录同事务，
+        // 同事务失败整体回滚保证通知/感知不丢——对齐 notifyDemandStatus 先例）
+        if (demandId != null) {
+            demandRecordRepository.updateShareOpenedIf(demandId, java.time.LocalDateTime.now());
+        }
     }
 
     /**

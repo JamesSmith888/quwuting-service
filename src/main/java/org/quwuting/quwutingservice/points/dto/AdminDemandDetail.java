@@ -50,5 +50,11 @@ public record AdminDemandDetail(
         /** 客人已请求平台代找替代（非空 = 高亮 + 提供「代找替代」操作） */
         boolean rescueRequested,
         /** 客人贡献等级称号（转发话术信任信号；NOVICE 无信号值 = null 不拼装） */
-        String contributionLevelName) {
+        String contributionLevelName,
+        /**
+         * 客人反馈 code（2026-08-27，V56，docs/agents/25「反馈闭环」；
+         * DemandGuestFeedback：非空 = 客人提交了「没加上 TA？」反馈——
+         * 邀约单详情展示反馈原因 + 已自动返还标记，管理员据此微信侧核实介入）。
+         */
+        String guestFeedback) {
 }

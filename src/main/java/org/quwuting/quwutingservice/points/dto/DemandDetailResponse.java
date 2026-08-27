@@ -56,5 +56,21 @@ public record DemandDetailResponse(
         String rejectReason,
         String rejectReasonText,
         boolean rescueRequested,
-        Long originDemandId) {
+        Long originDemandId,
+        /**
+         * 邀约被查看时间（2026-08-27，V56，docs/agents/25「分享闭环自动化」；
+         * 非空 = 舞伴已打开邀约落地页——前端展示「TA 已查看你的邀约」，客人
+         * 第一次获得"平台还活着 + 分享生效"的确认，零操作自动感知）。
+         */
+        java.time.LocalDateTime shareOpenedAt,
+        /**
+         * 客人反馈 code（2026-08-27，V56，docs/agents/25「反馈闭环」；
+         * DemandGuestFeedback：ADD_FAILED/REJECTED/NO_REPLY/OTHER；
+         * 非空 = 已提交「没加上 TA？」反馈——前端渲染已反馈态，隐藏入口）。
+         */
+        String guestFeedback,
+        /**
+         * 客人反馈提交时间（2026-08-27，V56；非空 = 已反馈，幂等只置一次）。
+         */
+        java.time.LocalDateTime feedbackRequestedAt) {
 }

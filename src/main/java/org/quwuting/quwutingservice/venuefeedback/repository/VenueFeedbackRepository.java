@@ -134,4 +134,22 @@ public interface VenueFeedbackRepository extends JpaRepository<VenueFeedback, Lo
                                   @Param("type") String type,
                                   @Param("note") String note,
                                   @Param("now") LocalDateTime now);
+
+    /**
+     * 批量统计：指定用户集的信息上报总数（2026-08-27 用户管理增强——详情页
+     * 上报概览；未软删且 user_id 非空——匿名上报无法归属，不计入）。
+     * 返回 Object[]{userId, count}。
+     */
+    @Query("SELECT f.userId, COUNT(f) FROM VenueFeedback f " +
+            "WHERE f.userId IN :userIds AND f.deleted = false GROUP BY f.userId")
+    List<Object[]> countGroupByUserIds(@Param("userIds") java.util.Collection<Long> userIds);
+
+    /**
+     * 批量统计：指定用户集某状态的信息上报数（2026-08-27 用户管理增强——详情页
+     * 上报概览「待处理」= ReportStatus.PENDING）。返回 Object[]{userId, count}。
+     */
+    @Query("SELECT f.userId, COUNT(f) FROM VenueFeedback f " +
+            "WHERE f.userId IN :userIds AND f.deleted = false AND f.status = :status GROUP BY f.userId")
+    List<Object[]> countGroupByUserIdsAndStatus(@Param("userIds") java.util.Collection<Long> userIds,
+                                                @Param("status") ReportStatus status);
 }

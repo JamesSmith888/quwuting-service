@@ -169,7 +169,11 @@ public class DemandRelayService {
                     r.getRejectReason(),
                     r.getRescueRequestedAt() != null,
                     cooperationCount,
-                    trustLevelName(contributionMap.get(r.getUserId())));
+                    trustLevelName(contributionMap.get(r.getUserId())),
+                    // 2026-08-27（V56，docs/agents/25「反馈闭环」）：客人反馈 code
+                    // （非空 = 已提交「没加上 TA？」反馈，已自动返还扣费积分——
+                    // 管理端识别需人工介入的邀约）
+                    r.getGuestFeedback());
         });
     }
 
@@ -227,7 +231,11 @@ public class DemandRelayService {
                 cooperationCount,
                 record.getRejectReason(),
                 record.getRescueRequestedAt() != null,
-                contributionLevelName);
+                contributionLevelName,
+                // 2026-08-27（V56，docs/agents/25「反馈闭环」）：客人反馈 code
+                // （非空 = 已提交「没加上 TA？」反馈——邀约单详情展示反馈原因，
+                // 管理员据此微信侧核实介入）
+                record.getGuestFeedback());
     }
 
     /**

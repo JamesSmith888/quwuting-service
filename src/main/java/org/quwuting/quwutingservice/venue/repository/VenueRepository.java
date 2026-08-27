@@ -157,16 +157,65 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     /**
      * 距离半径筛选（可选，叠加在筛选条件上，与排序方式正交）。
      * <p>
-     * radiusKm 为 null（不限）时谓词恒真；有值时仅保留距离 ≤ 半径的场所——
-     * 无坐标场所的距离表达式为 NULL，`NULL <= :radiusKm` 为 NULL 自然被排除
-     * （"未知距离的场所不承诺在半径内"，语义正确）。
+     * radiusKm 为 null（不限）时谓词恒真；有值时仅保留距离 ≤ 半径的场所。
      * <p>
-     * 含本片段的查询必须同时携带 :latitude/:longitude（见 {@link #DISTANCE_KM} 约束）。
+     * <b>城市放行（2026-08-28 用户反馈修复）</b>：显式选择城市（:city 非空）时谓词
+     * 恒真——无坐标场所（距离表达式 NULL）也能按城市查询出来。语义：城市是用户的
+     * <b>明确作用域</b>，「附近 300km」只是默认浏览视角（隐式条件，用户无从知晓——
+     * 苏州数据导入后全城无坐标，默认 300km 把整批门店静默过滤，用户选苏州却看不到
+     * 苏州门店，体验断裂）；两者冲突时城市优先。未选城市（:city 为空）时维持原口径：
+     * 有值半径下无坐标场所被排除（"未知距离的场所不承诺在半径内"——附近视角不应
+     * 混入全国无坐标门店）。
+     * <p>
+     * 含本片段的查询必须同时携带 :latitude/:longitude（见 {@link #DISTANCE_KM} 约束）
+     * 与 :city（放行开关，Service 层 blankToNull 后传 null/非空）。
      */
     String RADIUS_PREDICATE = """
-            AND (:radiusKm IS NULL OR
+            AND (:radiusKm IS NULL OR :city IS NOT NULL OR
             """ + DISTANCE_KM + """
              <= :radiusKm)
+            """;
+
+    /**
+     * 「浏览贡献」（JPQL 版）：来源质量加权 + 近 7 天时效衰减 + 对数压缩。
+     * <b>2026-08-27 从 HEAT_BEHAVIOR 抽出的子公式</b>（原线性 {@code COUNT(*) × VIEW}，
+     * 因马太效应反馈循环重构，语义见 {@link VenueHeatWeights} 浏览贡献注释）。
+     * <p>
+     * 数学形态：{@code LN(1 + Σ(source_weight × time_factor))}，30 天窗口
+     * （[CURRENT_DATE-30, CURRENT_DATE)，截至昨日，同 HEAT_BEHAVIOR 锚点）。
+     * <ul>
+     *   <li>source_weight：LIST 0.5 / OTHER 1.0 / SEARCH 1.5 / SHARE 2.0——列表点入
+     *       是位置偏差驱动的被动流量（排序→曝光→浏览→排序的马太闭环核心），降权；
+     *       搜索/分享是主动兴趣与口碑传播，加权（来源判定唯一事实源 =
+     *       前端 venue-detail 单一判定点 + {@link ViewSource} 枚举）；</li>
+     *   <li>time_factor：近 7 天（含今天）×2，7~30 天 ×1——热度更"当下"；</li>
+     *   <li>LN(1+x)：浏览量的边际信息含量递减（0→10 次远比 1000→2000 更能说明
+     *       热度上升），对数压缩后头部店不再以线性差距碾压长尾。</li>
+     * </ul>
+     * 三处镜像统一引用本口径（JPQL 本常量 / native findHotVenueIds / Java
+     * VenueHeatService.computeHeat），权重常量唯一事实源 = {@link VenueHeatWeights}。
+     * <p>
+     * HQL 语法注意：{@code LN} 是 Hibernate 注册的数学函数（PG 方言映射 ln）；
+     * {@code source} 枚举比较用<b>全限定枚举字面量</b>（HQL 标准做法，无需参数，
+     * 同 HEAT_BEHAVIOR 积分项先例）；近 7 天窗口减法带 {@code day} 单位后缀
+     * （裸整数 {@code CURRENT_DATE - 7} 会被 Hibernate 7 报 SemanticException）。
+     */
+    String VIEW_BEHAVIOR = """
+            LN(1 + (SELECT COALESCE(SUM(
+                     CASE WHEN vv.source = org.quwuting.quwutingservice.venue.enums.ViewSource.LIST THEN"""
+            + " " + VenueHeatWeights.VIEW_SOURCE_LIST + " " + """
+                     WHEN vv.source = org.quwuting.quwutingservice.venue.enums.ViewSource.SEARCH THEN"""
+            + " " + VenueHeatWeights.VIEW_SOURCE_SEARCH + " " + """
+                     WHEN vv.source = org.quwuting.quwutingservice.venue.enums.ViewSource.SHARE THEN"""
+            + " " + VenueHeatWeights.VIEW_SOURCE_SHARE + " " + """
+                     ELSE"""
+            + " " + VenueHeatWeights.VIEW_SOURCE_OTHER + " " + """
+                     END
+                     * CASE WHEN vv.viewDate >= (CURRENT_DATE - 7 day) THEN"""
+            + " " + VenueHeatWeights.VIEW_RECENCY_7D_MULTIPLIER + " " + """
+                     ELSE 1 END), 0)
+                FROM VenueView vv
+                WHERE vv.venueId = v.id AND vv.viewDate >= (CURRENT_DATE - 30 day) AND vv.viewDate < CURRENT_DATE))
             """;
 
     /**
@@ -175,7 +224,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 「零行为门店运营权重守卫」而独立成常量——见 {@link #HEAT_SCORE}）。
      * <p>
      * 语义与热门标记的「行为热度」（完整热度分扣除运营权重 sortWeight）完全一致：
-     * 近30天浏览×1 + 收藏总数×10 + 近30天新增收藏×15 + 动态总数×5 + 近30天评分数×8
+     * <b>2026-08-27 起浏览项 = {@link #VIEW_BEHAVIOR}（来源加权 + 近7天×2 + ln 压缩）</b>
+     * + 收藏总数×10 + 近30天新增收藏×15 + 动态总数×5 + 近30天评分数×8
      * + 近30天正向 Reaction×3 + 近30天收到积分 × :pointsWeight（2026-08-10 V2 新增，
      * 权重来自配置 app.points.heat-weight，运营校准对象）。
      * <p>
@@ -208,13 +258,13 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      *       此处窗口 = [今天-30天, 今天)，即「截至昨日」30 天。</li>
      *   <li>积分目标类型用<b>全限定枚举字面量</b>（HQL 标准做法，无需参数）——
      *       与 {@link org.quwuting.quwutingservice.points.entity.PointsTransaction}
-     *       的 targetType 枚举字段比较。</li>
+     *       的 targetType 枚举字段比较。浏览来源 {@code vv.source} 同为枚举列，
+     *       VIEW_BEHAVIOR 内同样用全限定枚举字面量比较。</li>
      * </ul>
      */
     String HEAT_BEHAVIOR = """
-            ((SELECT COUNT(*) FROM VenueView vv
-               WHERE vv.venueId = v.id AND vv.viewDate >= (CURRENT_DATE - 30 day) AND vv.viewDate < CURRENT_DATE) * """
-            + VenueHeatWeights.VIEW + """
+            ("""
+            + VIEW_BEHAVIOR + """
              + (SELECT COUNT(*) FROM Favorite f
                 WHERE f.venueId = v.id AND f.deleted = false) * """
             + VenueHeatWeights.FAVORITE + """
@@ -278,10 +328,13 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * <p>
      * 排序公式（服务端排序保证分页正确性）：
      * <pre>
-     * score = 行为热度（HEAT_SCORE = 受守卫的运营权重 + 近30天浏览×1 + 收藏×10 + 新增收藏×15
-     *                     + 动态×5 + 评分×8 + 正向反馈×3 + 近30天积分×pointsWeight，
+     * score = 行为热度（HEAT_SCORE = 受守卫的运营权重 + 浏览贡献 ln(1+加权浏览)
+     *                     （来源加权：列表0.5/其他1/搜索1.5/分享2，近7天×2）+ 收藏×10
+     *                     + 新增收藏×15 + 动态×5 + 评分×8 + 正向反馈×3 + 近30天积分×pointsWeight，
      *                     2026-08-27 起行为热度=0 的门店运营权重不生效，见 HEAT_SCORE 注释）
-     *       + 100 / (1 + 距离km)（邻近加成，Haversine）
+     *       + 100 / (1 + 距离km)（邻近加成，Haversine；2026-08-28 起无坐标场所 COALESCE 兜底 0——
+     *         城市放行后无坐标门店进入结果集，排序键不得为 NULL（PG 的 DESC 默认 NULLS FIRST
+     *         会把整批无坐标门店顶到列表最前且顺序不稳定），退化为纯热度排序）
      * </pre>
      * 距离项使本地场所在全国列表中自然置顶，跨城市时衰减至可忽略，由热度与运营权重决定顺序。
      * <p>
@@ -289,16 +342,17 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 绑定参数推断为 bytea，radians() 无法解析。无坐标场景必须改调 {@link #searchRankedNoLocation}，
      * 不要向本方法传 null。
      * <p>
-     * {@code radiusKm} 可空：null = 不限（谓词短路，行为与旧版完全一致）；有值 = 距离半径筛选。
+     * {@code radiusKm} 可空：null = 不限（谓词短路，行为与旧版完全一致）；有值 = 距离半径筛选
+     * （仅当 :city 为空时生效，城市放行口径见 {@link #RADIUS_PREDICATE}）。
      */
     @Query("""
             SELECT v FROM Venue v
             """ + LIST_FILTERS + RADIUS_PREDICATE + """
             ORDER BY (
             """ + HEAT_SCORE + """
-            + 100.0 / (1.0 +
+            + COALESCE(100.0 / (1.0 +
             """ + DISTANCE_KM + """
-            )
+            ), 0)
             ) DESC
             """)
     Page<Venue> searchRanked(@Param("city") String city,
@@ -338,22 +392,22 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                        Pageable pageable);
 
     /**
-     * 列表主查询（距离最近排序）：纯距离升序，仅保留有坐标的场所。
+     * 列表主查询（距离最近排序）：纯距离升序。
      * <p>
-     * 无坐标场所（v.latitude/longitude IS NULL）显式排除——"距离最近"只对距离已知的场所
-     * 有意义，未知距离的场所排在列表末尾只会造成困惑。radiusKm 可空（语义同
-     * {@link #searchRanked}）；坐标必须非 null（Service 保证，见 {@link #DISTANCE_KM}）。
+     * <b>2026-08-28 无坐标场所不再排除</b>（原"仅展示有坐标的场所"口径废弃）：配合
+     * {@link #RADIUS_PREDICATE} 城市放行，显式选城市时无坐标门店（如批量导入未补坐标的
+     * 城市数据）也能查出来——距离对其无意义故沉底（ORDER BY ... ASC NULLS LAST），而非
+     * 整批消失。未选城市时半径谓词照常把无坐标门店排除在"附近"视角外。radiusKm 可空
+     * （语义同 {@link #searchRanked}）；坐标必须非 null（Service 保证，见 {@link #DISTANCE_KM}）。
      * id 兜底 tie-break 保证分页稳定。
      */
     @Query("""
             SELECT v FROM Venue v
             """ + LIST_FILTERS + """
-            AND v.latitude IS NOT NULL
-            AND v.longitude IS NOT NULL
             """ + RADIUS_PREDICATE + """
             ORDER BY
             """ + DISTANCE_KM + """
-            ASC, v.id ASC
+            ASC NULLS LAST, v.id ASC
             """)
     Page<Venue> searchNearest(@Param("city") String city,
                               @Param("district") String district,
@@ -479,10 +533,14 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * getter 类型」章节，历史遗留 java.sql.* 类型会运行时抛 UnsupportedOperationException）。
      */
     interface HeatCounters {
-        /** 近30天浏览量 PV（含匿名） */
+        /** 近30天浏览量 PV（含匿名，原始计数——展示用，热度公式不再线性使用） */
         Long getPv();
         /** 近30天独立用户浏览数 UV（仅已登录去重，COUNT DISTINCT 天然忽略 NULL） */
         Long getUv();
+        /** 加权浏览贡献输入（2026-08-27 新增）：近30天 Σ(来源权重 × 近7天时效因子)，
+         *  热度公式浏览项 = round(ln(1 + 本值))——来源/时效权重常量唯一事实源 =
+         *  {@link org.quwuting.quwutingservice.config.VenueHeatWeights} */
+        Double getWeightedviews30d();
         /** 收藏总数 */
         Long getFavtotal();
         /** 近30天新增收藏 */
@@ -539,6 +597,21 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                 WHERE vv.venue_id = :venueId AND vv.view_date >= :viewSince AND vv.view_date < :viewUntil) AS pv,
               (SELECT COUNT(DISTINCT vv.user_id) FROM qwt_venue_views vv
                 WHERE vv.venue_id = :venueId AND vv.view_date >= :viewSince AND vv.view_date < :viewUntil) AS uv,
+              (SELECT COALESCE(SUM(
+                        CASE vv.source WHEN 'LIST' THEN"""
+            + " " + VenueHeatWeights.VIEW_SOURCE_LIST + " " + """
+                        WHEN 'SEARCH' THEN"""
+            + " " + VenueHeatWeights.VIEW_SOURCE_SEARCH + " " + """
+                        WHEN 'SHARE' THEN"""
+            + " " + VenueHeatWeights.VIEW_SOURCE_SHARE + " " + """
+                        ELSE"""
+            + " " + VenueHeatWeights.VIEW_SOURCE_OTHER + " " + """
+                        END
+                        * CASE WHEN vv.view_date >= (CURRENT_DATE - 7) THEN"""
+            + " " + VenueHeatWeights.VIEW_RECENCY_7D_MULTIPLIER + " " + """
+                        ELSE 1 END), 0)
+                FROM qwt_venue_views vv
+                WHERE vv.venue_id = :venueId AND vv.view_date >= :viewSince AND vv.view_date < :viewUntil) AS weightedviews30d,
               (SELECT COUNT(*) FROM qwt_favorites f
                 WHERE f.venue_id = :venueId AND f.deleted = false) AS favtotal,
               (SELECT COUNT(*) FROM qwt_favorites f
@@ -789,9 +862,21 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                     SELECT v.id, v.city,
                            v.sort_weight AS sort_weight,
                            v.sort_weight
-                           + (SELECT COUNT(*) FROM qwt_venue_views vv
-                              WHERE vv.venue_id = v.id AND vv.view_date >= (CURRENT_DATE - 30) AND vv.view_date < CURRENT_DATE) * """
-            + VenueHeatWeights.VIEW + """
+                           + LN(1 + (SELECT COALESCE(SUM(
+                                    CASE vv.source WHEN 'LIST' THEN"""
+            + " " + VenueHeatWeights.VIEW_SOURCE_LIST + " " + """
+                                    WHEN 'SEARCH' THEN"""
+            + " " + VenueHeatWeights.VIEW_SOURCE_SEARCH + " " + """
+                                    WHEN 'SHARE' THEN"""
+            + " " + VenueHeatWeights.VIEW_SOURCE_SHARE + " " + """
+                                    ELSE"""
+            + " " + VenueHeatWeights.VIEW_SOURCE_OTHER + " " + """
+                                    END
+                                    * CASE WHEN vv.view_date >= (CURRENT_DATE - 7) THEN"""
+            + " " + VenueHeatWeights.VIEW_RECENCY_7D_MULTIPLIER + " " + """
+                                    ELSE 1 END), 0)
+                                FROM qwt_venue_views vv
+                                WHERE vv.venue_id = v.id AND vv.view_date >= (CURRENT_DATE - 30) AND vv.view_date < CURRENT_DATE))
                            + (SELECT COUNT(*) FROM qwt_favorites f
                               WHERE f.venue_id = v.id AND f.deleted = false) * """
             + VenueHeatWeights.FAVORITE + """

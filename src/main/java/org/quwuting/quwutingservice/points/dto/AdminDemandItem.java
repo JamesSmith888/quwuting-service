@@ -38,5 +38,11 @@ public record AdminDemandItem(
         String rejectReason,
         boolean rescueRequested,
         long cooperationCount,
-        String contributionLevelName) {
+        String contributionLevelName,
+        /**
+         * 客人反馈 code（2026-08-27，V56，docs/agents/25「反馈闭环」；
+         * DemandGuestFeedback：非空 = 客人对该邀约提交了「没加上 TA？」反馈
+         * （已自动返还扣费积分）——管理端识别需人工介入的邀约（微信侧核实/安抚）。
+         */
+        String guestFeedback) {
 }

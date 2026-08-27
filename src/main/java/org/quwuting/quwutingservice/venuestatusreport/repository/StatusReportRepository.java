@@ -372,4 +372,21 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
         Long getActiveCount();
         LocalDateTime getLatestTime();
     }
+
+    /**
+     * 批量统计：指定用户集的暂停营业报告总数（2026-08-27 用户管理增强——详情页
+     * 上报概览合并口径之一；未软删且 user_id 非空）。返回 Object[]{userId, count}。
+     */
+    @Query("SELECT r.userId, COUNT(r) FROM VenueStatusReport r " +
+            "WHERE r.userId IN :userIds AND r.deleted = false GROUP BY r.userId")
+    List<Object[]> countGroupByUserIds(@Param("userIds") java.util.Collection<Long> userIds);
+
+    /**
+     * 批量统计：指定用户集的待处理报告数（2026-08-27 用户管理增强——详情页上报
+     * 概览「待处理」：admin_action IS NULL = 管理员未处置；已处置（采纳/忽略）与
+     * 未处置语义见 AdminAction 枚举）。返回 Object[]{userId, count}。
+     */
+    @Query("SELECT r.userId, COUNT(r) FROM VenueStatusReport r " +
+            "WHERE r.userId IN :userIds AND r.deleted = false AND r.adminAction IS NULL GROUP BY r.userId")
+    List<Object[]> countPendingGroupByUserIds(@Param("userIds") java.util.Collection<Long> userIds);
 }

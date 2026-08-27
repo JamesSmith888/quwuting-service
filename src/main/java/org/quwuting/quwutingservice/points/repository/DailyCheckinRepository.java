@@ -1,6 +1,7 @@
 package org.quwuting.quwutingservice.points.repository;
 
 import org.quwuting.quwutingservice.points.entity.DailyCheckin;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -33,4 +34,23 @@ public interface DailyCheckinRepository extends JpaRepository<DailyCheckin, Long
      */
     @Query("SELECT c.userId, COUNT(c) FROM DailyCheckin c WHERE c.userId IN :userIds GROUP BY c.userId")
     List<Object[]> countGroupByUserIds(@Param("userIds") Collection<Long> userIds);
+
+    /**
+     * 批量统计：指定用户集的最近打卡时间（2026-08-27 用户管理增强——「最近活跃」
+     * 四源之一：打卡是日常高频信号）。返回 Object[]{userId, MAX(createdAt)}；
+     * 无打卡用户不出现在结果。
+     */
+    @Query("SELECT c.userId, MAX(c.createdAt) FROM DailyCheckin c " +
+            "WHERE c.userId IN :userIds GROUP BY c.userId")
+    List<Object[]> findLatestGroupByUserIds(@Param("userIds") Collection<Long> userIds);
+
+    /**
+     * 单用户打卡日期倒序（2026-08-27 用户管理增强——详情页「连续打卡 N 天」：
+     * 应用层从最近一天往回数连续日期，今天未打不打断连续（锚点 = 今天或昨天）。
+     * LIMIT 400 覆盖一年以上打卡记录，足够支撑连续天数计算（连续超 400 天按
+     * 400 计，实际已无区分意义）。
+     */
+    @Query("SELECT c.checkinDate FROM DailyCheckin c WHERE c.userId = :userId " +
+            "ORDER BY c.checkinDate DESC")
+    List<LocalDate> findDatesByUserIdDesc(@Param("userId") Long userId, Pageable pageable);
 }

@@ -137,4 +137,37 @@ public class DemandRecord {
      */
     @Column
     private Long originDemandId;
+
+    /**
+     * 邀约被查看时间（2026-08-27 新增，V56；docs/agents/25「分享闭环自动化」）。
+     * <p>
+     * 语义：舞伴打开邀约落地页（demand-invite，分享卡片携带 demandId）时置位
+     * （幂等只置第一次）——平台自动感知"分享生效"，客人侧「TA 已查看你的邀约」
+     * 零操作可见（无需客人确认分享成功）。NULL = 未被查看/尚未分享。与
+     * dancershare 的 OPEN 归因统计正交：本字段是<b>邀约粒度</b>的反馈信号，
+     * 归因统计是 user×dancer 粒度的分享追踪，各自独立。
+     */
+    @Column
+    private LocalDateTime shareOpenedAt;
+
+    /**
+     * 客人反馈（2026-08-27 新增，V56；docs/agents/25「反馈闭环」；
+     * DemandGuestFeedback 枚举 code，可空）。
+     * <p>
+     * 语义：非中转舞伴（平台不感知线下结果）的客人遇到「没加上 TA / 被 TA 拒绝 /
+     * 未回复」时一键反馈——平台感知真实世界结果 + 自动返还该邀约的原扣费积分
+     * （幂等，返还键 = (user, UNLOCK_REFUND, demandId)）。管理端工作台据此识别
+     * 需人工介入的邀约。NULL = 未反馈；feedbackRequestedAt 非空 = 已反馈（幂等
+     * 只置一次，重复提交不重复返还）。
+     */
+    @Column(length = 20)
+    private String guestFeedback;
+
+    /**
+     * 客人反馈提交时间（2026-08-27 新增，V56；docs/agents/25「反馈闭环」）。
+     * 非空 = 客人已提交反馈（幂等只置一次，WHERE feedback_requested_at IS NULL
+     * 条件更新——防重复提交重复返还积分）；NULL = 未反馈。
+     */
+    @Column
+    private LocalDateTime feedbackRequestedAt;
 }

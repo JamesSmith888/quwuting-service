@@ -189,4 +189,21 @@ public interface PointsTransactionRepository extends JpaRepository<PointsTransac
            "WHERE t.userId IN :userIds AND t.sourceType IN :types GROUP BY t.userId")
     List<Object[]> countByUserIdsAndSourceTypes(@Param("userIds") Collection<Long> userIds,
                                                 @Param("types") Collection<PointsSourceType> types);
+
+    /**
+     * 批量统计：指定用户集的流水总条数（2026-08-27 用户管理增强——详情页积分账户
+     * 「流水 N 条」维度）。返回 Object[]{userId, count}；无流水用户不出现在结果。
+     */
+    @Query("SELECT t.userId, COUNT(t) FROM PointsTransaction t " +
+           "WHERE t.userId IN :userIds GROUP BY t.userId")
+    List<Object[]> countGroupByUserIds(@Param("userIds") Collection<Long> userIds);
+
+    /**
+     * 批量统计：指定用户集的最近流水时间（2026-08-27 用户管理增强——「最近活跃」
+     * 四源之一：积分流水 = 打卡/采纳/解锁/赠送等行为都会写流水，是高信号活跃源）。
+     * 返回 Object[]{userId, MAX(createdAt)}；无流水用户不出现在结果。
+     */
+    @Query("SELECT t.userId, MAX(t.createdAt) FROM PointsTransaction t " +
+           "WHERE t.userId IN :userIds GROUP BY t.userId")
+    List<Object[]> findLatestGroupByUserIds(@Param("userIds") Collection<Long> userIds);
 }

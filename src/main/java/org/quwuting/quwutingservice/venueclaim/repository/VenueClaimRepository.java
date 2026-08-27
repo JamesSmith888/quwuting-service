@@ -74,4 +74,13 @@ public interface VenueClaimRepository extends JpaRepository<VenueClaim, Long>, J
            "WHERE c.userId IN :userIds AND c.status = :status GROUP BY c.userId")
     List<Object[]> countGroupByUserIdsAndStatus(@Param("userIds") Collection<Long> userIds,
                                                 @Param("status") ClaimStatus status);
+
+    /**
+     * 批量统计：指定用户集 × 认领状态的分布（2026-08-27 用户管理增强——详情页
+     * 认领概览按状态分布：PENDING/APPROVED/REJECTED/WITHDRAWN）。
+     * 返回 Object[]{userId, status, count}。
+     */
+    @Query("SELECT c.userId, c.status, COUNT(c) FROM VenueClaim c " +
+           "WHERE c.userId IN :userIds GROUP BY c.userId, c.status")
+    List<Object[]> countByUserAndStatusGroup(@Param("userIds") Collection<Long> userIds);
 }

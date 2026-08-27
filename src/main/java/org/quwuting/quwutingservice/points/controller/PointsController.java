@@ -3,14 +3,17 @@ package org.quwuting.quwutingservice.points.controller;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
+import org.quwuting.quwutingservice.dancer.enums.DemandGuestFeedback;
 import org.quwuting.quwutingservice.points.dto.CheckInResponse;
 import org.quwuting.quwutingservice.points.dto.ContributionResponse;
 import org.quwuting.quwutingservice.points.dto.DemandDetailResponse;
 import org.quwuting.quwutingservice.points.dto.DemandRecordResponse;
+import org.quwuting.quwutingservice.points.dto.FeedbackResponse;
 import org.quwuting.quwutingservice.points.dto.FulfillmentResponse;
 import org.quwuting.quwutingservice.points.dto.GifterResponse;
 import org.quwuting.quwutingservice.points.dto.GiftRequest;
 import org.quwuting.quwutingservice.points.dto.GiftResponse;
+import org.quwuting.quwutingservice.points.dto.GuestFeedbackRequest;
 import org.quwuting.quwutingservice.points.dto.PointsSummaryResponse;
 import org.quwuting.quwutingservice.points.dto.PointsTransactionResponse;
 import org.quwuting.quwutingservice.points.dto.RewardHintResponse;
@@ -179,5 +182,23 @@ public class PointsController {
     public ApiResponse<Void> requestRescue(@PathVariable Long id) {
         pointsService.requestDemandRescue(UserContext.requireAuth(), id);
         return ApiResponse.ok(null);
+    }
+
+    /**
+     * 客人反馈「没加上 TA？」（2026-08-27，V56，docs/agents/25「反馈闭环」；
+     * 需登录 + 本人）：非中转舞伴的客人拿到联系方式后没加上/被拒/未回复时
+     * 一键反馈——平台感知真实世界结果 + 自动返还该邀约解锁时的原扣费积分
+     * （幂等，一次反馈只返还一次）。body reason = DemandGuestFeedback 枚举
+     * code（可空 = 旧客户端，回退 OTHER）。PENDING/REJECTED/EXPIRED/已履约
+     * → 1001（已有各自出口）。管理端工作台据此识别需人工介入的邀约。
+     */
+    @PostMapping("/demands/{id}/feedback")
+    public ApiResponse<FeedbackResponse> requestFeedback(
+            @PathVariable Long id,
+            @RequestBody(required = false) GuestFeedbackRequest request) {
+        DemandGuestFeedback reason = request == null ? null
+                : DemandGuestFeedback.parseOrNull(request.reason());
+        return ApiResponse.ok(pointsService.requestDemandFeedback(
+                UserContext.requireAuth(), id, reason));
     }
 }

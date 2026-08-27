@@ -32,7 +32,7 @@ public class User extends BaseEntity {
     @Column(length = 16)
     private String gender;
 
-    /** 常驻城市（行政区划名，如「杭州市」；自愿分享通道下发，便于同城包时匹配） */
+    /** 常驻城市（行政区划名，如「杭州市」；自愿分享通道下发，便于同城按时段匹配） */
     @Column(length = 64)
     private String city;
 

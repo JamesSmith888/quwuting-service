@@ -30,5 +30,13 @@ public enum PointsSourceType {
      * 不可流转准货币，见 AGENTS.md「积分系统 · 积分解锁」），故不参与
      * receivedTotal（收到积分）聚合。
      */
-    UNLOCK
+    UNLOCK,
+    /**
+     * 解锁返还（2026-08-27 新增，V56，docs/agents/25「反馈闭环」；delta > 0，
+     * source_id = 邀约 id = qwt_demand_records.id）——客人对已解锁邀约提交
+     * 「没加上 TA？」反馈后，自动返还该邀约解锁时的原扣费积分（拿回自己花的
+     * 分，无净收益可刷；幂等键 (user, UNLOCK_REFUND, demandId) 保证一次反馈
+     * 只返还一次）。免费解锁（无扣费流水）无返还，不写本来源流水。
+     */
+    UNLOCK_REFUND
 }

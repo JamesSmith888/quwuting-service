@@ -45,4 +45,13 @@ public interface PointsAccountRepository extends JpaRepository<PointsAccount, Lo
      */
     @Query("SELECT a.userId, a.balance FROM PointsAccount a WHERE a.userId IN :userIds")
     List<Object[]> findBalancesByUserIds(@Param("userIds") Collection<Long> userIds);
+
+    /**
+     * 批量账户快照（2026-08-27 用户管理增强——详情页积分账户收支维度）：一次查询
+     * 覆盖用户集的 balance + earnedTotal + spentTotal 三元组。
+     * 返回 Object[]{userId, balance, earnedTotal, spentTotal}；无账户用户不出现在
+     * 结果（调用方按 0 兜底）。
+     */
+    @Query("SELECT a.userId, a.balance, a.earnedTotal, a.spentTotal FROM PointsAccount a WHERE a.userId IN :userIds")
+    List<Object[]> findAccountSummariesByUserIds(@Param("userIds") Collection<Long> userIds);
 }

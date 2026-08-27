@@ -12,6 +12,7 @@ import org.quwuting.quwutingservice.dancer.enums.DancerServiceCategory;
 import org.quwuting.quwutingservice.dancer.enums.DancerServiceSubCategory;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.enums.DemandDuration;
+import org.quwuting.quwutingservice.dancer.enums.DemandGuestFeedback;
 import org.quwuting.quwutingservice.dancer.enums.DemandRejectReason;
 import org.quwuting.quwutingservice.dancer.enums.DemandStatus;
 import org.quwuting.quwutingservice.dancer.enums.UserLocationOption;
@@ -90,6 +91,7 @@ public class PointsService {
             case ADMIN_ADJUST -> "平台调整";
             case GIFT -> "赠送";
             case UNLOCK -> "解锁";
+            case UNLOCK_REFUND -> "解锁返还";
         };
     }
 
@@ -116,16 +118,6 @@ public class PointsService {
      *  别名保持既有调用点可读性，取值恒一致） */
     private static final String DEMAND_TIME_WITHIN_3_DAYS = DemandDetailTexts.TIME_WITHIN_3_DAYS;
     private static final String DEMAND_TIME_WITHIN_3_DAYS_TEXT = DemandDetailTexts.TIME_WITHIN_3_DAYS_TEXT;
-
-    /**
-     * 验证消息按时段类别用词（2026-08-26 晚：对外展示仍用「按时段」（V46 合规词，
-     * 见 AGENTS.md 合规用词脱敏），验证消息用舞伴行话「包时」——舞伴更看得懂；
-     * 验证消息不含计费信息（仅时长「2小时」），与审核词库命中的高危组合
-     * 「包时+元/小时计费」不同，风险可控；若后续审核驳回，回退 = 界面保持
-     * 「按时段」、仅复制文本替换）。前端预览经同一词镜像（utils/demand.ts
-     * DEMAND_MESSAGE_PACKAGE_LABEL，注释互证）。
-     */
-    private static final String DEMAND_MESSAGE_PACKAGE_CATEGORY_LABEL = "包时";
 
     /**
      * 采纳奖励整句激励文案（2026-08-12 上报激励三触点，文案唯一事实源在本服务）。
@@ -655,11 +647,12 @@ public class PointsService {
         // 同样走邀约流程（管理员暂时也不给特权）；admin/本人要看联系方式走
         // dancer-edit 回显（详情接口对本人/管理员下发真实值，不依赖 unlock 豁免）。
         if (contactType && !target.contactRelay() && isOwnerOrAdmin(userId, target.ownerUserId())) {
-            UnlockResponse.DemandDetail demandDetail = recordDemandDetail(userId, targetId, demand, null);
+            DemandRecorded recorded = recordDemand(userId, targetId, demand, null);
+            UnlockResponse.DemandDetail demandDetail = recorded != null ? recorded.detail() : null;
             return new UnlockResponse(true, currentBalance(userId), targetType, targetId,
                     target.content(), target.contactImageUrl(),
                     demandDetail != null ? demandDetail.demandMessage() : null, false, demandDetail,
-                    null, null, null);
+                    recorded != null ? recorded.id() : null, null, null);
         }
         // 同一用户并发解锁串行化（防「双请求同时通过幂等检查 → 双双扣费」；
         // 锁必须在幂等检查之前获取，见 repository javadoc）
@@ -683,11 +676,12 @@ public class PointsService {
             Optional<DemandRecord> approved = demandRecordRepository
                     .findApprovedByUserIdAndDancerId(userId, targetId);
             if (approved.isPresent()) {
-                UnlockResponse.DemandDetail demandDetail = recordDemandDetail(userId, targetId, demand, null);
+                DemandRecorded recorded = recordDemand(userId, targetId, demand, null);
+                UnlockResponse.DemandDetail demandDetail = recorded != null ? recorded.detail() : null;
                 String demandMessage = demandDetail != null ? demandDetail.demandMessage() : null;
                 return new UnlockResponse(true, currentBalance(userId), targetType, targetId,
                         target.content(), target.contactImageUrl(), demandMessage, false, demandDetail,
-                        null, null, null);
+                        recorded != null ? recorded.id() : null, null, null);
             }
             DemandRecord pending = demandRecordRepository
                     .findPendingByUserIdAndDancerId(userId, targetId).orElse(null);
@@ -707,11 +701,12 @@ public class PointsService {
         // 2026-08-26 邀约中转：contactRelay 舞伴已在上方中转分支处理（基于邀约
         // 状态幂等），此处仅非中转舞伴。
         if (unlockRepository.findByUserIdAndTargetTypeAndTargetId(userId, targetType, targetId).isPresent()) {
-            UnlockResponse.DemandDetail demandDetail = contactType ? recordDemandDetail(userId, targetId, demand, null) : null;
+            DemandRecorded recorded = contactType ? recordDemand(userId, targetId, demand, null) : null;
+            UnlockResponse.DemandDetail demandDetail = recorded != null ? recorded.detail() : null;
             String demandMessage = demandDetail != null ? demandDetail.demandMessage() : null;
             return new UnlockResponse(true, currentBalance(userId), targetType, targetId,
                     target.content(), target.contactImageUrl(), demandMessage, false, demandDetail,
-                    null, null, null);
+                    recorded != null ? recorded.id() : null, null, null);
         }
         // 费用计算：无门槛恒免费；有门槛联系方式每日首免（受运营开关
         // dancer.contact.daily.free 控制，V49 默认 false = 下线——暂不提供首免，
@@ -841,11 +836,13 @@ public class PointsService {
         String detailText = DemandDetailTexts.detailText(serviceLabel, timeDetailLabel, durationLabel, locationLabel);
         // 2026-08-26 邀约中转（22 号文档）：状态 + 客人友好状态文案（服务端权威，
         // 前端零拼接）+ PENDING 时 expireAt（24h 降级截止）；联系方式字段仅本人 +
-        // APPROVED/AUTO_RELEASED 时下发（released()），其余状态恒 null——防联系
-        // 方式随未获批状态泄漏；status NULL（存量锚点记录）= 无中转语义，按现状
-        // 渲染（当时已拿到微信，不展示状态卡/联系方式行）。
+        // 已获批时下发（released()），其余状态恒 null——防联系方式随未获批状态泄漏。
+        // 2026-08-27（V56，docs/agents/25「邀约生命周期」根因修复）：存量 NULL
+        // 语义等价已发放（22 号文档明确），<b>同样下发联系方式</b>——此前
+        // released = status != null && status.released() 导致非中转（绝大多数）
+        // 舞伴的邀约详情页永远看不到联系方式 =「邀约单消失」的直接原因之一。
         DemandStatus status = DemandStatus.parseOrNull(record.getStatus());
-        boolean released = status != null && status.released();
+        boolean released = status == null || status.released();
         // 联系方式仅获批发放时展示；dancer 软删（下架）→ 摘要已 null，不展示
         String contactText = released && dancer != null ? dancer.getContact() : null;
         String contactImageUrl = released && dancer != null ? dancer.getContactImageUrl() : null;
@@ -884,7 +881,14 @@ public class PointsService {
                 rejectReason != null ? rejectReason.name() : null,
                 rejectReason != null ? rejectReason.guestText() : null,
                 record.getRescueRequestedAt() != null,
-                record.getOriginDemandId());
+                record.getOriginDemandId(),
+                // 2026-08-27（V56，docs/agents/25「分享闭环自动化 + 反馈闭环」）：
+                // shareOpenedAt（非空 = 舞伴已查看，客人侧「TA 已查看你的邀约」）+
+                // guestFeedback/feedbackRequestedAt（非空 = 已提交「没加上 TA？」
+                // 反馈，前端渲染已反馈态隐藏入口）
+                record.getShareOpenedAt(),
+                record.getGuestFeedback(),
+                record.getFeedbackRequestedAt());
     }
 
     /**
@@ -910,6 +914,103 @@ public class PointsService {
             throw new BusinessException(1001, "TA 还在回复中，请稍候");
         }
         throw new BusinessException(1001, "当前状态无需寻找替代");
+    }
+
+    /**
+     * 客人反馈「没加上 TA？」（2026-08-27，V56，docs/agents/25「反馈闭环」；
+     * POST /points/demands/{id}/feedback，需登录 + 本人）。
+     * <p>
+     * 根因（25 号文档）：非中转舞伴（contact_relay=false，绝大多数）平台不感知
+     * 线下结果——客人拿到微信后没加上/被拒/未回复，平台零感知、客人无出口。
+     * 本方法 = 一键反馈通道（用户无动力做多余操作：提交即返还该邀约解锁时的
+     * 原扣费积分，拿回自己花的分，无净收益可刷）。
+     * <ul>
+     *   <li>状态校验：仅已获批发放（存量 NULL / APPROVED / AUTO_RELEASED）且
+     *       未履约的邀约可反馈（PENDING 等待中 / REJECTED·EXPIRED 已有知因 +
+     *       换乘站 / 已履约成功 → 1001）；</li>
+     *   <li>幂等：{@code updateFeedbackIf}（WHERE feedback_requested_at IS NULL）
+     *       只置一次——已反馈过返回 submitted=false，不重复返还；</li>
+     *   <li>返还：反查该邀约解锁记录（PointsUnlock.transactionId）的原扣费金额，
+     *       {@link #earn} 一笔正分（UNLOCK_REFUND，source_id = 邀约 id——挣取
+     *       幂等键兜底并发）；免费解锁（无扣费流水）无返还；</li>
+     *   <li>管理端可见：AdminDemandItem/Detail 下发 guestFeedback 标记，工作台
+     *       识别需人工介入的邀约。</li>
+     * </ul>
+     */
+    @Transactional
+    public FeedbackResponse requestDemandFeedback(Long userId, Long demandId,
+                                                  DemandGuestFeedback reason) {
+        DemandRecord record = demandRecordRepository.findByUserIdAndId(userId, demandId)
+                .orElseThrow(() -> new BusinessException(1001, "邀约不存在"));
+        DemandStatus status = DemandStatus.parseOrNull(record.getStatus());
+        if (status != null && !status.released()) {
+            // PENDING（等待回复中）/ REJECTED·EXPIRED（已有知因文案 + 换乘站出口）
+            throw new BusinessException(1001, "当前状态无需反馈");
+        }
+        if (record.getFulfilledAt() != null) {
+            throw new BusinessException(1001, "本次邀约已完成，无需反馈");
+        }
+        String code = reason != null ? reason.name() : DemandGuestFeedback.OTHER.name();
+        int updated = demandRecordRepository.updateFeedbackIf(demandId, code, LocalDateTime.now());
+        if (updated == 0) {
+            // 已反馈过（幂等成功）：不重复返还
+            return new FeedbackResponse(false, false, 0);
+        }
+        log.info("客人 {} 反馈邀约 {}：{}", userId, demandId, code);
+        long refundPoints = refundUnlockForDemand(userId, record);
+        return new FeedbackResponse(true, refundPoints > 0, refundPoints);
+    }
+
+    /**
+     * 返还该邀约解锁时的原扣费积分（2026-08-27，V56，docs/agents/25「反馈闭环」）。
+     * 反查解锁记录（DANCER_CONTACT × dancerId）→ transactionId 非空 = 真实扣费
+     * → 反查流水 delta 绝对值 = 返还金额 → {@link #earn} 正分（UNLOCK_REFUND，
+     * source_id = 邀约 id，挣取唯一键幂等——重复反馈/并发只返还一次）。
+     * 免费解锁（transactionId=null）/ 流水缺失或非扣费（防御历史脏数据）→ 0 不返还。
+     */
+    private long refundUnlockForDemand(Long userId, DemandRecord record) {
+        PointsUnlock unlock = unlockRepository.findByUserIdAndTargetTypeAndTargetId(
+                        userId, PointsGateTargetType.DANCER_CONTACT, record.getDancerId())
+                .orElse(null);
+        if (unlock == null || unlock.getTransactionId() == null) {
+            return 0L;
+        }
+        PointsTransaction tx = transactionRepository.findById(unlock.getTransactionId()).orElse(null);
+        if (tx == null || tx.getDelta() >= 0) {
+            return 0L;
+        }
+        long amount = Math.abs(tx.getDelta());
+        earn(userId, amount, PointsSourceType.UNLOCK_REFUND, record.getId(),
+                "邀约 " + record.getId() + " 解锁返还");
+        return amount;
+    }
+
+    /**
+     * 我的进行中邀约摘要（2026-08-27，V56，docs/agents/25「进行中邀约」；
+     * 供 dancer 详情组装——舞伴详情页「进行中邀约」卡数据源）。
+     * <p>
+     * 根因：客人拿到微信返回详情页时"邀约单消失"——本摘要让最近一次邀约
+     * （时间/状态/是否被查看/是否履约）在详情页恒可见，邀约从"档案"变"活单"。
+     * 未登录（匿名）/无邀约 → null（前端不渲染）；走
+     * idx_qwt_demand_records_user_dancer 索引一条轻量查询（用户相关，不入公共缓存）。
+     */
+    @Transactional(readOnly = true)
+    public org.quwuting.quwutingservice.dancer.dto.response.DancerDetailResponse.RecentDemand
+    recentDemandSummary(Long userId, Long dancerId) {
+        if (userId == null) {
+            return null;
+        }
+        DemandRecord record = demandRecordRepository
+                .findTopByUserIdAndDancerIdOrderByIdDesc(userId, dancerId).orElse(null);
+        if (record == null) {
+            return null;
+        }
+        return new org.quwuting.quwutingservice.dancer.dto.response.DancerDetailResponse.RecentDemand(
+                record.getId(),
+                record.getCreatedAt(),
+                record.getStatus(),
+                record.getShareOpenedAt() != null,
+                record.getFulfilledAt() != null);
     }
 
     /** 今日是否已对"任意有门槛舞伴"解锁过联系方式（2026-08-24 每日首免判定；
@@ -1080,15 +1181,16 @@ public class PointsService {
      * 2026-08-26 晚（用户反馈优化，两轮）：前缀「去舞厅【】」→「💃 舞伴你好～ 在
      * 「去舞厅」看到你，想约你：【】」→（用户嫌寒暄老气）最终定稿
      * 「去舞厅」：【服务 · 时间 · 时长 · 位置】😊——书名号明确小程序名（防名词/动词
-     * 歧义）+ 去寒暄 + 结尾 emoji；分隔符统一「 · 」；服务类别用舞伴行话「包时」
-     * （对外展示仍「按时段」，见 DEMAND_MESSAGE_PACKAGE_CATEGORY_LABEL）——
+     * 歧义）+ 去寒暄 + 结尾 emoji；分隔符统一「 · 」；服务类别词与对外展示一致用
+     * 「按时段」（2026-08-27 收敛：验证消息不再用「包时」舞伴行话，统一 V46 合规词，
+     * 单一权威派生见 buildDemandServicePart）——
      * 微信加好友验证消息 50 字限制内，实测最长组合约 27 字）：
-     * {@code 「去舞厅」：【包时 · KTV · 近3天内 · 2小时 · 同城】😊}
+     * {@code 「去舞厅」：【按时段 · KTV · 近3天内 · 2小时 · 同城】😊}
      * （时长/位置未选时省略）。
      * 2026-08-26（用户反馈定稿落地）：删【】左右括号——微信验证消息输入框的
      * 方括号在部分机型显示拥挤/多余，定稿无括号版：
-     * {@code 「去舞厅」：包时 · KTV · 近3天内 · 2小时 · 同城😊}。
-     * 服务名 = 类别权威派生（PACKAGE = 包时 · 具体场景名；DANCE/ONLINE_CHAT =
+     * {@code 「去舞厅」：按时段 · KTV · 近3天内 · 2小时 · 同城😊}。
+     * 服务名 = 类别权威派生（PACKAGE = 按时段 · 具体场景名；DANCE/ONLINE_CHAT =
      * 类别名；仅 OTHER = admin 手动录入的服务内容）；前端预览规则与本方法一致
      * （注释互证，前端零拼接）。
      */
@@ -1097,7 +1199,7 @@ public class PointsService {
                                              String subCategoryCode,
                                              DemandDuration duration,
                                              String locationCode) {
-        String servicePart = buildDemandMessageServicePart(service, subCategoryCode);
+        String servicePart = buildDemandServicePart(service, subCategoryCode);
         String timePart = DEMAND_TIME_WITHIN_3_DAYS.equals(timeSlotCode)
                 ? DEMAND_TIME_WITHIN_3_DAYS_TEXT : DemandDetailTexts.formatDate(LocalDate.parse(timeSlotCode));
         StringBuilder sb = new StringBuilder("「去舞厅」：")
@@ -1112,29 +1214,15 @@ public class PointsService {
         return sb.append("😊").toString();
     }
 
-    /** 需求消息服务部分（2026-08-26）：按时段 = 类别名 · 具体场景名（如「按时段 · KTV」，
-     *  子选项已在 recordDemand 校验属于服务子类别集合，valueOf 安全）；
-     *  其余类别 = 服务 label（权威派生，仅 OTHER 为 admin 手动录入） */
+    /** 需求服务部分（2026-08-26；2026-08-27 收敛：验证消息与对外展示共用本方法——
+     *  单一权威派生，见 buildDemandMessage）：按时段 = 类别名 · 具体场景名
+     *  （如「按时段 · KTV」，子选项已在 recordDemand 校验属于服务子类别集合，
+     *  valueOf 安全）；其余类别 = 服务 label（仅 OTHER 为 admin 手动录入） */
     private static String buildDemandServicePart(DancerService service, String subCategoryCode) {
         if (service.getCategory() == DancerServiceCategory.PACKAGE
                 && subCategoryCode != null && !subCategoryCode.isBlank()) {
             DancerServiceSubCategory sub = DancerServiceSubCategory.valueOf(subCategoryCode);
             return service.getCategory().defaultLabel() + " · " + sub.defaultLabel();
-        }
-        return service.getLabel();
-    }
-
-    /**
-     * 验证消息服务部分（2026-08-26 晚，与 {@link #buildDemandServicePart} 并存）：
-     * 仅按时段类别的类别词不同——消息用舞伴行话「包时」（DEMAND_MESSAGE_PACKAGE_
-     * CATEGORY_LABEL），对外展示（服务卡/详情表格/海报 = buildDemandServicePart）仍
-     * 「按时段」（V46 合规词）。两者注释互证，避免误改。
-     */
-    private static String buildDemandMessageServicePart(DancerService service, String subCategoryCode) {
-        if (service.getCategory() == DancerServiceCategory.PACKAGE
-                && subCategoryCode != null && !subCategoryCode.isBlank()) {
-            DancerServiceSubCategory sub = DancerServiceSubCategory.valueOf(subCategoryCode);
-            return DEMAND_MESSAGE_PACKAGE_CATEGORY_LABEL + " · " + sub.defaultLabel();
         }
         return service.getLabel();
     }

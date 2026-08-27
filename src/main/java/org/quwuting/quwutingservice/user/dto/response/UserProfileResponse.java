@@ -33,11 +33,11 @@ public record UserProfileResponse(
         long pointsBalance,
         /** TA 创建的公开舞伴（NORMAL，最近创建在前） */
         List<UserDancerResponse> dancers,
-        /** 年龄（用户自主录入，null = 未填写；自愿分享通道下发，便于舞伴判断包时对象） */
+        /** 年龄（用户自主录入，null = 未填写；自愿分享通道下发，便于舞伴判断按时段对象） */
         Integer age,
         /** 性别（MALE / FEMALE，null = 未声明；自愿分享通道下发） */
         String gender,
-        /** 常驻城市（行政区划名，null = 未填写；自愿分享通道下发，便于同城包时匹配） */
+        /** 常驻城市（行政区划名，null = 未填写；自愿分享通道下发，便于同城按时段匹配） */
         String city,
         /**
          * 贡献档案摘要（2026-08-27，docs/agents/23；自愿分享通道下发——用户主动

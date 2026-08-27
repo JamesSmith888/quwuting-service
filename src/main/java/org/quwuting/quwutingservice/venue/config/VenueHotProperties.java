@@ -23,14 +23,18 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * 与详情页热度 chip 的核心行为项口径一致（满意度偏移属评分纠偏小项，不参与热门
  * 判定，见 AGENTS.md「热门场所标记」演进说明）。
  * <p>
- * 默认 70 的语义：≈ 近30天内 7 次收藏、或 70 次浏览、或 14 条动态、或 1 收藏 +
- * 60 浏览等组合——低于该值视为"无实质活跃信号"（纯浏览/冷启动）。配置可经
- * application.yaml 调整，无需改代码（单实例部署，改动即时生效）。
+ * 默认 70 的语义（<b>2026-08-27 浏览贡献重构后校准</b>）：行为热度的浏览项已由线性
+ * PV 计数改为「来源加权 + 近7天×2 + ln(1+x) 压缩」（见 VenueHeatWeights 浏览贡献注释），
+ * 纯浏览不再能单靠浏览量达标——原"≈ 70 次浏览"的达标路径关闭，这是预期效果（热门 =
+ * 真实人气，光有人看≠热门）。当前 70 ≈ 近30天 7 次收藏、或 3 次收藏 + 3 次评分 +
+ * 3 条正向反馈、或 2 次收藏 + 40+ 次加权浏览 + 1 次评分等<b>主动信号组合</b>。
+ * 配置可经 application.yaml 调整，无需改代码（单实例部署，改动即时生效）；
+ * 上线初期若热门数量过少（数据稀疏），运营可下调（如 40）观察。
  */
 @ConfigurationProperties(prefix = "venue.hot")
 public record VenueHotProperties(int minHeatScore) {
 
-    /** 配置缺失/非法时的安全回退：70 分（≈ 近30天 7 次收藏或 70 次浏览的最低活跃门槛） */
+    /** 配置缺失/非法时的安全回退：70 分（≈ 近30天 7 次收藏，或主动信号组合——纯浏览因 ln 压缩不再能单独达标） */
     private static final VenueHotProperties DEFAULT = new VenueHotProperties(70);
 
     public VenueHotProperties {

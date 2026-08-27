@@ -825,7 +825,12 @@ public class DancerService {
                 earningsEnabled, earningsAdUnitId, pub.adViews(),
                 dancer.isRequireUserLocation(),
                 dancer.isContactRelay(), dancer.isAutoRelease(),
-                lastAlbumUpdatedAt, lastContactUpdatedAt);
+                lastAlbumUpdatedAt, lastContactUpdatedAt,
+                // 我的进行中邀约摘要（2026-08-27，V56，docs/agents/25「邀约生命周期」：
+                // 详情页「进行中邀约」卡数据源——客人返回详情页不再"邀约单消失"，
+                // 恒可见最近一次邀约的时间/状态/被查看/履约入口。用户相关（不入
+                // 公共缓存），实时轻量查询；匿名/无邀约 → null 前端不渲染）
+                pointsService.recentDemandSummary(currentUserId, dancerId));
     }
 
     // ─── 服务范围（2026-08-24：admin 录入的黄页内容；详情公开读 + 管理端写） ─────
