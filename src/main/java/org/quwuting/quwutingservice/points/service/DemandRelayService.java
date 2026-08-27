@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.entity.DemandRecord;
+import org.quwuting.quwutingservice.dancer.enums.DemandRejectReason;
 import org.quwuting.quwutingservice.dancer.enums.DemandStatus;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerServiceRepository;
@@ -16,6 +17,7 @@ import org.quwuting.quwutingservice.points.dto.AdminDemandDetail;
 import org.quwuting.quwutingservice.points.dto.AdminDemandItem;
 import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
 import org.quwuting.quwutingservice.points.repository.PointsUnlockRepository;
+import org.quwuting.quwutingservice.points.service.ContributionService.ContributionAggregate;
 import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
 import org.springframework.data.domain.Page;
@@ -27,6 +29,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -81,6 +84,14 @@ public class DemandRelayService {
      *  舞伴统计缓存——解锁改变 dancer-stats 输入（unlockStats 累计人次/人数），对齐
      *  PointsService 解锁写路径同款边界；幂等跳过（记录已存在）不需失效） */
     private final org.quwuting.quwutingservice.dancer.service.DancerDetailCacheService dancerDetailCacheService;
+    /** 贡献档案（2026-08-27，docs/agents/24：转发话术信任信号——客人贡献等级称号
+     *  批量聚合防 N+1，与工作台列表同页面批量取用） */
+    private final ContributionService contributionService;
+
+    /** 客人贡献等级称号（转发话术信任信号拼装；NOVICE = 无信号值，null 不拼装） */
+    private static String trustLevelName(ContributionAggregate agg) {
+        return agg == null || agg.level().name().equals("NOVICE") ? null : agg.levelName();
+    }
 
     /**
      * 邀约工作台待办列表（PENDING 分页倒序，新邀约在前）。
@@ -125,10 +136,23 @@ public class DemandRelayService {
                 : userRepository.findAllById(userIds).stream()
                         .filter(u -> !u.isDeleted())
                         .collect(Collectors.toMap(User::getId, u -> u));
+        // 2026-08-27 信任信号批量聚合（docs/agents/24）：贡献等级（一次 GROUP BY
+        // 覆盖整页用户）+ 履约确认数（该客人 × 该舞伴已合作 N 次）——转发话术拼装
+        // 「已确认合作 N 次 · 等级称号」，舞伴一眼判断客人诚意（防口嗨信任信号）
+        Map<Long, ContributionAggregate> contributionMap =
+                contributionService.aggregatesFor(userIds);
+        Map<String, Long> confirmedMap = userIds.isEmpty() || dancerIds.isEmpty() ? Map.of()
+                : demandRecordRepository.countConfirmedGroupByUserIdsAndDancerIds(userIds, dancerIds)
+                        .stream()
+                        .collect(Collectors.toMap(
+                                row -> row[0] + ":" + row[1],
+                                row -> (Long) row[2]));
         LocalDateTime remindBefore = LocalDateTime.now().minus(REMIND_AFTER);
         return records.map(r -> {
             Dancer dancer = dancerMap.get(r.getDancerId());
             User user = userMap.get(r.getUserId());
+            long cooperationCount = confirmedMap.getOrDefault(
+                    r.getUserId() + ":" + r.getDancerId(), 0L);
             return new AdminDemandItem(
                     r.getId(),
                     r.getCreatedAt(),
@@ -141,7 +165,11 @@ public class DemandRelayService {
                     user != null ? Math.max(0, Duration.between(user.getCreatedAt(), LocalDateTime.now()).toDays()) : 0,
                     r.getMessage(),
                     r.getCreatedAt().isBefore(remindBefore),
-                    r.getStatus());
+                    r.getStatus(),
+                    r.getRejectReason(),
+                    r.getRescueRequestedAt() != null,
+                    cooperationCount,
+                    trustLevelName(contributionMap.get(r.getUserId())));
         });
     }
 
@@ -172,6 +200,11 @@ public class DemandRelayService {
         // （「与 TA 已合作 N 次」）——管理员转发邀约时可参考/告知舞伴（私域信号）
         long cooperationCount = demandRecordRepository.countConfirmedByUserAndDancer(
                 record.getUserId(), record.getDancerId());
+        // 2026-08-27 信任信号 + 拒绝原因（docs/agents/24）：贡献等级称号（转发话术
+        // 拼装，NOVICE 无信号值 = null）；拒绝原因 code + 客人已请求替代标记
+        // （已处理视图展示原因标签 + 换乘站「代找替代」操作入口）
+        String contributionLevelName = trustLevelName(
+                contributionService.aggregatesFor(List.of(record.getUserId())).get(record.getUserId()));
         return new AdminDemandDetail(
                 record.getId(),
                 record.getCreatedAt(),
@@ -191,7 +224,10 @@ public class DemandRelayService {
                 locationLabel,
                 detailText,
                 record.getStatus(),
-                cooperationCount);
+                cooperationCount,
+                record.getRejectReason(),
+                record.getRescueRequestedAt() != null,
+                contributionLevelName);
     }
 
     /**
@@ -224,24 +260,82 @@ public class DemandRelayService {
             throw new BusinessException(1001, "该邀约已处理");
         }
         writeUnlockIfAbsent(record);
-        notifyDemandStatus(record, DemandStatus.APPROVED);
+        notifyDemandStatus(record, DemandStatus.APPROVED, null);
         log.info("管理员发放邀约 {} 联系方式（舞伴 {}，客人 {}）", demandId, record.getDancerId(), record.getUserId());
     }
 
     /**
-     * 拒绝（PENDING → REJECTED）：舞伴在微信回「不给」后管理员一键操作。
-     * 客人侧文案由 DemandStatus.statusText 派生（「TA 暂时不方便接收邀约」，
-     * 中性表述 + 引导看其他舞伴，尊重友好原则）。
+     * 拒绝（PENDING → REJECTED + 拒绝原因）：舞伴在微信回「不给」后管理员一键操作。
+     * <p>
+     * 2026-08-27（V55，docs/agents/24「P0 拒绝原因闭环」）：拒绝时选填原因标签
+     * （DemandRejectReason code，可空 = 旧客户端/未选）——客人侧知因文案
+     * （guestText「TA 暂时不方便（档期冲突）」），拒绝 = 信息而非句号；
+     * reason 落库走 {@code updateRejectIfPending}（WHERE status='PENDING'
+     * 天然幂等），无原因的存量行为零回归（客人侧回退通用状态文案）。
      */
     @Transactional
-    public void reject(Long demandId) {
+    public void reject(Long demandId, DemandRejectReason reason) {
         DemandRecord record = findPendingOrThrow(demandId);
-        int updated = demandRecordRepository.updateStatusIfPending(demandId, DemandStatus.REJECTED.name());
+        String reasonCode = reason != null ? reason.name() : null;
+        int updated = demandRecordRepository.updateRejectIfPending(demandId, reasonCode);
         if (updated == 0) {
             throw new BusinessException(1001, "该邀约已处理");
         }
-        notifyDemandStatus(record, DemandStatus.REJECTED);
-        log.info("管理员拒绝邀约 {}（舞伴 {}，客人 {}）", demandId, record.getDancerId(), record.getUserId());
+        notifyDemandStatus(record, DemandStatus.REJECTED, reason);
+        log.info("管理员拒绝邀约 {}（舞伴 {}，客人 {}，原因 {}）", demandId,
+                record.getDancerId(), record.getUserId(), reasonCode);
+    }
+
+    /**
+     * 代找替代舞伴（2026-08-27，V55，docs/agents/24「换乘站」；
+     * POST /admin/demands/{id}/rescue，仅 ADMIN）。
+     * <p>
+     * 语义：被拒/超时邀约（REJECTED/EXPIRED，含未点请求的——管理员看到记录即可
+     * 主动代找）→ 管理员微信人工确认替代舞伴同意 → 平台以原邀约四要素 +
+     * message <b>原样代建</b>一条新邀约（status=APPROVED 直接发放替代舞伴联系
+     * 方式，写解锁记录 = 客人幂等直返 + 舞伴统计）→ 站内信通知客人（直达新邀约
+     * 详情）。原邀约状态不动（语义 = 原舞伴拒绝了，替代是新的邀约）。
+     * <p>
+     * 幂等：部分唯一索引 idx_qwt_demand_records_rescue_origin（origin_demand_id
+     * 非空唯一）= 一次救援只产出一条替代邀约，重复代建 → 1001「已为该邀约找到
+     * 替代舞伴」；时间窗口：替代邀约 message 原样复用（含原时间槽，客人看详情
+     * 时知晓，管理员微信确认时已同步过）。<b>无用户间通信</b>：舞伴同意 = 管理员
+     * 微信线下确认，平台只代发联系方式（合规同批准制）。
+     * 客人侧「请求替代」置标记 = PointsService.requestDemandRescue（我的邀约域）。
+     */
+    @Transactional
+    public Long rescue(Long demandId, Long targetDancerId) {
+        DemandRecord original = demandRecordRepository.findById(demandId)
+                .orElseThrow(() -> new BusinessException(1001, "邀约不存在"));
+        DemandStatus status = DemandStatus.parseOrNull(original.getStatus());
+        if (status != DemandStatus.REJECTED && status != DemandStatus.EXPIRED) {
+            throw new BusinessException(1001, "仅被拒绝或超时的邀约可代找替代");
+        }
+        Dancer target = dancerRepository.findByIdAndDeletedFalse(targetDancerId)
+                .orElseThrow(() -> new BusinessException(1001, "替代舞伴不存在或已下架"));
+        if (demandRecordRepository.existsByOriginDemandId(demandId)) {
+            throw new BusinessException(1001, "已为该邀约找到替代舞伴");
+        }
+        // 以原邀约四要素 + message 原样代建替代邀约（status=APPROVED 直接发放：
+        // 管理员已微信确认替代舞伴同意；originDemandId 溯源 = 「我的邀约」平台代找标记）
+        DemandRecord rescued = new DemandRecord();
+        rescued.setUserId(original.getUserId());
+        rescued.setDancerId(targetDancerId);
+        rescued.setServiceIds(original.getServiceIds());
+        rescued.setTimeSlots(original.getTimeSlots());
+        rescued.setDuration(original.getDuration());
+        rescued.setUserLocation(original.getUserLocation());
+        rescued.setMessage(original.getMessage());
+        rescued.setStatus(DemandStatus.APPROVED.name());
+        rescued.setOriginDemandId(demandId);
+        DemandRecord saved = demandRecordRepository.save(rescued);
+        // 获批 = 解锁事件（免费 transactionId=null）：客人幂等直返 + 舞伴统计；
+        // insertIfAbsent 对重复（客人在替代舞伴处已解锁过）幂等跳过
+        writeUnlockIfAbsent(saved);
+        notifyRescued(original, target, saved.getId());
+        log.info("管理员为邀约 {} 代找替代：{}（舞伴 {}，客人 {}）", demandId,
+                targetDancerId, targetDancerId, original.getUserId());
+        return saved.getId();
     }
 
     /**
@@ -266,7 +360,7 @@ public class DemandRelayService {
                 if (release) {
                     writeUnlockIfAbsent(record);
                 }
-                notifyDemandStatus(record, release ? DemandStatus.AUTO_RELEASED : DemandStatus.EXPIRED);
+                notifyDemandStatus(record, release ? DemandStatus.AUTO_RELEASED : DemandStatus.EXPIRED, null);
                 handled++;
                 log.info("邀约 {} 超时降级：{}（舞伴 {} autoRelease={}）", record.getId(),
                         release ? "自动发放" : "告知未回复", record.getDancerId(), release);
@@ -328,22 +422,51 @@ public class DemandRelayService {
      * 徽标，点击直达邀约详情页，无需客人主动刷新「我的邀约」）。
      * <p>
      * 内容 = {@link DemandStatus#statusText()} 服务端权威友好文案（尊重友好原则，
-     * 前端零拼接）；幂等 = 调用方已按 {@code updateStatusIfPending} 实际流转（返回
-     * 行数 &gt; 0）守卫，重复操作/并发不重发；同事务失败整体回滚保证通知不丢。
+     * 前端零拼接）；<b>2026-08-27 拒绝知因</b>（V55，docs/agents/24）：REJECTED 时
+     * 传入原因则用 {@link DemandRejectReason#guestText()}（「TA 暂时不方便（档期
+     * 冲突）」——客人知因减痛），否则回退通用状态文案（存量/未选原因兼容）；
+     * 幂等 = 调用方已按 {@code updateStatusIfPending} 实际流转（返回行数 &gt; 0）
+     * 守卫，重复操作/并发不重发；同事务失败整体回滚保证通知不丢。
      * 软关联 DEMAND（深链邀约详情页 pages/demand-detail?id=）。
      */
-    private void notifyDemandStatus(DemandRecord record, DemandStatus status) {
+    private void notifyDemandStatus(DemandRecord record, DemandStatus status, DemandRejectReason reason) {
         String title;
+        String content;
         switch (status) {
-            case APPROVED -> title = "邀约已通过";
-            case REJECTED -> title = "邀约未通过";
-            case AUTO_RELEASED -> title = "联系方式已自动发放";
-            case EXPIRED -> title = "邀约已过期";
+            case APPROVED -> {
+                title = "邀约已通过";
+                content = status.statusText();
+            }
+            case REJECTED -> {
+                title = "邀约未通过";
+                content = reason != null ? reason.guestText() : status.statusText();
+            }
+            case AUTO_RELEASED -> {
+                title = "联系方式已自动发放";
+                content = status.statusText();
+            }
+            case EXPIRED -> {
+                title = "邀约已过期";
+                content = status.statusText();
+            }
             default -> {
                 return; // PENDING 不通知（等待态无需打扰）
             }
         }
         messageService.create(record.getUserId(), MessageType.DEMAND_STATUS,
-                title, status.statusText(), "DEMAND", record.getId());
+                title, content, "DEMAND", record.getId());
+    }
+
+    /**
+     * 替代邀约站内信（2026-08-27，V55，docs/agents/24「换乘站」）：管理员代建
+     * 替代邀约成功后同事务通知客人——「已为您找到新的舞伴」+ 直达新邀约详情
+     * （客人在「我的邀约」看到新记录 + 联系方式已发放）。内容 = 服务端权威文案
+     * （含替代舞伴昵称，前端零拼接）；与 notifyDemandStatus 同通道（DEMAND_STATUS）。
+     */
+    private void notifyRescued(DemandRecord original, Dancer target, Long newDemandId) {
+        String title = "已为您找到新的舞伴";
+        String content = "「" + target.getNickname() + "」可以接您的邀约，联系方式已发放，快去看看并联系 TA 吧";
+        messageService.create(original.getUserId(), MessageType.DEMAND_STATUS,
+                title, content, "DEMAND", newDemandId);
     }
 }

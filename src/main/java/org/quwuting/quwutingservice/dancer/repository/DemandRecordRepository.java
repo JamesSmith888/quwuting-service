@@ -84,6 +84,32 @@ public interface DemandRecordRepository extends JpaRepository<DemandRecord, Long
     int updateStatusIfPending(@Param("id") Long id, @Param("to") String to);
 
     /**
+     * 拒绝条件更新（PENDING → REJECTED + 落拒绝原因，2026-08-27，V55，
+     * docs/agents/24「P0 拒绝原因闭环」）：非 PENDING 不更新 = 天然幂等（重复
+     * 拒绝/并发无竞态，同 updateStatusIfPending 范式）。rejectReason 可空
+     * （旧客户端/未选原因，客人侧回退通用状态文案）。
+     */
+    @Modifying(clearAutomatically = true)
+    @Query("UPDATE DemandRecord d SET d.status = 'REJECTED', d.rejectReason = :reason " +
+            "WHERE d.id = :id AND d.status = 'PENDING'")
+    int updateRejectIfPending(@Param("id") Long id, @Param("reason") String reason);
+
+    /**
+     * 客人请求替代条件更新（2026-08-27，V55，docs/agents/24「换乘站」）：
+     * 仅 REJECTED/EXPIRED 且未请求过时置 rescue_requested_at（WHERE 双条件 =
+     * 天然幂等，重复请求/并发只成功一次）。返回 0 = 已请求过（幂等成功）或
+     * 状态不可请求（调用方已前置校验状态）。
+     */
+    @Modifying(clearAutomatically = true)
+    @Query("UPDATE DemandRecord d SET d.rescueRequestedAt = :at " +
+            "WHERE d.id = :id AND d.status IN ('REJECTED', 'EXPIRED') AND d.rescueRequestedAt IS NULL")
+    int updateRescueRequestedIf(@Param("id") Long id, @Param("at") LocalDateTime at);
+
+    /** 该原邀约是否已有替代邀约（2026-08-27：部分唯一索引
+     *  idx_qwt_demand_records_rescue_origin 兜底，一次救援只产出一条替代邀约） */
+    boolean existsByOriginDemandId(Long originDemandId);
+
+    /**
      * 该客人与该舞伴的履约确认数（「与 TA 已合作 N 次」，2026-08-27，V54，
      * docs/agents/23「P1 履约闭环」）：fulfilled_at 非空 = 客人已确认履约。
      * 走 idx_qwt_demand_records_user_dancer 索引；计数含本次已确认的邀约。
@@ -91,4 +117,18 @@ public interface DemandRecordRepository extends JpaRepository<DemandRecord, Long
     @Query("SELECT COUNT(d) FROM DemandRecord d WHERE d.userId = :userId " +
             "AND d.dancerId = :dancerId AND d.fulfilledAt IS NOT NULL")
     long countConfirmedByUserAndDancer(@Param("userId") Long userId, @Param("dancerId") Long dancerId);
+
+    /**
+     * 批量履约确认数（2026-08-27，V55，docs/agents/24：邀约工作台列表行拼转发
+     * 话术信任信号用——「该客人 × 该舞伴已合作 N 次」，批量 GROUP BY 防 N+1，
+     * 与单条 {@link #countConfirmedByUserAndDancer} 同口径）。返回行 =
+     * [userId, dancerId, count]（Object[]）；范围 = 指定用户集合 × 指定舞伴集合
+     * 内 fulfilled_at 非空组合（可能含不在本页邀约组合中的 user×dancer 对，结果集
+     * 用户数级别，内存按 "userId:dancerId" 组合键合并无压力）。
+     */
+    @Query("SELECT d.userId, d.dancerId, COUNT(d) FROM DemandRecord d " +
+            "WHERE d.userId IN :userIds AND d.dancerId IN :dancerIds AND d.fulfilledAt IS NOT NULL " +
+            "GROUP BY d.userId, d.dancerId")
+    List<Object[]> countConfirmedGroupByUserIdsAndDancerIds(
+            @Param("userIds") Iterable<Long> userIds, @Param("dancerIds") Iterable<Long> dancerIds);
 }

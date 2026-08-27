@@ -2,14 +2,19 @@ package org.quwuting.quwutingservice.points.controller;
 
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
+import org.quwuting.quwutingservice.dancer.enums.DemandRejectReason;
+import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.points.dto.AdminDemandDetail;
 import org.quwuting.quwutingservice.points.dto.AdminDemandItem;
+import org.quwuting.quwutingservice.points.dto.RejectDemandRequest;
+import org.quwuting.quwutingservice.points.dto.RescueDemandRequest;
 import org.quwuting.quwutingservice.points.service.DemandRelayService;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.springframework.data.domain.Page;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -83,11 +88,36 @@ public class AdminDemandController {
         return ApiResponse.ok(null);
     }
 
-    /** 拒绝（POST /admin/demands/{id}/reject；舞伴回「不给」后一键操作） */
+    /**
+     * 拒绝（POST /admin/demands/{id}/reject；舞伴回「不给」后一键操作）。
+     * 2026-08-27（V55，docs/agents/24）：body 选填拒绝原因（DemandRejectReason
+     * code，可空 = 旧客户端/未选——客人侧回退通用状态文案，拒绝动作不因原因
+     * 字段失败；非法 code 应用层 parseOrNull 按 null 防御）。
+     */
     @PostMapping("/{id}/reject")
-    public ApiResponse<Void> reject(@PathVariable Long id) {
+    public ApiResponse<Void> reject(@PathVariable Long id,
+                                    @RequestBody(required = false) RejectDemandRequest request) {
         UserContext.requireAdmin();
-        demandRelayService.reject(id);
+        DemandRejectReason reason = request == null ? null
+                : DemandRejectReason.parseOrNull(request.reason());
+        demandRelayService.reject(id, reason);
         return ApiResponse.ok(null);
+    }
+
+    /**
+     * 代找替代舞伴（POST /admin/demands/{id}/rescue；仅 ADMIN，2026-08-27，
+     * V55，docs/agents/24「换乘站」）：被拒/超时邀约 → 管理员微信人工确认替代
+     * 舞伴同意 → 平台以原邀约四要素 + message 原样代建 APPROVED 替代邀约（直接
+     * 发放替代舞伴联系方式 + 站内信通知客人直达新邀约详情）。幂等：一次救援
+     * 只产出一条替代邀约（origin_demand_id 部分唯一索引兜底），重复 → 1001。
+     */
+    @PostMapping("/{id}/rescue")
+    public ApiResponse<Long> rescue(@PathVariable Long id,
+                                    @RequestBody(required = false) RescueDemandRequest request) {
+        UserContext.requireAdmin();
+        if (request == null || request.targetDancerId() == null) {
+            throw new BusinessException(1001, "请选择替代舞伴");
+        }
+        return ApiResponse.ok(demandRelayService.rescue(id, request.targetDancerId()));
     }
 }

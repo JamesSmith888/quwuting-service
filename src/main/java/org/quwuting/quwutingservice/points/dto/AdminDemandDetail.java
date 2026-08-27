@@ -16,6 +16,11 @@ import java.time.LocalDateTime;
  * 该舞伴的履约确认数（「与 TA 已合作 N 次」），管理员转发邀约时可参考/告知舞伴
  * （私域信号，不公开广播）。
  * <p>
+ * 2026-08-27 拒绝原因 + 信任信号 + 替代（docs/agents/24）：加 {@code rejectReason}
+ * （拒绝原因 code，已处理视图展示标签）/ {@code rescueRequested}（客人已请求平台
+ * 代找替代——详情页提供「代找替代」操作入口）/ {@code contributionLevelName}（客人
+ * 贡献等级称号，转发话术信任信号拼装）。
+ * <p>
  * 隐私克制（同待办列表）：不下发客人真实联系方式（openId 等）；只有 message
  * 需求文本。
  */
@@ -39,5 +44,11 @@ public record AdminDemandDetail(
         String demandDetailText,
         String status,
         /** 该客人与该舞伴的履约确认数（「与 TA 已合作 N 次」，私域信号） */
-        long cooperationCount) {
+        long cooperationCount,
+        /** 拒绝原因 code（DemandRejectReason；可空 = 未填/存量） */
+        String rejectReason,
+        /** 客人已请求平台代找替代（非空 = 高亮 + 提供「代找替代」操作） */
+        boolean rescueRequested,
+        /** 客人贡献等级称号（转发话术信任信号；NOVICE 无信号值 = null 不拼装） */
+        String contributionLevelName) {
 }

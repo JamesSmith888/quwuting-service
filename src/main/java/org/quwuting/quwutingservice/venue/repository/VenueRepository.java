@@ -170,15 +170,19 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             """;
 
     /**
-     * 热度分（不含距离项）：运营权重 + 「行为热度」。
+     * 「行为热度」（不含运营权重）：列表排序/热门判定共用的<b>行为口径</b>，
+     * <b>2026-08-27 从 HEAT_SCORE 拆分</b>（原公式内联于 HEAT_SCORE，为承载
+     * 「零行为门店运营权重守卫」而独立成常量——见 {@link #HEAT_SCORE}）。
+     * <p>
+     * 语义与热门标记的「行为热度」（完整热度分扣除运营权重 sortWeight）完全一致：
+     * 近30天浏览×1 + 收藏总数×10 + 近30天新增收藏×15 + 动态总数×5 + 近30天评分数×8
+     * + 近30天正向 Reaction×3 + 近30天收到积分 × :pointsWeight（2026-08-10 V2 新增，
+     * 权重来自配置 app.points.heat-weight，运营校准对象）。
      * <p>
      * <b>2026-08-08 口径统一</b>（修复列表/详情双口径分叉）：本片段是
      * {@link org.quwuting.quwutingservice.venue.service.VenueHeatService#computeHeat}
-     * 热度公式的<b>行为部分</b>镜像——近30天浏览×1 + 收藏总数×10 + 近30天新增收藏×15
-     * + 动态总数×5 + 近30天评分数×8 + 近30天正向 Reaction×3
-     * <b>+ 近30天收到积分 × :pointsWeight（2026-08-10 V2 新增，权重来自配置
-     * app.points.heat-weight，运营校准对象）</b>。满意度偏移（口碑微调 ±80）仅参与
-     * 热度页综合展示，不进列表排序——排序看"行为热度"，口碑在热度页呈现
+     * 热度公式的<b>行为部分</b>镜像——满意度偏移（口碑微调 ±80）仅参与热度页综合展示，
+     * 不进列表排序——排序看"行为热度"，口碑在热度页呈现
      * （权重唯一事实源 = {@link org.quwuting.quwutingservice.config.VenueHeatWeights}
      * + PointsProperties，调整权重必须同步本片段与 findHotVenueIds 双处镜像，
      * 见后端 AGENTS.md「场所热度」章节）。
@@ -207,10 +211,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      *       的 targetType 枚举字段比较。</li>
      * </ul>
      */
-    String HEAT_SCORE = """
-            (v.sortWeight
-             + (SELECT COUNT(*) FROM VenueView vv
-                WHERE vv.venueId = v.id AND vv.viewDate >= (CURRENT_DATE - 30 day) AND vv.viewDate < CURRENT_DATE) * """
+    String HEAT_BEHAVIOR = """
+            ((SELECT COUNT(*) FROM VenueView vv
+               WHERE vv.venueId = v.id AND vv.viewDate >= (CURRENT_DATE - 30 day) AND vv.viewDate < CURRENT_DATE) * """
             + VenueHeatWeights.VIEW + """
              + (SELECT COUNT(*) FROM Favorite f
                 WHERE f.venueId = v.id AND f.deleted = false) * """
@@ -238,12 +241,46 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             """;
 
     /**
+     * 热度分（不含距离项）：运营权重 + 「行为热度」。
+     * <p>
+     * <b>2026-08-27 零行为权重守卫</b>（生产实证修复：79 家种子门店被批量赋予 30~50
+     * 运营权重，其中 42 家行为热度为 0——零人气的"僵尸门店"仅靠权重挤占真实热门门店的
+     * 排位，MT舞酒吧 sortWeight=45 + 行为 76 被抬到列表第 3）。语义 = 与热门标记
+     * 「行为热度 ≥ 门槛」同构的曝光门槛：<b>行为热度 = 0 的门店（无实质活跃信号）
+     * 不因运营权重获得排序曝光</b>——
+     * <pre>
+     * HEAT_SCORE = CASE WHEN HEAT_BEHAVIOR &gt; 0 THEN sortWeight ELSE 0 END
+     *              + HEAT_BEHAVIOR
+     * </pre>
+     * 行为热度 &gt; 0（有任一实质活跃信号）时运营权重照常参与——运营推广提升曝光属其
+     * 本职，仅对"零行为门店"失效。与 {@code findHotVenueIds} 的关系：热门判定已有
+     * 「行为热度 ≥ venue.hot.min-heat-score（默认 70）」绝对门槛兜底，零行为门店
+     * 行为=0 &lt; 70 恒不进热门集合，无需重复守卫（见 findHotVenueIds javadoc）。
+     * <p>
+     * <b>2026-08-08 口径统一</b>（修复列表/详情双口径分叉）：行为部分见
+     * {@link #HEAT_BEHAVIOR}——本片段只是在其上叠加"受守卫的运营权重"。
+     * <p>
+     * 注意：本片段引用 {@code :positiveCodes} 与 {@code :pointsWeight}——使用本片段的
+     * 查询方法必须声明这两个参数。HEAT_BEHAVIOR 在 CASE 条件与求和项各出现一次，
+     * 子查询执行两遍；数据规模数百级 + 标量子查询命中 (venue_id, ...) 索引，无性能压力。
+     */
+    String HEAT_SCORE = """
+            (CASE WHEN ("""
+            + HEAT_BEHAVIOR + """
+            ) > 0 THEN v.sortWeight ELSE 0 END
+             + """
+            + HEAT_BEHAVIOR + """
+            )
+            """;
+
+    /**
      * 列表主查询（推荐排序 + 用户坐标）：筛选 + 复合评分排序 + 分页。
      * <p>
      * 排序公式（服务端排序保证分页正确性）：
      * <pre>
-     * score = 行为热度（HEAT_SCORE：运营权重 + 近30天浏览×1 + 收藏×10 + 新增收藏×15
-     *                     + 动态×5 + 评分×8 + 正向反馈×3，见 HEAT_SCORE 注释）
+     * score = 行为热度（HEAT_SCORE = 受守卫的运营权重 + 近30天浏览×1 + 收藏×10 + 新增收藏×15
+     *                     + 动态×5 + 评分×8 + 正向反馈×3 + 近30天积分×pointsWeight，
+     *                     2026-08-27 起行为热度=0 的门店运营权重不生效，见 HEAT_SCORE 注释）
      *       + 100 / (1 + 距离km)（邻近加成，Haversine）
      * </pre>
      * 距离项使本地场所在全国列表中自然置顶，跨城市时衰减至可忽略，由热度与运营权重决定顺序。
@@ -698,6 +735,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * <p>
      * 排序口径与列表查询一致（{@link #HEAT_SCORE} 行为热度镜像，2026-08-08 与列表
      * 排序统一——修复此前 fav×20+post×10 旧公式与热度页 heatScore 的双口径分叉）。
+     * <b>2026-08-27 起无需列表侧的「零行为运营权重守卫」</b>：热门判定已有
+     * 「行为热度 ≥ venue.hot.min-heat-score（默认 70）」绝对门槛兜底——零行为门店
+     * 行为=0 &lt; 70 恒不进热门集合，运营权重不可能伪造热门资格（见 HEAT_SCORE javadoc）。
      * <p>
      * <b>双条件判定（2026-08-08 确立，修复"热度指数 2 也有热门标签"的伪热门缺陷）</b>：
      * <ul>

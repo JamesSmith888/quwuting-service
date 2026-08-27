@@ -12,6 +12,7 @@ import org.quwuting.quwutingservice.dancer.enums.DancerServiceCategory;
 import org.quwuting.quwutingservice.dancer.enums.DancerServiceSubCategory;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.enums.DemandDuration;
+import org.quwuting.quwutingservice.dancer.enums.DemandRejectReason;
 import org.quwuting.quwutingservice.dancer.enums.DemandStatus;
 import org.quwuting.quwutingservice.dancer.enums.UserLocationOption;
 import org.quwuting.quwutingservice.dancer.repository.DancerPhotoRepository;
@@ -800,7 +801,9 @@ public class PointsService {
                     dancer != null && dancer.getStatus() == DancerStatus.NORMAL,
                     r.getMessage(),
                     r.getStatus(),
-                    r.getCreatedAt());
+                    r.getCreatedAt(),
+                    r.getOriginDemandId(),
+                    r.getRejectReason());
         });
     }
 
@@ -850,6 +853,12 @@ public class PointsService {
         // null = 未确认）+ cooperationCount（该客人与该舞伴的履约确认数，含本次）
         long cooperationCount = demandRecordRepository.countConfirmedByUserAndDancer(
                 userId, record.getDancerId());
+        // 2026-08-27 拒绝原因 + 替代邀约（docs/agents/24）：REJECTED 且管理员已填
+        // 原因时下发 rejectReason + 权威知因文案（guestText——前端 display =
+        // rejectReasonText || statusText，零拼接）；rescueRequested = 客人已请求
+        // 平台代找替代（终态卡按钮变已请求态）；originDemandId = 本邀约是平台代找
+        // 的替代邀约（前端展示「平台代找」标识）
+        DemandRejectReason rejectReason = DemandRejectReason.parseOrNull(record.getRejectReason());
         return new DemandDetailResponse(
                 record.getId(),
                 record.getDancerId(),
@@ -871,7 +880,36 @@ public class PointsService {
                 contactImageUrl,
                 record.getCreatedAt(),
                 record.getFulfilledAt(),
-                cooperationCount);
+                cooperationCount,
+                rejectReason != null ? rejectReason.name() : null,
+                rejectReason != null ? rejectReason.guestText() : null,
+                record.getRescueRequestedAt() != null,
+                record.getOriginDemandId());
+    }
+
+    /**
+     * 客人请求平台代找替代（2026-08-27，V55，docs/agents/24「换乘站」；
+     * POST /points/demands/{id}/rescue-request，需登录 + 本人；我的邀约域）。
+     * <p>
+     * 语义：被拒/超时终态（REJECTED/EXPIRED）页客人点「让平台帮您找类似的」——
+     * 置 {@code rescue_requested_at}（WHERE 双条件 = 只置一次幂等，重复请求成功
+     * 不报错）→ 管理端工作台识别「客人想要续」高亮优先处理，管理员微信人工确认
+     * 替代舞伴同意后代建替代邀约（DemandRelayService.rescue）。其他状态 → 1001
+     * （PENDING 等待中 / APPROVED 已拿到微信，无需替代）。
+     */
+    public void requestDemandRescue(Long userId, Long demandId) {
+        DemandRecord record = demandRecordRepository.findByUserIdAndId(userId, demandId)
+                .orElseThrow(() -> new BusinessException(1001, "邀约不存在"));
+        DemandStatus status = DemandStatus.parseOrNull(record.getStatus());
+        if (status == DemandStatus.REJECTED || status == DemandStatus.EXPIRED) {
+            demandRecordRepository.updateRescueRequestedIf(demandId, LocalDateTime.now());
+            log.info("客人 {} 请求为被拒邀约 {} 代找替代", userId, demandId);
+            return;
+        }
+        if (status == DemandStatus.PENDING) {
+            throw new BusinessException(1001, "TA 还在回复中，请稍候");
+        }
+        throw new BusinessException(1001, "当前状态无需寻找替代");
     }
 
     /** 今日是否已对"任意有门槛舞伴"解锁过联系方式（2026-08-24 每日首免判定；

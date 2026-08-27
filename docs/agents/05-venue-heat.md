@@ -43,6 +43,7 @@ SQL 侧镜像一致性由 `VenueHeatServiceTest` 公式测试 + 本 AGENTS.md �
 
 **列表排序/热门标记的口径（2026-08-08 统一，修复双口径分叉）**：
 - 列表「热度最高」排序（`VenueRepository.searchHeat*`）、推荐排序的热度项（`searchRanked*`）、热门场所标记（`findHotVenueIds`）全部使用 `VenueRepository.HEAT_SCORE` 片段 = **行为热度镜像公式**（sortWeight + 近30天浏览×1 + 收藏×10 + 新增收藏×15 + 动态×5 + 评分×8 + 正向反馈×3 **+ 近30天收到积分×:pointsWeight（2026-08-10 V2）**，窗口在 SQL 内取 `CURRENT_DATE` 锚定「截至昨日」——**排序口径保持截至昨日**（与热度页 `VenueHeatService` 的 2026-08-13 实时口径不同：排序是稳定比较基准，实时化会让同日不同时刻排名漂移，且与 VenueHeatService 的"同源不同窗口"状态一致——热度指数计算与排名不要求逐位一致，见「场所热度」章节）。
+- **零行为权重守卫（2026-08-27）**：`HEAT_SCORE` 拆为 `HEAT_BEHAVIOR`（行为热度，不含权重）+ 守卫壳——行为热度 = 0 的门店运营权重不参与排序（`CASE WHEN HEAT_BEHAVIOR > 0 THEN sortWeight ELSE 0 END + HEAT_BEHAVIOR`）。生产实证：79 家种子门店被批量赋予 30~50 权重、42 家零行为，仅靠权重挤占真实热门排位（MT舞酒吧 权重45+行为76 被抬到第3）。热门判定无需守卫——行为门槛（≥70）已兜底。详见 06-listing-and-stats.md「零行为权重守卫」。
 - **满意度偏移不进排序**：排序看"行为热度"（可 SQL 镜像、非负、稳定），口碑（±80 微调）在热度页综合呈现——语义划分：排序热度 = 行为热度，展示热度 = 行为热度 + 口碑偏移。
 - **约束（2026-08-10 V2 权重收敛）**：`HEAT_SCORE` 与 `findHotVenueIds` 是 SQL 双镜像；全部非配置化权重经 `VenueHeatWeights` 常量拼接、积分权重经 `:pointsWeight` 参数注入（配置唯一事实源 `app.points.heat-weight`）——**调整权重只改一处**（常量或配置），镜像一致性由 `VenueHeatServiceTest` 公式测试 + 代码注释互指维持。
 - **约束**：`HEAT_SCORE` 与 `findHotVenueIds` 是 SQL 双镜像，权重调整必须三处同步（VenueHeatService 常量 + HEAT_SCORE + findHotVenueIds），由本 AGENTS.md 约束；SQL 侧无法引用 Java 常量，镜像一致性靠 `VenueHeatServiceTest` 公式测试 + 代码注释互指维持。

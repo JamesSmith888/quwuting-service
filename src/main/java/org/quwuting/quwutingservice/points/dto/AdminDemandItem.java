@@ -16,6 +16,11 @@ import java.time.LocalDateTime;
  * 2026-08-26 工作台历史视图：新增 {@code status}（DemandStatus code，可空）——列表行
  * 自描述，使"已处理/全部"视图无需再查详情即可渲染状态徽标；Pending 列表同样下发
  * （值恒 PENDING），前端按 scope 决定是否展示，避免列表/详情双口径。
+ * <p>
+ * 2026-08-27 拒绝原因 + 信任信号（docs/agents/24）：{@code rejectReason}（拒绝原因
+ * code，已处理视图展示标签）/ {@code rescueRequested}（客人已请求平台代找替代——
+ * 高亮优先处理）/ {@code cooperationCount} + {@code contributionLevelName}（客人
+ * 信任信号，转发话术拼装「已确认合作 N 次 · 等级称号」——舞伴一眼判断客人诚意）。
  */
 public record AdminDemandItem(
         Long id,
@@ -29,5 +34,9 @@ public record AdminDemandItem(
         long userJoinedDays,
         String message,
         boolean over12h,
-        String status) {
+        String status,
+        String rejectReason,
+        boolean rescueRequested,
+        long cooperationCount,
+        String contributionLevelName) {
 }

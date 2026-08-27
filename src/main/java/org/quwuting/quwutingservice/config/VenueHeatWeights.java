@@ -9,9 +9,9 @@ package org.quwuting.quwutingservice.config;
  * 调整权重漏同步一处即口径漂移（AGENTS.md「场所热度」明文约束）。
  * <p>
  * 收敛方案：全部非配置化权重收敛到本类常量，三处镜像经字符串拼接引用
- * （HEAT_SCORE / findHotVenueIds 是 SQL 字符串，直接拼常量值）——一处定义、
- * 三处引用。积分权重是<b>运营可调参数</b>（V2 校准机制），不在此处，走
- * {@link PointsProperties#heatWeight()}（JPQL 参数 :pointsWeight 注入）。
+ * （HEAT_SCORE（2026-08-27 拆出行为口径 HEAT_BEHAVIOR）/ findHotVenueIds 是 SQL 字符串，
+ * 直接拼常量值）——一处定义、三处引用。积分权重是<b>运营可调参数</b>（V2 校准机制），
+ * 不在此处，走 {@link PointsProperties#heatWeight()}（JPQL 参数 :pointsWeight 注入）。
  */
 public final class VenueHeatWeights {
 

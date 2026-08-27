@@ -9,7 +9,9 @@ import org.quwuting.quwutingservice.exception.BusinessException;
  * 前端只传语义 code，不参与排序计算。
  * <ul>
  *   <li>RECOMMENDED（推荐排序，默认）：复合评分 = 运营权重 + 热度（收藏×20 + 动态×10）+ 邻近加成
- *       100/(1+距离km)。有定位时本地场所自然置顶，无定位时退化为权重 + 热度。</li>
+ *       100/(1+距离km)。有定位时本地场所自然置顶，无定位时退化为权重 + 热度。
+ *       <b>2026-08-27 零行为守卫</b>：行为热度 = 0 的门店（无实质活跃信号）运营权重不生效——
+ *       杜绝"零人气门店仅靠运营权重霸榜"（见 VenueRepository#HEAT_SCORE）。</li>
  *   <li>DISTANCE（距离最近）：纯距离升序（Haversine），仅展示有坐标的场所；无定位时由 Service
  *       降级为推荐排序（见 VenueService.listVenues 分流注释）。</li>
  *   <li>HEAT（热度最高）：复合评分去掉距离项（运营权重 + 热度），与「热门场所标记」同口径——

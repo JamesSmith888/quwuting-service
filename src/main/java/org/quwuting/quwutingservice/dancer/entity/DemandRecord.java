@@ -102,4 +102,39 @@ public class DemandRecord {
      */
     @Column
     private LocalDateTime fulfilledAt;
+
+    /**
+     * 舞伴拒绝原因（2026-08-27 新增，V55；DemandRejectReason 枚举 code，可空）。
+     * <p>
+     * 语义：管理员按舞伴微信回复「不给」拒绝邀约时选填原因标签（档期冲突/距离太远/
+     * 需求类型不符/暂不接新客/其他）——客人侧据此展示知因文案（「TA 暂时不方便
+     * （档期冲突）」），拒绝从「句号」变「信息」；管理端撮合台按原因优化推荐
+     * （帮客人找替代时避开同因舞伴）。NULL = 未填原因/存量记录（客人侧回退
+     * 通用状态文案，见 DemandStatus.statusText）。
+     */
+    @Column(length = 20)
+    private String rejectReason;
+
+    /**
+     * 客人请求替代时间（2026-08-27 新增，V55；docs/agents/24「换乘站」）。
+     * <p>
+     * 语义：被拒/超时（REJECTED/EXPIRED）终态页客人点「让平台帮您找类似的」时
+     * 置非空（只置一次，幂等）——管理端工作台据此识别「这位被拒客人想要续」
+     * （高亮优先处理）。NULL = 未请求。客人侧不可反复请求（已请求后按钮变已请求态）。
+     */
+    @Column
+    private LocalDateTime rescueRequestedAt;
+
+    /**
+     * 替代邀约溯源（2026-08-27 新增，V55；docs/agents/24「换乘站」）。
+     * <p>
+     * 语义：非空 = 本记录是管理员为另一条被拒/超时邀约代找的<b>替代邀约</b>——
+     * 管理员微信人工确认替代舞伴同意后，以原邀约的四要素 + message 原样代建一条
+     * 新记录（status=APPROVED 直接发放替代舞伴联系方式），原邀约状态保持
+     * REJECTED/EXPIRED 不动。客人侧「我的邀约」天然出现新记录（平台代找标记），
+     * 站内信直达新邀约详情。部分唯一索引 idx_qwt_demand_records_rescue_origin
+     * 保证一次救援只产出一条替代邀约（防重复代建）。NULL = 普通邀约。
+     */
+    @Column
+    private Long originDemandId;
 }

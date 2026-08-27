@@ -19,6 +19,11 @@ import java.time.LocalDateTime;
  * 2026-08-26 邀约中转（22 号文档）：行加 {@code status}（DemandStatus code；
  * NULL = 存量锚点记录，前端徽标兼容不渲染）——前端列表徽标区分
  * 等待回复/已同意/暂不方便/已自动发放/暂未回复。
+ * <p>
+ * 2026-08-27 替代邀约（docs/agents/24「换乘站」）：行加 {@code originDemandId}——
+ * 非空 = 本记录是平台为客人代找的替代邀约（「我的邀约」列表显示「平台代找」
+ * 角标，与原邀约区分）；{@code rejectReason} = 拒绝原因 code（DemandRejectReason，
+ * 管理端回填；列表不展示，详情页权威文案展示）。
  */
 public record DemandRecordResponse(
         Long id,
@@ -29,5 +34,7 @@ public record DemandRecordResponse(
         boolean dancerVisible,
         String message,
         String status,
-        LocalDateTime createdAt) {
+        LocalDateTime createdAt,
+        Long originDemandId,
+        String rejectReason) {
 }

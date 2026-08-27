@@ -7,18 +7,24 @@
 
 ## 列表排序与城市统计
 
-### 复合评分排序与排序方式（2026-08-06 扩展）
+### 复合评分排序与排序方式（2026-08-06 扩展；2026-08-27 零行为守卫）
 
 `GET /venues` 支持可选 `latitude` / `longitude`（用户定位，gcj02），列表按服务端复合评分排序（分页正确性要求排序必须在库内完成）。2026-08-06 起支持 `sort`（`VenueSortMode` 枚举：recommended/distance/heat/newest，默认 recommended）与 `radiusKm`（可选，km，距离半径筛选）：
 
 ```
-recommended（默认，复合评分）score = sortWeight（运营权重）
-      + 收藏数 × 20 + 动态数 × 10（热度）
+recommended（默认，复合评分）score = 受守卫的运营权重 sortWeight
+      + 行为热度（近30天浏览×1 + 收藏总数×10 + 近30天新增收藏×15
+        + 动态总数×5 + 近30天评分数×8 + 近30天正向反馈×3
+        + 近30天收到礼物价值×pointsWeight）
       + 100 / (1 + 距离km)（Haversine 邻近加成，无坐标时为 0）
 distance  = 纯距离升序（Haversine），仅展示有坐标的场所（v.latitude/longitude IS NOT NULL 显式排除），id 兜底 tie-break
-heat      = sortWeight + 收藏数 × 20 + 动态数 × 10（不含距离项，与「热门场所标记」同口径——热度是场所属性，不随请求者位置变化），id 兜底
+heat      = 受守卫的运营权重 + 行为热度（不含距离项，与「热门场所标记」同口径——热度是场所属性，不随请求者位置变化），id 兜底
 newest    = created_at DESC, id DESC
 ```
+
+**零行为权重守卫（2026-08-27，生产实证修复）**：行为热度 = 0 的门店（无任何近30天浏览/收藏/动态/评分/正向反馈/收到礼物的「僵尸门店」）**运营权重不参与排序**——`HEAT_SCORE = CASE WHEN HEAT_BEHAVIOR > 0 THEN sortWeight ELSE 0 END + HEAT_BEHAVIOR`（公式实现见 `VenueRepository.HEAT_BEHAVIOR` / `HEAT_SCORE`）。根因：79 家种子门店被批量赋予 30~50 运营权重，其中 42 家行为热度为 0，仅靠权重挤占真实热门门店排位（生产实证：MT舞酒吧 sortWeight=45 + 行为 76 被抬到列表第 3）。语义与热门标记「行为热度 ≥ 门槛」同构：**权重提升曝光是运营本职，但不伪造「有人气」**。行为热度 > 0 的门店权重照常生效。热门判定（findHotVenueIds）无需本守卫——绝对门槛（行为 ≥ min-heat-score）已兜底零行为门店。
+
+**权重与公式演进**：旧公式（收藏×20 + 动态×10）已于 2026-08-10 V2 权重收敛重构为上述行为项（唯一事实源 = `VenueHeatWeights` + `PointsProperties#heatWeight()`，调整权重必须同步 `HEAT_SCORE` / `findHotVenueIds` / `VenueHeatService.computeHeat` 三处镜像，见后端 AGENTS.md「场所热度」章节）。
 
 距离项使本地场所在全国列表中自然置顶，跨城市时衰减至可忽略（100km 外加成 ≈ 1），由热度与运营权重决定顺序。产品意图：默认展示全国列表但"本地化感知"，不自动按城市过滤（早期数据稀疏，自动过滤到无数据城市 = 首屏空白）。
 

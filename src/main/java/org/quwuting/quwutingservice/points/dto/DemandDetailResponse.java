@@ -24,6 +24,13 @@ import java.time.LocalDateTime;
  * 2026-08-27 履约闭环（docs/agents/23）：加 {@code fulfilledAt}/{@code cooperationCount}——
  * fulfilledAt = 本次邀约履约确认时间（null = 未确认，前端渲染「确认完成邀约」按钮）；
  * cooperationCount = 该客人与该舞伴的履约确认数（含本次，「与 TA 已合作 N 次」）。
+ * <p>
+ * 2026-08-27 拒绝原因 + 替代邀约（docs/agents/24）：加 {@code rejectReason}/
+ * {@code rejectReasonText}（REJECTED 且管理员已填原因时下发——客人侧知因文案
+ * 「TA 暂时不方便（档期冲突）」，前端 display = rejectReasonText || statusText，
+ * 零拼接）；{@code rescueRequested}（非空 = 客人已请求平台代找替代，终态卡按钮
+ * 变已请求态）；{@code originDemandId}（非空 = 本邀约是平台代找的替代邀约，
+ * 前端展示「平台代找」标识）。
  */
 public record DemandDetailResponse(
         Long id,
@@ -45,5 +52,9 @@ public record DemandDetailResponse(
         String contactImageUrl,
         LocalDateTime createdAt,
         LocalDateTime fulfilledAt,
-        long cooperationCount) {
+        long cooperationCount,
+        String rejectReason,
+        String rejectReasonText,
+        boolean rescueRequested,
+        Long originDemandId) {
 }

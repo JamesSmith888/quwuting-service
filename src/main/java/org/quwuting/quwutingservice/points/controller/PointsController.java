@@ -168,4 +168,16 @@ public class PointsController {
     public ApiResponse<FulfillmentResponse> confirmFulfillment(@PathVariable Long id) {
         return ApiResponse.ok(demandFulfillmentService.confirm(UserContext.requireAuth(), id));
     }
+
+    /**
+     * 客人请求平台代找替代（2026-08-27，需登录 + 本人；docs/agents/24「换乘站」）：
+     * 被拒/超时终态页「让平台帮您找类似的」→ 置 rescue_requested_at（只置一次
+     * 幂等）→ 管理端工作台优先处理，管理员微信确认替代舞伴同意后代建替代邀约
+     * （联系方式直接发放 + 站内信通知，客人不流失）。PENDING/已获批 → 1001。
+     */
+    @PostMapping("/demands/{id}/rescue-request")
+    public ApiResponse<Void> requestRescue(@PathVariable Long id) {
+        pointsService.requestDemandRescue(UserContext.requireAuth(), id);
+        return ApiResponse.ok(null);
+    }
 }
