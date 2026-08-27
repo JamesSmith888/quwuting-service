@@ -8,8 +8,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.points.dto.ContributionBrief;
 import org.quwuting.quwutingservice.points.entity.PointsAccount;
 import org.quwuting.quwutingservice.points.repository.PointsAccountRepository;
+import org.quwuting.quwutingservice.points.service.ContributionService;
 import org.quwuting.quwutingservice.user.dto.response.UserProfileResponse;
 import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.enums.UserRole;
@@ -33,12 +35,22 @@ class UserPublicServiceTest {
     private DancerRepository dancerRepository;
     @Mock
     private PointsAccountRepository pointsAccountRepository;
+    @Mock
+    private ContributionService contributionService;
+
+    /** 贡献档案摘要 mock 默认值（2026-08-27：getProfile 新增 contribution 字段，mock 恒空档案） */
+    private static final ContributionBrief EMPTY_BRIEF =
+            new ContributionBrief(0, "NOVICE", "新晋舞友", 0, 0, 0, 0, 0, 0);
 
     private UserPublicService userPublicService;
 
     @BeforeEach
     void setUp() {
-        userPublicService = new UserPublicService(userRepository, dancerRepository, pointsAccountRepository);
+        userPublicService = new UserPublicService(userRepository, dancerRepository, pointsAccountRepository, contributionService);
+        // lenient：getProfile_userNotFound_throws 不走到贡献聚合，允许未使用
+        org.mockito.Mockito.lenient()
+                .when(contributionService.briefFor(org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(EMPTY_BRIEF);
     }
 
     /** 正常返回：公开资料 + 加入天数 + 积分余额 + TA 创建的公开舞伴（仅 NORMAL，Repository 已过滤） */

@@ -3,10 +3,12 @@ package org.quwuting.quwutingservice.user.controller;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.user.dto.response.AdminUserDetailResponse;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserItem;
 import org.quwuting.quwutingservice.user.service.AdminUserService;
 import org.springframework.data.domain.Page;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -42,5 +44,16 @@ public class AdminUserController {
             @RequestParam(defaultValue = "20") int size) {
         UserContext.requireAdmin();
         return ApiResponse.ok(adminUserService.list(keyword, page, size));
+    }
+
+    /**
+     * 用户详情（GET /admin/users/{id}；仅 ADMIN）：管理端列表行点击 → 用户详情——
+     * 公开资料 + 积分余额 + <b>贡献档案完整明细</b>（等级 + 各维度计数）。
+     * openId 等敏感字段绝不下发；用户不存在/已软删 → 1004。
+     */
+    @GetMapping("/{id}")
+    public ApiResponse<AdminUserDetailResponse> detail(@PathVariable Long id) {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(adminUserService.detail(id));
     }
 }

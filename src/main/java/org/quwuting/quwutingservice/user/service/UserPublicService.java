@@ -5,7 +5,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.points.dto.ContributionBrief;
 import org.quwuting.quwutingservice.points.repository.PointsAccountRepository;
+import org.quwuting.quwutingservice.points.service.ContributionService;
 import org.quwuting.quwutingservice.user.dto.response.UserDancerResponse;
 import org.quwuting.quwutingservice.user.dto.response.UserProfileResponse;
 import org.quwuting.quwutingservice.user.entity.User;
@@ -40,6 +42,7 @@ public class UserPublicService {
     private final UserRepository userRepository;
     private final DancerRepository dancerRepository;
     private final PointsAccountRepository pointsAccountRepository;
+    private final ContributionService contributionService;
 
     /** 用户公开主页（公开只读；用户不存在/已软删 → 1004） */
     @Transactional(readOnly = true)
@@ -58,10 +61,13 @@ public class UserPublicService {
                 Math.max(0, ChronoUnit.DAYS.between(createdAt.toLocalDate(), LocalDate.now()));
         String nickname = user.getNickname() == null || user.getNickname().isBlank()
                 ? NICKNAME_FALLBACK : user.getNickname();
+        // 贡献档案摘要（2026-08-27，docs/agents/23：自愿分享通道下发——用户主动
+        // 分享邀约 = 默示授权向接收方舞伴展示社区共建行为记录）
+        ContributionBrief contribution = contributionService.briefFor(userId);
         return new UserProfileResponse(
                 user.getId(), nickname, user.getAvatarUrl(), user.getRole().name(),
                 createdAt, joinedDays, pointsBalance, dancers,
-                user.getAge(), user.getGender(), user.getCity());
+                user.getAge(), user.getGender(), user.getCity(), contribution);
     }
 
     private UserDancerResponse toDancerResponse(Dancer d) {

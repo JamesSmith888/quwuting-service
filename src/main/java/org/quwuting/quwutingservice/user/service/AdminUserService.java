@@ -1,8 +1,10 @@
 package org.quwuting.quwutingservice.user.service;
 
 import lombok.RequiredArgsConstructor;
+import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.points.repository.PointsAccountRepository;
 import org.quwuting.quwutingservice.points.service.ContributionService;
+import org.quwuting.quwutingservice.user.dto.response.AdminUserDetailResponse;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserItem;
 import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
@@ -50,6 +52,32 @@ public class AdminUserService {
         Map<Long, ContributionService.ContributionAggregate> contributions =
                 contributionService.aggregatesFor(userIds);
         return users.map(u -> toItem(u, balances.getOrDefault(u.getId(), 0L), contributions.get(u.getId())));
+    }
+
+    /**
+     * 用户详情（GET /admin/users/{id}，仅 ADMIN）：公开资料 + 积分余额 + 贡献档案
+     * 完整明细（等级 + 各维度计数）——管理端列表行点击进入，运营查看任意用户
+     * 的详细贡献（识别异常/刷分）。用户不存在/已软删 → 1004。
+     */
+    @Transactional(readOnly = true)
+    public AdminUserDetailResponse detail(Long id) {
+        User user = userRepository.findByIdAndDeletedFalse(id)
+                .orElseThrow(() -> new BusinessException(1004, "用户不存在"));
+        long pointsBalance = pointsAccountRepository.findByUserId(id)
+                .map(a -> a.getBalance())
+                .orElse(0L);
+        long joinedDays = user.getCreatedAt() == null ? 0 :
+                Math.max(0, ChronoUnit.DAYS.between(user.getCreatedAt().toLocalDate(), LocalDate.now()));
+        String nickname = user.getNickname() == null || user.getNickname().isBlank()
+                ? NICKNAME_FALLBACK : user.getNickname();
+        return new AdminUserDetailResponse(
+                id,
+                nickname,
+                user.getAvatarUrl(),
+                user.getRole(),
+                joinedDays,
+                pointsBalance,
+                contributionService.briefFor(id));
     }
 
     private AdminUserItem toItem(User user, long pointsBalance, ContributionService.ContributionAggregate agg) {

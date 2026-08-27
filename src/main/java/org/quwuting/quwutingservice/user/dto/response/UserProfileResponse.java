@@ -1,6 +1,7 @@
 package org.quwuting.quwutingservice.user.dto.response;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
+import org.quwuting.quwutingservice.points.dto.ContributionBrief;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -37,5 +38,12 @@ public record UserProfileResponse(
         /** 性别（MALE / FEMALE，null = 未声明；自愿分享通道下发） */
         String gender,
         /** 常驻城市（行政区划名，null = 未填写；自愿分享通道下发，便于同城包时匹配） */
-        String city
+        String city,
+        /**
+         * 贡献档案摘要（2026-08-27，docs/agents/23；自愿分享通道下发——用户主动
+         * 分享邀约 = 默示授权向接收方舞伴展示社区共建行为记录；与 pointsBalance
+         * 同口径（平台内行为记录，非实名身份信息），提审再次驳回 → 移除字段与
+         * 前端展示即可）
+         */
+        ContributionBrief contribution
 ) {}

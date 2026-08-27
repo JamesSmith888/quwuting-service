@@ -5,6 +5,7 @@ import org.quwuting.quwutingservice.config.ContributionProperties;
 import org.quwuting.quwutingservice.dancer.repository.DancerFavoriteRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionRepository;
 import org.quwuting.quwutingservice.dancershare.repository.DancerShareRepository;
+import org.quwuting.quwutingservice.points.dto.ContributionBrief;
 import org.quwuting.quwutingservice.points.dto.ContributionResponse;
 import org.quwuting.quwutingservice.points.enums.ContributionLevel;
 import org.quwuting.quwutingservice.points.enums.PointsSourceType;
@@ -75,6 +76,26 @@ public class ContributionService {
                 agg.shareCount(),
                 agg.favoriteCount(),
                 RULES_TEXT);
+    }
+
+    /**
+     * 单用户贡献档案摘要（2026-08-27）：供公开自愿分享场景（GET /users/{id}——
+     * 用户主动分享邀约 = 默示授权向接收方展示）与管理端用户详情（GET /admin/users/{id}）
+     * 嵌套；与 summary 同口径（aggregatesFor 复用）。
+     */
+    @Transactional(readOnly = true)
+    public ContributionBrief briefFor(Long userId) {
+        ContributionAggregate agg = aggregatesFor(List.of(userId)).getOrDefault(userId, ContributionAggregate.empty());
+        return new ContributionBrief(
+                agg.score(),
+                agg.level().name(),
+                agg.level().displayName(),
+                agg.reportedCount(),
+                agg.checkInDays(),
+                agg.recognitionCount(),
+                agg.claimCount(),
+                agg.shareCount(),
+                agg.favoriteCount());
     }
 
     /**
