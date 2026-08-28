@@ -28,6 +28,10 @@ public interface VenueClaimRepository extends JpaRepository<VenueClaim, Long>, J
     /** 我的认领记录（按提交时间倒序） */
     List<VenueClaim> findByUserIdOrderByCreatedAtDesc(Long userId);
 
+    /** 我的认领记录按状态过滤（2026-08-28 管理端用户详情下钻，docs/agents/23：
+     *  「认领 N 次」/「认领分布」统计点击查看每条明细的数据源，status 可选） */
+    List<VenueClaim> findByUserIdAndStatusOrderByCreatedAtDesc(Long userId, ClaimStatus status);
+
     /** 用户对某门店的认领记录（按提交时间倒序，最新一条 = 当前状态） */
     List<VenueClaim> findByUserIdAndVenueIdOrderByCreatedAtDesc(Long userId, Long venueId);
 

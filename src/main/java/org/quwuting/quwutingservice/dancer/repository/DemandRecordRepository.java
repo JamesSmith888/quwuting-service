@@ -34,6 +34,18 @@ public interface DemandRecordRepository extends JpaRepository<DemandRecord, Long
     @Query("SELECT d FROM DemandRecord d WHERE d.userId = :userId ORDER BY d.id DESC")
     Page<DemandRecord> findByUserIdOrderByIdDesc(@Param("userId") Long userId, Pageable pageable);
 
+    /**
+     * 单用户需求单明细（2026-08-28 管理端用户详情下钻，docs/agents/23）：id 倒序——
+     * 「需求单 N 条」/按状态分布统计点击查看每条明细的数据源。status 可空 = 全部；
+     * 存量 NULL 状态等价 APPROVED（COALESCE，与 22 号文档状态机一致），
+     * status=APPROVED 时 NULL 存量行一并命中。
+     */
+    @Query("SELECT d FROM DemandRecord d WHERE d.userId = :userId " +
+            "AND (:status IS NULL OR COALESCE(d.status, 'APPROVED') = :status) " +
+            "ORDER BY d.id DESC")
+    List<DemandRecord> findByUserIdForAdminDetail(@Param("userId") Long userId,
+                                                  @Param("status") String status);
+
     /** 我的单条邀约（详情；userId + id 双重条件 = 归属校验，越权查不到） */
     Optional<DemandRecord> findByUserIdAndId(Long userId, Long id);
 
@@ -133,6 +145,34 @@ public interface DemandRecordRepository extends JpaRepository<DemandRecord, Long
     @Query("UPDATE DemandRecord d SET d.guestFeedback = :feedback, d.feedbackRequestedAt = :at " +
             "WHERE d.id = :id AND d.feedbackRequestedAt IS NULL")
     int updateFeedbackIf(@Param("id") Long id, @Param("feedback") String feedback, @Param("at") LocalDateTime at);
+
+    /**
+     * 管理端反馈待办（2026-08-28，V58，docs/agents/25「反馈闭环 · 管理端可见性
+     * 修复」）：已反馈且未核实的邀约（<b>全舞伴范围</b>——客人反馈只发生在
+     * 非中转舞伴的已发放/存量邀约上，若仍按中转舞伴集合过滤将零可见，见 V58 迁移
+     * 注释；按 feedback_requested_at 倒序 = 最新反馈浮顶，走
+     * idx_qwt_demand_records_feedback_pending 部分索引）。
+     */
+    @Query("SELECT d FROM DemandRecord d WHERE d.feedbackRequestedAt IS NOT NULL " +
+            "AND d.guestFeedbackHandledAt IS NULL ORDER BY d.feedbackRequestedAt DESC")
+    Page<DemandRecord> findPendingFeedback(Pageable pageable);
+
+    /** 管理端反馈待办计数（2026-08-28，V58：计入邀约工作台待办红点，与
+     *  countPendingByDancerIds 相加 = me 页「邀约工作台」入口红点总量） */
+    @Query("SELECT COUNT(d) FROM DemandRecord d WHERE d.feedbackRequestedAt IS NOT NULL " +
+            "AND d.guestFeedbackHandledAt IS NULL")
+    long countPendingFeedback();
+
+    /**
+     * 反馈已核实条件更新（2026-08-28，V58，docs/agents/25「反馈闭环 · 管理端
+     * 可见性修复」）：管理员微信侧核实（联系舞伴/客人）完成后置位
+     * guest_feedback_handled_at（WHERE 双条件 = 天然幂等，重复核实/并发只成功
+     * 一次）。返回 0 = 已核实过（幂等成功）或该邀约无反馈（调用方前置校验）。
+     */
+    @Modifying(clearAutomatically = true)
+    @Query("UPDATE DemandRecord d SET d.guestFeedbackHandledAt = :at " +
+            "WHERE d.id = :id AND d.feedbackRequestedAt IS NOT NULL AND d.guestFeedbackHandledAt IS NULL")
+    int updateFeedbackHandledIf(@Param("id") Long id, @Param("at") LocalDateTime at);
 
     /**
      * 该 user×dancer 最近一条邀约（2026-08-27，V56，docs/agents/25「进行中邀约」：

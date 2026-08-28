@@ -6,15 +6,20 @@ import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserDetailResponse;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserItem;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserStatsResponse;
+import org.quwuting.quwutingservice.user.dto.response.AdminUserStatsRow;
+import org.quwuting.quwutingservice.user.enums.AdminUserStatsType;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.user.enums.UserSortMode;
 import org.quwuting.quwutingservice.user.service.AdminUserService;
+import org.quwuting.quwutingservice.user.service.AdminUserStatsDetailService;
 import org.springframework.data.domain.Page;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /**
  * 管理端用户接口（2026-08-27，docs/agents/23-user-contribution-and-fulfillment.md；
@@ -37,6 +42,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class AdminUserController {
 
     private final AdminUserService adminUserService;
+    private final AdminUserStatsDetailService statsDetailService;
 
     /**
      * 用户分页列表（GET /admin/users?page=&size=&keyword=&role=&city=&sort=）。
@@ -75,5 +81,24 @@ public class AdminUserController {
     public ApiResponse<AdminUserDetailResponse> detail(@PathVariable Long id) {
         UserContext.requireAdmin();
         return ApiResponse.ok(adminUserService.detail(id));
+    }
+
+    /**
+     * 用户统计明细（GET /admin/users/{id}/stats-detail；仅 ADMIN，2026-08-28）：
+     * 用户详情页<b>每条统计数据可点击下钻</b>——查看该统计的每条详细列表。
+     * type = {@link AdminUserStatsType}（POINTS/REPORT_REWARD/CHECKIN/RECOGNITION/
+     * CLAIM/SHARE/FAVORITE/DEMAND/REPORT）；status = 可选状态过滤（CLAIM/DEMAND/
+     * REPORT 用，如 APPROVED/PENDING）；mode = POINTS 收支方向（ALL 默认/EARN/GIFT）。
+     * 返回统一行结构（title/subtitle/time/badgeText/badgeCls），前端零分支渲染；
+     * openId 绝不下发；用户不存在/已软删 → 1004。
+     */
+    @GetMapping("/{id}/stats-detail")
+    public ApiResponse<List<AdminUserStatsRow>> statsDetail(
+            @PathVariable Long id,
+            @RequestParam AdminUserStatsType type,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String mode) {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(statsDetailService.detail(id, type, status, mode));
     }
 }

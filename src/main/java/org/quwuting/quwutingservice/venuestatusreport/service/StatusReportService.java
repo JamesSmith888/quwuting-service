@@ -26,6 +26,7 @@ import org.quwuting.quwutingservice.venuestatusreport.enums.ReportType;
 import org.quwuting.quwutingservice.venuestatusreport.repository.StatusReportRepository;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -393,45 +394,64 @@ public class StatusReportService {
     // ─── 管理端（需 ADMIN，2026-08-10 新增，2026-08-11 泛化） ───
 
     /**
-     * 管理端活跃突发事件列表（需 ADMIN，跨场所分页倒序，可按类型筛选）。
+     * 管理端突发事件列表（需 ADMIN，跨场所分页倒序，可按类型筛选，2026-08-28
+     * 加已处理视图）。
      * <p>
-     * 管理端「上报管理 → 突发事件」tab 数据源：TTL 窗口内全部活跃报告，按时间倒序。
-     * 管理端上下文返回上报者真实昵称 + userId + note（note 仅管理端可见的审核安全约定），
-     * 不做公开列表的昵称脱敏。{@code peerCount} = 同店同类型活跃信号数（众报聚簇，
-     * 管理员处置一条时看到"已有多人报同一事件"）。仅活跃报告需要管理处置（移除虚假
-     * 信号 / 采纳属实信号）——TTL 过期后信号已自动从公开视图消失，无需管理动作。
+     * 管理端「上报管理 → 突发事件」tab 数据源，两档视图由 {@code status} 参数切换
+     * （默认 ACTIVE = 待处理）：
+     * <ul>
+     *   <li><b>ACTIVE（待处理，默认）</b>：TTL 窗口内全部活跃报告，按时间倒序。
+     *       仅活跃报告需要管理处置（采纳/保留/移除）——TTL 过期后信号已自动从公开
+     *       视图撤下，无需管理动作。管理端上下文返回上报者真实昵称 + userId + note
+     *       （note 仅管理端可见的审核安全约定），不做公开列表的昵称脱敏。
+     *       {@code peerCount} = 同店同类型活跃信号数（众报聚簇，管理员处置一条时
+     *       看到"已有多人报同一事件"）；</li>
+     *   <li><b>HANDLED（已处理）</b>：全部已处置记录（ADOPTED 已采纳 / KEPT 已保留 /
+     *       REMOVED 已移除，含 soft delete 的移除记录与已过公示期的历史），按时间
+     *       倒序——管理员复盘历史处置（审计 + 识别恶意上报用户模式），解决旧"移除后
+     *       记录直接消失"无痕问题。只读视图（无处置按钮），{@code peerCount} 恒 0
+     *       （聚簇仅对活跃信号有意义）。</li>
+     * </ul>
      */
     @Transactional(readOnly = true)
-    public Page<AdminStatusReportResponse> listAdminReports(int page, int size, String typeFilter) {
+    public Page<AdminStatusReportResponse> listAdminReports(int page, int size, String typeFilter, String status) {
         UserContext.requireAdmin();
+        boolean handled = "HANDLED".equalsIgnoreCase(status);
         LocalDateTime now = LocalDateTime.now();
-        // 同店同类型聚簇计数（单次往返），主列表逐条回填
+        // 同店同类型聚簇计数（单次往返），主列表逐条回填——仅待处理视图消费
         Map<String, Long> clusterMap = new HashMap<>();
-        for (StatusReportRepository.TypeClusterRow row :
-                statusReportRepository.countClustersByVenueAndType(now)) {
-            clusterMap.put(row.getVenueid() + ":" + row.getType(), row.getCnt());
+        if (!handled) {
+            for (StatusReportRepository.TypeClusterRow row :
+                    statusReportRepository.countClustersByVenueAndType(now)) {
+                clusterMap.put(row.getVenueid() + ":" + row.getType(), row.getCnt());
+            }
         }
-        return statusReportRepository.findActiveReports(now, typeFilter,
-                        PageRequest.of(page, Math.min(Math.max(size, 1), 100)))
-                .map(row -> {
-                    ReportType type = ReportType.valueOf(row.getType());
-                    long peerCount = clusterMap.getOrDefault(
-                            row.getVenueid() + ":" + row.getType(), 0L);
-                    return new AdminStatusReportResponse(
-                            row.getId(),
-                            row.getVenueid(),
-                            row.getVenuename(),
-                            row.getUserid(),
-                            row.getNickname() != null && !row.getNickname().isBlank()
-                                    ? row.getNickname() : "舞友",
-                            type,
-                            type.getDisplayName(),
-                            type.getSeverity().getCode(),
-                            row.getNote(),
-                            row.getOccurredat(),
-                            row.getCreatedat(),
-                            peerCount);
-                });
+        Pageable pageable = PageRequest.of(page, Math.min(Math.max(size, 1), 100));
+        Page<StatusReportRepository.AdminReportRow> rows = handled
+                ? statusReportRepository.findHandledReports(pageable)
+                : statusReportRepository.findActiveReports(now, typeFilter, pageable);
+        return rows.map(row -> {
+            ReportType type = ReportType.valueOf(row.getType());
+            long peerCount = clusterMap.getOrDefault(
+                    row.getVenueid() + ":" + row.getType(), 0L);
+            AdminAction action = row.getAdminaction() != null
+                    ? AdminAction.valueOf(row.getAdminaction()) : null;
+            return new AdminStatusReportResponse(
+                    row.getId(),
+                    row.getVenueid(),
+                    row.getVenuename(),
+                    row.getUserid(),
+                    row.getNickname() != null && !row.getNickname().isBlank()
+                            ? row.getNickname() : "舞友",
+                    type,
+                    type.getDisplayName(),
+                    type.getSeverity().getCode(),
+                    row.getNote(),
+                    row.getOccurredat(),
+                    row.getCreatedat(),
+                    peerCount,
+                    action);
+        });
     }
 
     /**
@@ -465,11 +485,57 @@ public class StatusReportService {
         VenueStatusReport report = statusReportRepository.findById(id)
                 .orElseThrow(() -> new BusinessException(1008, "上报不存在"));
         if (report.getAdminAction() != null) {
-            return; // 幂等：已处置（采纳/移除）直接返回（不重复失效缓存）
+            return; // 幂等：已处置（采纳/保留/移除）直接返回（不重复失效缓存）
         }
         report.setDeleted(true);
         report.setAdminAction(AdminAction.REMOVED);
         statusReportRepository.save(report);
+        venueHeatService.invalidate(report.getVenueId());
+    }
+
+    /**
+     * 管理端保留突发事件报告（需 ADMIN，幂等，2026-08-28 新增——处置三分级）。
+     * <p>
+     * 保留 = 管理员<b>无法核实但判定非恶意</b>的存疑信号：平台不背书到"已核实"
+     * （不联动营业状态），但认可该上报行为并继续公示（与采纳/移除的语义差异见
+     * {@link AdminAction}）。
+     * <ul>
+     *   <li><b>不 soft delete</b>：公告区/「最近的突发事件」继续展示该信号至 TTL
+     *       自然过期——公开视图由置信度分层中性呈现（单条 = "舞友报告·未经核实"，
+     *       与 2026-08-27 分层无缝衔接，无需新增展示逻辑）；</li>
+     *   <li><b>不联动门店营业状态</b>：即使类型为状态类（SUSPENDED/RESUMED）也不
+     *       改 Venue.status——管理员不确定，不得用未经核实信号改变门店营业状态
+     *       （区别于采纳的 markSuspendedByReport / reopenByReport）；</li>
+     *   <li><b>奖励积分 + 处理结果站内信</b>（2026-08-28 用户拍板：保留也是平台对
+     *       上报行为的认可，与采纳同激励模式）——上报者（userId 非空）经
+     *       {@link PointsService#rewardStatusReport} 发放（流水幂等键
+     *       (user, STATUS_REPORT_REWARD, reportId) 兜底：同一条记录无论采纳/保留
+     *       只发一次分，处置幂等保证不重复）；经 {@link #notifyKept} 通知；
+     *       <b>SITUATION_UNCLEAR 不设奖励</b>（信息量最低、噪音高危，与采纳同一
+     *       奖励边界——管理员无法用"保留"绕过"情况不明不奖励"的防刷约定）；</li>
+     *   <li><b>移出待办</b>：KEPT 标记使所有"活跃/待办"判定（FAB 红点、管理端待处理
+     *       队列、热度计数）排除该记录——管理员处置后待办自然归零；管理端「已处理」
+     *       视图可见（处置留痕）。</li>
+     * </ul>
+     * 已处置（admin_action 非空）或不存在幂等返回；处置后失效 venueHeat 缓存
+     * （活跃报告数是热度输出之一）。
+     */
+    @Transactional
+    public void keepReport(Long id) {
+        UserContext.requireAdmin();
+        VenueStatusReport report = statusReportRepository.findById(id)
+                .orElseThrow(() -> new BusinessException(1008, "上报不存在"));
+        if (report.getAdminAction() != null) {
+            return; // 幂等：已处置（采纳/保留/移除）直接返回
+        }
+        report.setAdminAction(AdminAction.KEPT);
+        statusReportRepository.save(report);
+        // 积分奖励（同事务；匿名不发、流水幂等键兜底并发；情况不明不设奖励——与采纳同一边界）
+        if (report.getUserId() != null && report.getType() != ReportType.SITUATION_UNCLEAR) {
+            pointsService.rewardStatusReport(report.getUserId(), report.getId());
+        }
+        // 处理结果站内信（同事务；匿名不通知）
+        notifyKept(report);
         venueHeatService.invalidate(report.getVenueId());
     }
 
@@ -558,6 +624,28 @@ public class StatusReportService {
                 "突发事件已采纳",
                 "「" + venueName + "」的" + type.getDisplayName() + "报告已被采纳"
                         + statusClause + "，奖励积分已发放。",
+                "VENUE", report.getVenueId());
+    }
+
+    /**
+     * 保留结果站内信（2026-08-28 用户拍板：保留也发积分 + 站内信）：
+     * 保留流转实际发生时向上报者发送 STATUS_REPORT_RESULT，与保留同事务（通知不
+     * 丢失）。与采纳通知的差异：<b>不带门店状态变更结论</b>（保留不联动营业状态——
+     * 管理员不确定，文案不得暗示"门店状态已改"）；措辞"已保留公示"表达信号继续
+     * 公开可见 + 奖励已发放。匿名上报（userId null）无法归属，不通知（与积分同一
+     * 匿名边界）。
+     */
+    private void notifyKept(VenueStatusReport report) {
+        if (report.getUserId() == null) {
+            return;
+        }
+        String venueName = venueRepository.findByIdAndDeletedFalse(report.getVenueId())
+                .map(Venue::getName)
+                .orElse("已下架场所");
+        messageService.create(report.getUserId(), MessageType.STATUS_REPORT_RESULT,
+                "突发事件已保留",
+                "「" + venueName + "」的" + report.getType().getDisplayName()
+                        + "报告已保留公示，奖励积分已发放。",
                 "VENUE", report.getVenueId());
     }
 }

@@ -9,6 +9,8 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 
 public interface UserRepository extends JpaRepository<User, Long> {
@@ -16,6 +18,12 @@ public interface UserRepository extends JpaRepository<User, Long> {
     Optional<User> findByOpenIdAndDeletedFalse(String openId);
 
     Optional<User> findByIdAndDeletedFalse(Long id);
+
+    /**
+     * 批量查昵称（消除 N+1，2026-08-28 意见反馈管理端列表使用；与
+     * VenueRepository.findByIdInAndDeletedFalse 同模式）。
+     */
+    List<User> findByIdInAndDeletedFalse(Collection<Long> ids);
 
     /**
      * 管理端用户分页列表（2026-08-27 用户管理增强，docs/agents/23；仅 ADMIN）：

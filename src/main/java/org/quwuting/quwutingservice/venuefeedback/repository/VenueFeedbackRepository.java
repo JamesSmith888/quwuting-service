@@ -38,6 +38,15 @@ public interface VenueFeedbackRepository extends JpaRepository<VenueFeedback, Lo
     /** 当前用户的全部上报（「我的上报记录」个人中心数据源，倒序） */
     List<VenueFeedback> findByUserIdOrderByCreatedAtDesc(Long userId);
 
+    /**
+     * 单用户上报明细（2026-08-28 管理端用户详情下钻，docs/agents/23）：未软删行，
+     * 时间倒序——「上报 N 条」统计点击查看每条明细的数据源。status 可空 = 全部。
+     */
+    @Query("SELECT f FROM VenueFeedback f WHERE f.userId = :userId AND f.deleted = false " +
+            "AND (:status IS NULL OR f.status = :status) ORDER BY f.createdAt DESC, f.id DESC")
+    List<VenueFeedback> findByUserIdForAdminDetail(@Param("userId") Long userId,
+                                                   @Param("status") ReportStatus status);
+
     /** 当前用户对某场所的上报（「我的上报记录」详情页弹窗数据源，倒序） */
     List<VenueFeedback> findByUserIdAndVenueIdOrderByCreatedAtDesc(Long userId, Long venueId);
 

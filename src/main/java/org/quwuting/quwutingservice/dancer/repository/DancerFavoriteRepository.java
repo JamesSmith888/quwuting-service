@@ -85,4 +85,12 @@ public interface DancerFavoriteRepository extends JpaRepository<DancerFavorite, 
     @Query("SELECT f.userId, COUNT(f) FROM DancerFavorite f " +
            "WHERE f.userId IN :userIds AND f.deleted = false GROUP BY f.userId")
     List<Object[]> countGroupByUserIds(@Param("userIds") Collection<Long> userIds);
+
+    /**
+     * 单用户收藏舞伴明细（2026-08-28 管理端用户详情下钻，docs/agents/23）：未软删
+     * 行，时间倒序——「收藏舞伴 N 位」统计点击查看每条明细的数据源。
+     */
+    @Query("SELECT f FROM DancerFavorite f " +
+           "WHERE f.userId = :userId AND f.deleted = false ORDER BY f.createdAt DESC, f.id DESC")
+    List<DancerFavorite> findByUserIdForAdminDetail(@Param("userId") Long userId);
 }

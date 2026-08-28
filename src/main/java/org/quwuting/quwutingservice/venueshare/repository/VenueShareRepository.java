@@ -27,4 +27,10 @@ public interface VenueShareRepository extends JpaRepository<VenueShare, Long> {
            "WHERE s.userId IN :userIds AND s.eventType = :eventType GROUP BY s.userId")
     List<Object[]> countGroupByUserIdsAndEventType(@Param("userIds") Collection<Long> userIds,
                                                    @Param("eventType") ShareEventType eventType);
+
+    /**
+     * 单用户分享动作明细（2026-08-28 管理端用户详情下钻，docs/agents/23）：只计
+     * SHARE（分享动作），时间倒序——「分享 N 次」统计点击查看每条明细的数据源。
+     */
+    List<VenueShare> findByUserIdAndEventTypeOrderByCreatedAtDesc(Long userId, ShareEventType eventType);
 }

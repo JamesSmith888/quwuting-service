@@ -44,5 +44,12 @@ public record AdminDemandItem(
          * DemandGuestFeedback：非空 = 客人对该邀约提交了「没加上 TA？」反馈
          * （已自动返还扣费积分）——管理端识别需人工介入的邀约（微信侧核实/安抚）。
          */
-        String guestFeedback) {
+        String guestFeedback,
+        /**
+         * 反馈是否已核实（2026-08-28，V58，docs/agents/25「反馈闭环 · 管理端
+         * 可见性修复」）：管理端已微信侧核实并归档（guest_feedback_handled_at
+         * 非空）。待处理视图 = false（反馈待办行，提供「标记已核实」操作）；
+         * 已处理/全部视图 = true（「已核实」标记，与普通已处理行区分）。
+         */
+        boolean guestFeedbackHandled) {
 }

@@ -92,6 +92,7 @@ public class PointsService {
             case GIFT -> "赠送";
             case UNLOCK -> "解锁";
             case UNLOCK_REFUND -> "解锁返还";
+            case APP_FEEDBACK_REWARD -> "意见被采纳";
         };
     }
 
@@ -413,6 +414,30 @@ public class PointsService {
         }
         return earn(feedbackUserId, pointsProperties.feedbackReward(),
                 PointsSourceType.FEEDBACK_REWARD, feedbackId, null);
+    }
+
+    /**
+     * 意见反馈采纳奖励（供 AppFeedbackService 在 ADOPTED 流转事务内调用，2026-08-28）。
+     * 匿名反馈（userId null）不发分；已发过（幂等键存在）不发分。
+     * <p>
+     * 独立来源 APP_FEEDBACK_REWARD（区别于 FEEDBACK_REWARD）：qwt_app_feedbacks
+     * 与 qwt_venue_feedbacks 的 id 各自自增可能相同，幂等键跨表撞键会漏发——
+     * 必须按来源分键（(user, APP_FEEDBACK_REWARD, appFeedbackId)）。
+     * 奖励金额与门店纠错同池（app.points.feedback-reward，用户心智一致）。
+     *
+     * @return 新余额；匿名或已发过返回 null 表示未发放
+     */
+    @Transactional
+    public Long rewardAppFeedback(Long feedbackUserId, Long appFeedbackId) {
+        if (feedbackUserId == null) {
+            return null; // 匿名反馈无法归属
+        }
+        if (transactionRepository.findByUserIdAndSourceTypeAndSourceId(
+                feedbackUserId, PointsSourceType.APP_FEEDBACK_REWARD, appFeedbackId).isPresent()) {
+            return null; // 幂等：已发放
+        }
+        return earn(feedbackUserId, pointsProperties.feedbackReward(),
+                PointsSourceType.APP_FEEDBACK_REWARD, appFeedbackId, null);
     }
 
     /**

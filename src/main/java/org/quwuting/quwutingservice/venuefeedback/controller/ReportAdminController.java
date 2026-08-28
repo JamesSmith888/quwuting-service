@@ -25,6 +25,7 @@ public class ReportAdminController {
 
     private final VenueFeedbackService venueFeedbackService;
     private final StatusReportService statusReportService;
+    private final org.quwuting.quwutingservice.appfeedback.service.AppFeedbackService appFeedbackService;
 
     /**
      * 上报列表（需 ADMIN）。
@@ -49,8 +50,9 @@ public class ReportAdminController {
      * 管理端处理动作自然归零；非管理员访问由 requireAdmin 拒绝（403），
      * 前端按角色门禁 + 失败静默降级处理。
      * <p>
-     * 口径（2026-08-10 扩展）：<b>PENDING 反馈数 + 活跃暂停营业上报数</b>——
-     * 「上报管理」是两类上报的统一管理入口（admin-reports 页双 tab），红点 = 任一
+     * 口径（2026-08-10 扩展，2026-08-28 意见反馈纳入）：<b>PENDING 门店反馈数 +
+     * 活跃暂停营业上报数 + PENDING 意见反馈数</b>——「上报管理」是三类上报的
+     * 统一管理入口（admin-reports 页三 tab），红点 = 任一
      * 类有待办/待巡查即亮；暂停报活跃计数经 {@link StatusReportService#countActiveReports}
      * 按 TTL 窗口计算，处置（移除）或过期后自然归零。
      */
@@ -58,7 +60,8 @@ public class ReportAdminController {
     public ApiResponse<Long> pendingCount() {
         return ApiResponse.ok(
                 venueFeedbackService.countPendingReports()
-                        + statusReportService.countActiveReports());
+                        + statusReportService.countActiveReports()
+                        + appFeedbackService.countPendingFeedbacks());
     }
 
     /**

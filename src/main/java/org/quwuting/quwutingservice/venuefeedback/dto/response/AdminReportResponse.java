@@ -13,12 +13,20 @@ import java.time.LocalDateTime;
  * 平台级聚合视图：跨场所列出全部上报，附带场所名称（venueName）供管理员
  * 直接识别目标门店；处理动作（resolve/dismiss）后 handledAt 落值，
  * handleNote（处理结果说明）为管理员处理时填写的回传内容（2026-08-06 新增）。
+ * <p>
+ * 2026-08-28 补上报者信息（userId + nickname，管理端上下文真实昵称不脱敏）——
+ * 管理员点击上报者行直达用户详情（用户管理模块）识别异常/恶意上报模式；
+ * 匿名上报（userId null）昵称回退「匿名」。
  */
 public record AdminReportResponse(
         Long id,
         Long venueId,
         /** 场所名称（批量查询 qwt_venues，场所已逻辑删除时回退占位文案） */
         String venueName,
+        /** 上报者用户 ID（2026-08-28 新增，管理端识别身份用；匿名上报 = null） */
+        Long userId,
+        /** 上报者真实昵称（2026-08-28 新增，管理端上下文不做脱敏；匿名回退「匿名」） */
+        String nickname,
         FeedbackType type,
         String typeDisplay,
         String note,

@@ -120,4 +120,18 @@ public class AdminDemandController {
         }
         return ApiResponse.ok(demandRelayService.rescue(id, request.targetDancerId()));
     }
+
+    /**
+     * 反馈已核实（POST /admin/demands/{id}/feedback-handled；仅 ADMIN，2026-08-28，
+     * V58，docs/agents/25「反馈闭环 · 管理端可见性修复」）：客人「没加上 TA？」
+     * 反馈 = 管理端待办（红点 + 待处理视图）——管理员微信侧核实线下情况完成后
+     * 一键归档（置位 guest_feedback_handled_at，幂等），从待办消失进入已处理视图。
+     * 校验：邀约不存在 / 该邀约无客人反馈 → 1001；重复核实幂等成功静默。
+     */
+    @PostMapping("/{id}/feedback-handled")
+    public ApiResponse<Void> feedbackHandled(@PathVariable Long id) {
+        UserContext.requireAdmin();
+        demandRelayService.markFeedbackHandled(id);
+        return ApiResponse.ok(null);
+    }
 }

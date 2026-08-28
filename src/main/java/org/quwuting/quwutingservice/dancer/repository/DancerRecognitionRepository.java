@@ -165,4 +165,12 @@ public interface DancerRecognitionRepository extends JpaRepository<DancerRecogni
     @Query("SELECT r.userId, COUNT(r) FROM DancerRecognition r " +
            "WHERE r.userId IN :userIds AND r.deleted = false GROUP BY r.userId")
     List<Object[]> countGroupByUserIds(@Param("userIds") Collection<Long> userIds);
+
+    /**
+     * 单用户认可舞伴明细（2026-08-28 管理端用户详情下钻，docs/agents/23）：未软删
+     * 行，时间倒序——「认可舞伴 N 次」统计点击查看每条明细的数据源。
+     */
+    @Query("SELECT r FROM DancerRecognition r " +
+           "WHERE r.userId = :userId AND r.deleted = false ORDER BY r.createdAt DESC, r.id DESC")
+    List<DancerRecognition> findByUserIdForAdminDetail(@Param("userId") Long userId);
 }

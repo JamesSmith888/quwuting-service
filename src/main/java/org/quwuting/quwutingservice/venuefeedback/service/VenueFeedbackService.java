@@ -11,6 +11,7 @@ import org.quwuting.quwutingservice.config.ReportsProperties;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuefeedback.dto.request.CreateFeedbackRequest;
@@ -100,6 +101,8 @@ public class VenueFeedbackService {
      *  （markSuspendedByReport / reopenByReport，2026-08-20 兜底接入，与
      *   StatusReportService.adoptReport 同一联动通道） */
     private final org.quwuting.quwutingservice.venue.service.VenueService venueService;
+    /** 管理端列表批量回填上报者昵称（2026-08-28，消除 N+1） */
+    private final org.quwuting.quwutingservice.user.repository.UserRepository userRepository;
 
     /**
      * 提交上报（匿名可提交，不强推登录）。
@@ -259,8 +262,17 @@ public class VenueFeedbackService {
                 : venueRepository.findByIdInAndDeletedFalse(venueIds).stream()
                         .collect(Collectors.toMap(Venue::getId, Venue::getName, (a, b) -> a));
 
+        // 批量查上报者昵称（消除 N+1，2026-08-28 补上报者信息——管理端点击直达用户详情）
+        List<Long> userIds = result.getContent().stream()
+                .map(VenueFeedback::getUserId).filter(java.util.Objects::nonNull)
+                .distinct().toList();
+        Map<Long, String> nicknameMap = userIds.isEmpty() ? Map.of()
+                : userRepository.findByIdInAndDeletedFalse(userIds).stream()
+                        .collect(Collectors.toMap(User::getId, User::getNickname, (a, b) -> a));
+
         return result.map(f -> toAdminResponse(f,
-                nameMap.getOrDefault(f.getVenueId(), VENUE_GONE_NAME)));
+                nameMap.getOrDefault(f.getVenueId(), VENUE_GONE_NAME),
+                nicknameMap.get(f.getUserId())));
     }
 
     /**
@@ -462,11 +474,18 @@ public class VenueFeedbackService {
         );
     }
 
-    private AdminReportResponse toAdminResponse(VenueFeedback feedback, String venueName) {
+    /**
+     * 管理端列表项组装（2026-08-28 补上报者信息：userId + 真实昵称；匿名
+     * （userId null 或昵称缺失）回退「匿名」——管理端上下文不做脱敏，管理员
+     * 点击上报者行直达用户详情识别异常/恶意上报模式）。
+     */
+    private AdminReportResponse toAdminResponse(VenueFeedback feedback, String venueName, String nickname) {
         return new AdminReportResponse(
                 feedback.getId(),
                 feedback.getVenueId(),
                 venueName,
+                feedback.getUserId(),
+                nickname != null && !nickname.isBlank() ? nickname : "匿名",
                 feedback.getType(),
                 feedback.getType().getDisplayName(),
                 feedback.getNote(),

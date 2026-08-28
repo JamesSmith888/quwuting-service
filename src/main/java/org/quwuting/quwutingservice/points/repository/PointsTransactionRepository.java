@@ -69,6 +69,14 @@ public interface PointsTransactionRepository extends JpaRepository<PointsTransac
             """)
     Page<PointsTransaction> findPageByUserAndType(@Param("userId") Long userId, @Param("type") String type, Pageable pageable);
 
+    /**
+     * 单用户全量积分流水（2026-08-28 管理端用户详情下钻，docs/agents/23：POINTS /
+     * REPORT_REWARD 明细数据源，时间倒序；来源过滤在 Service 层按 sourceType 完成）。
+     */
+    @Query("SELECT pt FROM PointsTransaction pt WHERE pt.userId = :userId " +
+            "ORDER BY pt.createdAt DESC, pt.id DESC")
+    List<PointsTransaction> findAllByUserIdForAdminDetail(@Param("userId") Long userId);
+
     /** 今日赠送总量（赠送日上限校验） */
     @Query("""
             SELECT COALESCE(SUM(-pt.delta), 0) FROM PointsTransaction pt

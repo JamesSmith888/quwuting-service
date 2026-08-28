@@ -212,7 +212,7 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
      */
     @Query(value = "SELECT r.id AS id, r.venue_id AS venueid, r.user_id AS userid, " +
                    "       r.type AS type, r.note AS note, r.occurred_at AS occurredat, r.created_at AS createdat, " +
-                   "       v.name AS venuename, u.nickname AS nickname " +
+                   "       v.name AS venuename, u.nickname AS nickname, r.admin_action AS adminaction " +
                    "FROM qwt_venue_status_reports r " +
                    "JOIN qwt_venues v ON v.id = r.venue_id " +
                    "LEFT JOIN qwt_users u ON u.id = r.user_id " +
@@ -228,6 +228,38 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
                                            Pageable pageable);
 
     /**
+     * 管理端<b>已处理</b>突发事件列表（2026-08-28 新增，仅 ADMIN）。
+     * <p>
+     * 已处理 = 管理端已处置（admin_action IS NOT NULL）——已采纳 ADOPTED（未软删）、
+     * 已保留 KEPT（未软删）、已移除 REMOVED（soft delete）三态统一收口，按时间倒序
+     * 分页，跨场所。语义：管理员可复盘历史处置（审计 + 识别恶意上报用户模式），
+     * 「移除后记录直接消失」的旧问题由此解决——公开视图消失（恶意信号不得误导），
+     * 但管理端历史保留（处置留痕）。
+     * <p>
+     * <b>不按 TTL 过滤</b>：已处置信号无论是否过公示期都是历史事实（处置结果不因
+     * 时间流逝而失效）；软删的 REMOVED 记录在本视图内可见（与待处理视图的
+     * deleted=false 谓词差异是设计使然）。
+     * <p>
+     * 与 {@link #findActiveReports} 同投影/同 JOIN（无 type 筛选——已处理视图按
+     * 处置状态而非类型浏览，类型信息由行内 typeDisplay 展示；前端另有类型筛选
+     * 维度仅作用于待处理视图）。
+     * <p>
+     * 原生 SQL + 投影接口，别名必须全小写（PG 折叠未引用标识符，既定模式）。
+     */
+    @Query(value = "SELECT r.id AS id, r.venue_id AS venueid, r.user_id AS userid, " +
+                   "       r.type AS type, r.note AS note, r.occurred_at AS occurredat, r.created_at AS createdat, " +
+                   "       v.name AS venuename, u.nickname AS nickname, r.admin_action AS adminaction " +
+                   "FROM qwt_venue_status_reports r " +
+                   "JOIN qwt_venues v ON v.id = r.venue_id " +
+                   "LEFT JOIN qwt_users u ON u.id = r.user_id " +
+                   "WHERE r.admin_action IS NOT NULL " +
+                   "ORDER BY r.created_at DESC",
+           countQuery = "SELECT COUNT(*) FROM qwt_venue_status_reports r " +
+                        "WHERE r.admin_action IS NOT NULL",
+           nativeQuery = true)
+    Page<AdminReportRow> findHandledReports(Pageable pageable);
+
+    /**
      * 管理端活跃突发事件计数（需 ADMIN，跨场所全量）。
      * 活跃 = 未删除、<b>未处置（admin_action IS NULL）</b>且 expiresAt > now（TTL
      * 唯一事实源 = 列）——FAB「上报管理」红点聚合数据源之一（与 venuefeedback
@@ -237,7 +269,7 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
            "WHERE r.deleted = false AND r.adminAction IS NULL AND r.expiresAt > :now")
     long countActiveReports(@Param("now") LocalDateTime now);
 
-    /** 投影接口：管理端活跃突发事件行（含上报者身份 + 场所名 + note，供 /admin/status-reports 使用） */
+    /** 投影接口：管理端突发事件行（含上报者身份 + 场所名 + note + 处置标记，供 /admin/status-reports 使用） */
     interface AdminReportRow {
         Long getId();
         Long getVenueid();
@@ -248,6 +280,8 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
         LocalDateTime getCreatedat();
         String getVenuename();
         String getNickname();
+        /** 管理端处置标记（null = 待处理；ADOPTED/KEPT/REMOVED = 已处置，2026-08-28 新增） */
+        String getAdminaction();
     }
 
     /**
@@ -389,4 +423,12 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
     @Query("SELECT r.userId, COUNT(r) FROM VenueStatusReport r " +
             "WHERE r.userId IN :userIds AND r.deleted = false AND r.adminAction IS NULL GROUP BY r.userId")
     List<Object[]> countPendingGroupByUserIds(@Param("userIds") java.util.Collection<Long> userIds);
+
+    /**
+     * 单用户暂停营业报告明细（2026-08-28 管理端用户详情下钻，docs/agents/23）：未软删
+     * 行，时间倒序——「上报 N 条」统计点击查看每条明细中状态报告部分的数据源。
+     */
+    @Query("SELECT r FROM VenueStatusReport r WHERE r.userId = :userId AND r.deleted = false " +
+            "ORDER BY r.createdAt DESC, r.id DESC")
+    List<VenueStatusReport> findByUserIdForAdminDetail(@Param("userId") Long userId);
 }

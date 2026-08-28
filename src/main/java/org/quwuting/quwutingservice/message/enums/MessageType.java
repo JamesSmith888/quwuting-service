@@ -49,5 +49,13 @@ public enum MessageType {
      * 幂等 = 仅 updateStatusIfPending 实际流转（PENDING → 目标态）时发一次。
      * 软关联 DEMAND（深链邀约详情页 pages/demand-detail?id=）。
      */
-    DEMAND_STATUS
+    DEMAND_STATUS,
+    /**
+     * 意见反馈处理结果（2026-08-28 新增，平台级意见反馈）：管理端对
+     * qwt_app_feedbacks 的实际流转（采纳/采纳不奖励/已处理/忽略）完成时发送给
+     * 反馈者，同事务、幂等（仅 PENDING→终态实际流转时发一次）；匿名反馈不通知。
+     * 与 FEEDBACK_RESULT（门店维度上报）独立成类，标题/内容/深链目标不同。
+     * 软关联 APP_FEEDBACK（深链意见反馈页「我的反馈」列表）。
+     */
+    APP_FEEDBACK_RESULT
 }

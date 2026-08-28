@@ -35,6 +35,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -602,7 +603,7 @@ class StatusReportServiceTest {
         when(statusReportRepository.countClustersByVenueAndType(any(LocalDateTime.class)))
                 .thenReturn(List.of());
 
-        Page<AdminStatusReportResponse> page = service.listAdminReports(0, 20, null);
+        Page<AdminStatusReportResponse> page = service.listAdminReports(0, 20, null, "ACTIVE");
 
         AdminStatusReportResponse resp = page.getContent().get(0);
         assertEquals("张三", resp.nickname(), "管理端上下文必须返回真实昵称（不脱敏）");
@@ -611,6 +612,7 @@ class StatusReportServiceTest {
         assertEquals("突然检查", resp.typeDisplay());
         assertEquals("夜幕舞厅", resp.venueName());
         assertEquals(USER_ID, resp.userId());
+        assertNull(resp.adminAction(), "待处理视图 adminAction 必须为 null");
     }
 
     /** 同店同类型聚簇计数回填：管理端「N人报」显示（peerCount = 众报置信度） */
@@ -629,15 +631,45 @@ class StatusReportServiceTest {
         when(statusReportRepository.countClustersByVenueAndType(any(LocalDateTime.class)))
                 .thenReturn(List.of(cluster));
 
-        Page<AdminStatusReportResponse> page = service.listAdminReports(0, 20, null);
+        Page<AdminStatusReportResponse> page = service.listAdminReports(0, 20, null, "ACTIVE");
 
         assertEquals(3L, page.getContent().get(0).peerCount());
+    }
+
+    /** 已处理视图：findHandledReports 驱动，adminAction 回填处置标记（2026-08-28） */
+    @Test
+    void listAdminReports_handledView_mapsAdminAction() {
+        UserContext.set(ADMIN_ID, UserRole.ADMIN);
+        StatusReportRepository.AdminReportRow row = adminRow(3L, "王五", null);
+        when(row.getAdminaction()).thenReturn(AdminAction.KEPT.name());
+        when(statusReportRepository.findHandledReports(any(PageRequest.class)))
+                .thenReturn(new PageImpl<>(List.of(row), PageRequest.of(0, 20), 1));
+
+        Page<AdminStatusReportResponse> page = service.listAdminReports(0, 20, null, "HANDLED");
+
+        assertEquals(AdminAction.KEPT, page.getContent().get(0).adminAction());
+        // 已处理视图不消费聚簇计数（无「N人报」语义）
+        verify(statusReportRepository, never()).countClustersByVenueAndType(any());
+    }
+
+    /** 已处理视图：移除（REMOVED，soft delete）记录同样可见——审计留痕不消失 */
+    @Test
+    void listAdminReports_handledView_includesRemovedRows() {
+        UserContext.set(ADMIN_ID, UserRole.ADMIN);
+        StatusReportRepository.AdminReportRow row = adminRow(4L, "赵六", null);
+        when(row.getAdminaction()).thenReturn(AdminAction.REMOVED.name());
+        when(statusReportRepository.findHandledReports(any(PageRequest.class)))
+                .thenReturn(new PageImpl<>(List.of(row), PageRequest.of(0, 20), 1));
+
+        Page<AdminStatusReportResponse> page = service.listAdminReports(0, 20, null, "HANDLED");
+
+        assertEquals(AdminAction.REMOVED, page.getContent().get(0).adminAction());
     }
 
     @Test
     void listAdminReports_nonAdmin_throws() {
         // setUp 已置 USER 角色：非管理员访问管理端列表必须被拒
-        assertThrows(BusinessException.class, () -> service.listAdminReports(0, 20, null));
+        assertThrows(BusinessException.class, () -> service.listAdminReports(0, 20, null, "ACTIVE"));
         verify(statusReportRepository, never()).findActiveReports(any(), any(), any());
     }
 
@@ -684,6 +716,91 @@ class StatusReportServiceTest {
         when(statusReportRepository.findById(1L)).thenReturn(Optional.empty());
 
         BusinessException ex = assertThrows(BusinessException.class, () -> service.removeReport(1L));
+
+        assertEquals(1008, ex.getCode());
+    }
+
+    // ─── 管理端保留（2026-08-28 处置三分级新增：存疑不背书——只打 KEPT 标记不软删，
+    //     不联动营业状态、不发分、不发站内信；公告区继续公示至 TTL 过期） ─────────
+
+    @Test
+    void keepReport_marksKeptWithoutSoftDelete_andInvalidatesHeat() {
+        UserContext.set(ADMIN_ID, UserRole.ADMIN);
+        VenueStatusReport report = activeReport(1L, USER_ID, false, ReportType.SUSPENDED);
+        report.setVenueId(VENUE_ID);
+        when(statusReportRepository.findById(1L)).thenReturn(Optional.of(report));
+        Venue venue = venue(VENUE_ID);
+        venue.setName("夜幕舞厅");
+        when(venueRepository.findByIdAndDeletedFalse(VENUE_ID)).thenReturn(Optional.of(venue));
+
+        service.keepReport(1L);
+
+        // 只打 KEPT 标记不软删（公告区继续公示）；不联动营业状态（即使状态类 SUSPENDED）；
+        // 2026-08-28 用户拍板：保留发积分 + 处理结果站内信（与采纳同激励模式）
+        verify(statusReportRepository).save(argThat(r ->
+                !r.isDeleted() && r.getAdminAction() == AdminAction.KEPT));
+        verify(venueHeatService).invalidate(VENUE_ID);
+        verify(venueService, never()).markSuspendedByReport(anyLong(), anyLong());
+        verify(venueService, never()).reopenByReport(anyLong(), anyLong());
+        verify(pointsService).rewardStatusReport(USER_ID, 1L);
+        verify(messageService).create(eq(USER_ID), eq(MessageType.STATUS_REPORT_RESULT),
+                eq("突发事件已保留"), any(String.class), eq("VENUE"), eq(VENUE_ID));
+    }
+
+    /**
+     * 情况不明保留：不设积分奖励（信息量最低、噪音高危——与采纳同一奖励边界，
+     * 管理员无法用"保留"绕过"情况不明不奖励"的防刷约定），但仍发站内信。
+     */
+    @Test
+    void keepReport_situationUnclear_noRewardButNotified() {
+        UserContext.set(ADMIN_ID, UserRole.ADMIN);
+        VenueStatusReport report = activeReport(2L, USER_ID, false, ReportType.SITUATION_UNCLEAR);
+        report.setVenueId(VENUE_ID);
+        when(statusReportRepository.findById(2L)).thenReturn(Optional.of(report));
+        Venue venue = venue(VENUE_ID);
+        venue.setName("夜幕舞厅");
+        when(venueRepository.findByIdAndDeletedFalse(VENUE_ID)).thenReturn(Optional.of(venue));
+
+        service.keepReport(2L);
+
+        verify(pointsService, never()).rewardStatusReport(anyLong(), anyLong());
+        verify(messageService).create(eq(USER_ID), eq(MessageType.STATUS_REPORT_RESULT),
+                eq("突发事件已保留"), any(String.class), eq("VENUE"), eq(VENUE_ID));
+    }
+
+    /** 匿名上报保留：userId null 无法归属——不发分、不通知（与积分同一匿名边界） */
+    @Test
+    void keepReport_anonymousReporter_noRewardNoNotify() {
+        UserContext.set(ADMIN_ID, UserRole.ADMIN);
+        VenueStatusReport report = activeReport(3L, null, false, ReportType.SUDDEN_INSPECTION);
+        report.setVenueId(VENUE_ID);
+        when(statusReportRepository.findById(3L)).thenReturn(Optional.of(report));
+
+        service.keepReport(3L);
+
+        verify(pointsService, never()).rewardStatusReport(anyLong(), anyLong());
+        verify(messageService, never()).create(anyLong(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void keepReport_alreadyDisposed_idempotent() {
+        UserContext.set(ADMIN_ID, UserRole.ADMIN);
+        VenueStatusReport report = report(1L, false, LocalDateTime.now().minusHours(1));
+        report.setAdminAction(AdminAction.ADOPTED);
+        when(statusReportRepository.findById(1L)).thenReturn(Optional.of(report));
+
+        service.keepReport(1L);
+
+        verify(statusReportRepository, never()).save(any());
+        verify(venueHeatService, never()).invalidate(anyLong());
+    }
+
+    @Test
+    void keepReport_notFound_throws() {
+        UserContext.set(ADMIN_ID, UserRole.ADMIN);
+        when(statusReportRepository.findById(1L)).thenReturn(Optional.empty());
+
+        BusinessException ex = assertThrows(BusinessException.class, () -> service.keepReport(1L));
 
         assertEquals(1008, ex.getCode());
     }

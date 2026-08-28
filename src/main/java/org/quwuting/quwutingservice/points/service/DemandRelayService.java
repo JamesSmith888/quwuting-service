@@ -29,7 +29,9 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -73,6 +75,12 @@ public class DemandRelayService {
      *  让 24h 自动降级成为「催过无回应」的兜底而非「平台默默放行」） */
     private static final Duration REMIND_AFTER = Duration.ofHours(12);
 
+    /** 待处理视图全量拉取上限（2026-08-28，V58：pending 视图 = 中转 PENDING 待发放
+     *  ∪ 全舞伴反馈未核实两类异构集合，DB 层无法 UNION 分页 → 各自全量拉取（上限
+     *  保护防失控）+ 内存合并排序 + 手动分页。个人项目量级（<百级）无性能风险；
+     *  超限即截断，配运营规模增长时再评估 DB 层 UNION 化） */
+    private static final int PENDING_FETCH_LIMIT = 500;
+
     private final DemandRecordRepository demandRecordRepository;
     private final DancerRepository dancerRepository;
     private final DancerServiceRepository dancerServiceRepository;
@@ -103,27 +111,33 @@ public class DemandRelayService {
     }
 
     /**
-     * 邀约工作台列表（按 scope 过滤；scope=pending → PENDING / processed → 终态
+     * 邀约工作台列表（按 scope 过滤；scope=pending → 待处理 / processed → 终态
      * （APPROVED/REJECTED/AUTO_RELEASED/EXPIRED）/ all → 全部中转记录（不限状态））。
      * 舞伴范围 = 全部开启中转（contact_relay=true）的舞伴；行含舞伴摘要 + 客人公开资料
      * + message 原文 + 超 12h 催办标记 + status（列表行自描述，已处理视图直接渲染状态，
      * 无需再查详情）。映射逻辑三视图共用（单一事实源），仅底层查询按 scope 选择。
+     * <p>
+     * 2026-08-28（V58，docs/agents/25「反馈闭环 · 管理端可见性修复」）：pending 视图
+     * 从「仅中转 PENDING」扩展为「中转 PENDING 待发放 ∪ <b>全舞伴反馈未核实</b>」——
+     * 客人反馈只发生在非中转舞伴的已发放/存量邀约上，若仍按中转舞伴集合过滤将零可见
+     * （生产实证：feedback_requested_at 非空的邀约 100% 非中转舞伴）。两类待办合并
+     * 排序（反馈待办按反馈时间倒序浮顶，最新反馈最优先处理）+ 内存分页。
      */
     public Page<AdminDemandItem> listByScope(String scope, int page, int size) {
         List<Long> relayDancerIds = dancerRepository.findRelayEnabled().stream()
                 .map(Dancer::getId).toList();
         PageRequest pr = PageRequest.of(page, Math.min(Math.max(size, 1), 50));
-        if (relayDancerIds.isEmpty()) {
-            return Page.empty(pr);
-        }
         Page<DemandRecord> records;
         if ("processed".equals(scope)) {
-            records = demandRecordRepository.findByDancerIdsAndStatuses(relayDancerIds,
-                    List.of("APPROVED", "REJECTED", "AUTO_RELEASED", "EXPIRED"), pr);
+            records = relayDancerIds.isEmpty() ? Page.empty(pr)
+                    : demandRecordRepository.findByDancerIdsAndStatuses(relayDancerIds,
+                            List.of("APPROVED", "REJECTED", "AUTO_RELEASED", "EXPIRED"), pr);
         } else if ("all".equals(scope)) {
-            records = demandRecordRepository.findByDancerIds(relayDancerIds, pr);
+            records = relayDancerIds.isEmpty() ? Page.empty(pr)
+                    : demandRecordRepository.findByDancerIds(relayDancerIds, pr);
         } else {
-            records = demandRecordRepository.findPendingByDancerIds(relayDancerIds, pr);
+            // 待处理 = 中转 PENDING ∪ 全舞伴反馈未核实（2026-08-28，V58）
+            records = mergePendingTodo(relayDancerIds, pr);
         }
         List<Long> dancerIds = records.getContent().stream()
                 .map(DemandRecord::getDancerId).distinct().toList();
@@ -173,8 +187,50 @@ public class DemandRelayService {
                     // 2026-08-27（V56，docs/agents/25「反馈闭环」）：客人反馈 code
                     // （非空 = 已提交「没加上 TA？」反馈，已自动返还扣费积分——
                     // 管理端识别需人工介入的邀约）
-                    r.getGuestFeedback());
+                    r.getGuestFeedback(),
+                    // 2026-08-28（V58）：反馈是否已核实（已处理/全部视图展示
+                    // 「已核实」标记；待处理视图非空 = 反馈待办行）
+                    r.getGuestFeedbackHandledAt() != null);
         });
+    }
+
+    /**
+     * 待处理视图合并（2026-08-28，V58，docs/agents/25「反馈闭环 · 管理端可见性
+     * 修复」）：中转 PENDING 待发放 ∪ 全舞伴反馈未核实。
+     * <p>
+     * 两类集合<b>理论不相交</b>（PENDING 未发放的邀约客人无法反馈——反馈仅对
+     * 已发放/存量邀约开放），合并仍按 id 去重防御（保险丝，避免同记录双计）。
+     * 排序键 = 各自"事件时间"：反馈待办按 feedbackRequestedAt（真实世界事件，
+     * 最新反馈浮顶优先处理）、PENDING 按 createdAt（新邀约在前）——统一降序混排，
+     * 管理员一眼看到最新待处理事项。DB 层无法对异构集合 UNION 分页，故全量拉取
+     * （上限 {@link #PENDING_FETCH_LIMIT} 保护）+ 内存合并 + 手动切片。
+     */
+    private Page<DemandRecord> mergePendingTodo(List<Long> relayDancerIds, PageRequest pr) {
+        List<DemandRecord> pendingRelay = relayDancerIds.isEmpty() ? List.of()
+                : demandRecordRepository.findPendingByDancerIds(relayDancerIds,
+                        PageRequest.of(0, PENDING_FETCH_LIMIT)).getContent();
+        List<DemandRecord> feedbackPending = demandRecordRepository
+                .findPendingFeedback(PageRequest.of(0, PENDING_FETCH_LIMIT)).getContent();
+        Map<Long, DemandRecord> unique = new LinkedHashMap<>();
+        for (DemandRecord r : pendingRelay) {
+            unique.putIfAbsent(r.getId(), r);
+        }
+        for (DemandRecord r : feedbackPending) {
+            unique.putIfAbsent(r.getId(), r);
+        }
+        List<DemandRecord> merged = new ArrayList<>(unique.values());
+        merged.sort((a, b) -> {
+            LocalDateTime ka = a.getFeedbackRequestedAt() != null
+                    ? a.getFeedbackRequestedAt() : a.getCreatedAt();
+            LocalDateTime kb = b.getFeedbackRequestedAt() != null
+                    ? b.getFeedbackRequestedAt() : b.getCreatedAt();
+            return kb.compareTo(ka);
+        });
+        int total = merged.size();
+        int from = Math.min(pr.getPageNumber() * pr.getPageSize(), total);
+        int to = Math.min(from + pr.getPageSize(), total);
+        return new org.springframework.data.domain.PageImpl<>(
+                merged.subList(from, to), pr, total);
     }
 
     /**
@@ -242,15 +298,47 @@ public class DemandRelayService {
      * 管理端待办总数（GET /admin/demands/pending-count；仅 ADMIN，2026-08-26：
      * me 页「邀约工作台」入口红点数据源——与 GET /admin/reports/pending-count
      * 同模式：红点只提示"有待办"，计数随发放/拒绝动作自然归零，无独立已读态）。
-     * 舞伴范围 = 全部开启中转（contact_relay=true）的舞伴（与 listPending 同口径）。
+     * <p>
+     * 2026-08-28（V58，docs/agents/25「反馈闭环 · 管理端可见性修复」）：口径扩展
+     * = 中转 PENDING 待发放 + <b>全舞伴反馈未核实</b>——客人反馈不再静默落库，
+     * 计入 me 页红点（管理端入口即见，无需主动打开工作台逐条翻找）。
      */
     public long countPending() {
         List<Long> relayDancerIds = dancerRepository.findRelayEnabled().stream()
                 .map(Dancer::getId).toList();
-        if (relayDancerIds.isEmpty()) {
-            return 0;
+        long relayPending = relayDancerIds.isEmpty() ? 0
+                : demandRecordRepository.countPendingByDancerIds(relayDancerIds);
+        long feedbackPending = demandRecordRepository.countPendingFeedback();
+        return relayPending + feedbackPending;
+    }
+
+    /**
+     * 反馈已核实（2026-08-28，V58，docs/agents/25「反馈闭环 · 管理端可见性修复」；
+     * POST /admin/demands/{id}/feedback-handled，仅 ADMIN）。
+     * <p>
+     * 语义：客人反馈 = 管理端待办（计入红点 + 待处理视图），管理员微信侧核实
+     * （联系舞伴/客人确认线下情况）完成后一键归档——置位 guest_feedback_handled_at
+     * （幂等，WHERE guest_feedback_handled_at IS NULL），从待办消失进入已处理/全部
+     * 视图（行显示「已核实」标记），红点计数随之归零。
+     * <p>
+     * 校验：邀约不存在 → 1001；该邀约无客人反馈（guestFeedback 为空）→ 1001
+     * （不能把普通邀约"假装核实"归档）；重复核实 = 幂等成功静默（同
+     * updateFeedbackIf「已反馈过不报错」语义，非终态操作无需两段确认）。
+     */
+    @Transactional
+    public void markFeedbackHandled(Long demandId) {
+        DemandRecord record = demandRecordRepository.findById(demandId)
+                .orElseThrow(() -> new BusinessException(1001, "邀约不存在"));
+        if (record.getGuestFeedback() == null) {
+            throw new BusinessException(1001, "该邀约无客人反馈");
         }
-        return demandRecordRepository.countPendingByDancerIds(relayDancerIds);
+        int updated = demandRecordRepository.updateFeedbackHandledIf(demandId, LocalDateTime.now());
+        if (updated == 0) {
+            log.info("管理员重复核实邀约 {} 客人反馈（幂等忽略）", demandId);
+            return;
+        }
+        log.info("管理员核实邀约 {} 客人反馈（{}，客人 {}）", demandId,
+                record.getGuestFeedback(), record.getUserId());
     }
 
     /**

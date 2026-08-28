@@ -27,4 +27,11 @@ public interface DancerShareRepository extends JpaRepository<DancerShare, Long> 
            "WHERE s.userId IN :userIds AND s.eventType = :eventType GROUP BY s.userId")
     List<Object[]> countGroupByUserIdsAndEventType(@Param("userIds") Collection<Long> userIds,
                                                    @Param("eventType") ShareEventType eventType);
+
+    /**
+     * 单用户舞伴分享动作明细（2026-08-28 管理端用户详情下钻，docs/agents/23）：只计
+     * SHARE（分享动作），时间倒序——与 {@link VenueShareRepository} 同名方法合并为
+     * 「分享 N 次」统计点击查看的每条明细。
+     */
+    List<DancerShare> findByUserIdAndEventTypeOrderByCreatedAtDesc(Long userId, ShareEventType eventType);
 }

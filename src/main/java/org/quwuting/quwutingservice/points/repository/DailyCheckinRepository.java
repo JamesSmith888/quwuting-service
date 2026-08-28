@@ -53,4 +53,12 @@ public interface DailyCheckinRepository extends JpaRepository<DailyCheckin, Long
     @Query("SELECT c.checkinDate FROM DailyCheckin c WHERE c.userId = :userId " +
             "ORDER BY c.checkinDate DESC")
     List<LocalDate> findDatesByUserIdDesc(@Param("userId") Long userId, Pageable pageable);
+
+    /**
+     * 单用户打卡明细（2026-08-28 管理端用户详情下钻，docs/agents/23）：日期倒序——
+     * 「打卡 N 天」统计点击查看每条明细（日期 + 创建时间）的数据源。
+     */
+    @Query("SELECT c FROM DailyCheckin c WHERE c.userId = :userId " +
+            "ORDER BY c.checkinDate DESC, c.id DESC")
+    List<DailyCheckin> findByUserIdForAdminDetail(@Param("userId") Long userId);
 }

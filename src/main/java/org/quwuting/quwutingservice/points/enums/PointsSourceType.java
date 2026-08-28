@@ -38,5 +38,13 @@ public enum PointsSourceType {
      * 分，无净收益可刷；幂等键 (user, UNLOCK_REFUND, demandId) 保证一次反馈
      * 只返还一次）。免费解锁（无扣费流水）无返还，不写本来源流水。
      */
-    UNLOCK_REFUND
+    UNLOCK_REFUND,
+    /**
+     * 意见反馈被管理员采纳（2026-08-28 新增，source_id = qwt_app_feedbacks.id）。
+     * 与 FEEDBACK_REWARD 的差异：那是门店维度上报（venue_feedbacks），本来源是
+     * 平台级意见反馈（BUG/建议/夸奖）——两表 id 各自自增可能相同，幂等键必须
+     * 分来源（(user, APP_FEEDBACK_REWARD, appFeedbackId)），否则跨表撞键会漏发。
+     * 奖励金额与 FEEDBACK_REWARD 同池（app.points.feedback-reward，用户心智一致）。
+     */
+    APP_FEEDBACK_REWARD
 }

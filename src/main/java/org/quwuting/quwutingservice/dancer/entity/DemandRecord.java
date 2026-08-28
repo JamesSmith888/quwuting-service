@@ -170,4 +170,17 @@ public class DemandRecord {
      */
     @Column
     private LocalDateTime feedbackRequestedAt;
+
+    /**
+     * 客人反馈已核实时间（2026-08-28 新增，V58；docs/agents/25「反馈闭环 ·
+     * 管理端可见性修复」）。
+     * <p>
+     * 语义：管理端待办闭环的"已处理"侧——管理员微信侧核实（联系舞伴/客人）
+     * 完成后置位（幂等，WHERE guest_feedback_handled_at IS NULL 条件更新）。
+     * NULL + feedbackRequestedAt 非空 = 反馈待处理（计入邀约工作台待处理视图 +
+     * me 页红点）；非空 = 已核实归档（从待办消失，已处理/全部视图可见）。
+     * 无独立已读态（同 pending-count 范式：计数随处理动作自然归零）。
+     */
+    @Column
+    private LocalDateTime guestFeedbackHandledAt;
 }

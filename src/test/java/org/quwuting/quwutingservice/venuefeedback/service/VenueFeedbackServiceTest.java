@@ -13,6 +13,7 @@ import org.quwuting.quwutingservice.message.service.MessageService;
 import org.quwuting.quwutingservice.points.service.PointsService;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.user.enums.UserRole;
+import org.quwuting.quwutingservice.user.repository.UserRepository;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.service.VenueService;
@@ -52,6 +53,9 @@ class VenueFeedbackServiceTest {
     /** 状态类反馈采纳联动（2026-08-20：SUSPENDED/RESUMED 采纳时联动门店营业状态） */
     @Mock
     private VenueService venueService;
+    /** 管理端列表批量回填上报者昵称（2026-08-28 补上报者信息；列表场景才消费） */
+    @Mock
+    private UserRepository userRepository;
 
     private VenueFeedbackService service;
 
@@ -63,7 +67,7 @@ class VenueFeedbackServiceTest {
         //（2026-08-13 远端合并：VenueFeedbackService 构造器新增 PointsProperties 参数）
         service = new VenueFeedbackService(venueFeedbackRepository, venueRepository,
                 new ReportsProperties(3), new PointsProperties(0, 0, 0, 0, null, null),
-                pointsService, messageService, venueService);
+                pointsService, messageService, venueService, userRepository);
         UserContext.set(99L, UserRole.ADMIN);
 
         feedback = new VenueFeedback();

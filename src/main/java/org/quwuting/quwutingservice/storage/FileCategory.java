@@ -27,7 +27,9 @@ public enum FileCategory {
     /** 舞友群群二维码（2026-08-17 新增，运营管理端上传；用户端长按识别加入群聊） */
     GROUP_QR("group-qr"),
     /** 舞伴短视频（2026-08-22 新增，管理员直发 + PENDING 审核后公开；走视频扩展名/大小校验通道） */
-    DANCER_VIDEO("dancer-videos");
+    DANCER_VIDEO("dancer-videos"),
+    /** 意见反馈截图（2026-08-28 新增，平台级意见反馈选填 1 张；仅管理端处理时可见） */
+    APP_FEEDBACK("app-feedbacks");
 
     private final String pathPrefix;
 
