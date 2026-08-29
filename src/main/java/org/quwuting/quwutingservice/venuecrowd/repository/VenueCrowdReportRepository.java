@@ -48,18 +48,28 @@ public interface VenueCrowdReportRepository extends JpaRepository<VenueCrowdRepo
     /**
      * 幂等 upsert（每日一记）：INSERT 新行 / ON CONFLICT UPDATE 原行（modify_count+1）。
      * 冲突目标 = 部分唯一索引（venue_id, user_id, report_date）WHERE deleted=false。
+     * <p>
+     * ⚠️ 时间口径（2026-08-29 修复）：created_at/updated_at **必须由 Java 传入
+     * LocalDateTime.now()（JVM 时区=北京时间）**，禁止用 DB 端 now()——Supabase
+     * 会话时区是 UTC，DB now() 写入 UTC 墙钟值，而聚合窗口（since = JVM
+     * LocalDateTime.now() - 2h）是北京时间，比较永远错位 → 上报恒落在窗口外、
+     * 详情页恒显「暂无舞友上报」。全库其余表（@CreationTimestamp）均为 JVM 时间，
+     * 本表须同口径。同日「改一下」命中 ON CONFLICT 时同时刷新 created_at（重新
+     * 上报 = 数据此刻新鲜，2h TTL 重新计时——顺带自愈修复前的 UTC 脏行）。
      */
     @Modifying
     @Query(value = "INSERT INTO qwt_venue_crowd_reports " +
             "(id, created_at, updated_at, deleted, venue_id, user_id, female_level, male_level, report_date, modify_count) " +
-            "VALUES (nextval('qwt_venue_crowd_reports_id_seq'), now(), now(), false, :venueId, :userId, :femaleLevel, :maleLevel, :reportDate, 0) " +
+            "VALUES (nextval('qwt_venue_crowd_reports_id_seq'), :createdAt, :updatedAt, false, :venueId, :userId, :femaleLevel, :maleLevel, :reportDate, 0) " +
             "ON CONFLICT (venue_id, user_id, report_date) WHERE deleted = false " +
             "DO UPDATE SET female_level = EXCLUDED.female_level, " +
             "male_level = EXCLUDED.male_level, " +
             "modify_count = qwt_venue_crowd_reports.modify_count + 1, " +
-            "updated_at = now()",
+            "created_at = :createdAt, " +
+            "updated_at = :updatedAt",
             nativeQuery = true)
     void upsert(@Param("venueId") Long venueId, @Param("userId") Long userId,
                 @Param("femaleLevel") int femaleLevel, @Param("maleLevel") Integer maleLevel,
-                @Param("reportDate") LocalDate reportDate);
+                @Param("reportDate") LocalDate reportDate,
+                @Param("createdAt") LocalDateTime createdAt, @Param("updatedAt") LocalDateTime updatedAt);
 }

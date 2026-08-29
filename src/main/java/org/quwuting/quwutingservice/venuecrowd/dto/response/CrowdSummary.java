@@ -14,7 +14,7 @@ package org.quwuting.quwutingservice.venuecrowd.dto.response;
  *   <li>{@code tier}/{@code tierText}：置信度分层（CrowdTier code + 完整胶囊文案，
  *       如「舞友报告 · 未经核实」「资深舞友报告」「多人报过」「说法不一」）；</li>
  *   <li>{@code mainText}：主信号完整展示文案（如「舞伴 不错（约100）· 3 位舞友 · 1 小时前」）；</li>
- *   <li>{@code maleText}：次信号展示文案（如「男客 正常 · 2 人」，无数据 null）；</li>
+ *   <li>{@code maleText}：次信号展示文案（如「男客 一般（约50）· 2 人」，无数据 null）；</li>
  *   <li>{@code ageText}：最新上报相对时间（「刚刚 / N 分钟前 / N 小时前」）；</li>
  *   <li>{@code mine}：我今天的上报（未登录或未上报 null——前端据此渲染「报一下 / 已上报·可改」）。</li>
  * </ul>

@@ -30,7 +30,7 @@ public class CrowdReportController {
      * 提交 / 更新今晚热度（需登录，每日一记幂等 upsert）。
      * POST /venues/{venueId}/crowd-reports
      * <p>
-     * 请求体：{ femaleLevel: 1-4（必填，在店舞伴档位）, maleLevel: 1-3（选填，男客密度） }。
+     * 请求体：{ femaleLevel: 1-4（必填，在店舞伴档位）, maleLevel: 1-4（选填，男客数量档位，锚点同女） }。
      * 返回更新后的聚合摘要（前端立即刷新展示 + mine 态）。
      */
     @PostMapping

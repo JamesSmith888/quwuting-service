@@ -92,8 +92,12 @@ public class CrowdReportService {
         // 枚举校验（快捷按钮载荷越界拒绝——零自由文本，无内容审核面）
         CrowdFemaleLevel female = CrowdFemaleLevel.of(request.femaleLevel());
         CrowdMaleLevel male = request.maleLevel() != null ? CrowdMaleLevel.of(request.maleLevel()) : null;
+        // ⚠️ 时间口径：created_at/updated_at 必须传 JVM LocalDateTime.now()（北京时间），
+        // 禁 DB now()（Supabase 会话 UTC → 与 2h 窗口比较错位 → 上报恒不可见，见
+        // VenueCrowdReportRepository.upsert 注释，2026-08-29 修复）。
+        LocalDateTime now = LocalDateTime.now();
         crowdReportRepository.upsert(venueId, userId, female.getLevel(),
-                male != null ? male.getLevel() : null, LocalDate.now());
+                male != null ? male.getLevel() : null, LocalDate.now(), now, now);
         return summary(venueId);
     }
 
@@ -220,11 +224,11 @@ public class CrowdReportService {
                 female.getAnchor(), w.count(), w.share());
     }
 
-    /** 次信号视图（男客 1-3，无锚点） */
+    /** 次信号视图（男客 1-4，锚点同女——冷清 0-20 / 一般 约50 / 不错 约100 / 火爆 300+） */
     private CrowdSummary.CrowdLevelView maleLevelView(Winner w) {
         CrowdMaleLevel male = CrowdMaleLevel.of(w.level());
         return new CrowdSummary.CrowdLevelView(male.getLevel(), male.getDisplayName(),
-                "", w.count(), w.share());
+                male.getAnchor(), w.count(), w.share());
     }
 
     /** 加权众数中间结果 */
@@ -242,10 +246,10 @@ public class CrowdReportService {
         return core;
     }
 
-    /** 次信号展示文案：「男客 正常 · 2 人」 */
+    /** 次信号展示文案：「男客 一般（约50）· 2 人」（2026-08-29 用户改判：男客同女 4 档 + 锚点） */
     private String buildMaleText(CrowdSummary.CrowdLevelView male) {
         CrowdMaleLevel maleLevel = CrowdMaleLevel.of(male.level());
-        return "男客 " + maleLevel.getDisplayName() + " · " + male.count() + " 人";
+        return "男客 " + maleLevel.getDisplayName() + "（" + maleLevel.getAnchor() + "）· " + male.count() + " 人";
     }
 
     /** 相对时间（「刚刚 / N 分钟前 / N 小时前」）——服务端权威，前端零拼接 */
@@ -377,7 +381,7 @@ public class CrowdReportService {
                 .collect(Collectors.toList());
     }
 
-    /** 男客密度分布（level → 条数，降序；CrowdMaleLevel 解析） */
+    /** 男客数量档位分布（level → 条数，降序；CrowdMaleLevel 解析，锚点同女） */
     private List<AdminCrowdReportSummary.LevelCount> maleDistribution(List<VenueCrowdReport> rows) {
         Map<Integer, Long> counts = rows.stream()
                 .filter(r -> r.getMaleLevel() != null)
@@ -387,7 +391,7 @@ public class CrowdReportService {
                 .map(e -> {
                     CrowdMaleLevel male = CrowdMaleLevel.of(e.getKey());
                     return new AdminCrowdReportSummary.LevelCount(
-                            male.getLevel(), male.getDisplayName(), "", e.getValue());
+                            male.getLevel(), male.getDisplayName(), male.getAnchor(), e.getValue());
                 })
                 .collect(Collectors.toList());
     }

@@ -42,7 +42,7 @@ public class VenueCrowdReport extends BaseEntity {
     @Column(nullable = false)
     private Integer femaleLevel;
 
-    /** 男客密度档位（1-3，见 CrowdMaleLevel；null = 跳过未观察） */
+    /** 男客数量档位（1-4，锚点同女，见 CrowdMaleLevel；null = 跳过未观察） */
     @Column
     private Integer maleLevel;
 
