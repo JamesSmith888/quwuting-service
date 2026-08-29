@@ -815,6 +815,19 @@ public class DancerService {
         List<DancerServiceResponse> services = pub.services();
         boolean noService = services == null || services.isEmpty();
         boolean contactRevealEligible = hasContact && noService && !dancer.isContactRelay();
+        // 免费直显（2026-08-29 用户拍板：免费展示的联系方式直接随详情下发，前端
+        // 加载即展示——零点击零请求，无需「需要时加载」）：
+        // - 判定 = 打码直显资格（hasContact && 服务范围为空 && 非邀约中转）&&
+        //   <b>无积分门槛（contactCost == 0）</b>——「免费」= 无门槛；有付费墙
+        //   （cost>0）仍维持打码 + 点击解锁（unlock 扣费），不能白给；
+        // - 防泄漏红线对免费直显场景放宽（用户知情拍板）：真实值随详情下发可被
+        //   脚本批量抓取，但免费内容本身免费可得（unlock 无门槛），权衡后接受；
+        // - 本人/管理员（showAllPhotos）照常下发（dancer-edit 编辑回显）。
+        boolean directDeliverContact = contactRevealEligible && contactCost == 0;
+        if (directDeliverContact) {
+            contact = dancer.getContact();
+            contactImageUrl = dancer.getContactImageUrl();
+        }
         String contactMasked = (!showAllPhotos && contactRevealEligible)
                 ? maskContact(rawContact) : null;
         // 创作者收益计划（2026-08-14）：开关 + 广告位 ID（配置下发，前端零硬编码）+
