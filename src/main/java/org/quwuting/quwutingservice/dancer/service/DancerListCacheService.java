@@ -51,12 +51,14 @@ import java.util.stream.Collectors;
  * <ul>
  *   <li>60s refresh-ahead + 30min 绝对过期 + 500 条上限（同 DancerDetailCacheService）；</li>
  *   <li>新鲜度主保障是写路径显式 {@link #invalidateAll()}（唯一失效入口）——
- *       认可 toggle / 资料编辑 / 照片增删审 / 状态流转 / 认证流转 / 新建舞伴等
- *       <b>改变公开列表行内容或排序</b>的写操作后全清（列表条目数 = 城市×页数，
- *       数据量小，全清成本 = 下次请求回源一次，可接受；对齐门店 hotVenueIds
- *       @CacheEvict(allEntries=true) 先例）；收藏 add·remove 不改公开列表内容
- *       （DancerSummaryResponse 无收藏态字段，收藏 Tab 走个性化接口不进本缓存），
- *       豁免失效（详情缓存已覆盖）；</li>
+ *       认可 toggle / 资料编辑 / 照片增删审 / 状态流转 / 认证流转 / 新建舞伴 /
+ *       <b>积分解锁（2026-08-29 排序 v2 入矩阵——联系解锁数是 HOT 排序主导信号，
+ *       经 PointsService#invalidateDancerStatsAfterCommit 同事务 afterCommit 触发，
+ *       与详情缓存失效同点调用）</b>等<b>改变公开列表行内容或排序</b>的写操作后全清
+ *       （列表条目数 = 城市×页数，数据量小，全清成本 = 下次请求回源一次，可接受；
+ *       对齐门店 hotVenueIds @CacheEvict(allEntries=true) 先例）；收藏 add·remove
+ *       不改公开列表内容（DancerSummaryResponse 无收藏态字段，收藏 Tab 走个性化
+ *       接口不进本缓存），豁免失效（详情缓存已覆盖）；</li>
  *   <li><b>用户相关状态不进缓存</b>：个人「今日已认可」ID 集合 / 今日投票标签
  *       （myTodayIds / myTagsById）恒实时查询——列表卡片 chips 活跃态是个人态，
  *       严禁进用户无关缓存（对齐 DancerDetailCacheService 的用户相关态边界）。</li>

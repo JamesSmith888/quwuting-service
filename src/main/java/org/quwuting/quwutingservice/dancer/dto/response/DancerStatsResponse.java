@@ -11,9 +11,10 @@ import java.util.List;
  * 七张趋势图渲染（认可/收藏/礼物价值/分享/浏览/需求 + 浏览来源）+ 一组「用户解锁
  * 信息」分类聚合（unlockStats，前端横向条形图）+ 一组「需求热度」分类聚合
  * （demandStats，按服务类别）+ 一组全量历史累计指标（totals，前端「累计数据」
- * 汇总卡：总收藏数/总浏览数等常见指标）。与门店 {@code VenueHeatResponse} 的
- * 趋势字段同模式（countDailyTrends 骨架 + 实时口径），但只含时间序列与累计指标、
- * 不含热度指数——舞伴域暂无热度公式（第一期范围，见前端 docs/agents/09「舞伴统计」）。
+ * 汇总卡：总收藏数/总浏览数等常见指标）+ 一组「排名热度」快照（heat，2026-08-29
+ * 追加——列表 HOT 排序口径公开化，权重唯一事实源 = DancerHeatWeights，对齐门店
+ * 热度页 formulaText/formulaDetail 模式）。与门店 {@code VenueHeatResponse} 的
+ * 趋势字段同模式（countDailyTrends 骨架 + 实时口径）。
  */
 public record DancerStatsResponse(
         /**
@@ -79,6 +80,12 @@ public record DancerStatsResponse(
          * 趋势=近30天）；浏览/认可/收藏/分享/礼物价值/需求六类，见 {@link DancerTotals}。
          */
         DancerTotals totals,
+        /**
+         * 「排名热度」快照（2026-08-29 追加：列表 HOT 排序口径的同源快照——
+         * 热度分 + 各信号输入 + 后端权威公式文案）。列表排序规则对用户公开的
+         * 展示载体（对齐门店热度页模式）；缺省（旧后端兼容）= null 前端不渲染。
+         */
+        DancerHeatResponse heat,
         /**
          * 滚动窗口统计口径的截止日期（yyyy-MM-dd，实时口径 = 今天）。
          * 所有趋势序列统计到请求时刻（含今日已发生的数据），同一天内多次请求结果

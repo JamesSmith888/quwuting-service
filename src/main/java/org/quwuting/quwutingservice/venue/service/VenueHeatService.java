@@ -8,6 +8,7 @@ import org.quwuting.quwutingservice.taginteraction.repository.TagInteractionRepo
 import org.quwuting.quwutingservice.venue.dto.response.FavoriteTrendPoint;
 import org.quwuting.quwutingservice.venue.dto.response.ReactionTrendPoint;
 import org.quwuting.quwutingservice.venue.dto.response.VenueHeatResponse;
+import org.quwuting.quwutingservice.venue.dto.response.VenueStatusLogItem;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.enums.StatusConfidence;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
@@ -121,6 +122,7 @@ public class VenueHeatService {
 
     private final VenueLookupService venueLookupService;
     private final VenueRepository venueRepository;
+    private final org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository venueStatusLogRepository;
     private final TagInteractionRepository tagInteractionRepository;
     private final org.quwuting.quwutingservice.config.PointsProperties pointsProperties;
     /**
@@ -133,12 +135,14 @@ public class VenueHeatService {
 
     public VenueHeatService(VenueLookupService venueLookupService,
                             VenueRepository venueRepository,
+                            org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository venueStatusLogRepository,
                             TagInteractionRepository tagInteractionRepository,
                             org.quwuting.quwutingservice.config.PointsProperties pointsProperties,
                             @org.springframework.context.annotation.Lazy
                             org.quwuting.quwutingservice.points.service.PointsService pointsService) {
         this.venueLookupService = venueLookupService;
         this.venueRepository = venueRepository;
+        this.venueStatusLogRepository = venueStatusLogRepository;
         this.tagInteractionRepository = tagInteractionRepository;
         this.pointsProperties = pointsProperties;
         this.pointsService = pointsService;
@@ -222,6 +226,11 @@ public class VenueHeatService {
         ActiveReportSummary reportSummary = new ActiveReportSummary(
                 (int) orZero(counters.getReportcount()),
                 counters.getLatestreporttime());
+
+        // ── 状态变更记录（2026-08-29 新增）：近30天最多 5 条倒序，营业状态弹窗
+        //    「状态记录」区块数据源（可信度判定的证据层）。状态日志仅随状态变更写入，
+        //    写路径均显式 invalidate 本缓存——记录新鲜度与可信度判定输入同源同调。
+        List<VenueStatusLogItem> statusLogs = buildStatusLogItems(venueId, windowSince);
 
         // ── 趋势（多行时间序列，独立 1 次往返：收藏（含取消收藏）/浏览（含来源分列）/
         //    正负向 Reaction/收到积分八序列合一，近30天+今日、缺失日补零——
@@ -339,6 +348,7 @@ public class VenueHeatService {
                 confidence.level().name(),
                 confidence.text(),
                 confidence.ruleDetail(),
+                statusLogs,
                 reportSummary.activeCount(),
                 reportSummary.latestReportTime(),
                 formulaText, formulaDetail,
@@ -403,6 +413,31 @@ public class VenueHeatService {
     }
 
     /**
+     * 组装近30天状态变更记录（最多 5 条，按变更时间倒序；窗口与可信度判定输入同源）。
+     * <p>
+     * 事件文案（changeText）在此生成下发（文案唯一事实源，与可信度依据同模式）：
+     * 状态变迁 = 「A → B」；建档初始日志（fromStatus 为 null）= 「初始状态：B」。
+     * 日期格式 MM-dd——30 天窗口内不跨年时无歧义（跨年场景由窗口边界自然化解，
+     * 用户对"一个月前"的日期精度需求到日即止）。
+     */
+    private List<VenueStatusLogItem> buildStatusLogItems(Long venueId, LocalDateTime since) {
+        List<org.quwuting.quwutingservice.venue.entity.VenueStatusLog> logs =
+                venueStatusLogRepository.findTop5ByVenueIdAndCreatedAtAfterOrderByCreatedAtDesc(venueId, since);
+        List<VenueStatusLogItem> items = new ArrayList<>(logs.size());
+        for (org.quwuting.quwutingservice.venue.entity.VenueStatusLog log : logs) {
+            String changeText = log.getFromStatus() != null
+                    ? log.getFromStatus().getDisplayName() + " → " + log.getToStatus().getDisplayName()
+                    : "初始状态：" + log.getToStatus().getDisplayName();
+            items.add(new VenueStatusLogItem(
+                    log.getCreatedAt() != null
+                            ? log.getCreatedAt().toLocalDate().format(java.time.format.DateTimeFormatter.ofPattern("MM-dd"))
+                            : "",
+                    changeText));
+        }
+        return items;
+    }
+
+    /**
      * 状态可信度判定结果：等级 + 结论文案 + 判定依据文案。
      * <p>
      * 文案唯一事实源在后端（与热度公式 formulaText/formulaDetail 同模式）——前端只渲染、
@@ -437,32 +472,36 @@ public class VenueHeatService {
      * 非营业分支不依赖暂停次数：对非营业门店该指标无区分力（0 次是常态），决定可信度的是
      * 「该状态已稳定持续多久」与「有无反向实时信号（活跃报告 override）」。等级结论（text）
      * 与判定依据（ruleDetail）随状态类型区分生成，杜绝"已停业却显示稳定营业"类语义错配。
+     * <p>
+     * 判定依据文案白话化（2026-08-29，用户反馈"一眼看上去完全不懂，需要静下心才能明白"）：
+     * 旧文案是「判定规则」口吻（规则术语 + 嵌套条件 + 完整矩阵复述），本质是把代码判定逻辑
+     * 逐字翻译给用户——信息完整但不可读。重构原则：徽标已承载结论，依据行只补
+     * <b>一句白话事实 + 必要时一句行动建议</b>，完整判定矩阵不再复述（判定过程由
+     * 「状态记录」区块的事件列表自证——证据即解释）。
      */
     private StatusConfidenceResult computeStatusConfidence(VenueStatus status, long suspensionCount30d,
                                                            long currentStatusDays, int activeReportCount) {
         if (activeReportCount > 0) {
             return new StatusConfidenceResult(StatusConfidence.LOW, "数据可能过时",
-                    "判定规则：近 4 小时有 " + activeReportCount + " 人报告暂停营业，与当前状态不一致，数据可能过时。");
+                    "近4小时有 " + activeReportCount + " 人报告暂停营业，信息可能已过时。");
         }
         if (status == VenueStatus.OPEN) {
             if (suspensionCount30d == 0) {
                 return new StatusConfidenceResult(StatusConfidence.HIGH, "稳定营业",
-                        "判定规则：近30天暂停 " + suspensionCount30d + " 次 = 稳定。稳定门店无论多久未更新状态，\"营业中\"即为可信——不更新不等于不准确。");
+                        "近30天无暂停记录，状态稳定可信。");
             }
             if (currentStatusDays <= CONFIDENCE_RECENT_DAYS) {
                 return new StatusConfidenceResult(StatusConfidence.MEDIUM, "状态多变",
-                        "判定规则：近30天暂停 " + suspensionCount30d + " 次 = 不稳定。不稳定门店状态持续 ≤7天为\"近期确认\"（建议关注），>7天为\"数据可能过时\"。当前属近期确认范围。");
+                        "近30天暂停过 " + suspensionCount30d + " 次，本次已连续营业 " + currentStatusDays + " 天。");
             }
             return new StatusConfidenceResult(StatusConfidence.LOW, "数据可能过时",
-                    "判定规则：近30天暂停 " + suspensionCount30d + " 次 = 不稳定。不稳定门店状态持续 >7天为\"数据可能过时\"。建议出发前电话确认或提交反馈。");
+                    "近30天暂停过 " + suspensionCount30d + " 次，且已 " + currentStatusDays + " 天未更新，建议出发前核实。");
         }
         if (currentStatusDays > CONFIDENCE_RECENT_DAYS) {
             return new StatusConfidenceResult(StatusConfidence.HIGH, "状态可信",
-                    "判定规则：当前状态（" + status.getDisplayName() + "）已持续 " + currentStatusDays
-                            + " 天，长时间未被纠正或收到反向信号，该状态信息可信。");
+                    status.getDisplayName() + "状态已持续 " + currentStatusDays + " 天，信息可信。");
         }
         return new StatusConfidenceResult(StatusConfidence.MEDIUM, "建议确认",
-                "判定规则：当前状态（" + status.getDisplayName() + "）刚变更 " + currentStatusDays
-                        + " 天，未经时间验证，建议出发前确认最新情况。");
+                currentStatusDays + " 天前刚变更为" + status.getDisplayName() + "，建议出发前确认。");
     }
 }

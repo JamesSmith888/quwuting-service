@@ -3,6 +3,8 @@ package org.quwuting.quwutingservice.dancer.service;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import lombok.RequiredArgsConstructor;
+import org.quwuting.quwutingservice.config.DancerHeatWeights;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerHeatResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerStatsResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerDemandStat;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTotals;
@@ -31,8 +33,9 @@ import java.util.concurrent.TimeUnit;
  * 对齐舞伴模块服务与联系方式需求的新增内容）。
  * <p>
  * 对齐门店热度服务（{@code VenueHeatService}）的「内嵌 Caffeine refresh-ahead」缓存
- * 模式（能力平权：统计接口同模式，但舞伴域暂无热度公式，只含趋势时间序列 +
- * 累计指标 totals + 解锁信息 + 需求热度）：
+ * 模式（能力平权：统计接口同模式，含趋势时间序列 + 累计指标 totals + 解锁信息 +
+ * 需求热度 + 「排名热度」快照 heat（2026-08-29 追加——列表 HOT 排序口径公开化，
+ * 权重唯一事实源 = DancerHeatWeights，排序与展示同源，对齐门店 2026-08-08 先例））：
  * <ul>
  *   <li>{@code refreshAfterWrite(60s)}：条目写入 60s 后，下一次访问立即返回旧值并
  *       异步回源刷新（单飞：同键并发只触发一次回源）——统计页高频滚动浏览场景下
@@ -212,10 +215,83 @@ public class DancerStatsService {
                 orZero(totalsRow.getSharecount()),
                 orZero(totalsRow.getPointstotal()),
                 orZero(totalsRow.getDemandcount()));
+        // 「排名热度」快照（2026-08-29 追加）：列表 HOT 排序口径的同源计算与文案——
+        // 权重唯一事实源 = DancerHeatWeights，输入计数器 = countDancerHeatCounters
+        // （窗口锚点与 DancerListCacheService.compute 同款现算）。舞伴不存在（软删/
+        // 未创建）时 heat = null（防御：计数器查询空行跳过，前端不渲染该卡）。
+        DancerHeatResponse heat = computeHeat(dancerId);
         return new DancerStatsResponse(
                 recognitionTrend, favoriteTrend, pointsTrend, shareTrend,
                 viewTrend, viewSourceTrend, unlockStats, demandTrend, demandStats,
-                totals, asOfDate.toString());
+                totals, heat, asOfDate.toString());
+    }
+
+    /**
+     * 排名热度计算（2026-08-29 追加，缓存 loader 内执行——经 {@link #getStats} 走缓存）。
+     * <p>
+     * <b>口径契约</b>：与列表 HOT 排序（DancerRepository#findPublicPage）完全同源——
+     * 权重引用 {@link DancerHeatWeights}（唯一事实源）、窗口锚点与列表缓存 compute
+     * 同款现算（now-7d / now-30d / now-14d / now-3d）、输入计数器 SQL 逐项镜像排序
+     * 子查询。formulaText/formulaDetail 文案唯一事实源在后端（对齐门店
+     * VenueHeatService 公式文案模式），前端只渲染——排序规则公开化、可问责。
+     * <p>
+     * 舞伴不存在/已软删时返回 null（计数器查询无行——stats 接口对不存在舞伴本就
+     * 返回全零序列，heat 无主行输入时无意义，前端缺省不渲染）。
+     */
+    private DancerHeatResponse computeHeat(Long dancerId) {
+        LocalDateTime now = LocalDateTime.now();
+        DancerStatsRepository.HeatCountersRow row = dancerStatsRepository.countDancerHeatCounters(
+                dancerId,
+                now.minusDays(DancerHeatWeights.INTENT_WINDOW_DAYS),
+                now.minusDays(DancerHeatWeights.FAV_WINDOW_DAYS));
+        if (row == null || row.getCreatedat() == null) {
+            return null;
+        }
+        long unlock7d = orZero(row.getUnlockcontact7d());
+        long unlock30d = orZero(row.getUnlockcontact30d());
+        long rec7d = orZero(row.getRecognition7d());
+        long fav30d = orZero(row.getFav30d());
+        int newBonus = row.getCreatedat()
+                .isAfter(now.minusDays(DancerHeatWeights.NEW_DANCER_WINDOW_DAYS))
+                ? (int) DancerHeatWeights.NEW_DANCER_BONUS : 0;
+        LocalDateTime albumMax = row.getAlbummax();
+        LocalDateTime contactAt = row.getContactupdatedat();
+        boolean freshAlbum = albumMax != null
+                && !albumMax.isBefore(now.minusDays(DancerHeatWeights.FRESH_WINDOW_DAYS));
+        boolean freshContact = contactAt != null
+                && !contactAt.isBefore(now.minusDays(DancerHeatWeights.FRESH_WINDOW_DAYS));
+        int freshBonus = (freshAlbum || freshContact) ? (int) DancerHeatWeights.FRESH_UPDATE_BONUS : 0;
+        long heatScore = unlock7d * DancerHeatWeights.UNLOCK_CONTACT
+                + rec7d * DancerHeatWeights.RECOGNITION
+                + newBonus + freshBonus;
+
+        String formulaText = "热度 " + heatScore + " = 近7天联系解锁 " + unlock7d
+                + "×" + DancerHeatWeights.UNLOCK_CONTACT + " · 认可 " + rec7d
+                + "×" + DancerHeatWeights.RECOGNITION
+                + (newBonus > 0 ? " · 新舞伴 +" + newBonus : "")
+                + (freshBonus > 0 ? " · 近期更新 +" + freshBonus : "");
+
+        StringBuilder detail = new StringBuilder();
+        detail.append("此热度 = 舞伴列表「热门」排序的主排序值，按同一公式实时计算：\n");
+        detail.append("· 近7天联系解锁×").append(DancerHeatWeights.UNLOCK_CONTACT)
+                .append("（主导信号）：当前 ").append(unlock7d).append(" 次——解锁联系方式")
+                .append("需消耗积分，是用户真实意向的最强信号；\n");
+        detail.append("· 近7天认可×").append(DancerHeatWeights.RECOGNITION)
+                .append("（平滑项）：当前 ").append(rec7d).append(" 次——免费点赞，")
+                .append("量小时提供同分区分度，不作为主导信号（与成交相关性弱）；\n");
+        detail.append("· 新舞伴 +").append(DancerHeatWeights.NEW_DANCER_BONUS)
+                .append("：创建在 ").append(DancerHeatWeights.NEW_DANCER_WINDOW_DAYS)
+                .append(" 天保护期内（当前：").append(newBonus > 0 ? "是" : "否").append("）——新资料冷启动曝光通道；\n");
+        detail.append("· 近期更新 +").append(DancerHeatWeights.FRESH_UPDATE_BONUS)
+                .append("：近 ").append(DancerHeatWeights.FRESH_WINDOW_DAYS)
+                .append(" 天更新过相册或联系方式（当前：").append(freshBonus > 0 ? "是" : "否")
+                .append("）——「正在维护资料」的活跃信号；\n");
+        detail.append("· 同分时依次比 近30天联系解锁（当前 ").append(unlock30d)
+                .append(" 次）、近30天收藏（当前 ").append(fav30d).append(" 次）、资料创建时间。\n");
+        detail.append("排序信号原则：每个信号须预测用户目标行为（约到舞伴/成交）——付费意向主导、免费社交信号平滑。");
+
+        return new DancerHeatResponse(heatScore, unlock7d, unlock30d, rec7d, fav30d,
+                newBonus, freshBonus, formulaText, detail.toString());
     }
 
     /**

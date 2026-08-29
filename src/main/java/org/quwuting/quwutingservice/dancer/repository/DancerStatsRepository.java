@@ -305,6 +305,65 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
     }
 
     /**
+     * 舞伴「排名热度」输入计数器行投影（2026-08-29 追加，非时间序列——
+     * 列表 HOT 排序公式（DancerHeatWeights）的单舞伴输入快照，
+     * 驱动统计页「排名热度」卡 = 排序口径公开化）。getter 名与 SQL alias
+     * （小写）逐字匹配（同 DailyTrendRow 惯例）。
+     */
+    interface HeatCountersRow {
+        /** 近7天联系方式解锁数（排序主导信号输入） */
+        Long getUnlockcontact7d();
+        /** 近30天联系方式解锁数（排序 tie-break 一级输入） */
+        Long getUnlockcontact30d();
+        /** 近7天认可数（排序平滑项输入） */
+        Long getRecognition7d();
+        /** 近30天收藏数（排序 tie-break 二级输入） */
+        Long getFav30d();
+        /** 舞伴创建时刻（新舞伴保护期判定输入） */
+        java.time.LocalDateTime getCreatedat();
+        /** 最新 PUBLIC 媒体 created_at（资料新鲜度判定输入，未上传过 = null） */
+        java.time.LocalDateTime getAlbummax();
+        /** 联系方式最近更新时刻（资料新鲜度判定输入，未更新过 = null） */
+        java.time.LocalDateTime getContactupdatedat();
+    }
+
+    /**
+     * 舞伴「排名热度」输入计数器聚合（2026-08-29 追加，统计页「排名热度」卡数据源）：
+     * 一条 DB 往返取回排序公式全部输入（子查询各扫一次目标表 + 舞伴主行两列）。
+     * 口径与 {@code DancerRepository#findPublicPage} 排序子查询逐项一致
+     * （窗口锚点由服务层现算传入：since7d/since30d），保证「排序 = 展示」同源——
+     * 对齐门店「列表排序与热度页统一」2026-08-08 先例。
+     *
+     * @param dancerId 舞伴 ID
+     * @param since7d  近7天窗口下界（now-7d，服务层现算）
+     * @param since30d 近30天窗口下界（now-30d，服务层现算）
+     */
+    @Query(value = """
+            SELECT (SELECT COUNT(*) FROM qwt_points_unlocks
+                    WHERE target_type = 'DANCER_CONTACT' AND target_id = :dancerId
+                      AND created_at >= :since7d) AS unlockcontact7d,
+                   (SELECT COUNT(*) FROM qwt_points_unlocks
+                    WHERE target_type = 'DANCER_CONTACT' AND target_id = :dancerId
+                      AND created_at >= :since30d) AS unlockcontact30d,
+                   (SELECT COUNT(*) FROM qwt_dancer_recognitions
+                    WHERE dancer_id = :dancerId AND deleted = false
+                      AND created_at >= :since7d) AS recognition7d,
+                   (SELECT COUNT(*) FROM qwt_dancer_favorites
+                    WHERE dancer_id = :dancerId AND deleted = false
+                      AND created_at >= :since30d) AS fav30d,
+                   d.created_at AS createdat,
+                   (SELECT MAX(created_at) FROM qwt_dancer_photos
+                    WHERE dancer_id = :dancerId AND status = 'PUBLIC'
+                      AND deleted = false) AS albummax,
+                   d.contact_updated_at AS contactupdatedat
+            FROM qwt_dancers d
+            WHERE d.id = :dancerId AND d.deleted = false
+            """, nativeQuery = true)
+    HeatCountersRow countDancerHeatCounters(@Param("dancerId") Long dancerId,
+                                            @Param("since7d") LocalDateTime since7d,
+                                            @Param("since30d") LocalDateTime since30d);
+
+    /**
      * 舞伴需求热度聚合（2026-08-26 追加，「需求热度」横向条形图用）：一条 DB
      * 往返取回各服务类别的需求次数 / 去重人数。
      * <ul>

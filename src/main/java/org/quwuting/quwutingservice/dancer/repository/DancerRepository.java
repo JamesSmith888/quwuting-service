@@ -1,5 +1,6 @@
 package org.quwuting.quwutingservice.dancer.repository;
 
+import org.quwuting.quwutingservice.config.DancerHeatWeights;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.entity.DancerCity;
 import org.springframework.data.domain.Page;
@@ -83,19 +84,26 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
     List<String> findPublicCities();
 
     /**
-     * 公开舞伴列表（仅 NORMAL），按排序模式分页（2026-08-26 晚排序升级）。
+     * 公开舞伴列表（仅 NORMAL），按排序模式分页（2026-08-29 排序 v2：付费意向主导）。
      * <p>
-     * <b>HOT（默认，sortMode='HOT'）</b>——组合分倒序：
+     * <b>HOT（默认，sortMode='HOT'）</b>——排名热度倒序（权重唯一事实源 =
+     * {@link org.quwuting.quwutingservice.config.DancerHeatWeights}，经字符串拼接注入，
+     * 与门店 HEAT_SCORE 同款收敛模式——禁止在 SQL 内回退硬编码数字）：
      * <ol>
-     *   <li><b>近7天认可数 cnt7</b>（主导信号，滚动锚点 now-7d，与 Reaction 同口径；
-     *       刻意不用 countAll——"被认可的历史总量不应让活跃度低的旧资料长期霸榜"）</li>
+     *   <li><b>近7天联系解锁数 ×3</b>（主导信号，2026-08-29 新增——烧积分的付费
+     *       意向，与成交最相关。2026-08-29 根因：原主导信号「近7天认可数」是免费
+     *       点赞、与成交零相关——懒懒Q 12 票仅 1 次解锁，3 周 53 次解锁 0 成交）；</li>
+     *   <li><b>+ 近7天认可数 ×1</b>（平滑项：解锁量级小（全站 3 周 53 次），认可
+     *       提供同分区分度——滚动锚点 now-7d，与 Reaction 同口径）；</li>
      *   <li><b>新鲜度加成 +2/+4</b>：新舞伴（created_at &gt;= now-14d）+2；
      *       近 3 天更新过相册（最新 PUBLIC 媒体 created_at，V51 信号）或联系方式
      *       （contact_updated_at）任一 &gt;= now-3d 再 +2——冷启动曝光通道 +
-     *       "正在维护资料"的活跃信号（2026-08-26 晚新增）</li>
-     *   <li><b>近30天收藏数 fav30d</b>（tie-break，2026-08-26 由近30天收到积分
+     *       "正在维护资料"的活跃信号（2026-08-26 晚新增，口径沿用）；</li>
+     *   <li><b>近30天联系解锁数</b>（tie-break 一级，2026-08-29 新增——长窗口意向
+     *       快照，7 天窗口同分时的区分度）；</li>
+     *   <li><b>近30天收藏数 fav30d</b>（tie-break 二级，2026-08-26 由近30天收到积分
      *       points30d 替换——原口径 SUM(-delta) 仅收费舞伴非零、同分时系统性偏向
-     *       "收费型"，混入商业模式信号；收藏零成本表达长期兴趣，口径中性）</li>
+     *       "收费型"，混入商业模式信号；收藏零成本表达长期兴趣，口径中性）；</li>
      *   <li><b>id 倒序</b>（兜底，新资料优先 + 分页稳定）</li>
      * </ol>
      * <b>LATEST（sortMode='LATEST'）</b>——id 倒序（新资料在前，纯"最新"口径；
@@ -109,10 +117,46 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
      * <p>
      * 返回 Object[]：{id, nickname, avatar_url, bio, gender, city, count_all,
      * count_today, count_7d, verification_status}（verification_status 追加于末尾，
-     * 2026-08-14 官方认证）。排序用列（cnt7/score/fav30d）不参与 SELECT——消费方
-     * 行解析与旧契约完全一致。
+     * 2026-08-14 官方认证）。排序用列（cnt7/unlock7d/unlock30d/fav30d）不参与
+     * SELECT——消费方行解析与旧契约完全一致。
+     * <p>
+     * 权重注入方式（2026-08-29 修复编译错误）：注解值必须是编译期常量表达式，
+     * 无法在注解内对 long 常量做字符串拼接——故主查询/排序片段收敛为下方
+     * {@link #PUBLIC_PAGE_SQL} / {@link #PUBLIC_PAGE_ORDER_BY} 接口常量
+     * （常量拼接 = 合法常量表达式），注解只引用，与 VenueRepository.HEAT_SCORE 同款。
      */
-    @Query(value = """
+
+    /**
+     * findPublicPage 排序片段（HOT/LATEST 双模，2026-08-29 排序 v2）。
+     * 权重经字符串拼接注入 {@link DancerHeatWeights}（唯一事实源）——注解值须为
+     * 编译期常量表达式，long 常量拼接在此接口字段级别完成（与 VenueRepository.HEAT_SCORE
+     * 同款收敛模式），注解内禁止直接拼常量。
+     */
+    String PUBLIC_PAGE_ORDER_BY = """
+            ORDER BY
+              CASE WHEN :sortMode = 'LATEST' THEN 0
+                   ELSE COALESCE(u.unlock7d, 0) * """
+            // 注意：文本块会剥离行尾空白，拼接点必须用显式 " " 空格（否则
+            // 会粘连成 *3/THEN2ELSE 触发 PostgreSQL 语法错误——2026-08-29 线上事故）
+            + " " + DancerHeatWeights.UNLOCK_CONTACT + " " + """
+                        + COALESCE(a.cnt7, 0) * """
+            + " " + DancerHeatWeights.RECOGNITION + " " + """
+                      + CASE WHEN d.created_at >= :sinceNew THEN """
+            + " " + DancerHeatWeights.NEW_DANCER_BONUS + " " + """
+                      ELSE 0 END
+                      + CASE WHEN COALESCE(GREATEST(ph.album_max, d.contact_updated_at),
+                                           TIMESTAMP '1970-01-01 00:00:00') >= :sinceFresh
+                             THEN """
+            + " " + DancerHeatWeights.FRESH_UPDATE_BONUS + " " + """
+                      ELSE 0 END
+              END DESC,
+              CASE WHEN :sortMode = 'LATEST' THEN 0 ELSE COALESCE(u.unlock30d, 0) END DESC,
+              CASE WHEN :sortMode = 'LATEST' THEN 0 ELSE COALESCE(f.fav30d, 0) END DESC,
+              d.id DESC
+            """;
+
+    /** findPublicPage 主查询（HOT/LATEST 双模 + 城市/服务类别筛选），排序片段拼接注入 */
+    String PUBLIC_PAGE_SQL = """
             SELECT d.id, d.nickname, d.avatar_url, d.bio, d.gender, d.city,
                    COALESCE(a.cnt_all, 0) AS cnt_all,
                    COALESCE(a.cnt_today, 0) AS cnt_today,
@@ -138,6 +182,18 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
                 WHERE status = 'PUBLIC' AND deleted = false
                 GROUP BY dancer_id
             ) ph ON ph.dancer_id = d.id
+            -- 2026-08-29 排序 v2：付费意向子查询（联系解锁 = qwt_points_unlocks
+            -- target_type='DANCER_CONTACT'，target_id = 舞伴 ID 直连；字面量语义 =
+            -- PointsGateTargetType.DANCER_CONTACT——注解值须编译期常量，无法拼枚举
+            -- .name()，与 VenueRepository 热度 SQL 硬编码 'VENUE' 同先例）
+            LEFT JOIN (
+                SELECT target_id AS dancer_id,
+                       COUNT(*) FILTER (WHERE created_at >= :since7d) AS unlock7d,
+                       COUNT(*) FILTER (WHERE created_at >= :since30d) AS unlock30d
+                FROM qwt_points_unlocks
+                WHERE target_type = 'DANCER_CONTACT'
+                GROUP BY target_id
+            ) u ON u.dancer_id = d.id
             WHERE d.status = 'NORMAL' AND d.deleted = false
               AND (:city IS NULL OR d.city = :city OR qwt_city_key(d.city) = qwt_city_key(:city)
                    OR EXISTS (
@@ -148,18 +204,9 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
                         SELECT 1 FROM qwt_dancer_services s
                         WHERE s.dancer_id = d.id AND s.deleted = false AND s.active = true
                           AND s.category = :serviceCategory))
-            ORDER BY
-              CASE WHEN :sortMode = 'LATEST' THEN 0
-                   ELSE COALESCE(a.cnt7, 0)
-                      + CASE WHEN d.created_at >= :sinceNew THEN 2 ELSE 0 END
-                      + CASE WHEN COALESCE(GREATEST(ph.album_max, d.contact_updated_at),
-                                           TIMESTAMP '1970-01-01 00:00:00') >= :sinceFresh
-                             THEN 2 ELSE 0 END
-              END DESC,
-              CASE WHEN :sortMode = 'LATEST' THEN 0 ELSE COALESCE(f.fav30d, 0) END DESC,
-              d.id DESC
-            """,
-            countQuery = """
+            """ + PUBLIC_PAGE_ORDER_BY;
+
+    @Query(value = PUBLIC_PAGE_SQL, countQuery = """
             SELECT COUNT(*) FROM qwt_dancers d
             WHERE d.status = 'NORMAL' AND d.deleted = false
               AND (:city IS NULL OR d.city = :city OR qwt_city_key(d.city) = qwt_city_key(:city)

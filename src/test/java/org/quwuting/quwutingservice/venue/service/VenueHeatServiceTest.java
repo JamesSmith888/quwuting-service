@@ -44,6 +44,9 @@ class VenueHeatServiceTest {
     private VenueLookupService venueLookupService;
     @Mock
     private VenueRepository venueRepository;
+    /** 2026-08-29 状态记录：营业状态弹窗「状态记录」区块数据源（近30天变更明细） */
+    @Mock
+    private org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository venueStatusLogRepository;
     @Mock
     private TagInteractionRepository tagInteractionRepository;
     @Mock
@@ -60,7 +63,7 @@ class VenueHeatServiceTest {
 
     @BeforeEach
     void setUp() {
-        heatService = new VenueHeatService(venueLookupService, venueRepository,
+        heatService = new VenueHeatService(venueLookupService, venueRepository, venueStatusLogRepository,
                 tagInteractionRepository, pointsProperties, pointsService);
         venue = new Venue();
         venue.setId(1L);
@@ -71,6 +74,9 @@ class VenueHeatServiceTest {
         // 趋势 mega-query：无数据（generate_series 骨架由 SQL 保证连续，此处空列表即可）
         when(venueRepository.countDailyTrends(anyLong(), any(), any(), any(), any(),
                 any(), any(), any(), any())).thenReturn(Collections.emptyList());
+        // 状态记录查询：默认无记录（各测试按需覆盖）
+        when(venueStatusLogRepository.findTop5ByVenueIdAndCreatedAtAfterOrderByCreatedAtDesc(anyLong(), any()))
+                .thenReturn(Collections.emptyList());
     }
 
     /** 基础 stubbing：热度 mega-query 计数器全零，各测试按需覆盖 */
@@ -260,8 +266,10 @@ class VenueHeatServiceTest {
 
         assertEquals("HIGH", resp.statusConfidence());
         assertEquals("稳定营业", resp.statusConfidenceText());
-        assertTrue(resp.statusConfidenceRuleDetail().contains("近30天暂停 0 次 = 稳定"),
-                "判定依据应说明稳定性输入");
+        assertTrue(resp.statusConfidenceRuleDetail().contains("近30天无暂停记录"),
+                "判定依据应一句话说清稳定性证据（2026-08-29 白话化：不再复述判定规则）");
+        assertFalse(resp.statusConfidenceRuleDetail().contains("判定规则"),
+                "白话化后不得再出现规则术语前缀");
     }
 
     @Test
@@ -273,6 +281,10 @@ class VenueHeatServiceTest {
 
         assertEquals("MEDIUM", resp.statusConfidence());
         assertEquals("状态多变", resp.statusConfidenceText());
+        assertTrue(resp.statusConfidenceRuleDetail().contains("近30天暂停过 1 次"),
+                "判定依据应含暂停次数事实");
+        assertTrue(resp.statusConfidenceRuleDetail().contains("连续营业 3 天"),
+                "判定依据应含当前连续营业天数（用户最关心的现状）");
     }
 
     @Test
@@ -338,5 +350,43 @@ class VenueHeatServiceTest {
         assertEquals("LOW", resp.statusConfidence());
         assertEquals("数据可能过时", resp.statusConfidenceText());
         assertTrue(resp.statusConfidenceRuleDetail().contains("2 人报告"), "判定依据应说明活跃报告数");
+    }
+
+    @Test
+    void statusLogsAreCarriedIntoResponseAsEvidence() {
+        // 2026-08-29 状态记录：近30天变更明细随热度响应下发（营业状态弹窗「状态记录」区块）。
+        // 变迁行 = "A → B"；建档行（fromStatus=null）= "初始状态：B"；日期格式 MM-dd。
+        stubZeroCounters();
+        org.quwuting.quwutingservice.venue.entity.VenueStatusLog resume =
+                new org.quwuting.quwutingservice.venue.entity.VenueStatusLog();
+        resume.setVenueId(1L);
+        resume.setFromStatus(VenueStatus.SUSPENDED);
+        resume.setToStatus(VenueStatus.OPEN);
+        resume.setCreatedAt(LocalDateTime.now().minusDays(1));
+        org.quwuting.quwutingservice.venue.entity.VenueStatusLog suspend =
+                new org.quwuting.quwutingservice.venue.entity.VenueStatusLog();
+        suspend.setVenueId(1L);
+        suspend.setFromStatus(VenueStatus.OPEN);
+        suspend.setToStatus(VenueStatus.SUSPENDED);
+        suspend.setCreatedAt(LocalDateTime.now().minusDays(2));
+        org.quwuting.quwutingservice.venue.entity.VenueStatusLog initial =
+                new org.quwuting.quwutingservice.venue.entity.VenueStatusLog();
+        initial.setVenueId(1L);
+        initial.setFromStatus(null);
+        initial.setToStatus(VenueStatus.OPEN);
+        initial.setCreatedAt(LocalDateTime.now().minusDays(90));
+        when(venueStatusLogRepository.findTop5ByVenueIdAndCreatedAtAfterOrderByCreatedAtDesc(anyLong(), any()))
+                .thenReturn(List.of(resume, suspend, initial));
+
+        VenueHeatResponse resp = heatService.getHeat(1L);
+
+        assertEquals(3, resp.statusLogs().size(), "记录条目应随响应下发");
+        assertEquals("暂停营业 → 营业中", resp.statusLogs().get(0).changeText(),
+                "状态变迁行应展示 from → to 展示名");
+        assertEquals("营业中 → 暂停营业", resp.statusLogs().get(1).changeText());
+        assertEquals("初始状态：营业中", resp.statusLogs().get(2).changeText(),
+                "建档行（fromStatus=null）应展示初始状态");
+        assertTrue(resp.statusLogs().get(0).changedAt().matches("\\d{2}-\\d{2}"),
+                "日期应为 MM-dd 格式");
     }
 }

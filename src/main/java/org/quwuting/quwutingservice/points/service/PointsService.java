@@ -158,6 +158,10 @@ public class PointsService {
      *  设置 DANCER_CONTACT 门槛改变联系方式门槛值——经本入口级联失效内层统计缓存，
      *  单一失效入口，见 DancerDetailCacheService javadoc） */
     private final org.quwuting.quwutingservice.dancer.service.DancerDetailCacheService dancerDetailCacheService;
+    /** 舞伴列表缓存失效入口（2026-08-29 排序 v2：解锁改变 HOT 排序主导信号
+     *  「近7天联系解锁数」——真实解锁写入后与详情缓存同点全清列表缓存，
+     *  见 DancerListCacheService 失效矩阵与 PointsService#invalidateDancerStatsAfterCommit） */
+    private final org.quwuting.quwutingservice.dancer.service.DancerListCacheService dancerListCacheService;
     /** 运营配置（2026-08-26 联系方式「每日首免」开关，热更新即时生效） */
     private final OpsConfigService opsConfigService;
 
@@ -1287,9 +1291,15 @@ public class PointsService {
     }
 
     /**
-     * 解锁写路径 → 舞伴统计缓存失效（2026-08-21 解锁入统计失效矩阵）。
-     * 经 {@link DancerDetailCacheService#invalidate} 唯一入口（级联失效内层
-     * DancerStatsService，单一失效入口见其 javadoc）：
+     * 解锁写路径 → 舞伴缓存失效（2026-08-21 解锁入统计失效矩阵；2026-08-29 排序 v2
+     * 追加列表缓存——联系解锁数是 HOT 排序主导信号）。
+     * <ul>
+     *   <li>{@link DancerDetailCacheService#invalidate}：级联失效内层 DancerStatsService
+     *       （unlockStats 输入 + 统计页「排名热度」卡输入），单一失效入口见其 javadoc；</li>
+     *   <li>{@link DancerListCacheService#invalidateAll}：排序信号输入变化 → 全清列表
+     *       缓存（与认可/收藏/编辑同失效矩阵；列表条目数小全清成本低，见其 javadoc）。</li>
+     * </ul>
+     * 目标定位：
      * <ul>
      *   <li>DANCER_CONTACT：target_id = 舞伴 ID 直连；</li>
      *   <li>DANCER_PHOTO：target_id = 照片 ID，回查 dancer_id；</li>
@@ -1314,10 +1324,12 @@ public class PointsService {
                 @Override
                 public void afterCommit() {
                     dancerDetailCacheService.invalidate(targetDancerId);
+                    dancerListCacheService.invalidateAll();
                 }
             });
         } else {
             dancerDetailCacheService.invalidate(targetDancerId);
+            dancerListCacheService.invalidateAll();
         }
     }
 

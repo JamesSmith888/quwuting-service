@@ -136,6 +136,8 @@ LocalDate viewUntil = today.plusDays(1);                      // views 按 DATE 
 
 `VenueHeatResponse` 返回 `statusConfidence` 等级 + **`statusConfidenceText` 结论文案 + `statusConfidenceRuleDetail` 判定依据**（2026-08-08 新增），向用户传达"当前状态信息有多可信"。枚举值：`HIGH` / `MEDIUM` / `LOW`。**判定逻辑与文案的唯一事实源在 `VenueHeatService`，前端只渲染**（与热度公式文案 `formulaText/formulaDetail` 同模式，规则调整免发前端）。
 
+**判定依据文案白话化（2026-08-29，用户反馈"一眼看不懂、需静下心才能明白"）**：`statusConfidenceRuleDetail` 不再复述判定规则全文（旧文案为「判定规则：近30天暂停 N 次 = 稳定…」的规则说明书口吻），改为**一句话白话 = 关键事实 + 必要时的行动建议**（如「近30天暂停过 2 次，本次已连续营业 3 天。」/「已停业状态已持续 20 天，信息可信。」）。判定过程由 `statusLogs`（状态记录区块）的事件列表自证——证据即解释，完整矩阵不再对用户展开。
+
 **三维矩阵（2026-08-08 根因修复：旧二维矩阵缺"状态类型"维度）**——稳定性（suspensionCount30d）× 当前状态持续天数（currentStatusDays）× **当前状态类型（营业中 vs 非营业）**：
 
 **营业中（OPEN）**（保留原二维矩阵语义）：
@@ -155,7 +157,9 @@ LocalDate viewUntil = today.plusDays(1);                      // views 按 DATE 
 - **非营业分支不依赖暂停次数**（该指标对非营业门店无区分力），决定可信度的是"该状态已稳定持续多久"（长期未被纠正/反向信号 = 被时间验证，最可信）与"有无反向实时信号"
 - **文案按状态类型分治**：OPEN+HIGH=「稳定营业」，非营业+HIGH=「状态可信」，非营业+MEDIUM=「建议确认」——等级与文案同处生成，杜绝语义错配
 
-**活跃上报覆盖规则**：当 `VenueHeatService` 获取到 `activeCount > 0`（近 4 小时有用户报告暂停）时，`computeStatusConfidence` 直接返回 `LOW`（文案「数据可能过时」+ "近 4 小时有 N 人报告暂停营业"），跳过上述矩阵，**对营业中与非营业状态一视同仁**——众包实时信号优先级高于历史矩阵。根因：矩阵基于历史记录（管理员维护的 `Venue.status` 变迁），无法反映"此刻正在发生"的事件；用户现场上报正是为了弥补这一滞后。
+**活跃上报覆盖规则**：当 `VenueHeatService` 获取到 `activeCount > 0`（近 4 小时有用户报告暂停）时，`computeStatusConfidence` 直接返回 `LOW`（文案「数据可能过时」+ "近4小时有 N 人报告暂停营业，信息可能已过时"），跳过上述矩阵，**对营业中与非营业状态一视同仁**——众包实时信号优先级高于历史矩阵。根因：矩阵基于历史记录（管理员维护的 `Venue.status` 变迁），无法反映"此刻正在发生"的事件；用户现场上报正是为了弥补这一滞后。
+
+**状态记录 statusLogs（2026-08-29 新增）**：`VenueHeatResponse` 新增 `statusLogs`（`VenueStatusLogItem[]`）——近 30 天状态变更事件（最多 5 条倒序，`VenueStatusLogRepository#findTop5ByVenueIdAndCreatedAtAfterOrderByCreatedAtDesc`，命中 `(venueId, createdAt)` 索引，computeHeat 缓存内 +1 次轻量往返）。营业状态弹窗「状态记录」区块数据源 = 可信度判定的证据层：每条变迁（`changeText`，后端生成"A → B" / 建档行"初始状态：B"）直接支撑「近30天暂停 N 次」「状态持续天数」两个判定输入；无记录时前端展示「近30天无状态变更」，本身即稳定性的证据。记录新鲜度与热度缓存一致：状态日志仅随状态变更写入，写路径均显式 invalidate 热度缓存。
 
 ### 查询性能优化（三轮：条件聚合 → 跨表合并 → 趋势合并 + refresh-ahead 缓存）
 

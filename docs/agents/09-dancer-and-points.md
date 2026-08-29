@@ -174,11 +174,12 @@
 - 窗口统计（countAll/countToday/count7d/count30d）锚点 = `createdAt`（真实"此刻"，与 Reaction
   同口径）；`recognitionDate` 只承载"每日唯一"语义；「最近认可」动态（昨天 +3 前天 +5）按
   `recognitionDate` 自然日聚合——两套时间语义职责分离，同 VenueReaction 的 reactionDate/createdAt 约定
-- 排序时间属性优先：公开列表按 **count7d 倒序**而非 countAll——"被认可的历史总量"不应让
+- 排序时间属性优先：公开列表按 **近 7 天窗口信号倒序**而非 countAll——"被认可的历史总量"不应让
   活跃度低的旧资料长期霸榜（舞厅/舞伴场景具有明显时间属性）。**2026-08-26 晚排序升级**
   （`findPublicPage` + `DancerSortMode`，见「列表排序」）：HOT 默认 = 组合分（count7d +
   新舞伴 14 天 +2 / 近 3 天更新相册或联系方式 +2）→ 近 30 天收藏数（tie-break）→ id 倒序；
-  LATEST = id 倒序（冷启动曝光通道）
+  LATEST = id 倒序（冷启动曝光通道）。**2026-08-29 排序 v2**：主导信号换为付费意向
+  （近 7 天联系解锁 ×3，见「列表排序」根因与信号原则）——认可降为平滑项 ×1
 
 ### 标签字典（DancerTagCode，后台维护）
 
@@ -273,28 +274,51 @@ V41 迁移 UPDATE 为简短中性对称文案：线上「可提供线上互动�
 | GET /dancers/{id}/stats | 仅本人/管理员 | **舞伴统计**（六组近30天趋势：认可/收藏/礼物价值/分享/浏览+浏览来源；<b>舞伴是自然人，统计属精细行为数据，仅本人+管理员可查看</b>——未登录 401/非本人 1003；缓存 60s refresh-ahead，2026-08-14） |
 | POST /dancers/{id}/view | 软鉴权 | **浏览埋点**（body {source} 可空；按天按来源去重，匿名 60s IP 频控，2026-08-14） |
 
-### 列表排序（2026-08-26 晚新增：DancerSortMode）
+### 列表排序（2026-08-26 晚新增：DancerSortMode；2026-08-29 排序 v2：付费意向主导）
 
 **根因**（2026-08-26 排序缺陷评审）：① 新舞伴认可数为 0，靠第三级 id 兜底永远沉底——
 冷启动死循环（看不到 → 得不到认可 → 更看不到）；② tie-break「近30天收到积分」仅设付费
 门槛的舞伴非零、免费恒 0，同分时系统性偏向"收费型"，混入商业模式信号；③ 排序只有「认可」
 单一维度，V51 已建的「最近更新」信号（相册/联系方式）未参与。
 
-**HOT（默认）组合分**（`findPublicPage` SQL 单查询，CASE 分支）：
-1. `count7d`（近7天认可，主导信号，滚动锚点 now-7d——时间属性优先，避免老数据霸榜）
-2. `+2` 新舞伴（`created_at >= now-14d`，冷启动保护期）；`+2` 近 3 天更新过相册
+**2026-08-29 排序 v2 根因（排序信号与商业目标错位，全漏斗数据复盘）**：HOT 主导信号
+「近7天认可数」是免费点赞，与成交零相关——生产实证：懒懒Q 12 票排第三仅 1 次解锁，
+全站 3 周 53 次联系解锁、0 成交；「付费意向」（烧积分解锁联系方式）是唯一与成交
+相关的站内信号，却完全不参与排序。**系统性防复发（排序信号原则）**：每个排序信号
+必须回答「该信号是否预测用户目标行为（约到舞伴/成交）」——付费意向主导、免费社交
+信号只做平滑项；新增排序信号先过该原则再进公式；权重收敛到唯一事实源
+`DancerHeatWeights`（对齐门店 `VenueHeatWeights` 2026-08-10 收敛先例，根治权重散落
+SQL 的口径漂移），排序口径在统计页「排名热度」卡公开（对齐门店「排序与热度页统一」
+2026-08-08 先例——规则可见、可问责）。
+
+**HOT（默认）排名热度**（`findPublicPage` SQL 单查询，CASE 分支；权重唯一事实源 =
+`DancerHeatWeights`，统计页 `DancerStatsService#computeHeat` 同源镜像）：
+1. `unlock7d ×3`（近7天联系解锁，主导信号——烧积分的付费意向，与成交最相关；
+   2026-08-29 新增）
+2. `+ cnt7 ×1`（近7天认可，平滑项——免费点赞与成交零相关，数据量小时提供同分区分度；
+   滚动锚点 now-7d）
+3. `+2` 新舞伴（`created_at >= now-14d`，冷启动保护期）；`+2` 近 3 天更新过相册
    （最新 PUBLIC 媒体 created_at）或联系方式（`contact_updated_at`）任一——「正在维护
    资料」的活跃信号；两者可叠加（+4）
-3. 近 30 天收藏数（`qwt_dancer_favorites`，tie-break——口径中性，替代原积分信号）
-4. id 倒序（兜底 + 分页稳定）
+4. tie-break 依次：近 30 天联系解锁数（`qwt_points_unlocks` DANCER_CONTACT，长窗口
+   意向快照）→ 近 30 天收藏数（`qwt_dancer_favorites`，口径中性）→ id 倒序（兜底 + 分页稳定）
 
 **LATEST**：id 倒序（新资料在前；筛选条件与 HOT 完全一致，仅排序不同）。
 
+**实现注意（2026-08-29 线上事故）**：`findPublicPage` 的排序片段 `PUBLIC_PAGE_ORDER_BY`
+用 Java 文本块 + 常量拼接注入权重（注解值须编译期常量）。**文本块会剥离行尾空白**——
+若拼接点依赖文本块行尾的空格，会粘连成 `*3` / `THEN2ELSE` 触发 PostgreSQL 语法错误
+（`syntax error at or near "THEN2ELSE"`，GET /dancers?sort=HOT 全 500）。拼接点必须
+显式写空格字符串：`+ " " + DancerHeatWeights.XXX + " " +`，禁止依赖文本块行尾空格。
+
 **联动**：缓存 key 含 sort 维度（HOT/LATEST 各自缓存）；收藏 add·remove 纳入列表缓存
-失效矩阵（收藏数参与排序）；窗口参数：sinceNew=now-14d、sinceFresh=now-3d（
-`DancerListCacheService.compute` 现算）。前端 dancers 页「热门/最新」切换 chip（激活态
-accent 实底 + 白字，与城市 chip 同族）。后续扩展（P2，未实现）：每日 0 点预聚合计数表
-（排序读物化表，消抖动 + 降聚合成本）、运营置顶、门店上下文排序。
+失效矩阵（收藏数参与排序）；**积分解锁 2026-08-29 入失效矩阵**（解锁改变 HOT 主导
+信号 unlock7d——`PointsService#invalidateDancerStatsAfterCommit` 同事务 afterCommit
+调用 `DancerListCacheService#invalidateAll`，与详情缓存失效同点）；窗口参数：
+sinceNew=now-14d、sinceFresh=now-3d（`DancerListCacheService.compute` 现算）。前端
+dancers 页「热门/最新」切换 chip（激活态 accent 实底 + 白字，与城市 chip 同族）。
+后续扩展（P2，未实现）：每日 0 点预聚合计数表（排序读物化表，消抖动 + 降聚合成本）、
+运营置顶、门店上下文排序。
 
 ### 舞伴收藏（2026-08-14：能力平权，根因驱动）
 
@@ -362,23 +386,29 @@ reason/created_at + 索引 dancer_id）。
 ### 舞伴统计（2026-08-14 第一期：趋势时间序列，V29 浏览埋点）
 
 **背景**：舞伴详情页参考门店热度页（venue-heat）做统计图（用户需求"舞伴详情页也需要
-做一个统计图，第一期先做核心关注点"）。与门店的关键差异 = ① **舞伴域无热度公式**（列表
-排序已有认可数/收礼信号，综合指数属后续扩展），第一期只做**趋势时间序列**六张图：
-认可 / 收藏 / 礼物价值 / 分享 / 浏览 + 浏览来源；② **可见范围公开**（2026-08-24 起，
-对齐门店热度页先例——原"仅本人 + 管理员"决策 2026-08-14 曾因舞伴是自然人、逐日时间
-序列/来源拆解属精细行为数据且与创作者收益计划敏感度耦合而收紧；放开后详情页「统计图」
-动作行按钮全员可见可入，响应为纯计数聚合、无个人身份信息）。前端独立页 `dancer-stats`
-（对齐 venue-heat 的 charts 数组模板 + chart-brush + 图例开关 + 空图恒渲染 +
-y 轴全量锁定）。
+做一个统计图，第一期先做核心关注点"）。与门店的关键差异 = ① **舞伴域 2026-08-29 起
+有热度公式**（列表 HOT 排序口径，见「列表排序」排序 v2——统计页「排名热度」卡公开
+排序规则，对齐门店「排序与热度页统一」先例；权重唯一事实源 `DancerHeatWeights`，
+`DancerStatsService#computeHeat` 与 `findPublicPage` 同源镜像），第一期只做**趋势时间
+序列**六张图：认可 / 收藏 / 礼物价值 / 分享 / 浏览 + 浏览来源；② **可见范围公开**
+（2026-08-24 起，对齐门店热度页先例——原"仅本人 + 管理员"决策 2026-08-14 曾因舞伴是
+自然人、逐日时间序列/来源拆解属精细行为数据且与创作者收益计划敏感度耦合而收紧；
+放开后详情页「统计图」动作行按钮全员可见可入，响应为纯计数聚合、无个人身份信息）。
+前端独立页 `dancer-stats`（对齐 venue-heat 的 charts 数组模板 + chart-brush + 图例开关
++ 空图恒渲染 + y 轴全量锁定）。
 
 **接口**：
 - `GET /dancers/{id}/stats`（**公开**）：`DancerStatsResponse{recognitionTrend,
   favoriteTrend, pointsTrend, shareTrend, viewTrend, viewSourceTrend, unlockStats,
-  totals, statsAsOfDate}`——
+  demandTrend, demandStats, totals, heat, statsAsOfDate}`——
   六组近30天每日时间序列（含今日，骨架 31 天，generate_series 补零；与门店 countDailyTrends
   同骨架，见下）+ **解锁信息分类聚合**（unlockStats，2026-08-21 追加，横向条形图，见后）
+  + **需求趋势/需求热度**（demandTrend/demandStats，2026-08-26 追加，见后）
   + **累计指标**（totals，2026-08-22 追加，全量历史口径——累计认可/总收藏/累计浏览/
-  累计分享/收到礼物价值累计，前端「累计数据」汇总卡）。
+  累计分享/收到礼物价值累计，前端「累计数据」汇总卡）
+  + **排名热度**（heat，2026-08-29 追加——列表 HOT 排序口径快照：热度分 + 各信号输入
+  + formulaText/formulaDetail 后端权威文案，前端「排名热度」卡渲染，口径与
+  `DancerRepository#findPublicPage` 排序逐项一致）。
   **鉴权**：无（对齐门店 GET /venues/{id}/heat 公开先例；2026-08-24 移除
   requireAuth + checkStatsAccess——原未登录 HTTP 401、非本人/非管理员 1003「仅舞伴
   本人可查看统计数据」一并下线，方法已删）。缓存 = 内嵌 Caffeine LoadingCache
@@ -587,10 +617,13 @@ Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻
 ### 排名接入与权重校准（V2 三阶段机制）
 
 - **venue**：热度公式加 `近30天收到积分 × app.points.heat-weight`——三处镜像（`VenueHeatService` + `VenueRepository.HEAT_SCORE` + `findHotVenueIds`）经 `VenueHeatWeights` 常量拼接 + `:pointsWeight` 参数注入（见「场所热度 → 热度公式 → 权重收敛」）；`countHeatCounters` 加 `pointsreceivedtotal/pointsreceived30d` 标量；`countDailyTrends` 加第五序列 `points`（`DailyTrendRow.getPoints()`）；
-- **dancer**：无热度公式，积分不再参与排序（2026-08-26 晚：原「近30天收到积分」tie-break
-  替换为**近30天收藏数**——积分口径仅收费舞伴非零，同分时系统性偏向"收费型"、混入商业
-  模式信号；收藏零成本表达长期兴趣、口径中性，见「列表排序」）；是否引入综合加权在 P2
-  按数据定；
+- **dancer**：2026-08-29 起有排名热度公式（见「列表排序」排序 v2）——积分不直接参与
+  排序（2026-08-26 晚：原「近30天收到积分」tie-break 替换为**近30天收藏数**——积分口径
+  仅收费舞伴非零，同分时系统性偏向"收费型"、混入商业模式信号；收藏零成本表达长期兴趣、
+  口径中性）；付费意向以「联系解锁数」形式进入排序（解锁即积分消耗行为，等价于积分
+  信号的净化形态——只计真实意向、不计赠送/奖励等流转，见「列表排序」）；权重唯一事实源
+  = `DancerHeatWeights`（非 `app.points.heat-weight`，舞伴域权重为常量级、无运营调参入口），
+  后续如需运营校准再配置化；
 - **权重校准 SOP（禁止拍脑袋）**：① 初始保守值 heat-weight=2 → ② 上线约 2 周采集基线（各门店积分贡献占比 = 积分得分/热度总分 的中位数/P90）→ ③ 目标区间 [5%, 15%]：超 15% 降权（减半）或收紧发放；低于 5% 适度升权或提高采纳奖励。只改 `app.points.heat-weight` 一处，公式文案后端下发自动同步。
 
 ### 接口
