@@ -10,6 +10,7 @@ import org.quwuting.quwutingservice.dancer.dto.request.UpdateDancerVerificationR
 import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerDetailResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerRecognitionStats;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerServiceResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.RecognizeResponse;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.entity.DancerPhoto;
@@ -317,6 +318,79 @@ class DancerServiceTest {
 
         assertEquals("wx:xiaoya", resp.contact(), "本人恒可见（dancer-edit 编辑回显）");
         assertTrue(resp.hasContact());
+    }
+
+    // ─── 联系方式打码直显（2026-08-29：未配置服务范围（不用填邀约单）的舞伴 ——
+    //      详情页直接展示联系方式（默认打码），点击一次实时取真实值） ───────────
+
+    @Test
+    void getDetail_noService_contactMaskedDeliveredToOthers() {
+        dancer.setContact("wx:xiaoya");
+        dancer.setHideContact(true);
+        stubDetailForContact(0); // 默认 services 空 = 未配置服务范围
+
+        DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
+
+        assertTrue(resp.hasContact());
+        assertNull(resp.contact(), "真实值仍不随详情下发（防泄漏红线，点击揭示经 unlock 实时查询）");
+        assertEquals("wx****ya", resp.contactMasked(),
+                "无服务范围舞伴 → 普通用户收到脱敏预览（保留首 2 尾 2、中间 4 星）");
+    }
+
+    @Test
+    void getDetail_withService_contactMaskedNull() {
+        dancer.setContact("wx:xiaoya");
+        stubDetailForContact(0);
+        // 配置了服务范围（任意一条在用服务）→ 走邀约单流程，不打码直显
+        when(detailCacheService.get(1L)).thenReturn(new DancerDetailCacheService.PublicPart(
+                new DancerRecognitionStats(5L, 1L, 3L, 4L, Collections.emptyList()),
+                Collections.emptyList(), Collections.emptyList(), Collections.emptyList(),
+                Collections.emptyList(), 0L, 0L, 0, 0L,
+                List.of(new DancerServiceResponse(1L, org.quwuting.quwutingservice.dancer.enums.DancerServiceCategory.DANCE,
+                        "舞厅跳舞", Collections.emptyList(), Collections.emptyList(),
+                        "舞厅跳舞", "300元/小时起", "", "", "", true))));
+
+        DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
+
+        assertTrue(resp.hasContact());
+        assertNull(resp.contactMasked(), "有服务范围 → 不直显，维持邀约单流程（contactMasked 恒 null）");
+    }
+
+    @Test
+    void getDetail_relayDancer_contactMaskedNull() {
+        dancer.setContact("wx:xiaoya");
+        dancer.setContactRelay(true); // 邀约中转 = 须走邀约批准，即使无服务也不直显
+        stubDetailForContact(0);
+
+        DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
+
+        assertTrue(resp.hasContact());
+        assertNull(resp.contactMasked(), "邀约中转舞伴 → 不打码直显（把关权交还舞伴，须批准）");
+    }
+
+    @Test
+    void getDetail_contactImageOnly_contactMaskedNull() {
+        dancer.setContact(null);
+        dancer.setContactImageUrl("https://cdn.example.com/qrcode.png");
+        stubDetailForContact(0);
+
+        DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
+
+        assertTrue(resp.hasContact());
+        assertNull(resp.contactMasked(), "仅图片联系方式 → 脱敏文案无法表达，前端占位「图片联系方式」");
+    }
+
+    @Test
+    void getDetail_owner_contactMaskedNull() {
+        dancer.setContact("wx:xiaoya");
+        stubDetailForContact(0);
+        when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(any(), any(), any()))
+                .thenReturn(Optional.empty());
+
+        DancerDetailResponse resp = dancerService.getDetail(1L, 1L, UserRole.USER);
+
+        assertEquals("wx:xiaoya", resp.contact(), "本人恒可见真实值（dancer-edit 编辑回显）");
+        assertNull(resp.contactMasked(), "本人/管理员 → 真实值已下发，无需脱敏预览");
     }
 
     // ─── 认可（每日一记 toggle） ─────────────────────────────────────────────

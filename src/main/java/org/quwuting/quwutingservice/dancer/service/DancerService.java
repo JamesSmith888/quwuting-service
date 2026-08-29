@@ -804,6 +804,19 @@ public class DancerService {
         String rawContactImageUrl = dancer.getContactImageUrl();
         boolean hasContact = (rawContact != null && !rawContact.isBlank())
                 || (rawContactImageUrl != null && !rawContactImageUrl.isBlank());
+        // 联系方式打码直显（2026-08-29 用户需求：未配置服务范围（不用填写邀约单）的
+        // 舞伴 = 详情页直接展示联系方式（默认打码），点击一次经 POST /points/unlock
+        // 实时取真实值展示）：
+        // - 判定 = 有联系方式 && 服务范围为空 && 非邀约中转（contactRelay 舞伴须走
+        //   邀约批准流程，即使无服务也不能直显——把关权交还舞伴是 TA 设置的规则）；
+        // - 仅普通用户下发（本人/管理员详情已下发真实值 contact，前端本地揭示无需
+        //   脱敏）；真实值仍不随详情泄漏——contactMasked 仅脱敏预览（文字首 2 尾 2
+        //   + 4 星；仅图片联系方式 = null，前端占位「图片联系方式」）。
+        List<DancerServiceResponse> services = pub.services();
+        boolean noService = services == null || services.isEmpty();
+        boolean contactRevealEligible = hasContact && noService && !dancer.isContactRelay();
+        String contactMasked = (!showAllPhotos && contactRevealEligible)
+                ? maskContact(rawContact) : null;
         // 创作者收益计划（2026-08-14）：开关 + 广告位 ID（配置下发，前端零硬编码）+
         // 累计广告支持次数（收益线下结算依据）
         boolean earningsEnabled = dancer.isEarningsEnabled();
@@ -825,7 +838,7 @@ public class DancerService {
                 pub.pointsReceivedTotal(), pub.pointsReceived30d(), pub.giftsReceived(),
                 fetchPhotos(dancerId, showAllPhotos, currentUserId),
                 pub.tags(), pub.venues(), pub.services(),
-                hasContact, contact, contactImageUrl, hideContact, contactCost, contactUnlocked,
+                hasContact, contactMasked, contact, contactImageUrl, hideContact, contactCost, contactUnlocked,
                 earningsEnabled, earningsAdUnitId, pub.adViews(),
                 dancer.isRequireUserLocation(),
                 dancer.isContactRelay(), dancer.isAutoRelease(),
@@ -835,6 +848,24 @@ public class DancerService {
                 // 恒可见最近一次邀约的时间/状态/被查看/履约入口。用户相关（不入
                 // 公共缓存），实时轻量查询；匿名/无邀约 → null 前端不渲染）
                 pointsService.recentDemandSummary(currentUserId, dancerId));
+    }
+
+    /**
+     * 联系方式打码文案（2026-08-29 打码直显，docs/agents/05-dancer-contact-reveal.md）：
+     * 文字联系方式 → 保留首 2 尾 2 字符、中间 4 星（长度 ≤4 全星）；
+     * 仅图片联系方式（无文字）→ null（脱敏文案无法表达，前端占位「图片联系方式」）。
+     * 仅作打码预览，真实值恒不随详情下发（点击揭示经 unlock 实时查询）。
+     */
+    private String maskContact(String contact) {
+        if (contact == null || contact.isBlank()) {
+            return null;
+        }
+        String s = contact.trim();
+        int len = s.length();
+        if (len <= 4) {
+            return "****";
+        }
+        return s.substring(0, 2) + "****" + s.substring(len - 2);
     }
 
     // ─── 服务范围（2026-08-24：admin 录入的黄页内容；详情公开读 + 管理端写） ─────

@@ -89,7 +89,7 @@ class FavoriteServiceTest {
                 null, null, Collections.emptyList(), Collections.emptyList(),
                 Collections.emptyList(), null, null, Collections.emptyList(),
                 Collections.emptyList(), Collections.emptyList(), 0,
-                0L, isHot, null, null);
+                0L, isHot, null, null, null);
     }
 
     /**
