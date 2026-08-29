@@ -827,9 +827,9 @@ public class DancerService {
         //   有门槛扣费，后端权威判定）；
         // - 本人/管理员（showAllPhotos）照常下发真实值（dancer-edit 编辑回显），
         //   前端同样默认打码展示（所有视角统一打码——交互与身份无关，便于管理端
-        //   预览），点击揭示时本地直用不调接口。
-        String contactMasked = (!showAllPhotos && contactRevealEligible)
-                ? maskContact(rawContact) : null;
+        //   预览），点击揭示时本地直用不调接口；contactMasked 对本人/管理员同样
+        //   下发（统一文字打码类型，避免无脱敏值被前端误判为图片马赛克）。
+        String contactMasked = contactRevealEligible ? maskContact(rawContact) : null;
         // 创作者收益计划（2026-08-14）：开关 + 广告位 ID（配置下发，前端零硬编码）+
         // 累计广告支持次数（收益线下结算依据）
         boolean earningsEnabled = dancer.isEarningsEnabled();

@@ -383,7 +383,7 @@ class DancerServiceTest {
     }
 
     @Test
-    void getDetail_owner_contactMaskedNull() {
+    void getDetail_owner_contactMaskedDelivered() {
         dancer.setContact("wx:xiaoya");
         stubDetailForContact(0);
         when(recognitionRepository.findByUserIdAndDancerIdAndRecognitionDate(any(), any(), any()))
@@ -392,7 +392,9 @@ class DancerServiceTest {
         DancerDetailResponse resp = dancerService.getDetail(1L, 1L, UserRole.USER);
 
         assertEquals("wx:xiaoya", resp.contact(), "本人恒可见真实值（dancer-edit 编辑回显）");
-        assertNull(resp.contactMasked(), "本人/管理员 → 真实值已下发，无需脱敏预览");
+        assertEquals("wx****ya", resp.contactMasked(),
+                "2026-08-29 隐私回归：本人/管理员同样下发脱敏预览（所有视角统一打码，"
+                + "前端点击揭示本地直用真实值）");
     }
 
     // ─── 认可（每日一记 toggle） ─────────────────────────────────────────────
