@@ -30,6 +30,7 @@ import org.quwuting.quwutingservice.venue.enums.VenuePhotoStatus;
 import org.quwuting.quwutingservice.venue.enums.VenueSortMode;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
+import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportService;
 import org.quwuting.quwutingservice.venue.repository.VenuePhotoRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
@@ -95,6 +96,8 @@ public class VenueService {
     private final VenueViewRepository venueViewRepository;
     private final VenueResponseMapper venueResponseMapper;
     private final VenueReactionService venueReactionService;
+    /** 门店热度上报（2026-08-29 列表角标批量生成，见 badgeTextsByVenue） */
+    private final CrowdReportService crowdReportService;
     private final VenueHeatService venueHeatService;
     private final ObjectMapper objectMapper;
     private final VenueLookupService venueLookupService;
@@ -760,11 +763,15 @@ public class VenueService {
                                 row -> ((Number) row[1]).longValue()));
         // 批量公开照片（2026-08-20 门店照片域：一次 IN 覆盖整页，规避 N+1，同徽标/浏览量批量模式）
         Map<Long, List<String>> photosByVenue = loadPublicPhotosByVenueIds(venueIds);
+        // 批量今晚热度角标（2026-08-29：一次 IN + GROUP BY 覆盖整页，中性「N人报过」，
+        // ≥3 人独立上报才生成——列表公共面克制，见 CrowdReportService#badgeTextsByVenue）
+        Map<Long, String> crowdBadges = crowdReportService.badgeTextsByVenue(venueIds);
         return result.map(v -> venueResponseMapper.toResponse(
                 v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
                 hotVenueIds.contains(v.getId()),
                 viewCounts.getOrDefault(v.getId(), 0L),
-                photosByVenue.getOrDefault(v.getId(), List.of())));
+                photosByVenue.getOrDefault(v.getId(), List.of()),
+                crowdBadges.get(v.getId())));
     }
 
     /**

@@ -276,27 +276,27 @@ class DancerServiceTest {
     }
 
     @Test
-    void getDetail_hideContactTrue_withFreeGate_freeDirectDeliver_contactDelivered() {
+    void getDetail_hideContactTrue_withFreeGate_contactNotDelivered_hasContactTrue() {
         dancer.setContact("wx:xiaoya");
         dancer.setHideContact(true);
-        stubDetailForContact(0); // 无服务范围 + 无门槛 = 免费直显
+        stubDetailForContact(0); // 无服务范围 + 无门槛
 
         DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
 
         assertTrue(resp.hideContact());
         assertEquals(0, resp.contactCost());
         assertTrue(resp.hasContact(), "无门槛免费舞伴同样下发 hasContact=true（入口渲染依据）");
-        assertEquals("wx:xiaoya", resp.contact(),
-                "2026-08-29 免费直显（用户拍板）：无服务范围 + 非中转 + 无门槛 → 真实值直接随详情下发"
-                + "（前端加载即展示，零点击零请求）");
-        assertEquals("wx****ya", resp.contactMasked(), "打码预览冗余下发（前端直显不依赖）");
+        assertNull(resp.contact(),
+                "2026-08-29 隐私回归（用户拍板）：无门槛获取的舞伴也<b>必须默认打码</b>，"
+                + "真实值不下发——用户每次进入页面点击马赛克获取（unlock 无门槛恒免费）");
+        assertEquals("wx****ya", resp.contactMasked(), "无门槛同样下发脱敏预览（默认打码）");
     }
 
     @Test
     void getDetail_hideContactFalse_contactNotDelivered_hasContactTrue() {
         dancer.setContact("wx:xiaoya");
         dancer.setHideContact(false);
-        stubDetailForContact(5); // 残留门槛 → 非免费直显（有付费墙不能白给）
+        stubDetailForContact(5); // 残留门槛
         when(pointsService.isUnlocked(any(), any(), eq(1L))).thenReturn(false);
 
         DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
@@ -304,8 +304,7 @@ class DancerServiceTest {
         assertFalse(resp.hideContact(), "不遮挡 → 行内直显入口（真实值仍按需实时查询）");
         assertTrue(resp.hasContact());
         assertNull(resp.contact(),
-                "2026-08-29 免费直显例外仅限无门槛：有积分门槛（contactCost>0）仍不下发真实值，"
-                + "点击揭示经 unlock 扣费查询");
+                "2026-08-24 晚 改版：不遮挡也不再随详情下发真实值——点击获取经 POST /points/unlock 实时查询");
     }
 
     @Test
@@ -334,10 +333,9 @@ class DancerServiceTest {
         DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
 
         assertTrue(resp.hasContact());
-        assertEquals("wx:xiaoya", resp.contact(),
-                "2026-08-29 免费直显（用户拍板）：无服务范围 + 非中转 + 无门槛 → 真实值直接随详情下发");
+        assertNull(resp.contact(), "真实值仍不随详情下发（防泄漏红线，点击揭示经 unlock 实时查询）");
         assertEquals("wx****ya", resp.contactMasked(),
-                "无服务范围舞伴 → 打码预览冗余下发（前端直显不依赖，兼容旧前端降级）");
+                "无服务范围舞伴 → 普通用户收到脱敏预览（保留首 2 尾 2、中间 4 星，默认打码）");
     }
 
     @Test
@@ -380,9 +378,8 @@ class DancerServiceTest {
         DancerDetailResponse resp = dancerService.getDetail(1L, null, null);
 
         assertTrue(resp.hasContact());
-        assertNull(resp.contactMasked(), "仅图片联系方式 → 脱敏文案无法表达（前端直显不依赖）");
-        assertEquals("https://cdn.example.com/qrcode.png", resp.contactImageUrl(),
-                "2026-08-29 免费直显：仅图片联系方式 + 无门槛 → 真实图片 URL 直接随详情下发");
+        assertNull(resp.contactMasked(), "仅图片联系方式 → 脱敏文案无法表达（前端渲染马赛克遮挡块）");
+        assertNull(resp.contactImageUrl(), "图片联系方式同样默认打码，真实图 URL 不下发（点击揭示经 unlock 返回）");
     }
 
     @Test

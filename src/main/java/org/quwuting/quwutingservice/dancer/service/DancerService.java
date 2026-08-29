@@ -815,19 +815,19 @@ public class DancerService {
         List<DancerServiceResponse> services = pub.services();
         boolean noService = services == null || services.isEmpty();
         boolean contactRevealEligible = hasContact && noService && !dancer.isContactRelay();
-        // 免费直显（2026-08-29 用户拍板：免费展示的联系方式直接随详情下发，前端
-        // 加载即展示——零点击零请求，无需「需要时加载」）：
-        // - 判定 = 打码直显资格（hasContact && 服务范围为空 && 非邀约中转）&&
-        //   <b>无积分门槛（contactCost == 0）</b>——「免费」= 无门槛；有付费墙
-        //   （cost>0）仍维持打码 + 点击解锁（unlock 扣费），不能白给；
-        // - 防泄漏红线对免费直显场景放宽（用户知情拍板）：真实值随详情下发可被
-        //   脚本批量抓取，但免费内容本身免费可得（unlock 无门槛），权衡后接受；
-        // - 本人/管理员（showAllPhotos）照常下发（dancer-edit 编辑回显）。
-        boolean directDeliverContact = contactRevealEligible && contactCost == 0;
-        if (directDeliverContact) {
-            contact = dancer.getContact();
-            contactImageUrl = dancer.getContactImageUrl();
-        }
+        // 联系方式打码直显（2026-08-29 用户需求 + 隐私回归拍板）：未配置服务范围
+        // （不用填写邀约单）且非邀约中转的舞伴 = 详情页直接展示联系方式入口
+        // （<b>默认打码</b>，无论有无积分门槛——2026-08-29 末轮用户明确：无门槛
+        // 获取的舞伴也必须打码，隐私考虑，用户每次进入页面点击马赛克获取）：
+        // - 判定 = 有联系方式 && 服务范围为空 && 非邀约中转（contactRelay 舞伴须
+        //   走邀约批准流程，即使无服务也不能直显——把关权交还舞伴是 TA 设置的规则）；
+        // - 真实值恒不随详情下发（防泄漏红线）：仅下发脱敏 contactMasked（文字
+        //   首 2 尾 2 + 4 星；仅图片联系方式 = null，前端渲染马赛克遮挡块），
+        //   点击打码区域经 POST /points/unlock 实时查询真实值（无门槛恒免费 /
+        //   有门槛扣费，后端权威判定）；
+        // - 本人/管理员（showAllPhotos）照常下发真实值（dancer-edit 编辑回显），
+        //   前端同样默认打码展示（所有视角统一打码——交互与身份无关，便于管理端
+        //   预览），点击揭示时本地直用不调接口。
         String contactMasked = (!showAllPhotos && contactRevealEligible)
                 ? maskContact(rawContact) : null;
         // 创作者收益计划（2026-08-14）：开关 + 广告位 ID（配置下发，前端零硬编码）+

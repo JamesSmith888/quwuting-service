@@ -60,6 +60,13 @@ public record VenueResponse(
         /** 是否为城市内热门场所（城市内热度排名前 20% 且热度分 ≥ 配置门槛，
          *  见 AGENTS.md「热门场所标记」），驱动列表/收藏卡片视觉高亮 */
         boolean isHot,
+        /**
+         * 今晚热度角标文案（2026-08-29，docs/agents/27-venue-crowd-report.md）：
+         * 中性「N人报过」（最近 2 小时窗口内独立上报人数 ≥ 3 才生成），驱动列表卡片
+         * 标签行行首 teal 胶囊（公共面克制：不携带档位词/冷清，防误伤与商家刷量）；
+         * 无展示语义场景（详情/编辑/创建回显）为 null。
+         */
+        String crowdBadgeText,
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime createdAt,
         /** 数据最后更新时间（用户可见的时效性信号，用于判断信息可靠度） */
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime updatedAt
