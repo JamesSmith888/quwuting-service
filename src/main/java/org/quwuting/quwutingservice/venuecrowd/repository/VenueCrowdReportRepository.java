@@ -42,6 +42,20 @@ public interface VenueCrowdReportRepository extends JpaRepository<VenueCrowdRepo
     List<Object[]> countDistinctUsersByVenueIdsSince(
             @Param("venueIds") Collection<Long> venueIds, @Param("since") LocalDateTime since);
 
+    /**
+     * 批量每店最新一条上报（2026-08-29 列表「最新上报」行数据源）：窗口内
+     * （CROWD_WINDOW_HOURS=2h）每店 created_at 最大的记录，一次查询覆盖整页，
+     * 防 N+1（同 countDistinctUsersByVenueIdsSince 批量模式）。子查询 = 窗口内
+     * 每店最大 created_at，外查询等值匹配；同一店同一时刻多条（理论罕见，
+     * upsert 幂等 + timestamp 精度）由 Service 按 venueId 取首条兜底。
+     */
+    @Query("SELECT r FROM VenueCrowdReport r " +
+            "WHERE r.venueId IN :venueIds AND r.createdAt >= :since AND r.deleted = false " +
+            "AND r.createdAt = (SELECT MAX(r2.createdAt) FROM VenueCrowdReport r2 " +
+            "WHERE r2.venueId = r.venueId AND r2.createdAt >= :since AND r2.deleted = false)")
+    List<VenueCrowdReport> findLatestByVenueIdsSince(
+            @Param("venueIds") Collection<Long> venueIds, @Param("since") LocalDateTime since);
+
     /** 窗口内全量上报（管理端按店聚合用，数据量小——日活 5~36 规模，内存分组可接受） */
     List<VenueCrowdReport> findByCreatedAtAfterAndDeletedFalse(@Param("since") LocalDateTime since);
 

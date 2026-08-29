@@ -101,10 +101,21 @@ public class VenueResponseMapper {
      * （最近 2h 独立上报人数 ≥ 3 才生成，见 {@code CrowdReportService#badgeTextsByVenue}），
      * 驱动列表卡片标签行行首 teal 胶囊。仅列表场景（城市列表/收藏列表）传入真实值；
      * 无展示语义场景（详情/编辑/创建回显）传 null——详情页热度走独立 crowd-reports 接口，
-     * 卡片角标不重复展示（同一事实只呈现一次）。
+     * 卡片角标不重复展示（同一事实只呈现一次）。crowdLatestText 恒 null（本重载调用方
+     * 不消费最新上报行，见七参重载）。
      */
     public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot, long viewCount,
                                     List<String> photos, String crowdBadgeText) {
+        return toResponse(v, topReactions, isHot, viewCount, photos, crowdBadgeText, null);
+    }
+
+    /**
+     * 七参重载（2026-08-29 列表「最新上报」行新增）：crowdLatestText = 克制版
+     * 「{相对时间} · {标识}舞友上报」（见 {@code CrowdReportService#latestTextsByVenue}），
+     * 驱动列表卡片底部实时动态行。仅列表场景传入真实值；无展示语义场景传 null。
+     */
+    public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot, long viewCount,
+                                    List<String> photos, String crowdBadgeText, String crowdLatestText) {
         List<String> customTags = deserializeStringList(v.getTags(), "tags");
         List<String> effectiveTags = defaultsConfig.merge(customTags);
         List<String> defaultTags = defaultsConfig.tags();
@@ -134,6 +145,7 @@ public class VenueResponseMapper {
                 viewCount,
                 isHot,
                 crowdBadgeText,
+                crowdLatestText,
                 v.getCreatedAt(),
                 v.getUpdatedAt()
         );

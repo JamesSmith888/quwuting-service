@@ -14,6 +14,7 @@ import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.quwuting.quwutingservice.venue.service.VenueService;
+import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportService;
 import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
 
@@ -64,6 +65,9 @@ class FavoriteServiceTest {
     /** 门店公开照片批量加载（2026-08-20 门店照片域新增依赖） */
     @Mock
     private VenueService venueService;
+    /** 门店热度上报（2026-08-29 收藏列表角标/最新上报行注入新增依赖） */
+    @Mock
+    private CrowdReportService crowdReportService;
 
     private FavoriteService service;
 
@@ -71,7 +75,7 @@ class FavoriteServiceTest {
     void setUp() {
         service = new FavoriteService(favoriteRepository, venueResponseMapper,
                 venueReactionService, venueLookupService, venueHeatService,
-                venueViewRepository, venueService);
+                venueViewRepository, venueService, crowdReportService);
     }
 
     private static Venue venue(Long id) {
@@ -89,7 +93,7 @@ class FavoriteServiceTest {
                 null, null, Collections.emptyList(), Collections.emptyList(),
                 Collections.emptyList(), null, null, Collections.emptyList(),
                 Collections.emptyList(), Collections.emptyList(), 0,
-                0L, isHot, null, null, null);
+                0L, isHot, null, null, null, null);
     }
 
     /**

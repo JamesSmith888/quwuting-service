@@ -13,6 +13,7 @@ import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.quwuting.quwutingservice.venue.service.VenueService;
+import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportService;
 import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
@@ -40,6 +41,10 @@ public class FavoriteService {
     private final VenueViewRepository venueViewRepository;
     /** 门店公开照片批量加载（2026-08-20 门店照片域：收藏卡片轮播照片数据源；无循环依赖——VenueService 不依赖本模块） */
     private final VenueService venueService;
+    /** 门店热度上报（2026-08-29：收藏列表与城市列表同为 venue-card 展示场景，角标
+     * 「N人报过」+ 「最新上报」行须同口径下发——同 isHot 历史缺陷模式，见
+     * {@link #getFavoriteVenues} javadoc） */
+    private final CrowdReportService crowdReportService;
 
     // ── 收藏/取消收藏写操作频控（2026-08-13 防刷） ──────────────────────────
     // 根因（用户反馈："频繁/恶意点击取消收藏、收藏，统计图怎么表现才合理"）：
@@ -117,12 +122,20 @@ public class FavoriteService {
                                 row -> ((Number) row[1]).longValue()));
         // 批量公开照片（2026-08-20 门店照片域：一次 IN 覆盖整页，同列表页批量模式）
         Map<Long, List<String>> photosByVenue = venueService.loadPublicPhotosByVenueIds(venueIds);
+        // 批量今晚热度角标 + 「最新上报」行（2026-08-29：收藏列表与城市列表同为
+        // venue-card 展示场景，须同口径——角标 ≥3 人「N人报过」，最新上报行克制版
+        // 「{时间} · {标识}舞友上报」，见 CrowdReportService#badgeTextsByVenue /
+        // #latestTextsByVenue；历史缺陷同 isHot：漏注入导致"全部城市正常、收藏不显示"）
+        Map<Long, String> crowdBadges = crowdReportService.badgeTextsByVenue(venueIds);
+        Map<Long, String> crowdLatestTexts = crowdReportService.latestTextsByVenue(venueIds);
         return venues.stream()
                 .map(v -> venueResponseMapper.toResponse(
                         v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
                         hotVenueIds.contains(v.getId()),
                         viewCounts.getOrDefault(v.getId(), 0L),
-                        photosByVenue.getOrDefault(v.getId(), List.of())))
+                        photosByVenue.getOrDefault(v.getId(), List.of()),
+                        crowdBadges.get(v.getId()),
+                        crowdLatestTexts.get(v.getId())))
                 .toList();
     }
 

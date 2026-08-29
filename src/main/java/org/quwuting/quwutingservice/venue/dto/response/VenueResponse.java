@@ -67,6 +67,15 @@ public record VenueResponse(
          * 无展示语义场景（详情/编辑/创建回显）为 null。
          */
         String crowdBadgeText,
+        /**
+         * 今晚热度「最新上报」行文案（2026-08-29，docs/agents/27-venue-crowd-report.md）：
+         * 克制版「{相对时间} · {标识}舞友上报」（如「2 分钟前 · 资深舞友上报」）——
+         * 窗口内有上报即生成，驱动列表卡片底部实时动态行（公共面克制：不显示档位词
+         * 防商家自报贴标签，不公开昵称只用信任标识，见 CrowdReportService#latestTextsByVenue）；
+         * 与 crowdBadgeText（≥3 人共识人数）语义解耦互补；无展示语义场景（详情/编辑/
+         * 创建回显）为 null。
+         */
+        String crowdLatestText,
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime createdAt,
         /** 数据最后更新时间（用户可见的时效性信号，用于判断信息可靠度） */
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime updatedAt

@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -60,6 +61,9 @@ public class CrowdReportService {
 
     /** 单条上报标记「资深舞友」的可信度权重阈值（N==1 时升级 UNVERIFIED_VETERAN 呈现） */
     static final double VETERAN_WEIGHT = 2.0;
+
+    /** 明细标识「常客」的权重阈值（1.2 ≤ w < 2.0；有贡献（打卡/少量采纳）但未达资深） */
+    static final double REGULAR_WEIGHT = 1.2;
 
     /** 众数确认占比阈值：众数权重和 / 总权重和 ≥ 该值视为「一致」（否则 CONFLICT 不站队） */
     static final double CONFIRM_SHARE = 0.6;
@@ -110,11 +114,18 @@ public class CrowdReportService {
         String emptyText = "暂无舞友上报，来报第一个";
         if (rows.isEmpty()) {
             return new CrowdSummary(false, null, null, 0, CrowdTier.EMPTY.name(),
-                    CrowdTier.EMPTY.getText(), null, null, null, emptyText, mine(venueId));
+                    CrowdTier.EMPTY.getText(), null, null, null, emptyText, mine(venueId), List.of());
         }
-        // 上报者可信度权重（批量聚合，一次查询）
+        // 上报者可信度权重（批量聚合，一次查询；明细行用户标识亦由权重分档，
+        // 见 buildDetailRows——不展示用户名）
         Set<Long> userIds = rows.stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
         Map<Long, Double> weights = trustWeights(userIds);
+        // 明细昵称批量回填（2026-08-29 用户拍板：详情弹层**直接展示完整昵称**，
+        // 纯展示不可点击；列表行仍不显示——公共面不点名。空昵称兜底「匿名」，防 N+1）
+        Map<Long, String> nicknames = userRepository.findByIdInAndDeletedFalse(userIds).stream()
+                .collect(Collectors.toMap(User::getId,
+                        u -> u.getNickname() != null && !u.getNickname().isBlank()
+                                ? u.getNickname() : "匿名"));
         // 加权众数（双维独立聚合）
         Map<Integer, Double> femaleSums = new HashMap<>();
         Map<Integer, Double> maleSums = new HashMap<>();
@@ -140,8 +151,9 @@ public class CrowdReportService {
         String ageText = ageText(rows);
         String mainText = buildMainText(femaleView, reporterCount, ageText, tier);
         String maleText = maleView != null ? buildMaleText(maleView) : null;
+        List<CrowdSummary.CrowdReportRow> detailRows = buildDetailRows(rows, weights, nicknames);
         return new CrowdSummary(true, femaleView, maleView, reporterCount, tier.name(),
-                tier.getText(), mainText, maleText, ageText, emptyText, mine(venueId));
+                tier.getText(), mainText, maleText, ageText, emptyText, mine(venueId), detailRows);
     }
 
     /** 我今天的上报（可改；未登录 / 未上报 → null） */
@@ -256,10 +268,15 @@ public class CrowdReportService {
     private String ageText(List<VenueCrowdReport> rows) {
         LocalDateTime latest = rows.stream().map(VenueCrowdReport::getCreatedAt)
                 .max(LocalDateTime::compareTo).orElse(null);
-        if (latest == null) {
+        return ageTextFor(latest);
+    }
+
+    /** 单条上报的相对时间（明细行逐条复用；createdAt 为 null 时返回空串） */
+    private String ageTextFor(LocalDateTime at) {
+        if (at == null) {
             return "";
         }
-        long minutes = Duration.between(latest, LocalDateTime.now()).toMinutes();
+        long minutes = Duration.between(at, LocalDateTime.now()).toMinutes();
         if (minutes < 1) {
             return "刚刚";
         }
@@ -267,6 +284,53 @@ public class CrowdReportService {
             return minutes + " 分钟前";
         }
         return (minutes / 60) + " 小时前";
+    }
+
+    /**
+     * 每个用户的上报明细（2026-08-29 用户要求「表格式列表展示每个用户上报」，
+     * 同日再改「舞友列不展示用户名，只展示用户标识」，七次改「详情弹窗直接展示
+     * 完整昵称（不可点击），去脱敏」）：
+     * createdAt 倒序（最新在前）；male 未报时 maleLevelName/maleLevelHint 为 null；
+     * **列表行不展示昵称**——badgeText 由上报者可信度权重分档（服务端权威，
+     * 对齐 UNVERIFIED_VETERAN 判定）；nickname = 完整昵称（空兜底「匿名」），
+     * 仅详情弹层展示（纯展示不可点击跳转，公共面不点名）。
+     */
+    private List<CrowdSummary.CrowdReportRow> buildDetailRows(List<VenueCrowdReport> rows,
+                                                              Map<Long, Double> weights,
+                                                              Map<Long, String> nicknames) {
+        return rows.stream()
+                .sorted(Comparator.comparing(VenueCrowdReport::getCreatedAt).reversed())
+                .map(r -> {
+                    CrowdFemaleLevel female = CrowdFemaleLevel.of(r.getFemaleLevel());
+                    CrowdMaleLevel male = r.getMaleLevel() != null
+                            ? CrowdMaleLevel.of(r.getMaleLevel()) : null;
+                    return new CrowdSummary.CrowdReportRow(
+                            r.getUserId(),
+                            badgeFor(r.getUserId(), weights),
+                            nicknames.getOrDefault(r.getUserId(), "匿名"),
+                            female.getDisplayName(), female.getAnchor(),
+                            male != null ? male.getDisplayName() : null,
+                            male != null ? male.getAnchor() : null,
+                            ageTextFor(r.getCreatedAt()));
+                })
+                .toList();
+    }
+
+    /**
+     * 用户标识分档（2026-08-29 用户要求「至少三个级别」+「删除『舞友』两字」——
+     * 表头已有「舞友」列名，行内只显示级别词）：
+     * 权重 ≥ {@link #VETERAN_WEIGHT} → 资深；≥ {@link #REGULAR_WEIGHT} → 常客；
+     * 其余 → 普通（无贡献记录按 1.0 兜底）。
+     */
+    private String badgeFor(Long userId, Map<Long, Double> weights) {
+        double w = weights.getOrDefault(userId, 1.0);
+        if (w >= VETERAN_WEIGHT) {
+            return "资深";
+        }
+        if (w >= REGULAR_WEIGHT) {
+            return "常客";
+        }
+        return "普通";
     }
 
     private void requireVenue(Long venueId) {
@@ -301,6 +365,47 @@ public class CrowdReportService {
             }
         }
         return badges;
+    }
+
+    /**
+     * 列表「最新上报」行批量生成（2026-08-29，VenueService.listVenues 调用）：
+     * 每店窗口内最新一条上报 → 克制文案「{相对时间} · {标识}舞友上报」
+     * （如「2 分钟前 · 资深舞友上报」）——列表公共面克制：
+     * <ul>
+     *   <li>**不显示档位词**：单条档位贴公共列表有商家自报营销/数据误伤风险，
+     *       档位留详情页（同 {@link #badgeTextsByVenue} 决策）；本行只表达
+     *       「此刻有人刚报过」的实时动态 + 上报者信任标识；</li>
+     *   <li>**不公开昵称**：标识由上报者可信度权重分档（{@link #badgeFor}，
+     *       服务端权威，资深/常客/普通 + 「舞友」后缀——列表无表头，需自解释）；</li>
+     *   <li>展示门槛：窗口内有上报即返回（「有人刚报过」是事实非结论，
+     *       与 ≥3 人角标语义解耦、互补：胶囊 = 多少人，本行 = 最新动态）。</li>
+     * </ul>
+     * 返回 venueId → 文案；无上报的店不在 map（前端 null 不渲染）。
+     */
+    @Transactional(readOnly = true)
+    public Map<Long, String> latestTextsByVenue(Collection<Long> venueIds) {
+        if (venueIds == null || venueIds.isEmpty()) {
+            return Map.of();
+        }
+        LocalDateTime since = LocalDateTime.now().minusHours(CROWD_WINDOW_HOURS);
+        List<VenueCrowdReport> rows = crowdReportRepository
+                .findLatestByVenueIdsSince(venueIds, since);
+        if (rows.isEmpty()) {
+            return Map.of();
+        }
+        Set<Long> userIds = rows.stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
+        Map<Long, Double> weights = trustWeights(userIds);
+        Map<Long, String> texts = new HashMap<>();
+        // 同一店同一时刻多条（理论罕见，子查询等值匹配）→ 每店只取首条
+        Set<Long> seen = new HashSet<>();
+        for (VenueCrowdReport r : rows) {
+            if (!seen.add(r.getVenueId())) {
+                continue;
+            }
+            texts.put(r.getVenueId(),
+                    ageTextFor(r.getCreatedAt()) + " · " + badgeFor(r.getUserId(), weights) + "舞友上报");
+        }
+        return texts;
     }
 
     /**

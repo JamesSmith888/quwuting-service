@@ -766,12 +766,17 @@ public class VenueService {
         // 批量今晚热度角标（2026-08-29：一次 IN + GROUP BY 覆盖整页，中性「N人报过」，
         // ≥3 人独立上报才生成——列表公共面克制，见 CrowdReportService#badgeTextsByVenue）
         Map<Long, String> crowdBadges = crowdReportService.badgeTextsByVenue(venueIds);
+        // 批量「最新上报」行（2026-08-29：每店窗口内最新一条 → 克制文案
+        // 「{时间} · {标识}舞友上报」，有上报即生成——实时动态与角标互补，
+        // 见 CrowdReportService#latestTextsByVenue）
+        Map<Long, String> crowdLatestTexts = crowdReportService.latestTextsByVenue(venueIds);
         return result.map(v -> venueResponseMapper.toResponse(
                 v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
                 hotVenueIds.contains(v.getId()),
                 viewCounts.getOrDefault(v.getId(), 0L),
                 photosByVenue.getOrDefault(v.getId(), List.of()),
-                crowdBadges.get(v.getId())));
+                crowdBadges.get(v.getId()),
+                crowdLatestTexts.get(v.getId())));
     }
 
     /**
