@@ -56,6 +56,15 @@
 - `trustWeightsCache`（userId→权重，60s）：trustWeights 先查缓存、miss 一次 `aggregatesFor` 批量补齐并回填（**含零贡献用户默认 1.0，防"查了但无记录"反复 miss**）；
 - 上报写路径 `submit` 后 `invalidateVenueCrowdCaches(venueId)`（单店失效；权重与单店上报无关不失效）。
 
+## 辅助接口缓存（P1-2，2026-08-30）
+
+首页冷启动必拉的轻量接口同样无缓存（每次进首页重查跨洲往返），补缓存后首页并发请求全部命中：
+
+- **cities（GET /venues/cities，实测 321ms）**：`CacheConfig.CACHE_CITY_STATS` 5min TTL（maxSize 1 全局集合）——城市列表仅门店新增/编辑才变化；`VenueService.listCityStats` 加 `@Cacheable(sync=true)`；createVenue/updateVenue 注解 `allEntries` 逐出。
+- **ops-config（GET /ops-config，实测 221ms）**：`OpsConfigService.allValuesCache` 60s TTL 单飞（key="all" 单值集合）——配置低频变化；`setValue` 写路径同时失效单键缓存与全量缓存，管理端改动即时生效。
+
+**长期方案（系统性防复发）**：任何「全局单值/低频集合」读模型（首页冷启动必拉）一律挂短 TTL 缓存 + 写路径逐出，禁止裸查库进首页请求链。
+
 ## 实测效果（优化后）
 
 列表接口缓存命中时：主查询+count+角标×2+权重 全命中 → 剩 badges/浏览量/照片 3~4 次批量往返（~400~600ms 级）。**注意**：匿名用户 badges 仅 1 次往返（无个人态查询），登录用户 +1。

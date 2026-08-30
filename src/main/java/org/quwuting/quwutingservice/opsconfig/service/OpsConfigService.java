@@ -60,12 +60,25 @@ public class OpsConfigService {
     /** 单键配置缓存（LoadingCache + Optional 承载"键不存在"——Caffeine 禁 null 值） */
     private LoadingCache<String, Optional<String>> cache;
 
+    /** 全量配置缓存固定键（单值集合缓存） */
+    private static final String ALL_VALUES_KEY = "all";
+
+    /** 全量配置缓存（2026-08-30 性能优化）：GET /ops-config 首页冷启动必拉，实测 221ms。
+     *  配置低频变化（管理端改，写路径 {@link #setValue} 显式失效即时生效），
+     *  60s TTL 兜底 + 单飞回源（同单键缓存模式）。 */
+    private LoadingCache<String, Map<String, String>> allValuesCache;
+
     @PostConstruct
     void initCache() {
         cache = Caffeine.newBuilder()
                 .maximumSize(100)
                 .expireAfterWrite(30, TimeUnit.SECONDS)
                 .build(key -> opsConfigRepository.findByKey(key).map(OpsConfig::getValue));
+        allValuesCache = Caffeine.newBuilder()
+                .maximumSize(2)
+                .expireAfterWrite(60, TimeUnit.SECONDS)
+                .build(key -> opsConfigRepository.findAll().stream()
+                        .collect(Collectors.toMap(OpsConfig::getKey, OpsConfig::getValue)));
     }
 
     /**
@@ -89,10 +102,10 @@ public class OpsConfigService {
 
     /**
      * 公开读取全部配置（前端 feature flag 初始化；值为非敏感的开关字符串，无需鉴权）。
+     * 缓存优先（60s TTL + 单飞）；管理端 setValue 写路径显式失效，新值即时生效。
      */
     public Map<String, String> getAllValues() {
-        return opsConfigRepository.findAll().stream()
-                .collect(Collectors.toMap(OpsConfig::getKey, OpsConfig::getValue));
+        return allValuesCache.get(ALL_VALUES_KEY);
     }
 
     /**
@@ -117,6 +130,7 @@ public class OpsConfigService {
         cfg.setUpdatedAt(LocalDateTime.now());
         opsConfigRepository.save(cfg);
         cache.invalidate(key);
+        allValuesCache.invalidate(ALL_VALUES_KEY);
         log.info("ops config updated: {} = {} (by user {})", key, value, adminId);
     }
 }

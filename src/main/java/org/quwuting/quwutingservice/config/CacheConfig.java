@@ -53,6 +53,9 @@ public class CacheConfig {
     /** 热门场所 ID 集合缓存名称（列表页 isHot 标记用） */
     public static final String CACHE_HOT_VENUE_IDS = "hotVenueIds";
 
+    /** 有场所的城市列表缓存名称（首页热门城市，5min TTL——门店新增/编辑才变化，写路径逐出） */
+    public static final String CACHE_CITY_STATS = "cityStats";
+
     @Bean
     public CacheManager cacheManager() {
         CaffeineCacheManager manager = new CaffeineCacheManager();
@@ -63,6 +66,11 @@ public class CacheConfig {
                 .build());
         // 热门场所 ID：5min TTL，maxSize 1（全局唯一集合），写路径 allEntries 逐出
         manager.registerCustomCache(CACHE_HOT_VENUE_IDS, Caffeine.newBuilder()
+                .maximumSize(1)
+                .expireAfterWrite(5, TimeUnit.MINUTES)
+                .build());
+        // 有场所的城市列表：5min TTL，maxSize 1（全局唯一集合），门店新增/编辑逐出
+        manager.registerCustomCache(CACHE_CITY_STATS, Caffeine.newBuilder()
                 .maximumSize(1)
                 .expireAfterWrite(5, TimeUnit.MINUTES)
                 .build());

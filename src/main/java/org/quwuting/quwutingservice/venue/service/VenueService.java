@@ -45,6 +45,7 @@ import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.storage.ImageContentValidator;
 import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.cache.annotation.Caching;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
@@ -198,7 +199,10 @@ public class VenueService {
      * 独立表并直发 PUBLIC（创建者为管理方可信写者，保留旧 JSON 列直写公开语义）。
      */
     @Transactional
-    @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
+    @Caching(evict = {
+            @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true),
+            @CacheEvict(value = CacheConfig.CACHE_CITY_STATS, allEntries = true)
+    })
     public VenueResponse createVenue(CreateVenueRequest req) {
         validateTickets(req.tickets());
         imageValidator.validate(req.imageUrl());
@@ -255,7 +259,8 @@ public class VenueService {
     @Transactional
     @Caching(evict = {
             @CacheEvict(value = CacheConfig.CACHE_VENUE, key = "#id"),
-            @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
+            @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true),
+            @CacheEvict(value = CacheConfig.CACHE_CITY_STATS, allEntries = true)
     })
     public VenueResponse updateVenue(Long id, CreateVenueRequest req) {
         Venue venue = venueRepository.findByIdAndDeletedFalse(id)
@@ -911,7 +916,11 @@ public class VenueService {
         venueListCache.invalidateAll();
     }
 
-    /** 有场所的城市列表（按场所数倒序），供前端热门城市选择 */
+    /** 有场所的城市列表（按场所数倒序），供前端热门城市选择。
+     *  2026-08-30 性能优化：5min TTL 缓存（CacheConfig.CACHE_CITY_STATS）——城市列表
+     *  仅门店新增/编辑才变化（实测每次进入首页重查 321ms），createVenue/updateVenue
+     *  写路径 allEntries 逐出（见两方法缓存注解）。 */
+    @Cacheable(value = CacheConfig.CACHE_CITY_STATS, sync = true)
     @Transactional(readOnly = true)
     public List<CityStatsResponse> listCityStats() {
         return venueRepository.findCityStats().stream()
