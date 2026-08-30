@@ -69,6 +69,50 @@
 
 列表接口缓存命中时：主查询+count+角标×2+权重 全命中 → 剩 badges/浏览量/照片 3~4 次批量往返（~400~600ms 级）。**注意**：匿名用户 badges 仅 1 次往返（无个人态查询），登录用户 +1。
 
+## 舞伴域性能优化（2026-08-30，列表/详情进入性能）
+
+### 根因（三层叠加，非偶发抖动）
+
+生产慢日志坐实：近 12h 列表主接口 19 次、详情 60+ 次超 1s（1.1~2.8s）。
+
+1. **详情接口串行往返过多**：getDetail 个人态 + 公共态共 8~9 次互不依赖查询全部串行执行，跨洲单次 371ms × 串行链 = 秒级；
+2. **列表缓存被高频失效打穿**：`DancerListCacheService` 旧实现一律 `invalidateAll()` 全清——认可 toggle 12h 34 次，每次都清空全部城市×分页×排序条目，列表缓存命中率实际很低（缓存名存实亡）；
+3. **收藏列表无后端缓存**：`listFavorites` 每次 ~10 次 DB 往返，实测 1.5~2.9s；前端 `refreshCurrentUser` 每次 onShow 拉网络、`recordDancerView` 每次进详情立即 POST，与首屏关键请求抢占通道与连接池。
+
+### 缓存失效分级（DancerListCacheService + DancerService）
+
+失效分两级，调用点按写语义归类：
+
+- **精失效 `invalidateByDancerId(dancerId)`**：只清该舞伴所在缓存条目。适用 = 排序信号写（认可 toggle、收藏 add/remove 的 30 天收藏 tie-break、联系解锁、照片增删审——只影响该舞伴热度分）。实现 = 反向索引：`dancerKeys`（dancerId → Set<缓存key>）+ `keyDancerIds`（key → Set<dancerId>）双向维护，cache `removalListener` 同步清理；get 成功后 `registerIndex` 登记；未命中零操作。
+- **全清 `invalidateAll()`**：仅成员资格写（新建/编辑城市昵称/服务类别增删/状态流转 HIDDEN↔NORMAL/认证流转）——只有这些改变"某舞伴是否/如何在列表出现"。
+- 批量 `invalidateByDancerIds(Collection<Long>)`：预留对称 API。
+
+**事务兜底约定**：内联失效（写事务内）+ `afterCommit`/`afterCompletion` 兜底（防并发读者缓存旧值 / 事务回滚污染缓存）；同一写路径内列表+详情双失效时，列表侧兜底由精失效方法统一注册，详情侧单独注册，避免重复注册。
+
+### 用户级缓存（DancerFavoritesCacheService，对「个人态永不缓存」的语义细化）
+
+`listFavorites` 接入 `favoritesCacheService.get(userId, this::assembleFavorites)`：Caffeine `Cache<Long, List<DancerSummaryResponse>>`，**键 = userId**，30s TTL + 500 容量，Caffeine 单飞防击穿；loader 由 DancerService 注入（组装逻辑单一权威在 `DancerService#buildSummaries`）。
+
+> **铁律细化**：「个人态永不缓存」指**永不进用户无关的共享缓存**（键不区分用户即跨用户泄漏红线）；**按 userId 隔离的短 TTL 缓存（30s + 容量上限）不跨用户泄漏，允许**。写路径（收藏 add/remove）显式 `invalidate(userId)`。
+
+### 详情并行化（getDetail，最大收益项）
+
+- 8 个互不依赖只读查询全部并行：`fetchMyTodayState`（认可+标签链式查询聚合为单分支）、`fetchFavoriteState`、`contactUnlocked`（showAllPhotos 时 `completedFuture(true)` 直通）、profileTags 字典解析、lastAlbumUpdatedAt、detailCacheService.get、fetchPhotos、recentDemandSummary；
+- 专用线程池 `detailAsyncExecutor`：**固定 4 线程 daemon**（对齐 Hikari 池上限 5——主线程事务持 1 连接，并行分支至多占 4，不排队不饥饿）；已完成 Future 直通免占线程；
+- `awaitDetail`：join + `CompletionException` 解包，`BusinessException` 按原错误码传播；
+- **红线：并行任务内只做仓储/服务层只读调用（各自独立事务/会话），严禁触碰主线程会话的懒加载实体**——dancer 仅按已加载标量字段消费；
+- fetchPhotos 查询合并（4 次 → 2 次）：`Map<PointsGateTargetType, Collection<Long>>` 合并照片/视频门槛与解锁查询，`pointsService.gateCosts/unlockedIds` 多类型批量 IN 查询（语义约束 = 同一 targetId 不得出现在多个 targetType 下，媒体 id 全局唯一天然满足）。
+
+### 前端编排（auth.ts + dancer.ts）
+
+- **`refreshCurrentUser` 30s TTL**（`USER_REFRESH_TTL_MS`）：TTL 窗口内跳过网络请求；`saveCredentials/clearCredentials` 复位（登录/登出强制下次刷新）——对齐前端既有 favorites 30s TTL 契约；
+- **`recordDancerView` 本地队列批量**：enqueue 去重（同窗口同舞伴只保留首次来源）→ 10s 定时 flush（模块级懒启动，队列清空停止）+ 阈值 10 提前 flush → 逐条经 serial-queue 串行发送（至多 1 个在途）；契约不变（入队即返回 fire-and-forget）。浏览统计走后端 60s refresh 缓存兜底，10s 延迟可接受；进程被杀丢队 = 统计少量损失，符合既有语义。
+
+### 预期收益
+
+- 详情：串行 8~9 往返 → 并行 1~2 往返链路（~371ms×2 + 组装）→ 进 0.8s 内；
+- 列表：缓存命中率回升（精失效不再被高频认可写打穿）+ 收藏列表命中 30s 缓存 → 进 1.5s 内。
+
 ## 未竟事项（长期方案，数据规模增长后再动）
 
 1. **HEAT_SCORE 双算**：CASE WHEN (HEAT_BEHAVIOR)>0 与求和项各出现一次 HEAT_BEHAVIOR（6+ 标量子查询 ×2）。当前被列表缓存消化（60s 只算一次）；SQL 改写（LATERAL/CTE 单次计算）涉及 4 个 @Query + SqlTest，风险/收益比不划算，暂缓。

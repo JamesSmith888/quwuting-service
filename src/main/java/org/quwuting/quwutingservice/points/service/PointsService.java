@@ -51,6 +51,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -1296,8 +1297,10 @@ public class PointsService {
      * <ul>
      *   <li>{@link DancerDetailCacheService#invalidate}：级联失效内层 DancerStatsService
      *       （unlockStats 输入 + 统计页「排名热度」卡输入），单一失效入口见其 javadoc；</li>
-     *   <li>{@link DancerListCacheService#invalidateAll}：排序信号输入变化 → 全清列表
-     *       缓存（与认可/收藏/编辑同失效矩阵；列表条目数小全清成本低，见其 javadoc）。</li>
+     *   <li>{@link DancerListCacheService#invalidateByDancerId}：排序信号输入变化 →
+     *       <b>精失效</b>该舞伴所在列表条目（2026-08-30 精失效改造——联系解锁数是 HOT
+     *       排序主导信号、写频率高，旧 {@code invalidateAll()} 全清会打穿列表缓存
+     *       命中率，与认可/收藏同失效矩阵，见 DancerListCacheService javadoc）。</li>
      * </ul>
      * 目标定位：
      * <ul>
@@ -1324,12 +1327,12 @@ public class PointsService {
                 @Override
                 public void afterCommit() {
                     dancerDetailCacheService.invalidate(targetDancerId);
-                    dancerListCacheService.invalidateAll();
+                    dancerListCacheService.invalidateByDancerId(targetDancerId);
                 }
             });
         } else {
             dancerDetailCacheService.invalidate(targetDancerId);
-            dancerListCacheService.invalidateAll();
+            dancerListCacheService.invalidateByDancerId(targetDancerId);
         }
     }
 
@@ -1380,6 +1383,76 @@ public class PointsService {
         Set<Long> result = new HashSet<>();
         for (PointsUnlock unlock : unlockRepository
                 .findByUserIdAndTargetTypeAndTargetIdIn(userId, targetType, targetIds)) {
+            result.add(unlock.getTargetId());
+        }
+        return result;
+    }
+
+    /**
+     * 多类型合并批量门槛（2026-08-30：详情 fetchPhotos 照片/视频合并一次 IN 查询，
+     * 跨洲往返约束下省 1 次往返；单类型场景请用
+     * {@link #gateCosts(PointsGateTargetType, Collection)}）。
+     * <p>
+     * ⚠️ 语义约束：同一 targetId 不得出现在多个 targetType 下（媒体 id 全局唯一、
+     * kind 创建时固定，天然满足），结果按 targetId 映射无歧义。
+     *
+     * @param targetsByType targetType → 该类型目标 id 集合（空值/空集合项自动跳过）
+     * @return targetId → cost（无门槛/已清除的目标缺席，调用方按 0 处理）
+     */
+    @Transactional(readOnly = true)
+    public Map<Long, Integer> gateCosts(Map<PointsGateTargetType, Collection<Long>> targetsByType) {
+        if (targetsByType == null || targetsByType.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        List<PointsGateTargetType> types = new ArrayList<>();
+        List<Long> ids = new ArrayList<>();
+        for (Map.Entry<PointsGateTargetType, Collection<Long>> e : targetsByType.entrySet()) {
+            if (e.getValue() == null || e.getValue().isEmpty()) {
+                continue;
+            }
+            for (Long id : e.getValue()) {
+                types.add(e.getKey());
+                ids.add(id);
+            }
+        }
+        if (types.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<Long, Integer> result = new HashMap<>();
+        for (PointsGate gate : gateRepository.findByTargetTypeInAndTargetIdInAndDeletedFalse(types, ids)) {
+            result.put(gate.getTargetId(), gate.getCost());
+        }
+        return result;
+    }
+
+    /**
+     * 多类型合并批量解锁（2026-08-30：详情 fetchPhotos 照片/视频解锁合并一次
+     * IN 查询；单类型场景请用 {@link #unlockedIds(Long, PointsGateTargetType, Collection)}）。
+     * 语义约束同 {@link #gateCosts(Map)}（targetId 跨类型唯一，映射无歧义）。
+     * 未登录（匿名）返回空集。
+     */
+    @Transactional(readOnly = true)
+    public Set<Long> unlockedIds(Long userId, Map<PointsGateTargetType, Collection<Long>> targetsByType) {
+        if (userId == null || targetsByType == null || targetsByType.isEmpty()) {
+            return Collections.emptySet();
+        }
+        List<PointsGateTargetType> types = new ArrayList<>();
+        List<Long> ids = new ArrayList<>();
+        for (Map.Entry<PointsGateTargetType, Collection<Long>> e : targetsByType.entrySet()) {
+            if (e.getValue() == null || e.getValue().isEmpty()) {
+                continue;
+            }
+            for (Long id : e.getValue()) {
+                types.add(e.getKey());
+                ids.add(id);
+            }
+        }
+        if (types.isEmpty()) {
+            return Collections.emptySet();
+        }
+        Set<Long> result = new HashSet<>();
+        for (PointsUnlock unlock : unlockRepository
+                .findByUserIdAndTargetTypeInAndTargetIdIn(userId, types, ids)) {
             result.add(unlock.getTargetId());
         }
         return result;

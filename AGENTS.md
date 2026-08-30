@@ -43,7 +43,7 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务，为去舞厅小程序
 | [`17-group-chats.md`](docs/agents/17-group-chats.md) | 舞友群（V33：微信引流，平台无一键加群 API → 长按识别二维码；scope 三态维度互斥校验；公开分组读 + ADMIN CRUD；qr_code_url 挂 ImageContentValidator；GROUP_QR 存储分类，2026-08-17） | 群聊相关 |
 | [`18-venue-photos.md`](docs/agents/18-venue-photos.md) | 门店照片域（V35 `qwt_venue_photos` 独立表；**2026-08-20 深夜收口：仅 ADMIN 上传直发 PUBLIC**——原普通用户 PENDING UGC 通道 + 频控因个人主体无「社交服务」类目被审核驳回而删除；本人视角回显、管理端逐张审核（保留处理存量 PENDING）；读路径批量注入五参重载 + PUBLIC 变化显式缓存失效；updateVenue 忽略 photos 禁全量覆盖） | 门店照片/相册相关 |
 | [`28-recruitments.md`](docs/agents/28-recruitments.md) | **门店招工**（2026-08-29，V61 双表 `qwt_recruitments` + `qwt_recruitment_contacts`）：定位=用工信息展示非招聘服务（无投递/报名闭环，个人主体红线）；仅管理员直发；职位受控枚举 + 必挂门店 + 有效期硬过滤 + 风险词发布确认（1010）+ 联系方式免费获取式按需下发幂等留痕（对齐舞伴联系方式纪律）；P0 后端已落地，前端页面待实施 | 动招工相关 |
-| [`29-performance.md`](docs/agents/29-performance.md) | **性能优化**（2026-08-30 首页慢根因定位：跨洲 DB 往返 371ms/次 × 列表接口 8~9 次 = 秒级）：缓存分层策略唯一权威——个人态永不缓存 / 无坐标列表主查询 60s 缓存（`VenueService.venueListCache`，写路径显式失效）/ 角标人数 30s + 最新上报行 30s（只缓存原始行禁缓存相对时间文案）+ 信任权重 60s（`CrowdReportService` 三级缓存）；带坐标查询永不缓存；未竟事项=HEAT_SCORE 双算、DB 迁国内、前端分包 | 性能优化/缓存相关 |
+| [`29-performance.md`](docs/agents/29-performance.md) | **性能优化**（2026-08-30 首页慢根因定位：跨洲 DB 往返 371ms/次 × 列表接口 8~9 次 = 秒级）：缓存分层策略唯一权威——个人态永不进共享缓存 / **用户级缓存（键=userId 短 TTL 30s 不跨用户泄漏，允许）** / 无坐标列表主查询 60s 缓存（`VenueService.venueListCache`，写路径显式失效）/ 角标人数 30s + 最新上报行 30s（只缓存原始行禁缓存相对时间文案）+ 信任权重 60s（`CrowdReportService` 三级缓存）；带坐标查询永不缓存；**2026-08-30 舞伴域：列表缓存精失效（反向索引 dancerId→keys，排序信号写只清该舞伴条目替代全清）+ 收藏列表用户级缓存 30s + getDetail 8 分支 CompletableFuture 并行（专用 4 线程池对齐 Hikari 上限）+ fetchPhotos 照片/视频门槛解锁合并 IN 查询 + 前端 refreshCurrentUser 30s TTL + view 上报本地队列 10s 批量去重串行**；未竟事项=HEAT_SCORE 双算、DB 迁国内、前端分包 | 性能优化/缓存相关 |
 
 ---
 

@@ -65,6 +65,15 @@ public interface PointsUnlockRepository extends JpaRepository<PointsUnlock, Long
             Long userId, PointsGateTargetType targetType, Collection<Long> targetIds);
 
     /**
+     * 多类型合并批量解锁（2026-08-30：详情 fetchPhotos 照片/视频解锁合并为一次
+     * IN 查询——target_type IN + target_id IN，跨洲往返约束下省 1 次往返）。
+     * 语义约束同 {@link PointsGateRepository#findByTargetTypeInAndTargetIdInAndDeletedFalse}
+     * （同一 targetId 不得出现在多个 targetType 下，媒体 kind 固定天然满足）。
+     */
+    List<PointsUnlock> findByUserIdAndTargetTypeInAndTargetIdIn(
+            Long userId, Collection<PointsGateTargetType> targetTypes, Collection<Long> targetIds);
+
+    /**
      * 某用户自某时刻起的解锁记录（2026-08-24 联系方式每日首免判定）：
      * 取当日全部 DANCER_CONTACT 解锁（target_id = 舞伴 ID），调用方据此判断
      * "今日是否已对任意有门槛舞伴解锁过"——每日首次获取联系方式免费。

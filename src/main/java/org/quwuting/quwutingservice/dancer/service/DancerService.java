@@ -59,6 +59,11 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -121,11 +126,21 @@ public class DancerService {
     /**
      * 列表公共部分聚合缓存（2026-08-22 引入）：主查询行 + 用户无关 enrichments
      * （Top 标签/常驻舞厅名/封面/累计浏览量）整体缓存，列表接口 DB 往返 ~7 次 → ~2 次。
-     * 改变列表行内容/排序的写路径（认可/收藏/编辑/照片增删审/状态流转/认证/新建）必须
-     * 经 {@link #invalidateListCache()} 失效（唯一失效入口，全清——条目数小可接受），
+     * 失效分级（2026-08-30 精失效根因修复，见 DancerListCacheService javadoc）：
+     * <ul>
+     *   <li>精失效 {@link #invalidateListCacheByDancerId}——<b>排序信号写</b>（认可 toggle /
+     *       收藏 add·remove / 积分解锁 / 照片增删审）：按反向索引只清该舞伴所在条目；
+     *       旧实现一律全清，认可 toggle 高频写每次都清空全部城市×分页×排序条目，
+     *       列表缓存命中率实际很低（根因，12h 34 次认可 → 34 次全清）；</li>
+     *   <li>全清 {@link #invalidateListCache}——<b>成员资格写</b>（新建/编辑/服务类别/
+     *       状态流转/认证）：改变「哪些舞伴出现在哪些条目」，反向索引无法覆盖
+     *       "未含该舞伴的条目"，必须全清；此类写低频，成本可接受。</li>
+     * </ul>
      * 浏览量/分享/广告浏览不入失效矩阵（弱信息 + 高频写，refresh 兜底），见类 javadoc。
      */
     private final DancerListCacheService listCacheService;
+    /** 收藏列表「用户级」聚合缓存（2026-08-30 引入：userId 隔离 30s TTL，见其 javadoc） */
+    private final DancerFavoritesCacheService favoritesCacheService;
     private final VenueLookupService venueLookupService;
     private final MessageService messageService;
     private final org.quwuting.quwutingservice.points.service.PointsService pointsService;
@@ -137,6 +152,18 @@ public class DancerService {
     private final OpsConfigService opsConfigService;
     /** 通用标签字典（2026-08-24：资料标签序列化/反序列化 + 字典解析） */
     private final TagDictService tagDictService;
+
+    /**
+     * 详情并行查询专用线程池（2026-08-30 getDetail 并行化）：固定 4 线程——
+     * Hikari 池上限 5、主线程事务持 1 连接 → 并行分支至多占 4，不排队不饥饿；
+     * daemon 线程不阻塞 JVM 退出。对齐 AmapVenuePhotoSyncService#syncExecutor
+     * 命名线程工厂先例。
+     */
+    private final ExecutorService detailAsyncExecutor = Executors.newFixedThreadPool(4, r -> {
+        Thread t = new Thread(r, "dancer-detail-async");
+        t.setDaemon(true);
+        return t;
+    });
 
     // ─── 创建（唯一通道：管理员后台创建 → NORMAL；用户主动注册已下线） ────────
 
@@ -192,7 +219,8 @@ public class DancerService {
         if (request.homeVenueId() != null) {
             attachHomeVenue(dancer.getId(), request.homeVenueId());
         }
-        // 管理端直通公开（adminApproved=true → NORMAL）：新舞伴立即出现在公开列表 → 列表缓存失效
+        // 管理端直通公开（adminApproved=true → NORMAL）：新舞伴立即出现在公开列表 → 列表缓存全清
+        // （成员资格写——新成员可能移入任意列表条目，反向索引无法覆盖，2026-08-30 分级语义）
         invalidateListCache();
         return dancer.getId();
     }
@@ -410,7 +438,7 @@ public class DancerService {
         replaceDancerCities(dancerId, cities);
         // 城市子表是详情公共缓存（cities）的输入——编辑后失效（2026-08-19 详情缓存约定）
         detailCacheService.invalidate(dancerId);
-        // 编辑改变列表行内容（昵称/常去/城市/简介）——列表缓存失效（2026-08-22）
+        // 编辑改变列表行内容（昵称/常去/城市/简介）——列表缓存全清（成员资格写，2026-08-30 分级语义）
         invalidateListCache();
         return getDetail(dancerId, userId, currentRole);
     }
@@ -454,27 +482,55 @@ public class DancerService {
     }
 
     /**
-     * 列表公共缓存失效（写路径统一入口，2026-08-22 列表缓存配套）：
-     * 改变公开列表行内容/排序的写操作（认可/编辑/照片增删审/状态流转/认证/新建）
-     * 后调用——对齐 {@link #detailCacheService} 失效约定：内联失效（写事务内清缓存，
+     * 列表公共缓存<b>全清</b>（成员资格写统一入口，2026-08-30 起语义收窄）：新建舞伴 /
+     * 编辑（城市·昵称等行内容）/ 服务类别增删 / 状态流转（HIDDEN↔NORMAL）/ 认证流转——
+     * 这些操作改变「哪些舞伴出现在哪些列表条目」，按 dancerId 反向索引无法覆盖
+     * "未含该舞伴的条目"（新成员可能移入任意条目），必须全清。此类写低频（管理员/
+     * 本人操作），全清成本 = 下次请求回源一次，可接受。
+     * <p>
+     * <b>排序信号写请走 {@link #invalidateListCacheByDancerId}（精失效）</b>——认可/收藏/
+     * 解锁/照片增删审只影响该舞伴的排序分与行内容，全清会打穿列表缓存命中率（根因见
+     * DancerListCacheService javadoc）。两个入口共用失效约定：内联失效（写事务内清缓存，
      * 保证响应后读者回源最新）+ afterCommit/afterCompletion 兜底（防并发读者在内联
-     * 失效与提交之间回源缓存旧值 / 事务回滚污染缓存）。
-     * 收藏 add·remove 不改公开列表内容，豁免（见 DancerListCacheService javadoc）；
-     * 浏览量/分享/广告浏览为弱信息 + 高频写，同样豁免（60s refresh 兜底）。
+     * 失效与提交之间回源缓存旧值 / 事务回滚污染缓存），见 {@link #registerListCacheInvalidation}。
      */
     private void invalidateListCache() {
         listCacheService.invalidateAll();
+        registerListCacheInvalidation(listCacheService::invalidateAll);
+    }
+
+    /**
+     * 列表公共缓存<b>精失效</b>（排序信号写统一入口，2026-08-30 新增）：按 dancerId
+     * 清掉该舞伴所在的所有列表条目（含全城市/多分页/双排序），下次请求回源重算；
+     * 反向索引未命中（该舞伴不在任何缓存条目）→ 零操作。同 {@link #invalidateListCache()}
+     * 双失效约定（内联 + afterCommit/afterCompletion 兜底，语义一致）。
+     */
+    private void invalidateListCacheByDancerId(Long dancerId) {
+        if (dancerId == null) {
+            return;
+        }
+        listCacheService.invalidateByDancerId(dancerId);
+        registerListCacheInvalidation(() -> listCacheService.invalidateByDancerId(dancerId));
+    }
+
+    /**
+     * 注册列表缓存失效的事务边界兜底（对齐 VenueReactionService 根因修复）：
+     * - afterCommit 再失效：并发读者在内联失效与提交之间回源可能缓存旧值 → 提交后清除；
+     * - afterCompletion(非提交) 失效：事务回滚时清除内联失效后写入缓存的"未提交值"（防幻影）。
+     * 单元测试无事务（isSynchronizationActive=false）时跳过注册——生产恒在事务内。
+     */
+    private void registerListCacheInvalidation(Runnable invalidate) {
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
-                    listCacheService.invalidateAll();
+                    invalidate.run();
                 }
 
                 @Override
                 public void afterCompletion(int status) {
                     if (status != STATUS_COMMITTED) {
-                        listCacheService.invalidateAll();
+                        invalidate.run();
                     }
                 }
             });
@@ -502,8 +558,10 @@ public class DancerService {
      * enrichments）整体走 {@link DancerListCacheService}（60s refresh-ahead + 写路径失效），
      * 列表接口 DB 往返 ~7 次 → ~2 次；个人态（今日已认可 ID / 今日投票标签）恒实时查询
      * （严禁进用户无关缓存，列表卡片 chips 活跃态数据源）。写路径（认可/收藏/编辑/照片
-     * 增删审/状态流转/认证/新建）经 {@link #invalidateListCache()} 显式失效——排序含
-     * 近30天收藏 tie-break，故收藏 add·remove 亦在失效矩阵内（2026-08-26 起）。
+     * 增删审/状态流转/认证/新建）经 {@link #invalidateListCacheByDancerId}（排序信号写
+     * 精失效）/ {@link #invalidateListCache}（成员资格写全清）两级显式失效（2026-08-30
+     * 精失效改造）——排序含近30天收藏 tie-break，故收藏 add·remove 亦在失效矩阵内
+     * （2026-08-26 起）。
      */
     @Transactional(readOnly = true)
     public Page<DancerSummaryResponse> listPublic(String city, String serviceCategory, String sort,
@@ -550,9 +608,23 @@ public class DancerService {
      * 当前用户收藏的舞伴列表（按收藏时间倒序；仅当前公开 NORMAL 舞伴——HIDDEN 自动
      * 淡出，见 V27 迁移注释）。返回与公开列表同构的 DancerSummaryResponse，前端
      * 复用同一套卡片 ViewModel 派生（toCardVM）。
+     * <p>
+     * 2026-08-30 性能根因修复：接入 {@link DancerFavoritesCacheService}（userId 隔离
+     * 30s TTL，与前端 dancerFavoritesCache 契约对齐）——原实现每次 ~10 次 DB 往返且
+     * 完全无后端缓存，实测 1.5~2.9s 慢加载；现在 30s 窗口内重复进入 = 纯内存命中，
+     * 收藏 add·remove 写路径显式失效（favoritesCacheService.invalidate）。
      */
     @Transactional(readOnly = true)
     public List<DancerSummaryResponse> listFavorites(Long userId) {
+        return favoritesCacheService.get(userId, this::assembleFavorites);
+    }
+
+    /**
+     * 收藏列表组装（{@link DancerFavoritesCacheService} 缓存 miss 时执行的 loader，
+     * 组装逻辑单一权威——与公开列表 buildSummaries 共用，enrichments 走列表缓存
+     * 用户无关部分 computeEnrichments，个人态恒实时查询）。
+     */
+    private List<DancerSummaryResponse> assembleFavorites(Long userId) {
         List<Object[]> rows = dancerFavoriteRepository.findFavoriteDancersByUserId(
                 userId, LocalDate.now().atStartOfDay(), LocalDateTime.now().minusDays(7));
         if (rows.isEmpty()) {
@@ -586,7 +658,8 @@ public class DancerService {
         }
         dancerFavoriteRepository.upsertFavorite(userId, dancerId, LocalDateTime.now());
         detailCacheService.invalidate(dancerId); // 收藏趋势输入（favoriteTrend）真实写入后失效
-        invalidateListCache(); // 2026-08-26 排序升级：近30天收藏数参与 HOT 排序 tie-break
+        favoritesCacheService.invalidate(userId); // 收藏列表用户级缓存（2026-08-30）
+        invalidateListCacheByDancerId(dancerId); // 2026-08-26 排序升级：近30天收藏数参与 HOT 排序 tie-break（精失效）
     }
 
     /**
@@ -604,7 +677,8 @@ public class DancerService {
                     dancerFavoriteRepository.save(fav);
                     // 列表/详情收藏态变化（统计缓存无实质影响，保持写路径一致约定）
                     detailCacheService.invalidate(dancerId);
-                    invalidateListCache(); // 2026-08-26 排序升级：近30天收藏数参与 HOT 排序 tie-break
+                    favoritesCacheService.invalidate(userId); // 收藏列表用户级缓存（2026-08-30）
+                    invalidateListCacheByDancerId(dancerId); // 2026-08-26 排序升级：近30天收藏数参与 HOT 排序 tie-break（精失效）
                 });
     }
 
@@ -757,6 +831,16 @@ public class DancerService {
      * 广告计数/联系方式门槛）整体走 {@link DancerDetailCacheService}（60s refresh-ahead +
      * 写路径失效），详情接口 DB 往返 ~15 次 → ~6 次；用户相关态（isMine/今日认可/收藏/
      * 解锁/相册过滤）恒实时查询不缓存。
+     * <p>
+     * 2026-08-30 性能根因修复（详情进 0.8s 目标达成路径）：剩余 ~8 个互不依赖的
+     * 查询（今日认可+标签 / 收藏态 / 联系方式解锁 / 资料标签字典 / 相册最近更新 /
+     * 详情公共聚合 / 相册门槛解锁 / 进行中邀约摘要）<b>全部并行提交</b>（专用线程池
+     * {@link #detailAsyncExecutor}）——跨洲 DB 单次往返 ~370ms 架构约束下，串行
+     * ~11 次往返 ≈ 3~4s → 墙钟时间 ≈ 最大分支（命中缓存时 ~0.4s 内）。
+     * ⚠️ 并行任务内只做仓储/服务层<b>只读</b>调用（各自独立事务/会话，只读安全），
+     * 严禁触碰主线程会话的懒加载实体——dancer 仅按已加载标量字段消费；
+     * 异常经 {@link #awaitDetail} 解包 CompletionException 按原类型传播
+     * （BusinessException → 业务错误码，不受并行影响）。
      */
     @Transactional(readOnly = true)
     public DancerDetailResponse getDetail(Long dancerId, Long currentUserId, UserRole currentRole) {
@@ -766,23 +850,33 @@ public class DancerService {
         }
         boolean isMine = currentUserId != null && dancer.getCreatedBy().equals(currentUserId);
         boolean showAllPhotos = isMine || currentRole == UserRole.ADMIN;
-        // 今日认可态 + 携带标签（2026-08-15 单票模型：详情页 chip 活跃态数据源；
-        // 与 myRecognizedToday 同一次查询，避免两次命中唯一索引）
-        boolean myToday = false;
-        List<String> myTags = Collections.emptyList();
-        if (currentUserId != null) {
-            Optional<DancerRecognition> myTodayRec = recognitionRepository
-                    .findByUserIdAndDancerIdAndRecognitionDate(currentUserId, dancerId, LocalDate.now());
-            myToday = myTodayRec.isPresent();
-            myTags = myTodayRec.map(r -> fetchTagsForRecognition(r.getId())).orElseGet(Collections::emptyList);
-        }
-        // 收藏态（2026-08-14 舞伴收藏：服务端权威，替代 venue 的 URL fav 参数 hack——
-        // 分享深链等无参数入口不丢状态；匿名/未收藏恒 false）
-        boolean favorite = currentUserId != null && dancerFavoriteRepository
-                .findByUserIdAndDancerId(currentUserId, dancerId)
-                .filter(f -> !f.isDeleted()).isPresent();
-        // 用户无关公共聚合（2026-08-19 详情缓存：stats/tags/venues/cities/gifts/points/adViews/contactCost）
-        DancerDetailCacheService.PublicPart pub = detailCacheService.get(dancerId);
+        // ── 并行分支提交（2026-08-30：互不依赖，全部并行；showAllPhotos 视角
+        //    联系方式恒解锁，completedFuture 直通免占线程） ──
+        CompletableFuture<MyTodayState> myTodayF = async(() -> fetchMyTodayState(currentUserId, dancerId));
+        CompletableFuture<Boolean> favoriteF = async(() -> fetchFavoriteState(currentUserId, dancerId));
+        CompletableFuture<Boolean> contactUnlockedF = showAllPhotos
+                ? CompletableFuture.completedFuture(true)
+                : async(() -> pointsService.isUnlocked(currentUserId, PointsGateTargetType.DANCER_CONTACT, dancerId));
+        CompletableFuture<List<TagItemResponse>> profileTagsF = async(() ->
+                tagDictService.resolveOrdered(tagDictService.deserializeIds(dancer.getProfileTags())));
+        CompletableFuture<LocalDateTime> lastAlbumF = async(() ->
+                photoRepository.findLatestPublicCreatedAtByDancerId(dancerId).orElse(null));
+        CompletableFuture<DancerDetailCacheService.PublicPart> pubF = async(() -> detailCacheService.get(dancerId));
+        CompletableFuture<List<DancerPhotoResponse>> photosF = async(() ->
+                fetchPhotos(dancerId, showAllPhotos, currentUserId));
+        CompletableFuture<DancerDetailResponse.RecentDemand> demandF = async(() ->
+                pointsService.recentDemandSummary(currentUserId, dancerId));
+        // ── 等待并行分支（awaitDetail 解包异常；join 顺序 = 后续消费序） ──
+        MyTodayState myTodayState = awaitDetail(myTodayF);
+        boolean myToday = myTodayState.recognized();
+        List<String> myTags = myTodayState.tags();
+        boolean favorite = awaitDetail(favoriteF);
+        DancerDetailCacheService.PublicPart pub = awaitDetail(pubF);
+        boolean contactUnlocked = awaitDetail(contactUnlockedF);
+        List<TagItemResponse> profileTags = awaitDetail(profileTagsF);
+        LocalDateTime lastAlbumUpdatedAt = awaitDetail(lastAlbumF);
+        List<DancerPhotoResponse> photos = awaitDetail(photosF);
+        DancerDetailResponse.RecentDemand recentDemand = awaitDetail(demandF);
         // 联系方式可见性（2026-08-24 晚 改版：联系方式改为「用户获取时才实时查询」）：
         // - 详情接口对普通用户（非本人/管理员）恒不下发真实值（contact/contactImageUrl），
         //   无论是否解锁/无门槛/不遮挡——防内容随详情泄漏；用户点击「获取联系方式」
@@ -792,8 +886,6 @@ public class DancerService {
         // - hideContact/contactCost/contactUnlocked 照常下发（前端驱动入口文案/锁态）。
         boolean hideContact = dancer.isHideContact();
         int contactCost = pub.contactCost();
-        boolean contactUnlocked = showAllPhotos
-                || pointsService.isUnlocked(currentUserId, PointsGateTargetType.DANCER_CONTACT, dancerId);
         String contact = showAllPhotos ? dancer.getContact() : null;
         String contactImageUrl = showAllPhotos ? dancer.getContactImageUrl() : null;
         // 舞伴是否填写了联系方式（contact 或 contactImageUrl 任一非空）——普通用户侧
@@ -834,14 +926,8 @@ public class DancerService {
         // 累计广告支持次数（收益线下结算依据）
         boolean earningsEnabled = dancer.isEarningsEnabled();
         String earningsAdUnitId = earningsEnabled ? dancerAdProperties.adUnitId() : "";
-        // 资料标签（2026-08-24：profile_tags 为 dancer 主行字段，实体已加载——
-        // 反序列化 + 字典解析（text + description，长按/点击弹说明的权威文案））
-        List<TagItemResponse> profileTags =
-                tagDictService.resolveOrdered(tagDictService.deserializeIds(dancer.getProfileTags()));
-        // 最近更新信号（2026-08-26 晚）：相册 = 最新一张 PUBLIC 媒体 created_at；
-        // 联系方式 = Dancer.contactUpdatedAt（实体已加载，零额外查询）
-        LocalDateTime lastAlbumUpdatedAt =
-                photoRepository.findLatestPublicCreatedAtByDancerId(dancerId).orElse(null);
+        // 最近更新信号（2026-08-26 晚）：相册 = 最新一张 PUBLIC 媒体 created_at
+        // （并行分支）；联系方式 = Dancer.contactUpdatedAt（实体已加载，零额外查询）
         LocalDateTime lastContactUpdatedAt = dancer.getContactUpdatedAt();
         return new DancerDetailResponse(
                 dancer.getId(), dancer.getNickname(), dancer.getAvatarUrl(), dancer.getBio(),
@@ -849,7 +935,7 @@ public class DancerService {
                 dancer.getVerificationStatus(), dancer.getVerifiedAt(),
                 isMine, myToday, myTags, favorite, pub.stats(),
                 pub.pointsReceivedTotal(), pub.pointsReceived30d(), pub.giftsReceived(),
-                fetchPhotos(dancerId, showAllPhotos, currentUserId),
+                photos,
                 pub.tags(), pub.venues(), pub.services(),
                 hasContact, contactMasked, contact, contactImageUrl, hideContact, contactCost, contactUnlocked,
                 earningsEnabled, earningsAdUnitId, pub.adViews(),
@@ -859,8 +945,57 @@ public class DancerService {
                 // 我的进行中邀约摘要（2026-08-27，V56，docs/agents/25「邀约生命周期」：
                 // 详情页「进行中邀约」卡数据源——客人返回详情页不再"邀约单消失"，
                 // 恒可见最近一次邀约的时间/状态/被查看/履约入口。用户相关（不入
-                // 公共缓存），实时轻量查询；匿名/无邀约 → null 前端不渲染）
-                pointsService.recentDemandSummary(currentUserId, dancerId));
+                // 公共缓存），实时轻量查询（并行分支）；匿名/无邀约 → null 前端不渲染）
+                recentDemand);
+    }
+
+    /** 详情并行化内部态（2026-08-30）：今日认可 + 携带标签（链式查询聚合为一并行分支） */
+    private record MyTodayState(boolean recognized, List<String> tags) {}
+
+    /**
+     * 今日认可态 + 携带标签（2026-08-15 单票模型：详情页 chip 活跃态数据源；
+     * 与 myRecognizedToday 同一次查询，避免两次命中唯一索引；匿名 → 未认可空标签）。
+     */
+    private MyTodayState fetchMyTodayState(Long userId, Long dancerId) {
+        if (userId == null) {
+            return new MyTodayState(false, Collections.emptyList());
+        }
+        Optional<DancerRecognition> myTodayRec = recognitionRepository
+                .findByUserIdAndDancerIdAndRecognitionDate(userId, dancerId, LocalDate.now());
+        if (myTodayRec.isEmpty()) {
+            return new MyTodayState(false, Collections.emptyList());
+        }
+        return new MyTodayState(true, fetchTagsForRecognition(myTodayRec.get().getId()));
+    }
+
+    /** 收藏态（2026-08-14 舞伴收藏：服务端权威，替代 venue 的 URL fav 参数 hack——
+     *  分享深链等无参数入口不丢状态；匿名/未收藏恒 false） */
+    private boolean fetchFavoriteState(Long userId, Long dancerId) {
+        return userId != null && dancerFavoriteRepository
+                .findByUserIdAndDancerId(userId, dancerId)
+                .filter(f -> !f.isDeleted()).isPresent();
+    }
+
+    /** 提交详情并行分支（专用线程池；任务只做仓储/服务层只读调用，见 getDetail javadoc） */
+    private <T> CompletableFuture<T> async(Supplier<T> task) {
+        return CompletableFuture.supplyAsync(task, detailAsyncExecutor);
+    }
+
+    /**
+     * 等待详情并行分支并解包异常：CompletionException → 原异常类型（BusinessException
+     * → 业务错误码；其余运行时异常原样传播）。并行分支各自独立事务/会话，异常不
+     * 影响主线程只读事务（无需标记 rollback，语义与串行调用一致）。
+     */
+    private static <T> T awaitDetail(CompletableFuture<T> f) {
+        try {
+            return f.join();
+        } catch (CompletionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException re) {
+                throw re;
+            }
+            throw e;
+        }
     }
 
     /**
@@ -1229,25 +1364,25 @@ public class DancerService {
         // （响应值 = 操作后真相；detailCacheService.invalidate 级联失效内层
         // DancerAggregateService 与 DancerStatsService——单一失效入口，2026-08-19）
         detailCacheService.invalidate(dancerId);
-        // 认可数变化直接改变公开列表排序（近7天认可倒序）与卡片 chips——列表缓存失效
-        invalidateListCache();
+        // 认可数变化直接改变公开列表排序（近7天认可倒序）与卡片 chips——列表缓存精失效
+        // （2026-08-30：认可 toggle 是高频排序信号写，只清该舞伴所在条目替代全清）
+        invalidateListCacheByDancerId(dancerId);
         // 事务边界兜底（对齐 VenueReactionService 根因修复）：
         // - afterCommit 再失效：并发读者在内联失效与提交之间回源可能缓存旧值 → 提交后清除；
         // - afterCompletion(非提交) 失效：事务回滚时清除内联失效后写入缓存的"未提交值"（防幻影）。
+        // 列表缓存兜底已由 invalidateListCacheByDancerId 注册（精失效同语义），此处仅兜底详情缓存。
         // 单元测试无事务（isSynchronizationActive=false）时跳过注册——生产恒在事务内。
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
                     detailCacheService.invalidate(dancerId);
-                    listCacheService.invalidateAll();
                 }
 
                 @Override
                 public void afterCompletion(int status) {
                     if (status != STATUS_COMMITTED) {
                         detailCacheService.invalidate(dancerId);
-                        listCacheService.invalidateAll();
                     }
                 }
             });
@@ -1472,8 +1607,9 @@ public class DancerService {
             inserted++;
         }
         if (inserted > 0) {
-            // 相册变化可能影响列表封面（封面 = 展示序最小 PUBLIC 照片）——列表缓存失效
-            invalidateListCache();
+            // 相册变化可能影响列表封面（封面 = 展示序最小 PUBLIC 照片）——列表缓存精失效
+            // （2026-08-30：单舞伴照片写只清该舞伴所在条目，替代全清）
+            invalidateListCacheByDancerId(dancerId);
         }
         return fetchPhotos(dancerId, true, userId);
     }
@@ -1555,7 +1691,7 @@ public class DancerService {
             inserted++;
         }
         if (inserted > 0) {
-            invalidateListCache();
+            invalidateListCacheByDancerId(dancerId); // 相册变化影响列表封面（精失效，2026-08-30）
         }
         return fetchPhotos(dancerId, true, userId);
     }
@@ -1574,8 +1710,8 @@ public class DancerService {
         }
         photo.setDeleted(true);
         photoRepository.save(photo);
-        // 照片删除可能影响列表封面——列表缓存失效
-        invalidateListCache();
+        // 照片删除可能影响列表封面——列表缓存精失效（2026-08-30，只清该舞伴所在条目）
+        invalidateListCacheByDancerId(dancerId);
     }
 
     // ─── 管理端照片审核 ────────────────────────────────────────────────────────
@@ -1616,8 +1752,8 @@ public class DancerService {
         }
         photo.setStatus(status);
         photoRepository.save(photo);
-        // 照片审核（PENDING → PUBLIC）可能改变列表封面——列表缓存失效
-        invalidateListCache();
+        // 照片审核（PENDING → PUBLIC）可能改变列表封面——列表缓存精失效（2026-08-30）
+        invalidateListCacheByDancerId(photo.getDancerId());
         log.info("管理员 {} 审核舞伴照片 {} → {}（舞伴 {}）{}", adminId, photoId, status,
                 photo.getDancerId(), reason == null || reason.isBlank() ? "" : "，说明：" + TextSanitizer.sanitize(reason, 200));
     }
@@ -1911,22 +2047,23 @@ public class DancerService {
         if (photos.isEmpty()) {
             return Collections.emptyList();
         }
-        // 门槛/解锁态按媒体类型分组批量查询（照片 DANCER_PHOTO / 视频 DANCER_VIDEO）
-        Map<Long, Integer> costs = new HashMap<>();
-        Set<Long> unlockedIds = new HashSet<>();
+        // 门槛/解锁态按媒体类型分组批量查询（照片 DANCER_PHOTO / 视频 DANCER_VIDEO）——
+        // 2026-08-30 合并为各一次 IN 查询（4 次 → 2 次，跨洲往返约束下省 2 次往返；
+        // 复用 pointsService 多类型批量方法，媒体 id 跨类型唯一、映射无歧义）
+        Map<PointsGateTargetType, Collection<Long>> targets = new HashMap<>();
         List<Long> photoIds = new ArrayList<>();
         List<Long> videoIds = new ArrayList<>();
         for (DancerPhoto p : photos) {
             (p.getKind() == DancerPhotoKind.VIDEO ? videoIds : photoIds).add(p.getId());
         }
         if (!photoIds.isEmpty()) {
-            costs.putAll(pointsService.gateCosts(PointsGateTargetType.DANCER_PHOTO, photoIds));
-            unlockedIds.addAll(pointsService.unlockedIds(currentUserId, PointsGateTargetType.DANCER_PHOTO, photoIds));
+            targets.put(PointsGateTargetType.DANCER_PHOTO, photoIds);
         }
         if (!videoIds.isEmpty()) {
-            costs.putAll(pointsService.gateCosts(PointsGateTargetType.DANCER_VIDEO, videoIds));
-            unlockedIds.addAll(pointsService.unlockedIds(currentUserId, PointsGateTargetType.DANCER_VIDEO, videoIds));
+            targets.put(PointsGateTargetType.DANCER_VIDEO, videoIds);
         }
+        Map<Long, Integer> costs = pointsService.gateCosts(targets);
+        Set<Long> unlockedIds = pointsService.unlockedIds(currentUserId, targets);
         List<DancerPhotoResponse> result = new ArrayList<>(photos.size());
         for (DancerPhoto p : photos) {
             if (!showAll && p.getStatus() != DancerPhotoStatus.PUBLIC) {

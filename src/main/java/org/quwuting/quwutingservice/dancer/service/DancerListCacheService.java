@@ -24,6 +24,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -31,6 +32,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -50,21 +53,27 @@ import java.util.stream.Collectors;
  * （sort 为 2026-08-26 晚排序模式维度，HOT/LATEST 各自缓存）：
  * <ul>
  *   <li>60s refresh-ahead + 30min 绝对过期 + 500 条上限（同 DancerDetailCacheService）；</li>
- *   <li>新鲜度主保障是写路径显式 {@link #invalidateAll()}（唯一失效入口）——
- *       认可 toggle / 资料编辑 / 照片增删审 / 状态流转 / 认证流转 / 新建舞伴 /
- *       <b>积分解锁（2026-08-29 排序 v2 入矩阵——联系解锁数是 HOT 排序主导信号，
- *       经 PointsService#invalidateDancerStatsAfterCommit 同事务 afterCommit 触发，
- *       与详情缓存失效同点调用）</b>等<b>改变公开列表行内容或排序</b>的写操作后全清
- *       （列表条目数 = 城市×页数，数据量小，全清成本 = 下次请求回源一次，可接受；
- *       对齐门店 hotVenueIds @CacheEvict(allEntries=true) 先例）；收藏 add·remove
- *       不改公开列表内容（DancerSummaryResponse 无收藏态字段，收藏 Tab 走个性化
- *       接口不进本缓存），豁免失效（详情缓存已覆盖）；</li>
+ *   <li>新鲜度主保障是写路径显式失效——失效分两级（2026-08-30 精失效根因修复，
+ *       见「失效分级」）：<b>精失效</b> {@link #invalidateByDancerId}（仅影响该舞伴
+ *       排序分/行内容的写操作——认可 toggle / 收藏 add·remove / 积分解锁 /
+ *       照片增删审，按反向索引只清该舞伴所在的列表条目）；<b>全清</b>
+ *       {@link #invalidateAll}（成员资格可能变化的写操作——新建舞伴 / 编辑城市·
+ *       昵称 / 服务类别增删 / 状态流转 HIDDEN↔NORMAL，条目数小、写频率低，
+ *       全清成本 = 下次请求回源一次，对齐门店 hotVenueIds 先例）；</li>
  *   <li><b>用户相关状态不进缓存</b>：个人「今日已认可」ID 集合 / 今日投票标签
  *       （myTodayIds / myTagsById）恒实时查询——列表卡片 chips 活跃态是个人态，
  *       严禁进用户无关缓存（对齐 DancerDetailCacheService 的用户相关态边界）。</li>
  * </ul>
  * 效果：60s 窗口内重复进列表，DB 往返从 ~7 次降到 ~2 次（个人态两个实时查询），
  * Supabase 抖动影响面同步收窄。
+ * <p>
+ * <b>失效分级根因（2026-08-30）</b>：旧实现一律 {@code invalidateAll()} 全清，
+ * 而认可 toggle（12h 内 34 次）等<b>高频排序信号写</b>每次都清空全部城市×分页×排序
+ * 条目 → 下一个用户进入必然全量回源，列表缓存命中率实际很低（线上每次进列表都在
+ * miss 区间）。修复 = 反向索引（dancerId → 所在缓存 key）精失效：排序信号写只清
+ * 该舞伴所在条目，命中率大幅回升。边界说明：排序分变化可能令舞伴跨页移动（移入
+ * 未含该舞伴的相邻页）——该页最迟由 refreshAfterWrite（60s）自愈，符合缓存既有
+ * 新鲜度契约；全清仍保留给成员资格写（新建/城市/服务类别/状态流转，低频）。
  * <p>
  * <b>失效豁免（不入失效矩阵，靠 refresh 兜底）</b>：浏览量（recordView）/ 分享 /
  * 广告浏览——浏览量是卡片右下角弱信息（60s 陈旧可接受），且浏览量写入高频
@@ -147,10 +156,24 @@ public class DancerListCacheService {
             .maximumSize(MAX_CACHE_SIZE)
             .refreshAfterWrite(CACHE_REFRESH_SECONDS, TimeUnit.SECONDS)
             .expireAfterWrite(CACHE_EXPIRE_MINUTES, TimeUnit.MINUTES)
+            // 2026-08-30 精失效配套：条目被清除（显式失效/过期/驱逐）时同步清理反向索引
+            .removalListener((String key, ListPublicPart value, com.github.benmanes.caffeine.cache.RemovalCause cause) ->
+                    unregisterIndex(key))
             .build(this::compute);
 
     /**
+     * 反向索引（2026-08-30 精失效配套）：dancerId → 包含该舞伴行的缓存 key 集合。
+     * 与 {@link #keyDancerIds} 双向维护；get 命中/装载成功后登记，removalListener
+     * 清除时注销（驱逐/过期/显式失效都经 removalListener，索引不泄漏）。
+     */
+    private final ConcurrentMap<Long, Set<String>> dancerKeys = new ConcurrentHashMap<>();
+
+    /** 反向索引（key → 该条目包含的 dancerId 集合），removalListener 注销用 */
+    private final ConcurrentMap<String, Set<Long>> keyDancerIds = new ConcurrentHashMap<>();
+
+    /**
      * 获取列表公共部分（缓存：单飞 + refresh-ahead；首次 miss 全量聚合一次）。
+     * 成功后登记反向索引（幂等覆盖——刷新产生的同 key 新值以最新行集为准）。
      *
      * @param city            城市筛选（null = 全部，与 DancerService.listPublic 同参数语义）
      * @param serviceCategory 服务类别筛选（2026-08-24 需求优先匹配；null = 全部——
@@ -160,13 +183,49 @@ public class DancerListCacheService {
      * @param pageable        分页（page/size 参与缓存 key；compute 内重新构造 Pageable 查询）
      */
     public ListPublicPart get(String city, String serviceCategory, String sort, Pageable pageable) {
-        return cache.get(key(city, serviceCategory, sort, pageable.getPageNumber(), pageable.getPageSize()));
+        String k = key(city, serviceCategory, sort, pageable.getPageNumber(), pageable.getPageSize());
+        ListPublicPart part = cache.get(k);
+        registerIndex(k, part);
+        return part;
     }
 
     /**
-     * 写路径显式失效（唯一失效入口）：改变列表行内容/排序的写操作后调用。
-     * 全清而非按 dancerId 精失效——列表条目数 = 城市×页数（小），且写频率低，
-     * 全清成本 = 下次请求回源一次；按 dancerId 需维护反向索引，复杂度收益不成比例。
+     * 精失效（2026-08-30 新增，排序信号写路径统一入口）：按 dancerId 清掉该舞伴
+     * 所在的所有列表条目（含全城市/多分页/双排序），下次请求回源重算。
+     * 反向索引未命中（该舞伴不在任何缓存条目）→ 零操作（无回源浪费）。
+     *
+     * @see #invalidateAll() 成员资格写（新建/城市/服务类别/状态流转）仍走全清
+     */
+    public void invalidateByDancerId(Long dancerId) {
+        if (dancerId == null) {
+            return;
+        }
+        Set<String> keys = dancerKeys.get(dancerId);
+        if (keys == null || keys.isEmpty()) {
+            return;
+        }
+        // 快照遍历：cache.invalidate 同步触发 removalListener 修改 dancerKeys，防 ConcurrentModification
+        for (String k : new ArrayList<>(keys)) {
+            cache.invalidate(k);
+        }
+    }
+
+    /** 批量精失效（多舞伴写路径——暂无调用方，预留对称 API；语义 = 逐个 {@link #invalidateByDancerId}） */
+    public void invalidateByDancerIds(Collection<Long> dancerIds) {
+        if (dancerIds == null || dancerIds.isEmpty()) {
+            return;
+        }
+        for (Long id : dancerIds) {
+            invalidateByDancerId(id);
+        }
+    }
+
+    /**
+     * 写路径显式全清（成员资格写专用）：新建舞伴 / 编辑（城市·昵称等行内容）/
+     * 服务类别增删 / 状态流转（HIDDEN↔NORMAL）——这些操作改变「哪些舞伴出现在
+     * 哪些列表条目」，按 dancerId 反向索引无法覆盖"未含该舞伴的条目"（新成员
+     * 可能移入任意条目），必须全清。此类写低频（管理员/本人操作），全清成本 =
+     * 下次请求回源一次，可接受。removalListener 顺带清理反向索引。
      */
     public void invalidateAll() {
         cache.invalidateAll();
@@ -176,6 +235,38 @@ public class DancerListCacheService {
     private static String key(String city, String serviceCategory, String sort, int page, int size) {
         return (city == null ? "" : city) + "|" + (serviceCategory == null ? "" : serviceCategory)
                 + "|" + (sort == null ? "" : sort) + "|" + page + "|" + size;
+    }
+
+    /** 登记反向索引（幂等：refresh 同 key 新行集覆盖旧登记；条目行集为空不登记） */
+    private void registerIndex(String key, ListPublicPart part) {
+        if (part == null || part.rows().isEmpty()) {
+            return;
+        }
+        Set<Long> ids = new HashSet<>(part.rows().size());
+        for (Object[] row : part.rows()) {
+            ids.add((Long) row[0]);
+        }
+        if (ids.isEmpty()) {
+            return;
+        }
+        keyDancerIds.put(key, ids);
+        for (Long id : ids) {
+            dancerKeys.computeIfAbsent(id, k -> ConcurrentHashMap.newKeySet()).add(key);
+        }
+    }
+
+    /** 注销反向索引（removalListener：显式失效/过期/驱逐统一入口，索引与缓存条目生命周期一致） */
+    private void unregisterIndex(String key) {
+        Set<Long> ids = keyDancerIds.remove(key);
+        if (ids == null) {
+            return;
+        }
+        for (Long id : ids) {
+            dancerKeys.computeIfPresent(id, (k, keys) -> {
+                keys.remove(key);
+                return keys.isEmpty() ? null : keys; // 空集合 → 移除 dancerId 键（防空集合泄漏）
+            });
+        }
     }
 
     /** 聚合计算（缓存 loader，勿直接调用——经 {@link #get} 走缓存）。 */
