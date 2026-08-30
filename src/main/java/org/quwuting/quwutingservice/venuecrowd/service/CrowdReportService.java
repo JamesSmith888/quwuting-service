@@ -1,5 +1,7 @@
 package org.quwuting.quwutingservice.venuecrowd.service;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.points.service.ContributionService;
@@ -29,11 +31,11 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -93,6 +95,45 @@ public class CrowdReportService {
     private final UserRepository userRepository;
     private final ContributionService contributionService;
 
+    // ===== 列表/详情公共读缓存（2026-08-30 性能优化，根因见 AGENTS.md「首页性能优化」） =====
+    //
+    // 背景：列表接口每次请求 8~9 次跨洲 DB 往返（ECS↔Supabase 东京单次 300~500ms），
+    // 其中门店热度角标（badgeTextsByVenue / latestTextsByVenue）是「6h 窗口 + 每日一记」
+    // 的低频变化数据，却每次列表都重查；信任权重（trustWeights → ContributionService
+    // .aggregatesFor 内部 7 表聚合）是用户历史行为事实，同样低频变化。三者均为「与
+    // 请求用户无关 / 低频变化」的公共数据，短 TTL 缓存 + 写路径显式失效（不串用户、
+    // 相对时间文案实时渲染——见各缓存注释）。
+    //
+    // 相对时间语义约束（latestReportsCache）：列表行文案含「N 分钟前」相对时间，
+    // 不能缓存渲染后的文案（缓存期间相对时间失真）——缓存「最新上报原始行」
+    // （userId + createdAt），渲染时实时重算 ageTextFor。
+
+    /** 列表角标「N人报过」人数缓存（venueId → 6h 窗口独立人数），TTL 30s。
+     *  人数是「此刻」信号的统计输入，30s 内变化对公共面无感知差异；上报后写路径
+     *  显式失效（{@link #invalidateVenueCrowdCaches}）。 */
+    private final Cache<Long, Long> badgeCountsCache = Caffeine.newBuilder()
+            .maximumSize(500)
+            .expireAfterWrite(30, TimeUnit.SECONDS)
+            .build();
+
+    /** 列表「最新上报」行原始数据缓存（venueId → 最新上报行），TTL 30s。
+     *  只缓存 userId + createdAt（相对时间文案渲染时实时计算，避免缓存期失真）。 */
+    private final Cache<Long, LatestReport> latestReportsCache = Caffeine.newBuilder()
+            .maximumSize(500)
+            .expireAfterWrite(30, TimeUnit.SECONDS)
+            .build();
+
+    /** 上报者可信度权重缓存（userId → 权重），TTL 60s。
+     *  权重 = 1.0 + 采纳加成 + 打卡加成（用户历史行为，低频变化）；aggregatesFor
+     *  内部 7 表聚合（跨洲多往返），列表/详情/历史页共享本缓存。 */
+    private final Cache<Long, Double> trustWeightsCache = Caffeine.newBuilder()
+            .maximumSize(1000)
+            .expireAfterWrite(60, TimeUnit.SECONDS)
+            .build();
+
+    /** 列表「最新上报」行缓存值：上报者 + 上报时刻（渲染相对时间文案用） */
+    private record LatestReport(Long userId, LocalDateTime createdAt) {}
+
     /**
      * 提交 / 更新今晚热度（需登录；每日一记，同日幂等 UPDATE）。
      * 返回提交后的聚合摘要（前端立即刷新展示）。
@@ -110,7 +151,20 @@ public class CrowdReportService {
         LocalDateTime now = LocalDateTime.now();
         crowdReportRepository.upsert(venueId, userId, female.getLevel(),
                 male != null ? male.getLevel() : null, LocalDate.now(), now, now);
+        // 上报写路径：该店角标人数/最新上报行缓存立即失效（新数据此刻生效，不依赖 TTL）；
+        // 信任权重缓存不失效——权重是用户历史行为事实，与本次上报无关
+        invalidateVenueCrowdCaches(venueId);
         return summary(venueId);
+    }
+
+    /**
+     * 门店热度公共读缓存失效（上报写路径调用，与 VenueService.invalidateDetailPublic
+     * 同模式——内嵌 Caffeine 不走 Spring CacheManager）。角标人数与最新上报行
+     * 均以本店为键，失效单店即可；信任权重（userId 为键）不受单店上报影响。
+     */
+    public void invalidateVenueCrowdCaches(Long venueId) {
+        badgeCountsCache.invalidate(venueId);
+        latestReportsCache.invalidate(venueId);
     }
 
     /** 聚合摘要（公开读，无需登录；mine 字段仅在登录时回填） */
@@ -238,15 +292,38 @@ public class CrowdReportService {
      * 打卡 = 真实到店行为。认领/收藏/认可/分享与「报人数可信」弱相关，不进入权重；
      * 认领人（门店主）不享受加成（商家自报有营销动机，用中性权重稀释）。
      */
+    /**
+     * 上报者可信度权重（2026-08-30 缓存版）：1.0 + 采纳加成 + 打卡加成。
+     * 权重是用户历史行为事实（低频变化），经 {@link #trustWeightsCache} 缓存（TTL 60s）——
+     * 底层 aggregatesFor 内部 7 表聚合（跨洲多往返），列表/详情/历史页共享本缓存；
+     * 批量回源：先查缓存，miss 的 userIds 一次聚合补齐并回填（含零贡献用户默认 1.0，
+     * 避免"查了但无记录"的用户反复 miss）。
+     */
     private Map<Long, Double> trustWeights(Set<Long> userIds) {
-        Map<Long, ContributionService.ContributionAggregate> aggs =
-                contributionService.aggregatesFor(userIds);
+        if (userIds == null || userIds.isEmpty()) {
+            return Map.of();
+        }
         Map<Long, Double> weights = new HashMap<>();
-        for (Map.Entry<Long, ContributionService.ContributionAggregate> e : aggs.entrySet()) {
-            long adoptions = e.getValue().reportedCount();
-            long checkins = e.getValue().checkInDays();
-            double w = 1.0 + Math.min(adoptions, 5) * 0.5 + Math.min(checkins, 10) * 0.1;
-            weights.put(e.getKey(), w);
+        List<Long> misses = new ArrayList<>();
+        for (Long userId : userIds) {
+            Double cached = trustWeightsCache.getIfPresent(userId);
+            if (cached != null) {
+                weights.put(userId, cached);
+            } else {
+                misses.add(userId);
+            }
+        }
+        if (!misses.isEmpty()) {
+            Map<Long, ContributionService.ContributionAggregate> aggs =
+                    contributionService.aggregatesFor(misses);
+            for (Long userId : misses) {
+                ContributionService.ContributionAggregate agg = aggs.get(userId);
+                long adoptions = agg != null ? agg.reportedCount() : 0L;
+                long checkins = agg != null ? agg.checkInDays() : 0L;
+                double w = 1.0 + Math.min(adoptions, 5) * 0.5 + Math.min(checkins, 10) * 0.1;
+                trustWeightsCache.put(userId, w);
+                weights.put(userId, w);
+            }
         }
         return weights;
     }
@@ -408,22 +485,37 @@ public class CrowdReportService {
      * 列表是公共面，<3 人不上（防误伤/防商家找两三个朋友刷「火爆」）；
      * 文案中性不带档位词（「热闹/冷清」不上列表——给门店贴正负定性有商家争议
      * 与数据误伤风险，具体档位留给详情页，同一事实只呈现一次）。
+     * <p>
+     * 2026-08-30 性能优化：人数经 {@link #badgeCountsCache} 缓存（TTL 30s）——
+     * 6h 窗口聚合是低频变化数据，逐店缓存 + 批量回源，上报写路径显式失效
+     * （{@link #invalidateVenueCrowdCaches}），列表接口省 1 次跨洲往返。
      */
     @Transactional(readOnly = true)
     public Map<Long, String> badgeTextsByVenue(Collection<Long> venueIds) {
         if (venueIds == null || venueIds.isEmpty()) {
             return Map.of();
         }
-        LocalDateTime since = LocalDateTime.now().minusHours(CROWD_WINDOW_HOURS);
-        Map<Long, Long> counts = crowdReportRepository
-                .countDistinctUsersByVenueIdsSince(venueIds, since).stream()
-                .collect(Collectors.toMap(
-                        row -> (Long) row[0],
-                        row -> (Long) row[1]));
         Map<Long, String> badges = new HashMap<>();
-        for (Map.Entry<Long, Long> e : counts.entrySet()) {
-            if (e.getValue() >= BADGE_MIN_REPORTERS) {
-                badges.put(e.getKey(), e.getValue() + "人报过");
+        List<Long> misses = new ArrayList<>();
+        for (Long venueId : venueIds) {
+            Long count = badgeCountsCache.getIfPresent(venueId);
+            if (count != null) {
+                if (count >= BADGE_MIN_REPORTERS) {
+                    badges.put(venueId, count + "人报过");
+                }
+            } else {
+                misses.add(venueId);
+            }
+        }
+        if (!misses.isEmpty()) {
+            LocalDateTime since = LocalDateTime.now().minusHours(CROWD_WINDOW_HOURS);
+            for (Object[] row : crowdReportRepository.countDistinctUsersByVenueIdsSince(misses, since)) {
+                Long venueId = (Long) row[0];
+                Long count = ((Number) row[1]).longValue();
+                badgeCountsCache.put(venueId, count);
+                if (count >= BADGE_MIN_REPORTERS) {
+                    badges.put(venueId, count + "人报过");
+                }
             }
         }
         return badges;
@@ -443,29 +535,49 @@ public class CrowdReportService {
      *       与 ≥3 人角标语义解耦、互补：胶囊 = 多少人，本行 = 最新动态）。</li>
      * </ul>
      * 返回 venueId → 文案；无上报的店不在 map（前端 null 不渲染）。
+     * <p>
+     * 2026-08-30 性能优化：最新上报行经 {@link #latestReportsCache} 缓存（TTL 30s，
+     * 只缓存 userId + createdAt——相对时间文案渲染时实时计算，缓存期不失真）；
+     * 上报写路径显式失效（{@link #invalidateVenueCrowdCaches}），列表接口省 1 次跨洲往返。
      */
     @Transactional(readOnly = true)
     public Map<Long, String> latestTextsByVenue(Collection<Long> venueIds) {
         if (venueIds == null || venueIds.isEmpty()) {
             return Map.of();
         }
-        LocalDateTime since = LocalDateTime.now().minusHours(CROWD_WINDOW_HOURS);
-        List<VenueCrowdReport> rows = crowdReportRepository
-                .findLatestByVenueIdsSince(venueIds, since);
-        if (rows.isEmpty()) {
+        Map<Long, LatestReport> latestByVenue = new HashMap<>();
+        List<Long> misses = new ArrayList<>();
+        for (Long venueId : venueIds) {
+            LatestReport cached = latestReportsCache.getIfPresent(venueId);
+            if (cached != null) {
+                latestByVenue.put(venueId, cached);
+            } else {
+                misses.add(venueId);
+            }
+        }
+        if (!misses.isEmpty()) {
+            LocalDateTime since = LocalDateTime.now().minusHours(CROWD_WINDOW_HOURS);
+            for (VenueCrowdReport r : crowdReportRepository.findLatestByVenueIdsSince(misses, since)) {
+                // 同一店同一时刻多条（理论罕见，子查询等值匹配）→ 每店只取首条
+                if (latestByVenue.containsKey(r.getVenueId())) {
+                    continue;
+                }
+                LatestReport entry = new LatestReport(r.getUserId(), r.getCreatedAt());
+                latestByVenue.put(r.getVenueId(), entry);
+                latestReportsCache.put(r.getVenueId(), entry);
+            }
+        }
+        if (latestByVenue.isEmpty()) {
             return Map.of();
         }
-        Set<Long> userIds = rows.stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
+        Set<Long> userIds = latestByVenue.values().stream()
+                .map(LatestReport::userId).collect(Collectors.toSet());
         Map<Long, Double> weights = trustWeights(userIds);
         Map<Long, String> texts = new HashMap<>();
-        // 同一店同一时刻多条（理论罕见，子查询等值匹配）→ 每店只取首条
-        Set<Long> seen = new HashSet<>();
-        for (VenueCrowdReport r : rows) {
-            if (!seen.add(r.getVenueId())) {
-                continue;
-            }
-            texts.put(r.getVenueId(),
-                    ageTextFor(r.getCreatedAt()) + " · " + badgeFor(r.getUserId(), weights) + "舞友上报");
+        for (Map.Entry<Long, LatestReport> e : latestByVenue.entrySet()) {
+            LatestReport entry = e.getValue();
+            texts.put(e.getKey(),
+                    ageTextFor(entry.createdAt()) + " · " + badgeFor(entry.userId(), weights) + "舞友上报");
         }
         return texts;
     }

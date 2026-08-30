@@ -14,6 +14,7 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务，为去舞厅小程序
 - **HTTP 语义**：只允许 GET 和 POST（禁 PUT/PATCH/DELETE）；统一 `ApiResponse<T>`——业务错 = 200+code、未登录 = 401、404 不存在、DB 瞬时 = 503+5003、未预期 = 500+5000；兜底异常禁以 200 伪装
 - **Schema 演进唯一通道 = Flyway 迁移**（`db/migration/V{n}__*.sql`），`ddl-auto=validate`；新 NOT NULL 列唯一通道 = `@ColumnDefault`；枚举类列禁 CHECK（扩枚举免迁移）
 - **连接池韧性（Supabase 不稳定）**：6543 JDBC URL 必含 `prepareThreshold=0&connectTimeout=5&socketTimeout=8&tcpKeepAlive=true`；连接池参数唯一事实源 = `application.yaml`（禁环境 yaml 重复声明）
+- **性能第一约束 = 最少 DB 往返**（跨洲 371ms/次）：列表/详情公共数据必须缓存、个人态永不缓存、写路径显式失效——详见 [`29-performance.md`](docs/agents/29-performance.md)
 - **技术债**：生产 systemd 跑 dev profile（`application-dev.yaml` 生效），切 prod 需先补 systemd 环境变量注入
 - 命名：表 `qwt_` 前缀；根包 `org.quwuting.quwutingservice`
 
@@ -42,6 +43,7 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务，为去舞厅小程序
 | [`17-group-chats.md`](docs/agents/17-group-chats.md) | 舞友群（V33：微信引流，平台无一键加群 API → 长按识别二维码；scope 三态维度互斥校验；公开分组读 + ADMIN CRUD；qr_code_url 挂 ImageContentValidator；GROUP_QR 存储分类，2026-08-17） | 群聊相关 |
 | [`18-venue-photos.md`](docs/agents/18-venue-photos.md) | 门店照片域（V35 `qwt_venue_photos` 独立表；**2026-08-20 深夜收口：仅 ADMIN 上传直发 PUBLIC**——原普通用户 PENDING UGC 通道 + 频控因个人主体无「社交服务」类目被审核驳回而删除；本人视角回显、管理端逐张审核（保留处理存量 PENDING）；读路径批量注入五参重载 + PUBLIC 变化显式缓存失效；updateVenue 忽略 photos 禁全量覆盖） | 门店照片/相册相关 |
 | [`28-recruitments.md`](docs/agents/28-recruitments.md) | **门店招工**（2026-08-29，V61 双表 `qwt_recruitments` + `qwt_recruitment_contacts`）：定位=用工信息展示非招聘服务（无投递/报名闭环，个人主体红线）；仅管理员直发；职位受控枚举 + 必挂门店 + 有效期硬过滤 + 风险词发布确认（1010）+ 联系方式免费获取式按需下发幂等留痕（对齐舞伴联系方式纪律）；P0 后端已落地，前端页面待实施 | 动招工相关 |
+| [`29-performance.md`](docs/agents/29-performance.md) | **性能优化**（2026-08-30 首页慢根因定位：跨洲 DB 往返 371ms/次 × 列表接口 8~9 次 = 秒级）：缓存分层策略唯一权威——个人态永不缓存 / 无坐标列表主查询 60s 缓存（`VenueService.venueListCache`，写路径显式失效）/ 角标人数 30s + 最新上报行 30s（只缓存原始行禁缓存相对时间文案）+ 信任权重 60s（`CrowdReportService` 三级缓存）；带坐标查询永不缓存；未竟事项=HEAT_SCORE 双算、DB 迁国内、前端分包 | 性能优化/缓存相关 |
 
 ---
 

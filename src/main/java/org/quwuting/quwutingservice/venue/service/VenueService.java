@@ -144,6 +144,53 @@ public class VenueService {
             .build(this::computeVenueDetailPublic);
 
     /**
+     * 列表主查询「无坐标视图」缓存（2026-08-30 性能优化，根因见 AGENTS.md「首页性能优化」）。
+     * <p>
+     * 背景：列表接口单次请求 8~9 次跨洲 DB 往返（主查询 + count + badges + 个人态 +
+     * 浏览量 + 照片 + 角标×2），单次往返 300~500ms（ECS↔Supabase 东京）——主查询
+     * （HEAT_SCORE 全表每行 6+ 标量子查询 ×2 处出现 + 分页 count）是其中最重的两跳，
+     * 且对「无坐标 + 无筛选」的公共视图而言，结果与请求用户完全无关、低频变化
+     * （门店新增/编辑/状态变更），却被每个用户每次冷启动重复计算。
+     * <p>
+     * 缓存边界（与 {@link #venueDetailPublicCache} 同族语义，个人态永不缓存）：
+     * <ul>
+     *   <li><b>仅缓存 hasCoords=false 分支</b>（无坐标：全国 / 显式城市视角，按
+     *       行为热度排序的公共视图）——带坐标查询的排序含请求者位置的邻近加成
+     *       100/(1+km)，结果与坐标强相关，缓存共享语义不成立（本地店置顶是核心
+     *       体验，不得串用户）；</li>
+     *   <li>缓存粒度 = <b>Page&lt;Venue&gt; 实体列表</b>（纯公共数据），不含任何
+     *       用户相关字段——Reaction 个人参与态（reactedByMe）、canManage 等仍在
+     *       缓存外实时查询组装（ReactionBadge 注释契约「个人状态永远实时查询」）；</li>
+     *   <li>TTL 60s + 写路径显式失效（{@link #invalidateVenueListCache}）：门店
+     *       新增/编辑/状态变更/照片变化立即生效；热度排序（reaction/favorite/view
+     *       累积）靠 60s 自然过期兜底——此类低频变化用户无秒级实时感知诉求
+     *       （热门 ID 集合本身也是 5min 缓存）；</li>
+     *   <li>LoadingCache 单飞：同参数并发只回源一次，热参数组合（默认全国推荐）
+     *       多用户共享同一份结果。</li>
+     * </ul>
+     * 键 = 影响主查询结果的全部参数（sortMode 决定无坐标排序口径——RECOMMENDED/
+     * DISTANCE 降级走 searchRankedNoLocation，HEAT/NEWEST 排序不同；positiveCodes/
+     * pointsWeight 为配置值重启才变；hotIds 全局集合 5min 缓存由 60s TTL 自然兜底）。
+     */
+    private final LoadingCache<VenueListKey, Page<Venue>> venueListCache = Caffeine.newBuilder()
+            .maximumSize(128)
+            .expireAfterWrite(60, TimeUnit.SECONDS)
+            .build(this::loadVenueListPage);
+
+    /** 列表主查询无坐标视图缓存键（不可变参数指纹，见 {@link #venueListCache} 注释） */
+    private record VenueListKey(
+            VenueSortMode sortMode,
+            String city,
+            String district,
+            VenueStatus status,
+            String keywordPattern,
+            String tagPattern,
+            boolean hotOnly,
+            int page,
+            int size
+    ) {}
+
+    /**
      * 新增场所（仅管理员）。
      * <p>
      * 2026-08-20 门店照片域：photos 不再写入 venue.photos JSON 列（V35 起该列废弃、
@@ -189,6 +236,8 @@ public class VenueService {
         if (!photos.isEmpty()) {
             persistPhotosDirect(saved.getId(), UserContext.getCurrentUserId(), photos, VenuePhotoStatus.PUBLIC);
         }
+        // 新门店出现：列表主查询缓存立即失效（新店 60s 内必须可见）
+        invalidateVenueListCache();
         return venueResponseMapper.toResponse(saved, Collections.emptyList(), false, 0L,
                 loadPublicPhotosByVenueIds(List.of(saved.getId())).getOrDefault(saved.getId(), List.of()));
     }
@@ -261,6 +310,8 @@ public class VenueService {
         // 场所编辑影响热度响应的输出（status/状态日志 → currentStatus / currentStatusDays）——
         // 显式逐出，与其余写路径一致
         venueHeatService.invalidate(id);
+        // 列表主查询缓存失效：字段/状态变化影响列表排序与展示（2026-08-30 新增）
+        invalidateVenueListCache();
         // 详情公共部分缓存失效：字段/状态变更后 base 响应（含 photos/tickets/status/
         // statusUpdatedAt/claimed 快照）必须立即重算（2026-08-13 新增）
         invalidateDetailPublic(id);
@@ -304,6 +355,7 @@ public class VenueService {
         // 公开照片变化：详情/列表公共缓存立即失效（key 为事务内已确定的 venueId，显式逐出）
         evictVenueEntityCache(venueId);
         invalidateDetailPublic(venueId);
+        invalidateVenueListCache();
         return fetchVenuePhotos(venueId, userId);
     }
 
@@ -343,6 +395,7 @@ public class VenueService {
         }
         evictVenueEntityCache(venueId);
         invalidateDetailPublic(venueId);
+        invalidateVenueListCache();
     }
 
     /**
@@ -359,6 +412,7 @@ public class VenueService {
         venuePhotoRepository.deleteImportedByVenue(venueId);
         evictVenueEntityCache(venueId);
         invalidateDetailPublic(venueId);
+        invalidateVenueListCache();
     }
 
     /**
@@ -385,6 +439,7 @@ public class VenueService {
         if (photo.getStatus() == VenuePhotoStatus.PUBLIC) {
             evictVenueEntityCache(venueId);
             invalidateDetailPublic(venueId);
+            invalidateVenueListCache();
         }
     }
 
@@ -431,6 +486,7 @@ public class VenueService {
             // （key 依赖事务内查询结果，显式 CacheManager.evict 而非 @CacheEvict）
             evictVenueEntityCache(photo.getVenueId());
             invalidateDetailPublic(photo.getVenueId());
+            invalidateVenueListCache();
         }
         log.info("管理员 {} 审核门店照片 {} → {}（门店 {}）{}", adminId, photoId, status,
                 photo.getVenueId(), reason == null || reason.isBlank() ? "" : "，说明：" + TextSanitizer.sanitize(reason, 200));
@@ -558,6 +614,8 @@ public class VenueService {
         venueHeatService.invalidate(venueId);
         // 详情公共部分缓存失效：status 与 statusUpdatedAt（新增状态日志）均属公共事实
         invalidateDetailPublic(venueId);
+        // 列表主查询缓存失效：营业状态是列表徽标/排序展示（2026-08-30 新增）
+        invalidateVenueListCache();
     }
 
     /**
@@ -598,6 +656,8 @@ public class VenueService {
         venueHeatService.invalidate(venueId);
         // 详情公共部分缓存失效：status 与 statusUpdatedAt（新增状态日志）均属公共事实
         invalidateDetailPublic(venueId);
+        // 列表主查询缓存失效：营业状态是列表徽标/排序展示（2026-08-30 新增）
+        invalidateVenueListCache();
     }
 
     /**
@@ -783,24 +843,27 @@ public class VenueService {
      * 列表查询分流（排序 × 坐标 × 半径 的显式矩阵，见 {@link #listVenues} 注释）。
      * 坐标必为 null 或双非 null（hasCoords 为准），distance 数学查询只在 hasCoords=true 分支被调用。
      * {@code hotOnly}/{@code hotIds} 透传给全部变体（热门筛选与排序正交，见 LIST_FILTERS 注释）。
+     * <p>
+     * 无坐标分支走 {@link #venueListCache}（2026-08-30 性能优化）：全国 / 显式城市
+     * 视角的行为热度排序是公共数据（与请求用户无关、低频变化），60s 缓存 + 写路径
+     * 显式失效（见 {@link #invalidateVenueListCache}）；带坐标分支（排序含邻近加成，
+     * 结果与坐标强相关）恒实时查询。
      */
     private Page<Venue> dispatchListQuery(VenueSortMode sortMode, String city, String district,
                                           VenueStatus status, String keywordPattern, String tagPattern,
                                           boolean hasCoords, Double latitude, Double longitude,
                                           Double radius, List<String> positiveCodes, int pointsWeight,
                                           boolean hotOnly, Set<Long> hotIds, PageRequest pageable) {
+        if (!hasCoords) {
+            return venueListCache.get(new VenueListKey(
+                    sortMode, city, district, status, keywordPattern, tagPattern,
+                    hotOnly, pageable.getPageNumber(), pageable.getPageSize()));
+        }
         return switch (sortMode) {
-            case RECOMMENDED -> hasCoords
-                    ? venueRepository.searchRanked(city, district, status, keywordPattern, tagPattern,
-                            latitude, longitude, radius, positiveCodes, pointsWeight, hotOnly, hotIds, pageable)
-                    : venueRepository.searchRankedNoLocation(city, district, status, keywordPattern, tagPattern,
-                            positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
-            case DISTANCE -> hasCoords
-                    ? venueRepository.searchNearest(city, district, status, keywordPattern, tagPattern,
-                            latitude, longitude, radius, hotOnly, hotIds, pageable)
-                    // 无定位无法按距离排序：防御性降级为推荐排序（而非空列表/报错）
-                    : venueRepository.searchRankedNoLocation(city, district, status, keywordPattern, tagPattern,
-                            positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
+            case RECOMMENDED -> venueRepository.searchRanked(city, district, status, keywordPattern, tagPattern,
+                    latitude, longitude, radius, positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
+            case DISTANCE -> venueRepository.searchNearest(city, district, status, keywordPattern, tagPattern,
+                    latitude, longitude, radius, hotOnly, hotIds, pageable);
             case HEAT -> hasCoords && radius != null
                     ? venueRepository.searchHeatWithinRadius(city, district, status, keywordPattern, tagPattern,
                             latitude, longitude, radius, positiveCodes, pointsWeight, hotOnly, hotIds, pageable)
@@ -812,6 +875,40 @@ public class VenueService {
                     : venueRepository.searchNewest(city, district, status, keywordPattern, tagPattern,
                             hotOnly, hotIds, pageable);
         };
+    }
+
+    /**
+     * 列表主查询无坐标视图缓存 loader（经 {@link #venueListCache} 调用，勿直接调用）。
+     * 按 {@link VenueListKey#sortMode()} 分发无坐标排序口径：RECOMMENDED 与 DISTANCE
+     * 降级共用 searchRankedNoLocation（无坐标无法按距离排序，防御性回退推荐排序）；
+     * HEAT / NEWEST 排序口径不同，各走其专用查询。
+     */
+    private Page<Venue> loadVenueListPage(VenueListKey key) {
+        PageRequest pageable = PageRequest.of(key.page(), key.size());
+        // hotIds 全局集合（5min 缓存）：loader 回源时取当前集合，缓存条目内的 hotOnly
+        // 过滤随 5min 集合刷新自然兜底（60s TTL < 5min，无需联动失效）
+        Set<Long> hotIds = venueLookupService.getHotVenueIds();
+        return switch (key.sortMode()) {
+            case RECOMMENDED, DISTANCE -> venueRepository.searchRankedNoLocation(
+                    key.city(), key.district(), key.status(), key.keywordPattern(), key.tagPattern(),
+                    POSITIVE_REACTION_CODES, pointsProperties.heatWeight(), key.hotOnly(), hotIds, pageable);
+            case HEAT -> venueRepository.searchHeat(
+                    key.city(), key.district(), key.status(), key.keywordPattern(), key.tagPattern(),
+                    POSITIVE_REACTION_CODES, pointsProperties.heatWeight(), key.hotOnly(), hotIds, pageable);
+            case NEWEST -> venueRepository.searchNewest(
+                    key.city(), key.district(), key.status(), key.keywordPattern(), key.tagPattern(),
+                    key.hotOnly(), hotIds, pageable);
+        };
+    }
+
+    /**
+     * 列表主查询无坐标视图缓存显式失效（写路径调用，与 {@link #invalidateDetailPublic}
+     * 同模式——内嵌 LoadingCache 不走 Spring CacheManager，@CacheEvict 无法表达）。
+     * 门店新增/编辑/状态变更/照片变化后调用：列表内容或排序立即生效，
+     * 不依赖 60s TTL 兜底。热度累积（reaction/favorite/view）变化不失效，靠 TTL。
+     */
+    public void invalidateVenueListCache() {
+        venueListCache.invalidateAll();
     }
 
     /** 有场所的城市列表（按场所数倒序），供前端热门城市选择 */
