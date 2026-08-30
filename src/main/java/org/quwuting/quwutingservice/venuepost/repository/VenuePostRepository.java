@@ -13,10 +13,12 @@ public interface VenuePostRepository extends JpaRepository<VenuePost, Long> {
 
     Page<VenuePost> findByVenueIdAndDeletedFalse(Long venueId, Pageable pageable);
 
-    /** 详情页辅助计数合并投影：动态总数 + 当前用户状态上报标记 */
+    /** 详情页辅助计数合并投影：动态总数 + 当前用户状态上报标记
+     *  hasMyReport 用 Long（0/1）而非 Boolean：PG 的 EXISTS 返回 boolean，MySQL 的
+     *  EXISTS 返回 BIGINT 整数——投影接口按 MySQL 类型声明（2026-08-30 迁移，见 VenueService）。 */
     interface DetailStats {
         Long getPostcount();
-        Boolean getHasmyreport();
+        Long getHasmyreport();
     }
 
     /**

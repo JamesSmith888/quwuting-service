@@ -693,7 +693,8 @@ public class VenueService {
         VenuePostRepository.DetailStats detailStats =
                 venuePostRepository.findDetailStats(id, UserContext.getCurrentUserId(), LocalDateTime.now());
         long postCount = detailStats.getPostcount() != null ? detailStats.getPostcount() : 0L;
-        boolean hasMyStatusReport = Boolean.TRUE.equals(detailStats.getHasmyreport());
+        // MySQL 迁移（2026-08-30）：EXISTS 投影为 0/1 整数（PG 为 boolean），按 Long 判等
+        boolean hasMyStatusReport = detailStats.getHasmyreport() != null && detailStats.getHasmyreport() == 1L;
         // canManage：venue 实体（缓存命中）内存计算，零查询
         boolean canManage = computeCanManage(venueLookupService.findById(id));
         // 认领申请状态（2026-08-11）：未登录恒 null，登录才查（驱动「认领舞厅」

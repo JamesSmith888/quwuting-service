@@ -16,7 +16,9 @@
 --    venue_feedbacks×2 / points_gates / points_transactions / dancer_services / tag_dict。
 --    「单列 IS NOT NULL」形态（demand_records.rescue_origin）→ 全量 UNIQUE（语义等价）。
 --    非唯一部分索引 → 全量索引（性能等价）。
--- 4. qwt_city_key(text) PG 函数 → MySQL DETERMINISTIC 函数（LEFT(city,-1)→LEFT(city,LENGTH(city)-1)）
+-- 4. qwt_city_key(text) PG 函数 → MySQL DETERMINISTIC 函数（LEFT(city,-1)→LEFT(city,CHAR_LENGTH(city)-1)；
+--    ⚠ 必须用 CHAR_LENGTH 按字符截断——LENGTH() 返回字节数（utf8mb4 下中文 3 字节/字），
+--    LEFT(city, LENGTH-1) 会截掉 1 字节导致「市」残留，2026-08-30 实机踩坑）
 -- 5. 保留字列名反引号：qwt_ops_config.key（MySQL KEY 保留字）
 -- ============================================================================
 
@@ -25,7 +27,7 @@
 -- Name: qwt_city_key(text); Type: FUNCTION; Schema: public; Owner: -
 -- qwt_city_key: 城市名规范化（去「市」后缀），供 native SQL 使用（DancerRepository）
 CREATE FUNCTION qwt_city_key(city TEXT) RETURNS TEXT DETERMINISTIC
-RETURN CASE WHEN RIGHT(city, 1) = '市' THEN LEFT(city, LENGTH(city) - 1) ELSE city END;
+RETURN CASE WHEN RIGHT(city, 1) = '市' THEN LEFT(city, CHAR_LENGTH(city) - 1) ELSE city END;
 
 -- Name: anonymous_quotas; Type: TABLE; Schema: public; Owner: -
 -- Name: conversation_messages; Type: TABLE; Schema: public; Owner: -
