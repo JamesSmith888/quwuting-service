@@ -26,8 +26,7 @@ public interface FavoriteRepository extends JpaRepository<Favorite, Long> {
     @Modifying
     @Query(value = "INSERT INTO qwt_favorites (user_id, venue_id, created_at, updated_at, deleted) " +
                    "VALUES (:userId, :venueId, :now, :now, false) " +
-                   "ON CONFLICT (user_id, venue_id) " +
-                   "DO UPDATE SET deleted = false, unfavorited_at = NULL, updated_at = EXCLUDED.updated_at",
+                   "ON DUPLICATE KEY UPDATE deleted = false, unfavorited_at = NULL, updated_at = VALUES(updated_at)",
            nativeQuery = true)
     int upsertFavorite(@Param("userId") Long userId,
                        @Param("venueId") Long venueId,

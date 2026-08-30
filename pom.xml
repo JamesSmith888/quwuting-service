@@ -67,6 +67,15 @@
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
+        <!-- MySQL 方言支持（2026-08-30 PG→MySQL 迁移：MySQL 环境需独立 Flyway 模块。
+             ⚠ artifact 名为 flyway-mysql（非 flyway-database-mysql——那是 PostgreSQL 的命名）；
+             Boot 4.1 BOM 不管理 flyway-mysql，必须显式版本（与 flyway-core 12.4.0 对齐，
+             升级 Flyway 时同步本版本号）。 -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-mysql</artifactId>
+            <version>12.4.0</version>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>

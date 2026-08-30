@@ -125,7 +125,7 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
                    COUNT(*) AS unlockcount,
                    COUNT(DISTINCT u.user_id) AS uniqueusers,
                    COALESCE(MAX(g.cost), 0) AS cost,
-                   COUNT(*) FILTER (WHERE u.transaction_id IS NULL) AS freecount
+                   SUM(CASE WHEN u.transaction_id IS NULL THEN 1 ELSE 0 END) AS freecount
             FROM qwt_points_unlocks u
             LEFT JOIN qwt_points_gates g
                    ON g.target_type = u.target_type
@@ -227,6 +227,11 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
      * @param windowUntil  timestamptz 列窗口上界（请求时刻 now，实时）
      */
     @Query(value = """
+            WITH RECURSIVE date_series AS (
+                SELECT CAST(:sinceDate AS DATE) AS day
+                UNION ALL
+                SELECT day + INTERVAL 1 DAY FROM date_series WHERE day < CAST(:asOfDate AS DATE)
+            )
             SELECT d.day,
                    COALESCE(r.cnt, 0) AS recognitioncount,
                    COALESCE(f.cnt, 0) AS favcount,
@@ -238,49 +243,49 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
                    COALESCE(v.search_cnt, 0) AS viewsearchcount,
                    COALESCE(v.venue_cnt, 0) AS viewvenuecount,
                    COALESCE(dm.cnt, 0) AS demandcount
-            FROM (SELECT generate_series(CAST(:sinceDate AS timestamp), CAST(:asOfDate AS timestamp), interval '1 day')::date AS day) AS d
+            FROM date_series d
             LEFT JOIN (SELECT recognition_date AS day, COUNT(*) AS cnt
                        FROM qwt_dancer_recognitions
                        WHERE dancer_id = :dancerId AND deleted = false
                          AND recognition_date >= :sinceDate AND recognition_date < :untilDate
-                       GROUP BY 1) r ON r.day = d.day
-            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS cnt
+                       GROUP BY day) r ON r.day = d.day
+            LEFT JOIN (SELECT CAST(created_at AS DATE) AS day, COUNT(*) AS cnt
                        FROM qwt_dancer_favorites
                        WHERE dancer_id = :dancerId AND deleted = false
                          AND created_at >= :windowSince AND created_at < :windowUntil
-                       GROUP BY 1) f ON f.day = d.day
-            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, SUM(-delta) AS cnt
+                       GROUP BY day) f ON f.day = d.day
+            LEFT JOIN (SELECT CAST(created_at AS DATE) AS day, SUM(-delta) AS cnt
                        FROM qwt_points_transactions
                        WHERE target_type = 'DANCER' AND target_id = :dancerId AND delta < 0
                          AND created_at >= :windowSince AND created_at < :windowUntil
-                       GROUP BY 1) pt ON pt.day = d.day
-            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS cnt
+                       GROUP BY day) pt ON pt.day = d.day
+            LEFT JOIN (SELECT CAST(created_at AS DATE) AS day, COUNT(*) AS cnt
                        FROM qwt_dancer_shares
                        WHERE dancer_id = :dancerId AND event_type = 'SHARE'
                          AND created_at >= :windowSince AND created_at < :windowUntil
-                       GROUP BY 1) s ON s.day = d.day
+                       GROUP BY day) s ON s.day = d.day
             -- 2026-08-19：qwt_dancer_views 多来源（全量/LIST/SHARE/SEARCH/VENUE（2026-08-21 追加））从
-            -- 多个独立子查询各扫一次收敛为单子查询 + FILTER 条件聚合（同一窗口 1 次扫描）——
-            -- 来源是行内列，FILTER 语义与 COUNT 独立分组完全等价（视图扫描量大时省 IO）
+            -- 多个独立子查询各扫一次收敛为单子查询 + 条件聚合（同一窗口 1 次扫描）——
+            -- 来源是行内列，COUNT(CASE WHEN) 语义与 FILTER/COUNT 独立分组完全等价（视图扫描量大时省 IO）
             LEFT JOIN (
                 SELECT view_date AS day,
                        COUNT(*) AS cnt,
-                       COUNT(*) FILTER (WHERE source = 'LIST') AS list_cnt,
-                       COUNT(*) FILTER (WHERE source = 'SHARE') AS share_cnt,
-                       COUNT(*) FILTER (WHERE source = 'SEARCH') AS search_cnt,
-                       COUNT(*) FILTER (WHERE source = 'VENUE') AS venue_cnt
+                       SUM(CASE WHEN source = 'LIST' THEN 1 ELSE 0 END) AS list_cnt,
+                       SUM(CASE WHEN source = 'SHARE' THEN 1 ELSE 0 END) AS share_cnt,
+                       SUM(CASE WHEN source = 'SEARCH' THEN 1 ELSE 0 END) AS search_cnt,
+                       SUM(CASE WHEN source = 'VENUE' THEN 1 ELSE 0 END) AS venue_cnt
                 FROM qwt_dancer_views
                 WHERE dancer_id = :dancerId
                   AND view_date >= :sinceDate AND view_date < :untilDate
-                GROUP BY 1
+                GROUP BY day
             ) v ON v.day = d.day
-            -- 2026-08-26：需求（qwt_demand_records.created_at 按天分组，timestamptz
-            -- 上界 = 请求时刻 now，与收藏/礼物/分享同窗口）——「需求趋势」图数据源
-            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS cnt
+            -- 2026-08-26：需求（qwt_demand_records.created_at 按天分组，上界 = 请求时刻 now，
+            -- 与收藏/礼物/分享同窗口）——「需求趋势」图数据源
+            LEFT JOIN (SELECT CAST(created_at AS DATE) AS day, COUNT(*) AS cnt
                        FROM qwt_demand_records
                        WHERE dancer_id = :dancerId
                          AND created_at >= :windowSince AND created_at < :windowUntil
-                       GROUP BY 1) dm ON dm.day = d.day
+                       GROUP BY day) dm ON dm.day = d.day
             ORDER BY d.day
             """, nativeQuery = true)
     List<DailyTrendRow> countDancerDailyTrends(@Param("dancerId") Long dancerId,
@@ -384,8 +389,11 @@ public interface DancerStatsRepository extends Repository<DancerView, Long> {
                    COUNT(*) AS demandcount,
                    COUNT(DISTINCT d.user_id) AS uniqueusers
             FROM qwt_demand_records d
-            CROSS JOIN LATERAL unnest(string_to_array(d.service_ids, ',')) AS sid
-            JOIN qwt_dancer_services s ON s.id = CAST(sid AS bigint)
+            JOIN JSON_TABLE(
+                CONCAT('["', REPLACE(d.service_ids, ',', '","'), '"]'),
+                '$[*]' COLUMNS (sid BIGINT PATH '$')
+            ) jt
+            JOIN qwt_dancer_services s ON s.id = jt.sid
             WHERE d.dancer_id = :dancerId
             GROUP BY s.category
             ORDER BY demandcount DESC

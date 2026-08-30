@@ -202,7 +202,7 @@ public class PointsService {
         int reward = pointsProperties.checkInReward();
         LocalDate today = LocalDate.now();
         // 锁必须在打卡幂等检查之前获取（对齐 unlock() 同一并发范式）
-        checkinRepository.lockUserCheckin("checkin:" + userId);
+        checkinRepository.lockUserCheckin(userId, today);
         DailyCheckin checkin = checkinRepository.findByUserIdAndCheckinDate(userId, today)
                 .orElseGet(() -> {
                     DailyCheckin c = new DailyCheckin();
@@ -293,7 +293,7 @@ public class PointsService {
         // 同一用户赠送事务串行化（2026-08-19 根因修复，同 unlock()/checkIn() 范式）：
         // 「日/单目标日上限读检查 → 原子扣减 → 写流水」若并发交错，上限检查可同时通过、
         // 实际扣减超过配置上限（读后写竞态）。锁必须在全部校验之前获取。
-        transactionRepository.lockUserGift("gift:" + userId);
+        transactionRepository.lockUserGift(userId);
         LocalDateTime dayStart = LocalDate.now().atStartOfDay();
         LocalDateTime dayEnd = dayStart.plusDays(1);
         if (transactionRepository.sumGiftedToday(userId, dayStart, dayEnd) + amount > limits.maxPerDay()) {
@@ -686,7 +686,7 @@ public class PointsService {
         }
         // 同一用户并发解锁串行化（防「双请求同时通过幂等检查 → 双双扣费」；
         // 锁必须在幂等检查之前获取，见 repository javadoc）
-        unlockRepository.lockUserUnlock("unlock:" + userId);
+        unlockRepository.lockUserUnlock(userId, targetType.name(), targetId);
         // 邀约中转（2026-08-26，22 号文档）：开启 contact_relay 的舞伴——联系方式
         // 把关权交还舞伴（平台管理员微信人工转发，舞伴回「给/不给」），客人提交
         // 邀约后<b>不立即拿微信</b>，返回 PENDING 等待态。<b>全员（含本人/管理员）

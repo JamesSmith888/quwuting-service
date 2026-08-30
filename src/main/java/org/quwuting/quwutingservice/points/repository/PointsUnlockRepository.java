@@ -21,10 +21,13 @@ public interface PointsUnlockRepository extends JpaRepository<PointsUnlock, Long
      * 事务可能已被标记 rollback-only，幂等返回实际变为 HTTP 500（语义不可靠）。
      * 本锁按 user 粒度串行化整个解锁事务（一人同时解锁多目标无真实并发价值，串行正确），
      * 使 check-then-act 原子化、23505 路径变为不可达（异常兜底仍保留为纵深防御）。
-     * pg_advisory_xact_lock 事务提交/回滚自动释放（对齐认可域 lockDailyTicket 先例）。
+     * 2026-08-30 MySQL 迁移：pg_advisory_xact_lock → SELECT ... FOR UPDATE 行锁
+     * （命中唯一索引 (user_id, target_type, target_id)，未命中锁间隙）。
      */
-    @Query(value = "SELECT pg_advisory_xact_lock(hashtext(:lockKey))", nativeQuery = true)
-    void lockUserUnlock(@Param("lockKey") String lockKey);
+    @Query(value = "SELECT id FROM qwt_points_unlocks " +
+                   "WHERE user_id = :userId AND target_type = :targetType AND target_id = :targetId FOR UPDATE", nativeQuery = true)
+    List<Long> lockUserUnlock(@Param("userId") Long userId, @Param("targetType") String targetType,
+                              @Param("targetId") Long targetId);
 
     /**
      * 解锁记录的<b>确定性原子写入</b>（2026-08-26 修复 DemandRelayService 的
@@ -49,7 +52,7 @@ public interface PointsUnlockRepository extends JpaRepository<PointsUnlock, Long
     @Query(value = "INSERT INTO qwt_points_unlocks " +
                    "(user_id, target_type, target_id, transaction_id, created_at) " +
                    "VALUES (:userId, :targetType, :targetId, NULL, :now) " +
-                   "ON CONFLICT (user_id, target_type, target_id) DO NOTHING",
+                   "ON DUPLICATE KEY UPDATE id = id",
            nativeQuery = true)
     int insertIfAbsent(@Param("userId") Long userId,
                        @Param("targetType") String targetType,

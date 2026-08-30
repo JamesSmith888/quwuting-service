@@ -79,12 +79,11 @@ public interface VenueCrowdReportRepository extends JpaRepository<VenueCrowdRepo
      */
     @Modifying
     @Query(value = "INSERT INTO qwt_venue_crowd_reports " +
-            "(id, created_at, updated_at, deleted, venue_id, user_id, female_level, male_level, report_date, modify_count) " +
-            "VALUES (nextval('qwt_venue_crowd_reports_id_seq'), :createdAt, :updatedAt, false, :venueId, :userId, :femaleLevel, :maleLevel, :reportDate, 0) " +
-            "ON CONFLICT (venue_id, user_id, report_date) WHERE deleted = false " +
-            "DO UPDATE SET female_level = EXCLUDED.female_level, " +
-            "male_level = EXCLUDED.male_level, " +
-            "modify_count = qwt_venue_crowd_reports.modify_count + 1, " +
+            "(created_at, updated_at, deleted, venue_id, user_id, female_level, male_level, report_date, modify_count) " +
+            "VALUES (:createdAt, :updatedAt, false, :venueId, :userId, :femaleLevel, :maleLevel, :reportDate, 0) " +
+            "ON DUPLICATE KEY UPDATE female_level = VALUES(female_level), " +
+            "male_level = VALUES(male_level), " +
+            "modify_count = modify_count + 1, " +
             "created_at = :createdAt, " +
             "updated_at = :updatedAt",
             nativeQuery = true)

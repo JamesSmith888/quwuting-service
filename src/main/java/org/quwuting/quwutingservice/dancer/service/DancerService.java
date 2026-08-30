@@ -1290,7 +1290,6 @@ public class DancerService {
         if (singleTag != null) {
             if (dailySingle) {
                 // ── 每日一票（默认）：参与 / 同票取消 / 异票原子换票（咨询锁串行化） ──
-                recognitionRepository.lockDailyTicket("recognition:" + userId + ":" + dancerId + ":" + today);
                 Optional<DancerRecognition> existing = recognitionRepository
                         .findByUserIdAndDancerIdAndRecognitionDate(userId, dancerId, today);
                 if (existing.isPresent()) {

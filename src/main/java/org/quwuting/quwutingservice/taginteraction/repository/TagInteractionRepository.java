@@ -28,7 +28,7 @@ public interface TagInteractionRepository extends JpaRepository<TagInteraction, 
     @Query(value = "INSERT INTO qwt_tag_interactions " +
                    "(user_id, venue_id, tag, score, created_at, updated_at, deleted) " +
                    "VALUES (:userId, :venueId, :tag, :score, :now, :now, false) " +
-                   "ON CONFLICT (user_id, venue_id, tag) DO NOTHING",
+                   "ON DUPLICATE KEY UPDATE id = id",
            nativeQuery = true)
     int upsertScore(@Param("userId") Long userId,
                     @Param("venueId") Long venueId,

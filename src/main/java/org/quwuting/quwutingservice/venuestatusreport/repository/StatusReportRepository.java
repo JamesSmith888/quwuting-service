@@ -68,17 +68,19 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
      * 「活跃记录」维度的部分唯一索引被 PG 拒绝（谓词含 now() 非 IMMUTABLE）。
      * 本锁保证同一用户对同一门店的并发上报串行执行：锁内重查「我的活跃报告」，
      * 已存在 → 走补充更新（不产生新记录）；不存在 → INSERT 新行。锁随事务提交/
-     * 回滚自动释放（pg_advisory_xact_lock 语义），无残留。
+     * 回滚自动释放，无残留。
      * <p>
-     * 实现注意：两参 pg_advisory_xact_lock(int, int) 参数为 32 位 int——id 超 2^31
-     * 截断仅导致不同 id 对碰撞（过度串行化，不影响正确性），故用单参 bigint 版
-     * 组合键（userId * 1000003 + venueId，乘法让相邻 id 对尽量分散到不同锁）。
+     * 2026-08-30 MySQL 迁移：pg_advisory_xact_lock → SELECT ... FOR UPDATE 行锁
+     * （锁「同用户同门店的活跃报告行」：命中锁行、未命中锁间隙——InnoDB 间隙锁
+     * 阻止并发首报双插；无唯一约束可兜底（V34 追加式模型），锁为唯一防线）。
      * 返回 List 仅为让 Spring Data 走 getResultList 执行（void 返回会走
      * executeUpdate，对 SELECT 依赖驱动行为，不够稳）。
      */
-    @Query(value = "SELECT pg_advisory_xact_lock(CAST(:uid AS bigint) * 1000003 + CAST(:vid AS bigint))",
-           nativeQuery = true)
-    List<Object> lockUserVenue(@Param("uid") Long userId, @Param("vid") Long venueId);
+    @Query(value = "SELECT id FROM qwt_venue_status_reports " +
+                   "WHERE user_id = :userId AND venue_id = :venueId " +
+                   "  AND deleted = false AND admin_action IS NULL " +
+                   "ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE", nativeQuery = true)
+    List<Long> lockUserVenue(@Param("userId") Long userId, @Param("venueId") Long venueId);
 
     /**
      * 活跃报告聚合：合并 COUNT + MAX(createdAt) 为 1 次往返。
@@ -369,7 +371,7 @@ public interface StatusReportRepository extends JpaRepository<VenueStatusReport,
      */
     @Query(value = "SELECT r.type AS type, " +
                    "       COUNT(*) AS cnt, " +
-                   "       COUNT(*) FILTER (WHERE r.admin_action = 'ADOPTED') AS adoptedcnt, " +
+                   "       SUM(CASE WHEN r.admin_action = 'ADOPTED' THEN 1 ELSE 0 END) AS adoptedcnt, " +
                    "       MAX(r.created_at) AS latestat " +
                    "FROM qwt_venue_status_reports r " +
                    "WHERE r.venue_id = :venueId " +

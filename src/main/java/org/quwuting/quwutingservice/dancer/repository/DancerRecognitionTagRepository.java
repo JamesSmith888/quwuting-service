@@ -50,7 +50,7 @@ public interface DancerRecognitionTagRepository extends JpaRepository<DancerReco
     @Query(value = "INSERT INTO qwt_dancer_recognition_tags " +
                    "(recognition_id, dancer_id, user_id, tag, created_at, updated_at, deleted) " +
                    "VALUES (:recognitionId, :dancerId, :userId, :tag, :now, :now, false) " +
-                   "ON CONFLICT (recognition_id, tag) DO NOTHING",
+                   "ON DUPLICATE KEY UPDATE id = id",
            nativeQuery = true)
     int upsertRecognitionTag(@Param("recognitionId") Long recognitionId,
                              @Param("dancerId") Long dancerId,

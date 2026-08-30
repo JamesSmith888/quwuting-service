@@ -35,8 +35,7 @@ public interface DancerFavoriteRepository extends JpaRepository<DancerFavorite, 
     @Modifying
     @Query(value = "INSERT INTO qwt_dancer_favorites (user_id, dancer_id, created_at, updated_at, deleted) " +
                    "VALUES (:userId, :dancerId, :now, :now, false) " +
-                   "ON CONFLICT (user_id, dancer_id) " +
-                   "DO UPDATE SET deleted = false, updated_at = EXCLUDED.updated_at",
+                   "ON DUPLICATE KEY UPDATE deleted = false, updated_at = VALUES(updated_at)",
            nativeQuery = true)
     int upsertFavorite(@Param("userId") Long userId,
                        @Param("dancerId") Long dancerId,
@@ -65,8 +64,8 @@ public interface DancerFavoriteRepository extends JpaRepository<DancerFavorite, 
             JOIN qwt_dancers d ON d.id = f.dancer_id AND d.deleted = false AND d.status = 'NORMAL'
             LEFT JOIN (
                 SELECT dancer_id, COUNT(*) AS cnt_all,
-                       COUNT(*) FILTER (WHERE created_at >= :sinceToday) AS cnt_today,
-                       COUNT(*) FILTER (WHERE created_at >= :since7d) AS cnt7
+                       SUM(CASE WHEN created_at >= :sinceToday THEN 1 ELSE 0 END) AS cnt_today,
+                       SUM(CASE WHEN created_at >= :since7d THEN 1 ELSE 0 END) AS cnt7
                 FROM qwt_dancer_recognitions WHERE deleted = false
                 GROUP BY dancer_id
             ) a ON a.dancer_id = d.id

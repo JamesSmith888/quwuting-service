@@ -145,7 +145,7 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
             + " " + DancerHeatWeights.NEW_DANCER_BONUS + " " + """
                       ELSE 0 END
                       + CASE WHEN COALESCE(GREATEST(ph.album_max, d.contact_updated_at),
-                                           TIMESTAMP '1970-01-01 00:00:00') >= :sinceFresh
+                                           CAST('1970-01-01 00:00:00' AS DATETIME)) >= :sinceFresh
                              THEN """
             + " " + DancerHeatWeights.FRESH_UPDATE_BONUS + " " + """
                       ELSE 0 END
@@ -165,8 +165,8 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
             FROM qwt_dancers d
             LEFT JOIN (
                 SELECT dancer_id, COUNT(*) AS cnt_all,
-                       COUNT(*) FILTER (WHERE created_at >= :sinceToday) AS cnt_today,
-                       COUNT(*) FILTER (WHERE created_at >= :since7d) AS cnt7
+                       SUM(CASE WHEN created_at >= :sinceToday THEN 1 ELSE 0 END) AS cnt_today,
+                       SUM(CASE WHEN created_at >= :since7d THEN 1 ELSE 0 END) AS cnt7
                 FROM qwt_dancer_recognitions WHERE deleted = false
                 GROUP BY dancer_id
             ) a ON a.dancer_id = d.id
@@ -188,8 +188,8 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
             -- .name()，与 VenueRepository 热度 SQL 硬编码 'VENUE' 同先例）
             LEFT JOIN (
                 SELECT target_id AS dancer_id,
-                       COUNT(*) FILTER (WHERE created_at >= :since7d) AS unlock7d,
-                       COUNT(*) FILTER (WHERE created_at >= :since30d) AS unlock30d
+                       SUM(CASE WHEN created_at >= :since7d THEN 1 ELSE 0 END) AS unlock7d,
+                       SUM(CASE WHEN created_at >= :since30d THEN 1 ELSE 0 END) AS unlock30d
                 FROM qwt_points_unlocks
                 WHERE target_type = 'DANCER_CONTACT'
                 GROUP BY target_id

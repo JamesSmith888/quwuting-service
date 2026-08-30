@@ -35,8 +35,8 @@ public interface VenueViewRepository extends JpaRepository<VenueView, Long> {
      */
     @Modifying
     @Query(value = "INSERT INTO qwt_venue_views (venue_id, user_id, view_date, source, created_at) " +
-                   "VALUES (:venueId, :userId, :viewDate, CAST(:source AS varchar), :createdAt) " +
-                   "ON CONFLICT (venue_id, user_id, view_date, source) DO NOTHING",
+                   "VALUES (:venueId, :userId, :viewDate, CAST(:source AS CHAR), :createdAt) " +
+                   "ON DUPLICATE KEY UPDATE id = id",
            nativeQuery = true)
     int upsertView(@Param("venueId") Long venueId,
                    @Param("userId") Long userId,

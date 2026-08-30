@@ -33,8 +33,8 @@ public interface DancerViewRepository extends JpaRepository<DancerView, Long> {
      */
     @Modifying
     @Query(value = "INSERT INTO qwt_dancer_views (dancer_id, user_id, view_date, source, created_at) " +
-                   "VALUES (:dancerId, :userId, :viewDate, CAST(:source AS varchar), :createdAt) " +
-                   "ON CONFLICT (dancer_id, user_id, view_date, source) DO NOTHING",
+                   "VALUES (:dancerId, :userId, :viewDate, CAST(:source AS CHAR), :createdAt) " +
+                   "ON DUPLICATE KEY UPDATE id = id",
            nativeQuery = true)
     int upsertView(@Param("dancerId") Long dancerId,
                    @Param("userId") Long userId,

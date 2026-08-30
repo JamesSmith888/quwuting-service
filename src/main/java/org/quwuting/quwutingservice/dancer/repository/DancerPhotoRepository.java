@@ -42,14 +42,19 @@ public interface DancerPhotoRepository extends JpaRepository<DancerPhoto, Long> 
      * image 组件无法承载的媒体类型，列表卡片/详情快照一律以照片为封面。
      */
     @Query(value = """
-            SELECT DISTINCT ON (p.dancer_id) p.dancer_id, p.url
-            FROM qwt_dancer_photos p
-            LEFT JOIN qwt_points_gates g
-              ON g.target_type = 'DANCER_PHOTO' AND g.target_id = p.id AND g.deleted = false
-            WHERE p.dancer_id IN :dancerIds AND p.status = 'PUBLIC' AND p.deleted = false
-              AND p.kind = 'PHOTO'
-              AND g.id IS NULL
-            ORDER BY p.dancer_id, p.sort_order ASC, p.id ASC
+            SELECT t.dancer_id, t.url FROM (
+                SELECT p.dancer_id, p.url,
+                       ROW_NUMBER() OVER (PARTITION BY p.dancer_id
+                                          ORDER BY p.sort_order ASC, p.id ASC) AS rn
+                FROM qwt_dancer_photos p
+                LEFT JOIN qwt_points_gates g
+                  ON g.target_type = 'DANCER_PHOTO' AND g.target_id = p.id AND g.deleted = false
+                WHERE p.dancer_id IN :dancerIds AND p.status = 'PUBLIC' AND p.deleted = false
+                  AND p.kind = 'PHOTO'
+                  AND g.id IS NULL
+            ) t
+            WHERE t.rn = 1
+            ORDER BY t.dancer_id
             """, nativeQuery = true)
     List<Object[]> findCoverUrlsByDancerIds(@Param("dancerIds") List<Long> dancerIds);
 

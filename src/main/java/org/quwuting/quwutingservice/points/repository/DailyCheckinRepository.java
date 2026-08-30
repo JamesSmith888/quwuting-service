@@ -20,12 +20,14 @@ public interface DailyCheckinRepository extends JpaRepository<DailyCheckin, Long
      * 若交错执行，后发请求的 INSERT 会撞唯一索引 23505——旧实现靠 catch +
      * entityManager.clear() 吞异常，但 Hibernate flush 失败后事务可能已被标记
      * rollback-only，幂等返回实际变为 HTTP 500（语义不可靠）。
-     * 本锁按 user 粒度串行化整个打卡事务（一人一天只打一次，串行正确），
+     * 本锁按 user+date 粒度串行化整个打卡事务（一人一天只打一次，串行正确），
      * 使 check-then-act 原子化、23505 路径变为不可达。
-     * pg_advisory_xact_lock 事务提交/回滚自动释放（对齐认可域 lockDailyTicket 先例）。
+     * 2026-08-30 MySQL 迁移：pg_advisory_xact_lock → SELECT ... FOR UPDATE 行锁
+     * （命中唯一索引 (user_id, checkin_date)，命中锁行、未命中锁间隙）。
      */
-    @Query(value = "SELECT pg_advisory_xact_lock(hashtext(:lockKey))", nativeQuery = true)
-    void lockUserCheckin(@Param("lockKey") String lockKey);
+    @Query(value = "SELECT id FROM qwt_daily_checkins " +
+                   "WHERE user_id = :userId AND checkin_date = :date FOR UPDATE", nativeQuery = true)
+    List<Long> lockUserCheckin(@Param("userId") Long userId, @Param("date") LocalDate date);
 
     /**
      * 批量统计：指定用户集的打卡天数（2026-08-27 贡献档案/管理端用户列表聚合，

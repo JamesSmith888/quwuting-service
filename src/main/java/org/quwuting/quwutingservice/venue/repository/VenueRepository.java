@@ -607,7 +607,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                         ELSE"""
             + " " + VenueHeatWeights.VIEW_SOURCE_OTHER + " " + """
                         END
-                        * CASE WHEN vv.view_date >= (CURRENT_DATE - 7) THEN"""
+                        * CASE WHEN vv.view_date >= (DATE_SUB(CURRENT_DATE, INTERVAL 7 DAY)) THEN"""
             + " " + VenueHeatWeights.VIEW_RECENCY_7D_MULTIPLIER + " " + """
                         ELSE 1 END), 0)
                 FROM qwt_venue_views vv
@@ -729,6 +729,11 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * </ul>
      */
     @Query(value = """
+            WITH RECURSIVE date_series AS (
+                SELECT CAST(:sinceDate AS DATE) AS day
+                UNION ALL
+                SELECT day + INTERVAL 1 DAY FROM date_series WHERE day < CAST(:asOfDate AS DATE)
+            )
             SELECT d.day,
                    COALESCE(f.cnt, 0) AS favcount,
                    COALESCE(uf.cnt, 0) AS unfavcount,
@@ -739,58 +744,58 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                    COALESCE(pr.cnt, 0) AS posreaction,
                    COALESCE(nr.cnt, 0) AS negreaction,
                    COALESCE(pt.cnt, 0) AS points
-            FROM (SELECT generate_series(CAST(:sinceDate AS timestamp), CAST(:asOfDate AS timestamp), interval '1 day')::date AS day) AS d
-            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS cnt
+            FROM date_series d
+            LEFT JOIN (SELECT CAST(created_at AS DATE) AS day, COUNT(*) AS cnt
                        FROM qwt_favorites
                        WHERE venue_id = :venueId AND deleted = false
                          AND created_at >= :windowSince AND created_at < :windowUntil
-                       GROUP BY 1) f ON f.day = d.day
-            LEFT JOIN (SELECT date_trunc('day', unfavorited_at)::date AS day, COUNT(*) AS cnt
+                       GROUP BY day) f ON f.day = d.day
+            LEFT JOIN (SELECT CAST(unfavorited_at AS DATE) AS day, COUNT(*) AS cnt
                        FROM qwt_favorites
                        WHERE venue_id = :venueId
                          AND unfavorited_at IS NOT NULL
                          AND unfavorited_at >= :windowSince AND unfavorited_at < :windowUntil
-                       GROUP BY 1) uf ON uf.day = d.day
+                       GROUP BY day) uf ON uf.day = d.day
             LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
                        FROM qwt_venue_views
                        WHERE venue_id = :venueId
                          AND view_date >= :viewSince AND view_date < :viewUntil
-                       GROUP BY 1) v ON v.day = d.day
+                       GROUP BY day) v ON v.day = d.day
             LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
                        FROM qwt_venue_views
                        WHERE venue_id = :venueId
                          AND source = 'LIST'
                          AND view_date >= :viewSince AND view_date < :viewUntil
-                       GROUP BY 1) vl ON vl.day = d.day
+                       GROUP BY day) vl ON vl.day = d.day
             LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
                        FROM qwt_venue_views
                        WHERE venue_id = :venueId
                          AND source = 'SHARE'
                          AND view_date >= :viewSince AND view_date < :viewUntil
-                       GROUP BY 1) vs ON vs.day = d.day
+                       GROUP BY day) vs ON vs.day = d.day
             LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
                        FROM qwt_venue_views
                        WHERE venue_id = :venueId
                          AND source = 'SEARCH'
                          AND view_date >= :viewSince AND view_date < :viewUntil
-                       GROUP BY 1) vq ON vq.day = d.day
-            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS cnt
+                       GROUP BY day) vq ON vq.day = d.day
+            LEFT JOIN (SELECT CAST(created_at AS DATE) AS day, COUNT(*) AS cnt
                        FROM qwt_venue_reactions
                        WHERE venue_id = :venueId AND deleted = false
                          AND reaction_code IN :positiveCodes
                          AND created_at >= :windowSince AND created_at < :windowUntil
-                       GROUP BY 1) pr ON pr.day = d.day
-            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS cnt
+                       GROUP BY day) pr ON pr.day = d.day
+            LEFT JOIN (SELECT CAST(created_at AS DATE) AS day, COUNT(*) AS cnt
                        FROM qwt_venue_reactions
                        WHERE venue_id = :venueId AND deleted = false
                          AND reaction_code IN :negativeCodes
                          AND created_at >= :windowSince AND created_at < :windowUntil
-                       GROUP BY 1) nr ON nr.day = d.day
-            LEFT JOIN (SELECT date_trunc('day', created_at)::date AS day, SUM(-delta) AS cnt
+                       GROUP BY day) nr ON nr.day = d.day
+            LEFT JOIN (SELECT CAST(created_at AS DATE) AS day, SUM(-delta) AS cnt
                        FROM qwt_points_transactions
                        WHERE target_type = 'VENUE' AND target_id = :venueId AND delta < 0
                          AND created_at >= :windowSince AND created_at < :windowUntil
-                       GROUP BY 1) pt ON pt.day = d.day
+                       GROUP BY day) pt ON pt.day = d.day
             ORDER BY d.day
             """, nativeQuery = true)
     List<DailyTrendRow> countDailyTrends(@Param("venueId") Long venueId,
@@ -872,33 +877,33 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                     ELSE"""
             + " " + VenueHeatWeights.VIEW_SOURCE_OTHER + " " + """
                                     END
-                                    * CASE WHEN vv.view_date >= (CURRENT_DATE - 7) THEN"""
+                                    * CASE WHEN vv.view_date >= (DATE_SUB(CURRENT_DATE, INTERVAL 7 DAY)) THEN"""
             + " " + VenueHeatWeights.VIEW_RECENCY_7D_MULTIPLIER + " " + """
                                     ELSE 1 END), 0)
                                 FROM qwt_venue_views vv
-                                WHERE vv.venue_id = v.id AND vv.view_date >= (CURRENT_DATE - 30) AND vv.view_date < CURRENT_DATE))
+                                WHERE vv.venue_id = v.id AND vv.view_date >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND vv.view_date < CURRENT_DATE))
                            + (SELECT COUNT(*) FROM qwt_favorites f
                               WHERE f.venue_id = v.id AND f.deleted = false) * """
             + VenueHeatWeights.FAVORITE + """
                            + (SELECT COUNT(*) FROM qwt_favorites f2
                               WHERE f2.venue_id = v.id AND f2.deleted = false
-                                AND f2.created_at >= (CURRENT_DATE - 30) AND f2.created_at < CURRENT_DATE) * """
+                                AND f2.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND f2.created_at < CURRENT_DATE) * """
             + VenueHeatWeights.NEW_FAVORITE + """
                            + (SELECT COUNT(*) FROM qwt_venue_posts p
                               WHERE p.venue_id = v.id AND p.deleted = false) * """
             + VenueHeatWeights.POST + """
                            + (SELECT COUNT(*) FROM qwt_tag_interactions ti
                               WHERE ti.venue_id = v.id AND ti.deleted = false AND ti.score IS NOT NULL
-                                AND ti.created_at >= (CURRENT_DATE - 30) AND ti.created_at < CURRENT_DATE) * """
+                                AND ti.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND ti.created_at < CURRENT_DATE) * """
             + VenueHeatWeights.RATING + """
                            + (SELECT COUNT(*) FROM qwt_venue_reactions r
                               WHERE r.venue_id = v.id AND r.deleted = false
                                 AND r.reaction_code IN :positiveCodes
-                                AND r.created_at >= (CURRENT_DATE - 30) AND r.created_at < CURRENT_DATE) * """
+                                AND r.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND r.created_at < CURRENT_DATE) * """
             + VenueHeatWeights.REACTION + """
                            + (SELECT COALESCE(SUM(-pt.delta), 0) FROM qwt_points_transactions pt
                               WHERE pt.target_type = 'VENUE' AND pt.target_id = v.id AND pt.delta < 0
-                                AND pt.created_at >= (CURRENT_DATE - 30) AND pt.created_at < CURRENT_DATE) * :pointsWeight
+                                AND pt.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND pt.created_at < CURRENT_DATE) * :pointsWeight
                            AS heat_score
                     FROM qwt_venues v
                     WHERE v.deleted = false

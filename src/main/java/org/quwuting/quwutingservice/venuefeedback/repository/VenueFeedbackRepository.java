@@ -102,8 +102,7 @@ public interface VenueFeedbackRepository extends JpaRepository<VenueFeedback, Lo
     @Query(value = "INSERT INTO qwt_venue_feedbacks " +
                    "(venue_id, user_id, type, note, field, corrected_value, status, handled, deleted, created_at, updated_at) " +
                    "VALUES (:venueId, :userId, :type, :note, :field, :correctedValue, 'PENDING', false, false, :now, :now) " +
-                   "ON CONFLICT (user_id, venue_id, type, field) " +
-                   "WHERE user_id IS NOT NULL AND status = 'PENDING' AND field IS NOT NULL DO NOTHING",
+                   "ON DUPLICATE KEY UPDATE id = id",
            nativeQuery = true)
     int upsertPendingWithField(@Param("venueId") Long venueId,
                                @Param("userId") Long userId,
@@ -135,8 +134,7 @@ public interface VenueFeedbackRepository extends JpaRepository<VenueFeedback, Lo
     @Query(value = "INSERT INTO qwt_venue_feedbacks " +
                    "(venue_id, user_id, type, note, field, corrected_value, status, handled, deleted, created_at, updated_at) " +
                    "VALUES (:venueId, :userId, :type, :note, NULL, NULL, 'PENDING', false, false, :now, :now) " +
-                   "ON CONFLICT (user_id, venue_id, type) " +
-                   "WHERE user_id IS NOT NULL AND status = 'PENDING' AND field IS NULL DO NOTHING",
+                   "ON DUPLICATE KEY UPDATE id = id",
            nativeQuery = true)
     int upsertPendingWithoutField(@Param("venueId") Long venueId,
                                   @Param("userId") Long userId,

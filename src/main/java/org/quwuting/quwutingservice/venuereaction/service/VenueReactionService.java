@@ -109,11 +109,11 @@ public class VenueReactionService {
 
     /**
      * 每日一票模式：一人一店一日一票（换票语义）。
-     * 咨询锁串行化后，当日查询至多一行（V22 已清理历史多行；findFirst 防御残留不抛异常）。
+     * 行锁（FOR UPDATE）串行化后，当日查询至多一行（V22 已清理历史多行；findFirst 防御残留不抛异常）。
      */
     private ToggleReactionResult toggleSingleTicket(Long userId, Long venueId, String code, LocalDate today) {
-        // 事务级咨询锁：串行化同 user+venue+date 的并发换票（提交/回滚自动释放）
-        venueReactionRepository.lockDailyTicket("reaction:" + userId + ":" + venueId + ":" + today);
+        // 事务级行锁：串行化同 user+venue+date 的并发换票（FOR UPDATE，提交/回滚自动释放）
+        venueReactionRepository.lockDailyTicket(userId, venueId, today);
 
         Optional<VenueReaction> existing = venueReactionRepository
                 .findFirstByUserIdAndVenueIdAndReactionDateOrderByIdAsc(userId, venueId, today);

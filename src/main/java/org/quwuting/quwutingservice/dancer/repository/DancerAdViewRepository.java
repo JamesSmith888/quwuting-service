@@ -27,7 +27,7 @@ public interface DancerAdViewRepository extends JpaRepository<DancerAdView, Long
     @Modifying
     @Query(value = "INSERT INTO qwt_dancer_ad_views (dancer_id, user_id, view_date, created_at) " +
                    "VALUES (:dancerId, :userId, :viewDate, :createdAt) " +
-                   "ON CONFLICT (user_id, dancer_id, view_date) DO NOTHING",
+                   "ON DUPLICATE KEY UPDATE id = id",
            nativeQuery = true)
     int upsertAdView(@Param("dancerId") Long dancerId,
                      @Param("userId") Long userId,

@@ -35,6 +35,8 @@ build/
 ### Local dev config (contains DB credentials) ###
 **/application-dev.yaml
 **/application-dev.yml
+**/application-mysql.yaml
+**/application-mysql.yml
 
 ### Local data (uploads etc.) ###
 data/

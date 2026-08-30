@@ -15,15 +15,6 @@ import java.util.Optional;
 public interface DancerRecognitionRepository extends JpaRepository<DancerRecognition, Long> {
 
     /**
-     * 事务级咨询锁：串行化同 (user, dancer, date) 的并发认可 toggle（2026-08-15 新增，
-     * 对齐 VenueReactionService 单票路径）——"查当日记录 → 删/换 → 插"若不串行化，
-     * 两个并发请求可能同时命中/新建，破坏"一日一枚表情"与删除幂等不变量。
-     * pg_advisory_xact_lock 事务提交/回滚自动释放。
-     */
-    @Query(value = "SELECT pg_advisory_xact_lock(hashtext(:lockKey))", nativeQuery = true)
-    void lockDailyTicket(@Param("lockKey") String lockKey);
-
-    /**
      * 批量删除认可记录（2026-08-15 根因修复：与标签批量删除同语义——派生删除
      * 的 SELECT+em.remove 延迟实体删除在并发/事务内 flush 场景会产生
      * StaleObjectStateException；@Modifying 批量删除幂等且无实体管理状态）。
@@ -57,7 +48,7 @@ public interface DancerRecognitionRepository extends JpaRepository<DancerRecogni
     @Query(value = "INSERT INTO qwt_dancer_recognitions " +
                    "(dancer_id, user_id, recognition_date, created_at, updated_at, deleted) " +
                    "VALUES (:dancerId, :userId, :recognitionDate, :now, :now, false) " +
-                   "ON CONFLICT (user_id, dancer_id, recognition_date) DO NOTHING",
+                   "ON DUPLICATE KEY UPDATE id = id",
            nativeQuery = true)
     int upsertRecognition(@Param("dancerId") Long dancerId,
                           @Param("userId") Long userId,
@@ -122,8 +113,8 @@ public interface DancerRecognitionRepository extends JpaRepository<DancerRecogni
     @Query(value = """
             SELECT r.dancer_id,
                    COUNT(*) AS count_all,
-                   COUNT(*) FILTER (WHERE r.created_at >= :sinceToday) AS count_today,
-                   COUNT(*) FILTER (WHERE r.created_at >= :since7d) AS count_7d
+                   SUM(CASE WHEN r.created_at >= :sinceToday THEN 1 ELSE 0 END) AS count_today,
+                   SUM(CASE WHEN r.created_at >= :since7d THEN 1 ELSE 0 END) AS count_7d
             FROM qwt_dancer_recognitions r
             WHERE r.dancer_id IN :dancerIds AND r.deleted = false
             GROUP BY r.dancer_id

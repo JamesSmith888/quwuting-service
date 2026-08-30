@@ -30,7 +30,7 @@ public interface VenueReactionRepository extends JpaRepository<VenueReaction, Lo
     @Query(value = "INSERT INTO qwt_venue_reactions " +
                    "(user_id, venue_id, reaction_code, reaction_date, created_at, updated_at, deleted) " +
                    "VALUES (:userId, :venueId, :code, :reactionDate, :now, :now, false) " +
-                   "ON CONFLICT (user_id, venue_id, reaction_code, reaction_date) DO NOTHING",
+                   "ON DUPLICATE KEY UPDATE id = id",
            nativeQuery = true)
     int upsertReaction(@Param("userId") Long userId,
                        @Param("venueId") Long venueId,
@@ -60,16 +60,22 @@ public interface VenueReactionRepository extends JpaRepository<VenueReaction, Lo
             Long userId, Long venueId, LocalDate reactionDate);
 
     /**
-     * 事务级 Postgres 咨询锁：串行化同 (userId, venueId, reactionDate) 的并发换票
-     * （2026-08-14 每日一票模式用）。
+     * 事务级行锁：串行化同 (userId, venueId, reactionDate) 的并发换票
+     * （2026-08-14 每日一票模式用；2026-08-30 MySQL 迁移：pg_advisory_xact_lock →
+     * SELECT ... FOR UPDATE 行锁——PG 咨询锁 MySQL 无等价物，改锁「当日票行」：
+     * 命中行锁行、未命中锁间隙（InnoDB RR 间隙锁可阻止并发插入同日新票）。
      * <p>
      * 每日一票为<b>应用层语义</b>（无 DB 唯一约束兜底，见 V22 migration 注释）——
      * 并发下"查当日票 → 删旧 → 插新"若不串行化，两个请求可能同日插入不同 code，
-     * 破坏一人一店一日一票不变量。本锁在事务内获取、事务提交/回滚自动释放
-     * （pg_advisory_xact_lock 语义），lockKey 构造见 {@code VenueReactionService}。
+     * 破坏一人一店一日一票不变量。本锁在事务内获取、事务提交/回滚自动释放，
+     * 调用点见 {@code VenueReactionService#toggleSingleTicket}。
      */
-    @Query(value = "SELECT pg_advisory_xact_lock(hashtext(:lockKey))", nativeQuery = true)
-    void lockDailyTicket(@Param("lockKey") String lockKey);
+    @Query(value = "SELECT id FROM qwt_venue_reactions " +
+                   "WHERE user_id = :userId AND venue_id = :venueId AND reaction_date = :date " +
+                   "ORDER BY id LIMIT 1 FOR UPDATE", nativeQuery = true)
+    List<Long> lockDailyTicket(@Param("userId") Long userId,
+                               @Param("venueId") Long venueId,
+                               @Param("date") LocalDate date);
 
     /**
      * 当前用户在该场所"今日已参与"的 Reaction 代码集合（个人状态，实时查询不缓存）。

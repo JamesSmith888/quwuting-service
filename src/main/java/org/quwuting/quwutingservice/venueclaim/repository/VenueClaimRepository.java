@@ -54,7 +54,7 @@ public interface VenueClaimRepository extends JpaRepository<VenueClaim, Long>, J
                    " status, handled_by, handle_note, handled_at, created_at, updated_at, deleted) " +
                    "VALUES (:venueId, :userId, :realName, :contactPhone, :contactWechat, :licenseUrls, :note, " +
                    " 'PENDING', NULL, NULL, NULL, :now, :now, false) " +
-                   "ON CONFLICT (user_id, venue_id) WHERE status = 'PENDING' DO NOTHING",
+                   "ON DUPLICATE KEY UPDATE id = id",
            nativeQuery = true)
     int upsertPending(@Param("venueId") Long venueId,
                       @Param("userId") Long userId,

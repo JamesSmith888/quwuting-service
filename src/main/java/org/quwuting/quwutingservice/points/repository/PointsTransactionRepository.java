@@ -46,8 +46,7 @@ public interface PointsTransactionRepository extends JpaRepository<PointsTransac
     @Query(value = "INSERT INTO qwt_points_transactions " +
                    "(created_at, user_id, delta, balance_after, source_type, source_id, target_type, target_id, remark) " +
                    "VALUES (:now, :userId, :delta, :balanceAfter, :sourceType, :sourceId, NULL, NULL, :remark) " +
-                   "ON CONFLICT (user_id, source_type, source_id) " +
-                   "WHERE delta > 0 AND source_id IS NOT NULL DO NOTHING",
+                   "ON DUPLICATE KEY UPDATE id = id",
            nativeQuery = true)
     int upsertEarn(@Param("userId") Long userId,
                    @Param("delta") long delta,
@@ -113,9 +112,11 @@ public interface PointsTransactionRepository extends JpaRepository<PointsTransac
      * 在并发下失守。按 user 粒度 pg_advisory_xact_lock 串行化整个赠送事务（同一用户
      * 的连续赠送本就应顺序执行，串行正确且无性能损失）。锁在全部校验之前获取，
      * 事务提交/回滚自动释放。
+     * 2026-08-30 MySQL 迁移：pg_advisory_xact_lock → SELECT ... FOR UPDATE 锁账户行
+     * （qwt_points_accounts.user_id 唯一索引；未命中锁间隙，懒建账户也在锁下安全）。
      */
-    @Query(value = "SELECT pg_advisory_xact_lock(hashtext(:lockKey))", nativeQuery = true)
-    void lockUserGift(@Param("lockKey") String lockKey);
+    @Query(value = "SELECT id FROM qwt_points_accounts WHERE user_id = :userId FOR UPDATE", nativeQuery = true)
+    List<Long> lockUserGift(@Param("userId") Long userId);
 
     /** 目标收到积分（全量/窗口——热度公式积分项 / 详情展示 / 趋势序列同源口径） */
     @Query("""
