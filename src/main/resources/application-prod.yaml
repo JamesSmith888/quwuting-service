@@ -1,34 +1,37 @@
-# 生产环境配置（阿里云 + Cloudflare Tunnel）
+# 生产环境配置（阿里云 RDS MySQL + Cloudflare Tunnel）
 # 所有敏感值通过环境变量注入，禁止硬编码
 # 启动命令：java -jar quwuting-service.jar --spring.profiles.active=prod
+#
+# 2026-08-30 PG→MySQL 迁移：生产数据源从 Supabase PG 切换为阿里云 RDS MySQL。
+# systemd 需注入 DB_URL（RDS 内网地址）/DB_USERNAME/DB_PASSWORD + SPRING_PROFILES_ACTIVE=prod。
 
 spring:
   datasource:
-    # Supabase 事务池化（6543），必须附加 prepareThreshold=0（见 AGENTS.md 连接池兼容性章节）。
-    # DB_URL 值内必须同时包含 connectTimeout=5&socketTimeout=8&tcpKeepAlive=true
-    # （2026-08-10 根因修复：数据库抖动时快速失败而非挂死，见 AGENTS.md「连接池与数据库抖动韧性」）。
-    # 注意：连接池调优统一在 application.yaml（基础配置）声明，禁止在本文件重复（防漂移）；
-    # 当前生产 systemd 实际以 dev profile 运行，本文件未生效——切换 prod profile 前
-    # 需先补齐 systemd Environment 注入 DB_URL/DB_USERNAME/DB_PASSWORD 等环境变量（见 AGENTS.md 部署章节）。
+    # RDS MySQL 内网连接（同 VPC），必须附加 serverTimezone=Asia/Shanghai &
+    # characterEncoding=utf8&useSSL=false&connectTimeout=5000&socketTimeout=8000。
+    # 示例：jdbc:mysql://rm-xxxx.mysql.rds.aliyuncs.com:3306/qwt_mysql?...
     url: ${DB_URL}
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
-    driver-class-name: org.postgresql.Driver
+    driver-class-name: com.mysql.cj.jdbc.Driver
   jpa:
     hibernate:
       # Schema 演进策略（2026-08-07 起）：与基础配置一致，Flyway 迁移 + validate 校验。
-      # 生产 schema 变更一律由 db/migration/V{n} 脚本版本化执行（部署时随应用启动自动
-      # 应用），禁止依赖 ddl-auto 自动演进——历史 ddl-auto:update 无法删列/改约束、
-      # 无版本回滚，是 2026-08-05 schema 事故的温床（根因见 AGENTS.md「Schema 演进」）。
+      # MySQL 环境迁移脚本 = db/migration-mysql（全量基线，见 docs/pg-to-mysql-migration-analysis.md）。
       ddl-auto: validate
     show-sql: false
     properties:
       hibernate:
         format_sql: false
+  flyway:
+    # MySQL 环境独立迁移目录：全新 RDS 库直接执行 V1 全量基线即达最新结构，
+    # 数据由线上 PG 或本地验证库迁移（scripts/pg2mysql_*.py，见 docs/mysql-production-migration.md）。
+    locations: classpath:db/migration-mysql
+    baseline-on-migrate: false
 
 # 微信小程序（secret 由环境变量注入，基础配置已声明 ${WECHAT_SECRET}，此处无需重复）
 
-# Supabase Storage（前端直传，后端签发凭证）
+# Supabase Storage（前端直传，后端签发凭证——与 DB 解耦，迁移 MySQL 后继续使用）
 supabase:
   storage:
     project-url: ${SUPABASE_PROJECT_URL}
