@@ -6,16 +6,19 @@
 # 满足 AGENTS.md 核心约束：java -jar + JVM 内存限制 + systemd
 # Restart=always + cgroup MemoryMax 三件套。
 #
-# 配置策略：所有业务配置（DB/JWT/Supabase）直接写在 application-dev.yaml 中，
-# 不依赖外部环境变量文件。JVM 参数硬编码在 ExecStart 中。
+# 配置策略（2026-08-30 PG→MySQL 迁移后）：
+# - 数据源 = 阿里云 RDS MySQL（application-prod.yaml 已切 MySQL，环境变量占位）；
+# - 业务配置（DB/JWT/Supabase）统一由 EnvironmentFile 注入（默认
+#   /etc/quwuting-service/environment，服务器本地维护，**禁止提交 git**）；
+# - 密码只存在于服务器 EnvironmentFile / systemd unit，仓库零敏感信息。
 #
 # 用法（首次部署，root 直接执行）：
 #   1. 把仓库 clone 到 /root/quwuting-service（或通过环境变量覆盖 APP_DIR）
-#   2. 确保 src/main/resources/application-dev.yaml 中有真实的业务配置
+#   2. 创建环境文件 $ENV_FILE（模板见 deploy/env.example），填入 DB_*/JWT/Supabase
 #   3. sudo bash deploy/deploy.sh
 #
 # 后续升级：
-#   cd /root/quwuting-service && git pull
+#   cd /root/quwuting-service && git checkout feature/mysql-migration && git pull
 #   sudo bash deploy/deploy.sh --no-user --no-unit   # 仅重新打包+重启
 #
 # 退出码：非 0 即失败；脚本采用 set -euo pipefail，任何错误立刻中止。
@@ -29,7 +32,8 @@ APP_USER="${APP_USER:-appuser}"
 LOG_DIR="${LOG_DIR:-/var/log/${APP_NAME}}"
 UNIT_FILE="/etc/systemd/system/${APP_NAME}.service"
 JAR_GLOB="${APP_DIR}/target/${APP_NAME}-*.jar"
-SPRING_PROFILE="${SPRING_PROFILE:-dev}"
+SPRING_PROFILE="${SPRING_PROFILE:-prod}"   # 2026-08-30: MySQL 生产环境，默认 prod
+ENV_FILE="${ENV_FILE:-/etc/${APP_NAME}/environment}"  # 敏感配置（DB/JWT/Supabase），服务器本地，不入 git
 
 # JVM 参数（阿里云 ECS 2C/2G 实测合理值）
 # Xmx512m: 堆上限，RSS 实际 ≈ Xmx + 250MB ≈ 762MB
@@ -69,10 +73,14 @@ die() { echo -e "\033[1;31m[deploy]\033[0m $*" >&2; exit 1; }
 command -v java >/dev/null 2>&1 || die "未安装 java；请先 'dnf install -y java-latest-openjdk-headless'"
 command -v systemctl >/dev/null 2>&1 || die "无 systemd；本脚本依赖 systemd"
 
-# 检查 application-dev.yaml 存在
-DEV_CONFIG="$APP_DIR/src/main/resources/application-${SPRING_PROFILE}.yaml"
-[[ -f "$DEV_CONFIG" ]] || die "缺少配置文件 $DEV_CONFIG（业务配置直接写在 yaml 中，不依赖环境变量）"
-log "配置文件: $DEV_CONFIG"
+# 检查 EnvironmentFile 存在且含关键变量（配置策略：敏感值服务器本地维护，不入 git）
+[[ -f "$ENV_FILE" ]] || die "缺少环境文件 $ENV_FILE（模板见 deploy/env.example：DB_URL/DB_USERNAME/DB_PASSWORD/JWT_SECRET/WECHAT_SECRET/SUPABASE_*）"
+grep -q '^DB_URL=' "$ENV_FILE" || die "环境文件 $ENV_FILE 缺少 DB_URL"
+grep -q '^DB_USERNAME=' "$ENV_FILE" || die "环境文件 $ENV_FILE 缺少 DB_USERNAME"
+grep -q '^DB_PASSWORD=' "$ENV_FILE" || die "环境文件 $ENV_FILE 缺少 DB_PASSWORD"
+log "环境文件: $ENV_FILE"
+[[ -f "$APP_DIR/src/main/resources/application-${SPRING_PROFILE}.yaml" ]] \
+  || die "缺少 application-${SPRING_PROFILE}.yaml（${SPRING_PROFILE} profile 配置在 git 中，含 ${DB_URL} 占位）"
 
 # ── 1. 创建系统用户（无登录 shell，无 home，专跑应用） ─────────────────────
 if ! $SKIP_USER && ! id -u "$APP_USER" >/dev/null 2>&1; then
@@ -165,7 +173,10 @@ User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${APP_DIR}
 
-# JVM 参数 + jar 路径 + Spring profile（业务配置在 application-${SPRING_PROFILE}.yaml）
+# 敏感配置注入（DB/JWT/Supabase；文件服务器本地维护，不入 git）
+EnvironmentFile=${ENV_FILE}
+
+# JVM 参数 + jar 路径 + Spring profile（prod = RDS MySQL，配置见 application-prod.yaml）
 ExecStart=${JAVA_HOME}/bin/java ${JVM_FLAGS} -jar ${JAR_PATH} --spring.profiles.active=${SPRING_PROFILE}
 
 # 守护：被杀立即拉起
