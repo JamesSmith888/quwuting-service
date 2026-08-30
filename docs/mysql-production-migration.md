@@ -15,8 +15,9 @@
 | 规格 | 2核 2GB | 当前数据 ~1 万行，余量巨大 |
 | 存储 | 50GB 高性能云盘 | 足够 |
 | 可用区 | 杭州 可用区I | ✅ 与目标一致 |
-| **VPC** | ⚠️ **必须与 ECS 114.55.0.14 同 VPC** | 页面默认 `vpc-bp1hxa69h74f62fgplmj6`——先去 ECS 控制台确认 ECS 的 VPC 是否一致；**不一致则内网不通**，需改选 ECS 所在 VPC |
+| **VPC** | ⚠️ **必须与 ECS 114.55.0.14 同 VPC** | ✅ 已确认：ECS 与页面默认均为 `vpc-bp1hxa69h74f62fgplmj6`，直接按默认下单 |
 | 交换机 | 自动创建 | 与 ECS 同可用区（或任一，RDS 内网地址与可用区无关） |
+| 可用区 | ECS 在 J（cn-hangzhou-j），RDS 页面默认 I | 同地域 VPC 内跨 AZ 互通（~1ms），不阻塞；下单时若能选 J 则同 AZ 最优 |
 | 字符集 | **utf8mb4**（建库时指定） | 页面创建实例后建库时选 utf8mb4 / utf8mb4_unicode_ci |
 | 时区 | Asia/Shanghai（参数组） | 保证 DB 端 now()/CURRENT_TIMESTAMP 为北京时间（应用时间由 JVM 生成不受影响） |
 
@@ -34,8 +35,8 @@ GRANT ALL PRIVILEGES ON qwt_mysql.* TO 'qwt_app'@'%';
 FLUSH PRIVILEGES;
 ```
 
-- **白名单**：RDS 控制台「白名单与安全组」添加 ECS 内网 IP（ECS 控制台查私有 IP），
-  若 systemd 服务器走 NAT/弹性 IP 则加对应出口 IP；本地直连调试可临时加本机公网 IP（用完即删）。
+- **白名单**：RDS 控制台「白名单与安全组」添加 ECS 内网 IP **172.21.240.255**（已确认，同 VPC 内网互访走该地址）；
+  本地直连调试可临时加本机公网 IP（用完即删）。
 - **参数组**：`time_zone = Asia/Shanghai`（如实例默认 UTC 需改）。
 
 ## 三、代码部署（feature/mysql-migration）
