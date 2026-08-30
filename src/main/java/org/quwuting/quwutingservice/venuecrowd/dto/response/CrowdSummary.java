@@ -1,5 +1,8 @@
 package org.quwuting.quwutingservice.venuecrowd.dto.response;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -10,7 +13,9 @@ import java.util.List;
  * <p>
  * 字段语义：
  * <ul>
- *   <li>{@code hasData}：窗口内是否有上报（false → 前端渲染空态 emptyText）；</li>
+ *   <li>{@code hasData}：6h 窗口内是否有上报（false → 前端渲染空态 emptyText；
+ *       历史数据不在此——2026-08-29 定版：过期/历史记录走独立历史页
+ *       {@code GET /venues/{id}/crowd-reports/history}，详情页右下角链接进入）；</li>
  *   <li>{@code female}/{@code male}：主/次信号众数视图（无对应数据时 null）；
  *       {@code share} = 众数档位权重占比（可信度加权，见 CrowdReportService）；</li>
  *   <li>{@code tier}/{@code tierText}：置信度分层（CrowdTier code + 完整胶囊文案，
@@ -23,7 +28,8 @@ import java.util.List;
  *       上报」；createdAt 倒序；**列表行不展示用户名**——badgeText 服务端权威三档
  *       （权重 ≥ VETERAN_WEIGHT 资深 / ≥ REGULAR_WEIGHT 常客 / 普通，表头已有「舞友」
  *       列名故行内不带「舞友」后缀）；nickname = **完整昵称，仅详情弹层展示**（纯
- *       展示不可点击，空昵称兜底「匿名」）；male 未报时 maleLevelName 为 null）。</li>
+ *       展示不可点击，空昵称兜底「匿名」）；male 未报时 maleLevelName 为 null；
+ *       **仅含 6h 窗口内有效行**——历史/过期记录走 {@code CrowdHistoryRow} 历史页）。</li>
  * </ul>
  */
 public record CrowdSummary(
@@ -75,6 +81,34 @@ public record CrowdSummary(
             String maleLevelName,
             String maleLevelHint,
             String ageText
+    ) {
+    }
+
+    /**
+     * 全部热度历史行（2026-08-29 用户需求「用户可以看到过期后的记录」最终形态：
+     * 独立历史页数据源，GET /venues/{id}/crowd-reports/history，分页全量）。
+     * <p>
+     * 字段全部服务端权威派生（badgeText 三档 / 档位名+锚点 / ageText 相对时间 /
+     * reportAt 绝对时间 yyyy-MM-dd HH:mm:ss / expired 窗口外标记——前端仅据此
+     * 派生「已过期」标签 + 置灰样式，零拼接）。
+     */
+    public record CrowdHistoryRow(
+            Long id,
+            Long userId,
+            /** 用户标识（资深 / 常客 / 普通） */
+            String badgeText,
+            /** 完整昵称（空兜底「匿名」） */
+            String nickname,
+            String femaleLevelName,
+            String femaleLevelHint,
+            String maleLevelName,
+            String maleLevelHint,
+            /** 上报绝对时间（yyyy-MM-dd HH:mm:ss，前端 formatGiftTime 展示「今天/昨天 HH:mm」） */
+            @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime reportAt,
+            /** 相对时间（「刚刚 / N 分钟前 / N 小时前」） */
+            String ageText,
+            /** 是否已出 6h 有效窗口（true = 历史参考，前端置灰 +「已过期」） */
+            boolean expired
     ) {
     }
 }

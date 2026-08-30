@@ -79,6 +79,7 @@ public record ApiResponse<T>(int code, String message, T data) {
 | 1007 | 无效的评分维度 / Reaction 类型 |
 | 1008 | 上报不存在 |
 | 1009 | 无效的排序方式（VenueSortMode.from） |
+| 1010 | 招工内容含风险词，需管理员确认发布（PublishRecruitmentRequest.confirmed） |
 | 5000 | 未知服务器错误（兜底），HTTP 500 |
 | 5001 | 微信接口响应异常（无响应 / 解析失败） |
 | 5002 | 文件保存失败（IO 异常） |

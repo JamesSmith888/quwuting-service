@@ -98,7 +98,7 @@ public class VenueResponseMapper {
 
     /**
      * 六参重载（2026-08-29 门店热度角标新增）：crowdBadgeText = 中性「N人报过」
-     * （最近 2h 独立上报人数 ≥ 3 才生成，见 {@code CrowdReportService#badgeTextsByVenue}），
+     * （最近 6h 独立上报人数 ≥ 3 才生成，见 {@code CrowdReportService#badgeTextsByVenue}），
      * 驱动列表卡片标签行行首 teal 胶囊。仅列表场景（城市列表/收藏列表）传入真实值；
      * 无展示语义场景（详情/编辑/创建回显）传 null——详情页热度走独立 crowd-reports 接口，
      * 卡片角标不重复展示（同一事实只呈现一次）。crowdLatestText 恒 null（本重载调用方

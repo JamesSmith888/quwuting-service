@@ -16,6 +16,9 @@ import org.quwuting.quwutingservice.venuecrowd.enums.CrowdFemaleLevel;
 import org.quwuting.quwutingservice.venuecrowd.enums.CrowdMaleLevel;
 import org.quwuting.quwutingservice.venuecrowd.enums.CrowdTier;
 import org.quwuting.quwutingservice.venuecrowd.repository.VenueCrowdReportRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -42,8 +45,10 @@ import java.util.stream.Collectors;
  *   <li><b>双维信号</b>：femaleLevel（在店舞伴，主）+ maleLevel（男客，次，可空）；</li>
  *   <li><b>每日一记防刷</b>：UNIQUE(venue,user,report_date) + ON CONFLICT 幂等 upsert，
  *       同日再次上报 = UPDATE 原行 + modify_count+1；首版零积分（防「为分而报」污染信号）；</li>
- *   <li><b>2 小时窗口</b>：聚合只取最近 {@link #CROWD_WINDOW_HOURS} 小时记录（强时效，
- *       过时自动撤下）；</li>
+ *   <li><b>6 小时窗口</b>：聚合只取最近 {@link #CROWD_WINDOW_HOURS} 小时记录（强时效，
+ *       过时自动撤下）；<b>全部历史记录</b>（2026-08-29 用户需求）——详情页右下角
+ *       「查看全部热度」链接 → 独立历史页（{@link #history}，分页全量，过期行
+ *       expired 标记），不塞进详情页表格（120rpx 定宽列放不下长文案）；</li>
  *   <li><b>上报者可信度加权</b>（2026-08-29 用户补充需求）：聚合非简单计数——
  *       每票权重 = 1.0 + 历史上报采纳加成 + 打卡加成（社区贡献信号，复用
  *       {@link ContributionService#aggregatesFor}，不发明新信任分体系、不公开）；
@@ -56,8 +61,11 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class CrowdReportService {
 
-    /** 聚合窗口（小时）：人数是「此刻」的信号，2 小时后数据自动撤下（区别于门店报告 2 天公示期） */
-    public static final int CROWD_WINDOW_HOURS = 2;
+    /** 聚合窗口（小时）：人数是「此刻」的信号，6 小时后数据自动撤下（区别于门店报告 2 天公示期） */
+    public static final int CROWD_WINDOW_HOURS = 6;
+
+    /** 历史页单页大小上限（分页查询防深翻页） */
+    static final int HISTORY_PAGE_SIZE_LIMIT = 50;
 
     /** 单条上报标记「资深舞友」的可信度权重阈值（N==1 时升级 UNVERIFIED_VETERAN 呈现） */
     static final double VETERAN_WEIGHT = 2.0;
@@ -97,7 +105,7 @@ public class CrowdReportService {
         CrowdFemaleLevel female = CrowdFemaleLevel.of(request.femaleLevel());
         CrowdMaleLevel male = request.maleLevel() != null ? CrowdMaleLevel.of(request.maleLevel()) : null;
         // ⚠️ 时间口径：created_at/updated_at 必须传 JVM LocalDateTime.now()（北京时间），
-        // 禁 DB now()（Supabase 会话 UTC → 与 2h 窗口比较错位 → 上报恒不可见，见
+        // 禁 DB now()（Supabase 会话 UTC → 与 6h 窗口比较错位 → 上报恒不可见，见
         // VenueCrowdReportRepository.upsert 注释，2026-08-29 修复）。
         LocalDateTime now = LocalDateTime.now();
         crowdReportRepository.upsert(venueId, userId, female.getLevel(),
@@ -154,6 +162,57 @@ public class CrowdReportService {
         List<CrowdSummary.CrowdReportRow> detailRows = buildDetailRows(rows, weights, nicknames);
         return new CrowdSummary(true, femaleView, maleView, reporterCount, tier.name(),
                 tier.getText(), mainText, maleText, ageText, emptyText, mine(venueId), detailRows);
+    }
+
+    /**
+     * 全部热度历史（2026-08-29 用户需求「用户可以看到过期后的记录」，最终形态：
+     * 详情页右下角「查看全部热度」链接 → 独立历史页；公开读，无需登录）。
+     * <p>
+     * 全量分页（createdAt 倒序，不过滤窗口）；行字段全部服务端权威派生——
+     * badgeText（资深/常客/普通）、档位名/锚点、ageText（相对时间）、
+     * reportAt（绝对时间 yyyy-MM-dd HH:mm:ss）、expired（是否已出 6h 窗口，
+     * 前端仅据此派生「已过期」标签 + 置灰，不参与任何聚合）。
+     * <p>
+     * ⚠️ 与 summary 的边界：summary = 窗口内有效信号（决策用）；history =
+     * 全部记录（回顾用）。历史页不禁用入口——窗口无数据时用户仍可回看。
+     */
+    @Transactional(readOnly = true)
+    public Page<CrowdSummary.CrowdHistoryRow> history(Long venueId, int page, int size) {
+        requireVenue(venueId);
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime since = now.minusHours(CROWD_WINDOW_HOURS);
+        Page<VenueCrowdReport> result = crowdReportRepository
+                .findByVenueIdAndDeletedFalseOrderByCreatedAtDesc(venueId,
+                        PageRequest.of(page, Math.min(size, HISTORY_PAGE_SIZE_LIMIT)));
+        List<VenueCrowdReport> rows = result.getContent();
+        if (rows.isEmpty()) {
+            return new PageImpl<>(List.of(), result.getPageable(), result.getTotalElements());
+        }
+        Set<Long> userIds = rows.stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
+        Map<Long, Double> weights = trustWeights(userIds);
+        Map<Long, String> nicknames = userRepository.findByIdInAndDeletedFalse(userIds).stream()
+                .collect(Collectors.toMap(User::getId,
+                        u -> u.getNickname() != null && !u.getNickname().isBlank()
+                                ? u.getNickname() : "匿名"));
+        List<CrowdSummary.CrowdHistoryRow> content = rows.stream()
+                .map(r -> {
+                    CrowdFemaleLevel female = CrowdFemaleLevel.of(r.getFemaleLevel());
+                    CrowdMaleLevel male = r.getMaleLevel() != null
+                            ? CrowdMaleLevel.of(r.getMaleLevel()) : null;
+                    return new CrowdSummary.CrowdHistoryRow(
+                            r.getId(),
+                            r.getUserId(),
+                            badgeFor(r.getUserId(), weights),
+                            nicknames.getOrDefault(r.getUserId(), "匿名"),
+                            female.getDisplayName(), female.getAnchor(),
+                            male != null ? male.getDisplayName() : null,
+                            male != null ? male.getAnchor() : null,
+                            r.getCreatedAt(),
+                            ageTextFor(r.getCreatedAt()),
+                            r.getCreatedAt().isBefore(since));
+                })
+                .toList();
+        return new PageImpl<>(content, result.getPageable(), result.getTotalElements());
     }
 
     /** 我今天的上报（可改；未登录 / 未上报 → null） */
@@ -294,6 +353,9 @@ public class CrowdReportService {
      * **列表行不展示昵称**——badgeText 由上报者可信度权重分档（服务端权威，
      * 对齐 UNVERIFIED_VETERAN 判定）；nickname = 完整昵称（空兜底「匿名」），
      * 仅详情弹层展示（纯展示不可点击跳转，公共面不点名）。
+     * <p>
+     * 仅含 6h 窗口内有效行（2026-08-29 定版：过期记录不塞进详情页表格——120rpx
+     * 定宽时间列放不下长文案，历史数据走 {@link #history} 独立页）。
      */
     private List<CrowdSummary.CrowdReportRow> buildDetailRows(List<VenueCrowdReport> rows,
                                                               Map<Long, Double> weights,
@@ -342,7 +404,7 @@ public class CrowdReportService {
     /**
      * 列表角标批量生成（2026-08-29，VenueService.listVenues 调用）：
      * 一次 IN + GROUP BY 覆盖整页（防 N+1），返回 venueId → 中性文案「N人报过」。
-     * 门槛 = 最近 2h 窗口独立上报人数 ≥ {@link #BADGE_MIN_REPORTERS}（3）——
+     * 门槛 = 最近 6h 窗口独立上报人数 ≥ {@link #BADGE_MIN_REPORTERS}（3）——
      * 列表是公共面，<3 人不上（防误伤/防商家找两三个朋友刷「火爆」）；
      * 文案中性不带档位词（「热闹/冷清」不上列表——给门店贴正负定性有商家争议
      * 与数据误伤风险，具体档位留给详情页，同一事实只呈现一次）。

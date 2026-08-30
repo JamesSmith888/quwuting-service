@@ -9,7 +9,7 @@ package org.quwuting.quwutingservice.venuecrowd.enums;
  * 男客可视作「能放开跳」的补充氛围。可空（= 跳过未观察，聚合不计票）。
  * <p>
  * 旧值兼容：初版 1=少 / 2=正常 / 3=多 在新语义下单调映射为 1=冷清 / 2=一般 /
- * 3=不错（数据 2 小时窗口自动过期，未做数据迁移）。
+ * 3=不错（数据 6 小时窗口自动过期，未做数据迁移）。
  */
 public enum CrowdMaleLevel {
     COLD(1, "冷清", "0-20"),

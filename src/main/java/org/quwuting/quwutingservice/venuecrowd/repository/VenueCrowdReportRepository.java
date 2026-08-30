@@ -1,6 +1,8 @@
 package org.quwuting.quwutingservice.venuecrowd.repository;
 
 import org.quwuting.quwutingservice.venuecrowd.entity.VenueCrowdReport;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -21,9 +23,13 @@ import java.util.List;
  */
 public interface VenueCrowdReportRepository extends JpaRepository<VenueCrowdReport, Long> {
 
-    /** 聚合窗口扫描：最近 N 小时（CROWD_WINDOW_HOURS=2）该店全部未删上报 */
+    /** 聚合窗口扫描：最近 6h（CROWD_WINDOW_HOURS）该店全部未删上报（详情聚合数据源） */
     List<VenueCrowdReport> findByVenueIdAndCreatedAtAfterAndDeletedFalse(
             @Param("venueId") Long venueId, @Param("since") LocalDateTime since);
+
+    /** 全部热度历史（2026-08-29 历史页数据源）：该店全量未删上报，createdAt 倒序分页 */
+    Page<VenueCrowdReport> findByVenueIdAndDeletedFalseOrderByCreatedAtDesc(
+            @Param("venueId") Long venueId, Pageable pageable);
 
     /** 我今天的上报（详情页「已上报 · 可改一下」mine 态判定） */
     List<VenueCrowdReport> findByVenueIdAndUserIdAndReportDateAndDeletedFalse(
@@ -34,7 +40,7 @@ public interface VenueCrowdReportRepository extends JpaRepository<VenueCrowdRepo
      * 批量每店独立上报人数（2026-08-29 列表角标数据源）：一次 IN + 窗口过滤 +
      * GROUP BY venue_id 覆盖整页，避免逐店 COUNT 的 N+1（同
      * VenueViewRepository#countByVenueIds 批量模式）。窗口 = 最近
-     * CROWD_WINDOW_HOURS 小时（2h，与详情聚合同口径）。返回 Object[]{venueId, count}。
+     * CROWD_WINDOW_HOURS 小时（6h，与详情聚合同口径）。返回 Object[]{venueId, count}。
      */
     @Query("SELECT r.venueId, COUNT(DISTINCT r.userId) FROM VenueCrowdReport r " +
             "WHERE r.venueId IN :venueIds AND r.createdAt >= :since AND r.deleted = false " +
@@ -44,7 +50,7 @@ public interface VenueCrowdReportRepository extends JpaRepository<VenueCrowdRepo
 
     /**
      * 批量每店最新一条上报（2026-08-29 列表「最新上报」行数据源）：窗口内
-     * （CROWD_WINDOW_HOURS=2h）每店 created_at 最大的记录，一次查询覆盖整页，
+     * （CROWD_WINDOW_HOURS=6h）每店 created_at 最大的记录，一次查询覆盖整页，
      * 防 N+1（同 countDistinctUsersByVenueIdsSince 批量模式）。子查询 = 窗口内
      * 每店最大 created_at，外查询等值匹配；同一店同一时刻多条（理论罕见，
      * upsert 幂等 + timestamp 精度）由 Service 按 venueId 取首条兜底。
@@ -69,7 +75,7 @@ public interface VenueCrowdReportRepository extends JpaRepository<VenueCrowdRepo
      * LocalDateTime.now() - 2h）是北京时间，比较永远错位 → 上报恒落在窗口外、
      * 详情页恒显「暂无舞友上报」。全库其余表（@CreationTimestamp）均为 JVM 时间，
      * 本表须同口径。同日「改一下」命中 ON CONFLICT 时同时刷新 created_at（重新
-     * 上报 = 数据此刻新鲜，2h TTL 重新计时——顺带自愈修复前的 UTC 脏行）。
+     * 上报 = 数据此刻新鲜，6h TTL 重新计时——顺带自愈修复前的 UTC 脏行）。
      */
     @Modifying
     @Query(value = "INSERT INTO qwt_venue_crowd_reports " +

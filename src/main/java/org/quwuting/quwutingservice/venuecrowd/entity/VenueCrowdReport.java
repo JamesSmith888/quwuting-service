@@ -19,7 +19,9 @@ import java.time.LocalDate;
  * <p>
  * 与 {@link org.quwuting.quwutingservice.venuestatusreport.entity.VenueStatusReport}
  * 的边界：status report = 突发事件（暂停/恢复/临检，2 天公示期，管理端处置）；
- * 本表 = 常态实时信号（2 小时窗口自动过期，无管理端逐条处置）。不混用、不塞进
+ * 本表 = 常态实时信号（6 小时窗口自动过期；全部历史走独立历史接口
+ * /venues/{id}/crowd-reports/history 分页全量供回看，无管理端逐条处置）。不混用、
+ * 不塞进
  * ReportType（突发事件语义），见 docs/agents/27-venue-crowd-report.md。
  */
 @Getter
