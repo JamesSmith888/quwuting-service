@@ -1,0 +1,172 @@
+src/main/java/org/quwuting/quwutingservice/resourceaccess/enums/GrantStatus.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-6
+src/main/java/org/quwuting/quwutingservice/resourceaccess/dto/response/ManagedResourceResponse.java
+  s_1d40237ba07ca6::t_4ddb3de0abb4a1 1-19
+src/main/java/org/quwuting/quwutingservice/dancer/dto/response/DancerDetailResponse.java
+  s_1d40237ba07ca6::t_0b59cdb79db3ad 6,11,62-63
+src/test/java/org/quwuting/quwutingservice/resourceaccess/service/ResourceGrantServiceTest.java
+  s_1d40237ba07ca6::t_3d57c615896821 113-137
+  s_1d40237ba07ca6::t_530a49cf1312ba 1-101,103-112,138
+  s_1d40237ba07ca6::t_5a864a2d06ee3d 102
+src/main/java/org/quwuting/quwutingservice/resourceaccess/controller/AdminResourceGrantController.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-83
+src/test/java/org/quwuting/quwutingservice/points/service/PointsServiceTest.java
+  s_1d40237ba07ca6::t_4ddb3de0abb4a1 35,96-97,99-100,106
+src/main/java/org/quwuting/quwutingservice/venueclaim/entity/VenueClaim.java
+  s_1d40237ba07ca6::t_c582008dbc7866 19-21
+src/test/java/org/quwuting/quwutingservice/venuecrowd/CrowdReportServiceTest.java
+  s_5c68e64df5027f::t_d29265e1952909 92,97
+  s_5c68e64df5027f::t_afc199206acf80 1-91,93-96,98-112
+AGENTS.md
+  s_25c7673d5441f5::t_b093a3fbf9de45 18
+  s_1d40237ba07ca6::t_d26b91b9cf4394 49
+  s_25c7673d5441f5::t_c601f68190ff9d 48
+src/main/java/org/quwuting/quwutingservice/resourceaccess/dto/response/ResourceGrantResponse.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-29
+src/main/java/org/quwuting/quwutingservice/dancer/controller/DancerController.java
+  s_1d40237ba07ca6::t_9d7b71eba29038 11
+  s_25c7673d5441f5::t_48cc6c22656c7c 14,201-211
+  s_1d40237ba07ca6::t_0b59cdb79db3ad 130-153
+src/main/java/org/quwuting/quwutingservice/venuecrowd/dto/request/SubmitCrowdReportRequest.java
+  s_5c68e64df5027f::t_0992f7198231d4 8-9
+src/main/java/org/quwuting/quwutingservice/resourceaccess/repository/ResourceGrantRepository.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-28,33-34,39-57
+  s_1d40237ba07ca6::t_5a864a2d06ee3d 29-32,35-38
+src/main/resources/db/migration/V62__resource_access.sql
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-86
+src/main/java/org/quwuting/quwutingservice/resourceaccess/entity/ResourceGrantAudit.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-69
+src/main/java/org/quwuting/quwutingservice/venuecrowd/enums/CrowdMaleLevel.java
+  s_5c68e64df5027f::t_04601f0a7bc0e8 4-6,12-19
+src/main/java/org/quwuting/quwutingservice/resourceaccess/dto/request/RevokeResourceGrantRequest.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-8
+src/main/java/org/quwuting/quwutingservice/resourceaccess/service/ResourceGrantService.java
+  s_1d40237ba07ca6::t_0a431f3417819b 109-110,112-118,126,128-130,167-168,170,344-348
+  s_1d40237ba07ca6::t_6424ad38355d91 4
+  s_1d40237ba07ca6::t_4ddb3de0abb4a1 8,26,41,44-45,221-310,312-317,319-323
+  s_1d40237ba07ca6::t_8053bfb054b293 123-125,127,131-142,144-163,169,171
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-3,5-7,9-25,27-40,42-43,46-66,68-108,111,119-122,172-174,177-178,180-215,217-220,324-343,349-354,356-357,359-434
+  s_1d40237ba07ca6::t_5a864a2d06ee3d 175
+  s_1d40237ba07ca6::t_a6fe6150be206d 143,164-166
+src/main/java/org/quwuting/quwutingservice/resourceaccess/service/ResourceAccessService.java
+  s_1d40237ba07ca6::t_2056e99656bd3b 27,70-71,75-77,84,86,88,102
+  s_1d40237ba07ca6::t_5a864a2d06ee3d 72-74,85,89-90,92,103-104
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-26,28-69,78-83,87,91,93-101,105
+src/main/java/org/quwuting/quwutingservice/venue/service/VenueService.java
+  s_1d40237ba07ca6::t_8053bfb054b293 9-11,95,252,255,270-271,439-440,547-549,705-707
+src/main/java/org/quwuting/quwutingservice/venuecrowd/entity/VenueCrowdReport.java
+  s_5c68e64df5027f::t_b45e3b39d24e98 43,47
+src/main/java/org/quwuting/quwutingservice/dancer/dto/response/DancerDemandRecord.java
+  s_25c7673d5441f5::t_013ecc48bb75ea 10-11,15-17
+  s_25c7673d5441f5::t_e8e8b92df2f31c 1-9,12-14,18-23
+src/test/java/org/quwuting/quwutingservice/dancer/service/DancerStatsServiceTest.java
+  s_25c7673d5441f5::t_cbffff79810525 1-14,19,21-45,50-54,57-63,65-68,71-72,78-83,85-91,94-108
+  s_1d40237ba07ca6::t_4ddb3de0abb4a1 15-17,48-49,55-56,69-70,92-93
+  s_25c7673d5441f5::t_013ecc48bb75ea 18,20,46-47,73-77,84
+  s_25c7673d5441f5::t_a78a52f36107b9 64
+src/main/java/org/quwuting/quwutingservice/dancer/repository/DemandRecordRepository.java
+  s_25c7673d5441f5::t_e8e8b92df2f31c 37-66
+src/main/java/org/quwuting/quwutingservice/resourceaccess/enums/ResourcePermission.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-23
+src/main/java/org/quwuting/quwutingservice/resourceaccess/entity/ResourceGrant.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-17,19-86,88-93
+  s_1d40237ba07ca6::t_4ddb3de0abb4a1 18,87
+src/main/java/org/quwuting/quwutingservice/dancer/service/DancerService.java
+  s_1d40237ba07ca6::t_0b59cdb79db3ad 44-46,111,383,857-860,865,897-898,944,1044,1046,1048-1049,1054,1057,1059,1062-1063,1071,1080,1082-1083,1095,1577-1578,1642-1643,1716-1717,1950,1958,2108-2124,2126-2130,2132
+  s_1d40237ba07ca6::t_c582008dbc7866 1081
+  s_1d40237ba07ca6::t_9d7b71eba29038 47
+src/main/java/org/quwuting/quwutingservice/resourceaccess/enums/ResourceType.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-6
+src/main/java/org/quwuting/quwutingservice/user/repository/UserRepository.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 3,9,24-26
+src/main/java/org/quwuting/quwutingservice/venueclaim/service/VenueClaimService.java
+  s_1d40237ba07ca6::t_2056e99656bd3b 209
+  s_1d40237ba07ca6::t_8053bfb054b293 8,78,192-193,218
+src/main/resources/db/migration-mysql/V2__resource_access.sql
+  s_1d40237ba07ca6::t_2056e99656bd3b 1-92
+docs/agents/04-venue-domain.md
+  s_1d40237ba07ca6::t_5cc90fd3cfc284 88,92,99,122,131,133
+src/main/java/org/quwuting/quwutingservice/dancer/service/DancerStatsService.java
+  s_25c7673d5441f5::t_48cc6c22656c7c 10,19,22,29,31-32,89-90,153-156,159-161,163,166-174,373-381
+  s_1d40237ba07ca6::t_0b59cdb79db3ad 25-27,74-75,164-165
+  s_1d40237ba07ca6::t_8c1ad5664c0683 162
+  s_25c7673d5441f5::t_a78a52f36107b9 183-191
+  s_25c7673d5441f5::t_013ecc48bb75ea 28,30,40,42,91-92,157-158,175-182
+src/test/java/org/quwuting/quwutingservice/dancer/service/DancerServiceTest.java
+  s_1d40237ba07ca6::t_4ddb3de0abb4a1 38-40,99-100,104-105,133,135,139-140,143-146
+  s_1d40237ba07ca6::t_008ca7b72acdc3 141-142
+src/main/java/org/quwuting/quwutingservice/venue/repository/VenueRepository.java
+  s_1d40237ba07ca6::t_2056e99656bd3b 3,11,24-26
+src/main/java/org/quwuting/quwutingservice/resourceaccess/dto/request/UpsertResourceGrantRequest.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-20
+src/main/java/org/quwuting/quwutingservice/venuepost/service/VenuePostService.java
+  s_1d40237ba07ca6::t_8053bfb054b293 6-8,36,68-69
+docs/agents/30-dancer-statistics-integrity.md
+  s_25c7673d5441f5::t_c601f68190ff9d 1-23,29-32,35-36
+  s_1d40237ba07ca6::t_5cc90fd3cfc284 33
+  s_25c7673d5441f5::t_b093a3fbf9de45 24-28,34,37
+src/main/java/org/quwuting/quwutingservice/resourceaccess/enums/GrantAuditAction.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-8
+src/main/java/org/quwuting/quwutingservice/venuecrowd/enums/CrowdFemaleLevel.java
+  s_5c68e64df5027f::t_479d2764d79516 4,6,8,12-19
+src/main/java/org/quwuting/quwutingservice/resourceaccess/dto/response/ResourceGrantAuditResponse.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-22
+src/main/java/org/quwuting/quwutingservice/venuecrowd/service/CrowdReportService.java
+  s_5c68e64df5027f::t_52e119076f000a 374,385,388,396,399
+src/main/java/org/quwuting/quwutingservice/resourceaccess/repository/ResourceGrantAuditRepository.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-11
+src/test/java/org/quwuting/quwutingservice/favorite/service/FavoriteServiceTest.java
+  s_5c68e64df5027f::t_8e0f8d0310d1ab 114,123-125
+docs/agents/31-resource-access.md
+  s_1d40237ba07ca6::t_d26b91b9cf4394 1-23,25-61,65-68,71-89
+  s_1d40237ba07ca6::t_8c3ac024c539bc 24,62-64,69-70,90-91
+src/main/java/org/quwuting/quwutingservice/resourceaccess/enums/GrantSource.java
+  s_1d40237ba07ca6::t_f4b9cae5227716 1-7
+src/main/java/org/quwuting/quwutingservice/points/service/PointsService.java
+  s_1d40237ba07ca6::t_0b59cdb79db3ad 41-43,150,165,168-174,596-598
+src/test/java/org/quwuting/quwutingservice/resourceaccess/service/ResourceAccessServiceTest.java
+  s_1d40237ba07ca6::t_5a864a2d06ee3d 36,44,58,67,76,81-93
+  s_1d40237ba07ca6::t_2056e99656bd3b 71-75,77-80,94-96
+  s_1d40237ba07ca6::t_530a49cf1312ba 1-35,37-43,45-57,59-66,68-70,97-104
+src/main/java/org/quwuting/quwutingservice/user/controller/UserController.java
+  s_1d40237ba07ca6::t_4ddb3de0abb4a1 6-8,17,20-21,34,49-53
+docs/agents/09-dancer-and-points.md
+  s_1d40237ba07ca6::t_5cc90fd3cfc284 31-33,65,693
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "7979d1532ed9d600bc1449ec3ba433abdd77e682",
+  "prompts": {},
+  "humans": {
+    "h_fbb9b8e239a0dd": {
+      "author": "James Smith(杨鑫) <xin.y@trip.com>"
+    }
+  },
+  "sessions": {
+    "s_1d40237ba07ca6": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "41015790-2895-4680-b61b-7fea529fa89c",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "James Smith(杨鑫) <xin.y@trip.com>"
+    },
+    "s_25c7673d5441f5": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "ae4ace88-3749-4d2c-8d82-4b2bd464a438",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "James Smith(杨鑫) <xin.y@trip.com>"
+    },
+    "s_5c68e64df5027f": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "20dcc737-0130-4bf8-ba3b-8fa4bdaabc75",
+        "model": "gemini-3.7-flash"
+      },
+      "human_author": "James Smith(杨鑫) <xin.y@trip.com>"
+    }
+  }
+}
