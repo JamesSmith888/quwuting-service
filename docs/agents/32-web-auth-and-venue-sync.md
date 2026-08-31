@@ -53,6 +53,7 @@ admin.starseek.online ──DNS A 记录──> ECS(114.55.0.14) ──nginx─�
   CEASED/SUSPENDED），快照仍存原始 confidence（审计不失真）。管线批量/自动路径 forceReversal 恒 false
   （保守：低置信只落快照不反转）——旧管线 body 缺该字段，反序列化默认 false 兼容。
 - **apply 只提交 `confidence ∈ {EXACT, ALIAS}` 且 `venue.venue_id` 非空**的条目，组装 batch 复用 `DailyOpeningService.applyBatch`（写快照 + 高置信状态反转），返回 `BatchApplyResult`。
+- **快照定位（2026-09-01 用户确认：保留待用）**：写库 = 落快照（`qwt_venue_daily_openings`，信息源当日声称事实，幂等 upsert）+ 状态反转两件事；快照当前**零消费者**（只写不读），作为信息源证据链有意留存（未来营业稳定性/可信度分析的数据基础），**勿当无用表清理**。
 - **状态口径（2026-08-31 明确；09-01 修订为实时）**：① 条目状态 tag = 信息源宣称的当日状态（UI「资讯·xx」）；
   ② 「平台门店」对比条 = **平台实时状态**——2026-09-01 起调 `POST /admin/venue-sync/venues/status-batch`
   批量查库（`findByIdInAndDeletedFalse` 单次往返，前端加载报告详情后拉一次）展示当前状态，
