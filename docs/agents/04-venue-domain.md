@@ -85,18 +85,18 @@
 
 ### 数据模型
 
-`Venue.claimedBy`（`Long`，可空）：认领人用户 ID，引用 `qwt_users.id`，`null` 表示未被认领。认领后该用户获得门店管理权（发布动态、编辑信息等），与平台管理员共享管理入口可见性。
+`Venue.claimedBy`（`Long`，可空）是认领摘要，`null` 表示未被认领；它不再是访问控制事实源。实际管理权来自 V62 `qwt_resource_grants`，详见 `31-resource-access.md`。
 
 ### 认领申请流程（2026-08-11 新增，venueclaim 模块）
 
-认领 = 门店工作人员申请成为管理方，**平台管理员审核通过后置 `Venue.claimedBy`**——
+认领 = 门店工作人员申请成为管理方，**平台管理员审核通过后同事务写 `Venue.claimedBy` 摘要与 `source=CLAIM` 资源授权**——
 不直接开放自助认领（审核制防止冒领）：
 
 - 申请表 `qwt_venue_claims`：venue_id / user_id（必填，认领必须登录）/ 申请材料
   （real_name 必填、contact_phone 必填、contact_wechat 选填、license_urls JSON 数组
   选填、note 选填）/ status（PENDING / APPROVED / REJECTED / WITHDRAWN）/ handled_by /
   handled_at / handle_note
-- **状态机**：PENDING → APPROVED（置 claimedBy，申请人获得管理权）/ REJECTED（可再申请）；
+- **状态机**：PENDING → APPROVED（置 claimedBy 摘要并创建 grant，申请人获得管理权）/ REJECTED（可再申请）；
   PENDING → WITHDRAWN（申请人撤回）。终态固定
 - **防重复（A1：只能一人认领，先到先得）**：V12 部分唯一索引
   `(user_id, venue_id) WHERE status='PENDING'`（同 V2/V8 上报去重模式）+ 提交时应用层
@@ -119,7 +119,7 @@
 
 - `canManage` 由后端基于软鉴权上下文计算：
   1. 平台管理员（`UserRole.ADMIN`）→ 对所有门店为 `true`
-  2. 门店认领人（`claimedBy` 等于当前用户 ID）→ 对该门店为 `true`
+  2. 具有有效 `VENUE_PROFILE_EDIT` 资源授权的用户 → 对该门店为 `true`
   3. 匿名用户 / 其他用户 → 恒为 `false`
 - `claimed`（2026-08-11 新增）：门店是否已被认领（`claimedBy` 非空），全局归属事实，
   驱动前端「认领舞厅」菜单项禁用态
@@ -128,9 +128,9 @@
 
 `canManage` 仅驱动前端管理入口的**展示**，安全边界在后端各写操作接口的角色校验。
 
-### 管理写操作权限校验（requireManageOrAdmin）
+### 管理写操作权限校验
 
-所有管理写接口（场所更新、动态发布等）统一调用 `UserContext.requireManageOrAdmin(venue.getClaimedBy())`：先 `requireAuth()` 确保已登录，再判定 ADMIN 角色或 claimedBy 匹配，否则抛 1003。此方法是管理写操作的标准权限入口，新增管理接口时必须使用。
+所有管理写接口统一调用 `ResourceAccessService` 并传入明确能力：基础资料 = `VENUE_PROFILE_EDIT`、动态 = `VENUE_POST_MANAGE`、照片删除 = `VENUE_PHOTO_DELETE`。`UserContext.requireManageOrAdmin` 已退役，禁止以 claimedBy fallback，否则撤权无法生效。
 
 ### 场所更新接口
 

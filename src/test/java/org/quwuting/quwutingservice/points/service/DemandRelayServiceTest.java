@@ -10,7 +10,7 @@ import org.quwuting.quwutingservice.dancer.entity.DemandRecord;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerServiceRepository;
 import org.quwuting.quwutingservice.dancer.repository.DemandRecordRepository;
-import org.quwuting.quwutingservice.dancer.service.DancerDetailCacheService;
+import org.quwuting.quwutingservice.dancer.service.DancerUnlockCacheInvalidator;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.service.MessageService;
 import org.quwuting.quwutingservice.points.dto.AdminDemandItem;
@@ -68,7 +68,7 @@ class DemandRelayServiceTest {
     @Mock
     private MessageService messageService;
     @Mock
-    private DancerDetailCacheService dancerDetailCacheService;
+    private DancerUnlockCacheInvalidator dancerUnlockCacheInvalidator;
     @Mock
     private ContributionService contributionService;
 
@@ -78,7 +78,7 @@ class DemandRelayServiceTest {
     void setUp() {
         service = new DemandRelayService(demandRecordRepository, dancerRepository,
                 dancerServiceRepository, userRepository, unlockRepository,
-                messageService, dancerDetailCacheService, contributionService);
+                messageService, dancerUnlockCacheInvalidator, contributionService);
     }
 
     // ─── 待办红点：反馈计入 pending-count（2026-08-28 根因修复核心） ──────────
@@ -218,6 +218,153 @@ class DemandRelayServiceTest {
         service.markFeedbackHandled(77L); // 无异常即通过
         verify(demandRecordRepository).updateFeedbackHandledIf(
                 org.mockito.ArgumentMatchers.eq(77L), any(LocalDateTime.class));
+    }
+
+    // ─── 获批 = 解锁事件（2026-08-31 契约锁定：解锁统计/列表缓存的输入护栏） ───
+    //
+    // 背景（2026-08-31「邀约解锁统计图未记录」排查）：解锁记录的写路径共有四条
+    // （直连解锁 / 中转获批 / 自动发放 / 代找替代），获批即写 PointsUnlock 是
+    // 「舞伴统计 unlockStats + 排名热度 + 列表 HOT 排序」全部输入的源头契约。
+    // 本组测试锁定：任一真实写入路径都必须 ① insertIfAbsent ② afterUnlockWrite
+    // 失效舞伴域缓存矩阵；幂等跳过（记录已存在）不失效；拒绝路径永不写解锁。
+    // 此前该契约零测试覆盖，缓存失效矩阵曾发生静默漂移（中转路径漏失效列表缓存）。
+
+    @Test
+    void approve_writesUnlockAndInvalidatesDancerCaches() {
+        DemandRecord pending = record(11L, 601L, 901L, "PENDING", null, null);
+        when(demandRecordRepository.findById(11L)).thenReturn(Optional.of(pending));
+        when(dancerRepository.findByIdAndDeletedFalse(601L)).thenReturn(Optional.of(dancer(601L, true)));
+        when(demandRecordRepository.updateStatusIfPending(11L, "APPROVED")).thenReturn(1);
+        when(unlockRepository.insertIfAbsent(org.mockito.ArgumentMatchers.eq(901L),
+                org.mockito.ArgumentMatchers.eq("DANCER_CONTACT"),
+                org.mockito.ArgumentMatchers.eq(601L), any(LocalDateTime.class)))
+                .thenReturn(1);
+
+        service.approve(11L);
+
+        verify(unlockRepository).insertIfAbsent(org.mockito.ArgumentMatchers.eq(901L),
+                org.mockito.ArgumentMatchers.eq("DANCER_CONTACT"),
+                org.mockito.ArgumentMatchers.eq(601L), any(LocalDateTime.class));
+        // 失效矩阵 = 协调器单入口（详情族级联 + 列表精失效），缺一即统计/排序陈旧
+        verify(dancerUnlockCacheInvalidator).afterUnlockWrite(601L);
+    }
+
+    @Test
+    void approve_idempotentSkip_doesNotInvalidate() {
+        DemandRecord pending = record(11L, 601L, 901L, "PENDING", null, null);
+        when(demandRecordRepository.findById(11L)).thenReturn(Optional.of(pending));
+        when(dancerRepository.findByIdAndDeletedFalse(601L)).thenReturn(Optional.of(dancer(601L, true)));
+        when(demandRecordRepository.updateStatusIfPending(11L, "APPROVED")).thenReturn(1);
+        // insertIfAbsent 返回 0 = 解锁记录已存在（同 user×dancer 历史已解锁）
+        when(unlockRepository.insertIfAbsent(any(), any(), any(), any(LocalDateTime.class)))
+                .thenReturn(0);
+
+        service.approve(11L);
+
+        // 无新数据 → 不失效（对齐 PointsService 幂等分支同款边界）
+        verify(dancerUnlockCacheInvalidator, never()).afterUnlockWrite(any());
+    }
+
+    @Test
+    void approve_alreadyProcessed_throwsWithoutUnlockWrite() {
+        DemandRecord pending = record(11L, 601L, 901L, "APPROVED", null, null);
+        when(demandRecordRepository.findById(11L)).thenReturn(Optional.of(pending));
+
+        BusinessException ex = assertThrows(BusinessException.class, () -> service.approve(11L));
+        assertEquals("该邀约已处理", ex.getMessage());
+        verify(demandRecordRepository, never()).updateStatusIfPending(any(), any());
+        verify(unlockRepository, never()).insertIfAbsent(any(), any(), any(), any(LocalDateTime.class));
+    }
+
+    @Test
+    void approve_dancerOffShelf_throwsWithoutUnlockWrite() {
+        DemandRecord pending = record(11L, 601L, 901L, "PENDING", null, null);
+        when(demandRecordRepository.findById(11L)).thenReturn(Optional.of(pending));
+        when(dancerRepository.findByIdAndDeletedFalse(601L)).thenReturn(Optional.empty());
+
+        BusinessException ex = assertThrows(BusinessException.class, () -> service.approve(11L));
+        assertEquals("该舞伴已下架，无法发放", ex.getMessage());
+        verify(demandRecordRepository, never()).updateStatusIfPending(any(), any());
+        verify(unlockRepository, never()).insertIfAbsent(any(), any(), any(), any(LocalDateTime.class));
+    }
+
+    @Test
+    void reject_neverWritesUnlock() {
+        DemandRecord pending = record(11L, 601L, 901L, "PENDING", null, null);
+        when(demandRecordRepository.findById(11L)).thenReturn(Optional.of(pending));
+        when(demandRecordRepository.updateRejectIfPending(org.mockito.ArgumentMatchers.eq(11L), any()))
+                .thenReturn(1);
+
+        service.reject(11L, null);
+
+        verify(demandRecordRepository).updateRejectIfPending(org.mockito.ArgumentMatchers.eq(11L), any());
+        verify(unlockRepository, never()).insertIfAbsent(any(), any(), any(), any(LocalDateTime.class));
+        verify(dancerUnlockCacheInvalidator, never()).afterUnlockWrite(any());
+    }
+
+    @Test
+    void autoRelease_release_writesUnlockAndInvalidates() {
+        DemandRecord overdue = record(11L, 601L, 901L, "PENDING", null, null);
+        Dancer dancer = dancer(601L, true);
+        dancer.setAutoRelease(true);
+        when(demandRecordRepository.findPendingOlderThan(any(LocalDateTime.class)))
+                .thenReturn(List.of(overdue));
+        when(dancerRepository.findByIdAndDeletedFalse(601L)).thenReturn(Optional.of(dancer));
+        when(demandRecordRepository.updateStatusIfPending(11L, "AUTO_RELEASED")).thenReturn(1);
+        when(unlockRepository.insertIfAbsent(org.mockito.ArgumentMatchers.eq(901L),
+                org.mockito.ArgumentMatchers.eq("DANCER_CONTACT"),
+                org.mockito.ArgumentMatchers.eq(601L), any(LocalDateTime.class)))
+                .thenReturn(1);
+
+        int handled = service.autoRelease();
+
+        assertEquals(1, handled);
+        verify(unlockRepository).insertIfAbsent(org.mockito.ArgumentMatchers.eq(901L), any(),
+                org.mockito.ArgumentMatchers.eq(601L), any(LocalDateTime.class));
+        verify(dancerUnlockCacheInvalidator).afterUnlockWrite(601L);
+    }
+
+    @Test
+    void autoRelease_expired_noUnlockWrite() {
+        DemandRecord overdue = record(11L, 601L, 901L, "PENDING", null, null);
+        Dancer dancer = dancer(601L, true);
+        dancer.setAutoRelease(false); // 告知未回复，不发放
+        when(demandRecordRepository.findPendingOlderThan(any(LocalDateTime.class)))
+                .thenReturn(List.of(overdue));
+        when(dancerRepository.findByIdAndDeletedFalse(601L)).thenReturn(Optional.of(dancer));
+        when(demandRecordRepository.updateStatusIfPending(11L, "EXPIRED")).thenReturn(1);
+
+        int handled = service.autoRelease();
+
+        assertEquals(1, handled);
+        verify(unlockRepository, never()).insertIfAbsent(any(), any(), any(), any(LocalDateTime.class));
+        verify(dancerUnlockCacheInvalidator, never()).afterUnlockWrite(any());
+    }
+
+    @Test
+    void rescue_writesUnlockForTargetDancer() {
+        DemandRecord rejected = record(11L, 601L, 901L, "REJECTED", null, null);
+        when(demandRecordRepository.findById(11L)).thenReturn(Optional.of(rejected));
+        when(dancerRepository.findByIdAndDeletedFalse(602L)).thenReturn(Optional.of(dancer(602L, true)));
+        when(demandRecordRepository.existsByOriginDemandId(11L)).thenReturn(false);
+        when(demandRecordRepository.save(any(DemandRecord.class))).thenAnswer(inv -> {
+            DemandRecord r = inv.getArgument(0);
+            r.setId(99L);
+            return r;
+        });
+        when(unlockRepository.insertIfAbsent(org.mockito.ArgumentMatchers.eq(901L),
+                org.mockito.ArgumentMatchers.eq("DANCER_CONTACT"),
+                org.mockito.ArgumentMatchers.eq(602L), any(LocalDateTime.class)))
+                .thenReturn(1);
+
+        Long newDemandId = service.rescue(11L, 602L);
+
+        assertEquals(99L, newDemandId);
+        // 解锁记录 = 替代舞伴（而非原舞伴）——统计归属与发放对象一致
+        verify(unlockRepository).insertIfAbsent(org.mockito.ArgumentMatchers.eq(901L),
+                org.mockito.ArgumentMatchers.eq("DANCER_CONTACT"),
+                org.mockito.ArgumentMatchers.eq(602L), any(LocalDateTime.class));
+        verify(dancerUnlockCacheInvalidator).afterUnlockWrite(602L);
     }
 
     // ─── 工具 ────────────────────────────────────────────────────────────────

@@ -17,6 +17,20 @@ public interface DancerRepository extends JpaRepository<Dancer, Long> {
 
     Optional<Dancer> findByIdAndDeletedFalse(Long id);
 
+    /**
+     * 管理端资源搜索（2026-08-31：新增协作页「选择门店或舞伴」数据源）：
+     * 昵称模糊匹配（keyword 由调用方包装为 %xx%），不限状态（含 PENDING/HIDDEN 亦可选为协作目标）。
+     * 返回 Object[]{id, nickname, city, avatar_url}。
+     */
+    @Query(value = """
+            SELECT d.id, d.nickname, d.city, d.avatar_url
+            FROM qwt_dancers d
+            WHERE d.deleted = false
+              AND d.nickname LIKE :keyword
+            ORDER BY d.id DESC
+            """, nativeQuery = true)
+    List<Object[]> searchGrantTarget(@Param("keyword") String keyword, Pageable pageable);
+
     /** 批量查询（列表页/详情页一次 IN 查询覆盖整页舞伴，规避 N+1） */
     @Query("SELECT d FROM Dancer d WHERE d.id IN :ids AND d.deleted = false")
     List<Dancer> findByIds(@Param("ids") List<Long> ids);

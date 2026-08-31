@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.text.TextSanitizer;
 import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.resourceaccess.service.ResourceGrantService;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
@@ -74,6 +75,7 @@ public class VenueClaimService {
     private final VenueClaimRepository venueClaimRepository;
     private final VenueRepository venueRepository;
     private final UserRepository userRepository;
+    private final ResourceGrantService resourceGrantService;
     private final CacheManager cacheManager;
     private final tools.jackson.databind.ObjectMapper objectMapper;
     /** 详情公共部分缓存失效（2026-08-13：认领审批后 claimed 快照立即重算；无循环依赖——
@@ -187,8 +189,8 @@ public class VenueClaimService {
 
     /**
      * 审核通过（需 ADMIN）：PENDING → APPROVED，并<b>置 qwt_venues.claimed_by =
-     * 申请人 userId</b>——canManage 判定（认领人或平台管理员）自动生效，申请人
-     * 获得该店管理权（编辑信息/发布动态），无需额外授权步骤。
+    * 申请人 userId</b>，并在同一事务创建来源为 CLAIM 的资源授权；claimedBy
+    * 仅保留认领摘要，授权表是访问控制事实源。
      * <p>
      * 并发竞态（A1 先到先得）：审核时<b>再次</b>校验门店未被认领——两个管理员
      * 同时通过不同申请时，先落库者生效，后到者报错（BusinessException）。
@@ -204,7 +206,7 @@ public class VenueClaimService {
         if (claim.getStatus() != ClaimStatus.PENDING) {
             return; // 终态幂等
         }
-        Venue venue = venueRepository.findByIdAndDeletedFalse(claim.getVenueId())
+        Venue venue = venueRepository.findByIdAndDeletedFalseForUpdate(claim.getVenueId())
                 .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
         if (venue.getClaimedBy() != null) {
             // A1 并发兜底：门店已被他人认领（可能刚通过另一申请）
@@ -213,6 +215,7 @@ public class VenueClaimService {
         // 置认领人 + 更新工单状态（同事务：权限授予与状态流转原子）
         venue.setClaimedBy(claim.getUserId());
         venueRepository.save(venue);
+        resourceGrantService.grantVenueClaim(claim.getUserId(), venue.getId());
         claim.setStatus(ClaimStatus.APPROVED);
         claim.setHandledBy(adminId);
         claim.setHandledAt(LocalDateTime.now());

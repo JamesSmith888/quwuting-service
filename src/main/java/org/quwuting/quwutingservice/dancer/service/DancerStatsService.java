@@ -7,6 +7,7 @@ import org.quwuting.quwutingservice.config.DancerHeatWeights;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerHeatResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerStatsResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerDemandStat;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerDemandRecord;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTotals;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerTrendPoint;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerUnlockRecord;
@@ -15,10 +16,20 @@ import org.quwuting.quwutingservice.dancer.dto.response.DancerViewSourceTrendPoi
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.enums.DancerServiceCategory;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
+import org.quwuting.quwutingservice.dancer.enums.DemandStatus;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerStatsRepository;
+import org.quwuting.quwutingservice.dancer.repository.DemandRecordRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
+import org.quwuting.quwutingservice.resourceaccess.enums.ResourcePermission;
+import org.quwuting.quwutingservice.resourceaccess.enums.ResourceType;
+import org.quwuting.quwutingservice.resourceaccess.service.ResourceAccessService;
+import org.quwuting.quwutingservice.user.entity.User;
+import org.quwuting.quwutingservice.user.enums.UserRole;
+import org.quwuting.quwutingservice.user.repository.UserRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -26,7 +37,9 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 /**
  * 舞伴统计服务（2026-08-14 舞伴统计图第一期；2026-08-26 追加需求趋势/需求热度——
@@ -58,6 +71,8 @@ import java.util.concurrent.TimeUnit;
 @RequiredArgsConstructor
 public class DancerStatsService {
 
+    private final ResourceAccessService resourceAccessService;
+
     /** 趋势窗口天数（与门店 VenueHeatService.WINDOW_DAYS 同值：近30天 + 今日 = 31 天骨架） */
     private static final int TREND_WINDOW_DAYS = 30;
 
@@ -70,6 +85,10 @@ public class DancerStatsService {
     private final DancerStatsRepository dancerStatsRepository;
 
     private final DancerRepository dancerRepository;
+
+    private final DemandRecordRepository demandRecordRepository;
+
+    private final UserRepository userRepository;
 
     private final LoadingCache<Long, DancerStatsResponse> statsCache = Caffeine.newBuilder()
             .maximumSize(500)
@@ -129,6 +148,47 @@ public class DancerStatsService {
                         (LocalDateTime) row[3],
                         row[6] == null ? 0 : ((Number) row[6]).intValue()))
                 .toList();
+    }
+
+    /**
+     * 某服务类别的邀约明细（统计页「需求热度」下钻）。
+     *
+     * <p>聚合统计是公开信号，逐条邀约是用户行为记录，两者不能共享公开性。
+    * 只有资料创建者或平台管理员可读。响应仅包含与解锁详情同款的昵称/头像，
+    * 不包含联系方式、openId 等敏感字段。
+     */
+    public Page<DancerDemandRecord> demandRecords(Long userId, UserRole role, Long dancerId,
+                                                   String category, int page, int size) {
+        dancerRepository.findByIdAndDeletedFalse(dancerId)
+                .orElseThrow(() -> new BusinessException(1001, "舞伴不存在"));
+        if (!resourceAccessService.hasPermission(userId, role, ResourceType.DANCER, dancerId,
+            ResourcePermission.DANCER_DEMAND_RECORDS_READ)) {
+            throw new BusinessException(1003, "无管理权限");
+        }
+        DancerServiceCategory demandCategory;
+        try {
+            demandCategory = DancerServiceCategory.valueOf(category);
+        } catch (IllegalArgumentException | NullPointerException ex) {
+            throw new BusinessException(1001, "参数错误");
+        }
+        PageRequest pageable = PageRequest.of(Math.max(0, page), Math.min(Math.max(1, size), 50));
+        Page<org.quwuting.quwutingservice.dancer.entity.DemandRecord> records = demandRecordRepository
+            .findByDancerIdAndServiceCategory(dancerId, demandCategory.name(), pageable);
+        List<Long> userIds = records.getContent().stream().map(org.quwuting.quwutingservice.dancer.entity.DemandRecord::getUserId)
+            .distinct().toList();
+        Map<Long, User> usersById = userIds.isEmpty() ? Map.of()
+            : userRepository.findByIdInAndDeletedFalse(userIds).stream()
+                .collect(Collectors.toMap(User::getId, user -> user));
+        return records
+            .map(record -> {
+                User requester = usersById.get(record.getUserId());
+                return new DancerDemandRecord(
+                    record.getId(), record.getUserId(),
+                    requester != null ? requester.getNickname() : null,
+                    requester != null ? requester.getAvatarUrl() : null,
+                    record.getCreatedAt(), record.getMessage(), record.getStatus(),
+                    demandStatusText(record.getStatus()));
+            });
     }
 
     /**
@@ -307,6 +367,18 @@ public class DancerStatsService {
             return DancerServiceCategory.valueOf(category).defaultLabel();
         } catch (IllegalArgumentException e) {
             return category;
+        }
+    }
+
+    /** status 为空的非中转邀约在当时已直接获取联系方式，语义等价已发放。 */
+    private static String demandStatusText(String status) {
+        if (status == null || status.isBlank()) {
+            return "已获取联系方式";
+        }
+        try {
+            return DemandStatus.valueOf(status).statusText();
+        } catch (IllegalArgumentException ex) {
+            return "";
         }
     }
 

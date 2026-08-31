@@ -16,9 +16,9 @@ import java.time.LocalDateTime;
  * 微信号/营业执照/补充说明）与审核结果（处理人/备注/时间）。
  * <p>
  * 与 venuefeedback（信息纠错上报）语义区分：反馈是"数据有错"的异步上报；
- * 认领是"身份归属"的权限申请。认领审核通过后由 Service 层置
- * qwt_venues.claimed_by = userId——canManage 判定自动生效（认领人或平台
- * 管理员，见 {@link org.quwuting.quwutingservice.security.UserContext#requireManageOrAdmin}）。
+ * 认领是"身份归属"的权限申请。认领审核通过后由 Service 层同事务写
+ * qwt_venues.claimed_by 摘要与 source=CLAIM 的资源授权；访问控制统一由
+ * ResourceAccessService 判定。
  * <p>
  * 隐私约定（2026-08-11 决策 D1）：realName / contactPhone / contactWechat
  * 仅存本工单表（一次性身份核验材料），不写入 qwt_users——用户资料表保持最小

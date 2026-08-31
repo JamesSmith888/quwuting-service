@@ -41,6 +41,10 @@ import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.message.service.MessageService;
 import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
 import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
+import org.quwuting.quwutingservice.resourceaccess.enums.ResourcePermission;
+import org.quwuting.quwutingservice.resourceaccess.enums.ResourceType;
+import org.quwuting.quwutingservice.resourceaccess.service.ResourceAccessService;
+import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.storage.ImageContentValidator;
 import org.quwuting.quwutingservice.tagdict.dto.response.TagItemResponse;
 import org.quwuting.quwutingservice.tagdict.service.TagDictService;
@@ -104,6 +108,7 @@ public class DancerService {
     private static final String PHOTO_OWNER_GONE_NAME = "未知舞伴";
 
     private final DancerRepository dancerRepository;
+    private final ResourceAccessService resourceAccessService;
     private final DancerCityRepository dancerCityRepository;
     private final DancerVenueRepository dancerVenueRepository;
     private final DancerRecognitionRepository recognitionRepository;
@@ -375,7 +380,7 @@ public class DancerService {
     public DancerDetailResponse updateDancer(Long userId, Long dancerId, UpsertDancerRequest request,
                                              UserRole currentRole) {
         Dancer dancer = findDancerOrThrow(dancerId);
-        if (!canManage(dancer, userId, currentRole)) {
+        if (!canManage(dancer, userId, currentRole, ResourcePermission.DANCER_PROFILE_EDIT)) {
             throw new BusinessException(1003, "无编辑权限");
         }
         // 联系方式旧值（2026-08-26 晚：变更检测——联系方式有变更且非空才刷新
@@ -849,12 +854,15 @@ public class DancerService {
             throw new BusinessException(1003, "该舞伴资料暂不可见");
         }
         boolean isMine = currentUserId != null && dancer.getCreatedBy().equals(currentUserId);
-        boolean showAllPhotos = isMine || currentRole == UserRole.ADMIN;
+        Set<ResourcePermission> managementCapabilities = managementCapabilities(
+            currentUserId, currentRole, dancerId);
+        boolean showAllPhotos = managementCapabilities.contains(ResourcePermission.DANCER_MEDIA_MANAGE);
+        boolean canViewContact = managementCapabilities.contains(ResourcePermission.DANCER_PROFILE_EDIT);
         // ── 并行分支提交（2026-08-30：互不依赖，全部并行；showAllPhotos 视角
         //    联系方式恒解锁，completedFuture 直通免占线程） ──
         CompletableFuture<MyTodayState> myTodayF = async(() -> fetchMyTodayState(currentUserId, dancerId));
         CompletableFuture<Boolean> favoriteF = async(() -> fetchFavoriteState(currentUserId, dancerId));
-        CompletableFuture<Boolean> contactUnlockedF = showAllPhotos
+        CompletableFuture<Boolean> contactUnlockedF = canViewContact
                 ? CompletableFuture.completedFuture(true)
                 : async(() -> pointsService.isUnlocked(currentUserId, PointsGateTargetType.DANCER_CONTACT, dancerId));
         CompletableFuture<List<TagItemResponse>> profileTagsF = async(() ->
@@ -886,8 +894,8 @@ public class DancerService {
         // - hideContact/contactCost/contactUnlocked 照常下发（前端驱动入口文案/锁态）。
         boolean hideContact = dancer.isHideContact();
         int contactCost = pub.contactCost();
-        String contact = showAllPhotos ? dancer.getContact() : null;
-        String contactImageUrl = showAllPhotos ? dancer.getContactImageUrl() : null;
+        String contact = canViewContact ? dancer.getContact() : null;
+        String contactImageUrl = canViewContact ? dancer.getContactImageUrl() : null;
         // 舞伴是否填写了联系方式（contact 或 contactImageUrl 任一非空）——普通用户侧
         // 「联系方式」行入口的权威依据（真实值恒不下发，前端无法自判"是否可获取"）。
         // ⚠️ 必须基于 dancer 原始值计算（contact/contactImageUrl 已按视角置 null，
@@ -933,7 +941,7 @@ public class DancerService {
                 dancer.getId(), dancer.getNickname(), dancer.getAvatarUrl(), dancer.getBio(),
                 dancer.getGender(), dancer.getCity(), pub.cities(), dancer.getCurrentCity(), profileTags, dancer.getStatus(),
                 dancer.getVerificationStatus(), dancer.getVerifiedAt(),
-                isMine, myToday, myTags, favorite, pub.stats(),
+                isMine, managementCapabilities, myToday, myTags, favorite, pub.stats(),
                 pub.pointsReceivedTotal(), pub.pointsReceived30d(), pub.giftsReceived(),
                 photos,
                 pub.tags(), pub.venues(), pub.services(),
@@ -1033,22 +1041,26 @@ public class DancerService {
                 .stream().map(this::toServiceResponse).toList();
     }
 
-    /** admin 新增服务范围（POST /admin/dancers/{id}/services，平台代发黄页内容——合规见 AGENTS.md） */
+    /** 新增服务范围（平台管理员或具备 DANCER_SERVICE_MANAGE 的资料管理员）。 */
     @Transactional
-    public DancerServiceResponse addService(Long adminId, Long dancerId, UpsertDancerServiceRequest request) {
+    public DancerServiceResponse addService(Long operatorId, Long dancerId, UpsertDancerServiceRequest request) {
         Dancer dancer = findDancerOrThrow(dancerId);
+        requirePermission(operatorId, UserContext.getCurrentRole(), dancerId,
+                ResourcePermission.DANCER_SERVICE_MANAGE);
         org.quwuting.quwutingservice.dancer.entity.DancerService service =
                 new org.quwuting.quwutingservice.dancer.entity.DancerService();
         service.setDancerId(dancerId);
         applyServiceFields(service, request, dancerServiceRepository.findMaxSortOrder(dancerId) + 1);
-        return saveService(adminId, dancer, service);
+        return saveService(operatorId, dancer, service);
     }
 
-    /** admin 更新服务范围（POST /admin/dancers/{id}/services/{serviceId}；全量覆盖可编辑字段） */
+    /** 更新服务范围（平台管理员或具备 DANCER_SERVICE_MANAGE 的资料管理员）。 */
     @Transactional
-    public DancerServiceResponse updateService(Long adminId, Long dancerId, Long serviceId,
+    public DancerServiceResponse updateService(Long operatorId, Long dancerId, Long serviceId,
                                                UpsertDancerServiceRequest request) {
         Dancer dancer = findDancerOrThrow(dancerId);
+        requirePermission(operatorId, UserContext.getCurrentRole(), dancerId,
+                ResourcePermission.DANCER_SERVICE_MANAGE);
         org.quwuting.quwutingservice.dancer.entity.DancerService service =
                 dancerServiceRepository.findByIdAndDeletedFalse(serviceId)
                         .orElseThrow(() -> new BusinessException(1001, "服务不存在"));
@@ -1056,7 +1068,7 @@ public class DancerService {
             throw new BusinessException(1001, "服务不属于该舞伴");
         }
         applyServiceFields(service, request, service.getSortOrder());
-        return saveService(adminId, dancer, service);
+        return saveService(operatorId, dancer, service);
     }
 
     /**
@@ -1065,8 +1077,10 @@ public class DancerService {
      * 同舞伴同标签的服务软删后不占唯一索引位，可重建。
      */
     @Transactional
-    public void removeService(Long adminId, Long dancerId, Long serviceId) {
-        Dancer dancer = findDancerOrThrow(dancerId);
+    public void removeService(Long operatorId, Long dancerId, Long serviceId) {
+        findDancerOrThrow(dancerId);
+        requirePermission(operatorId, UserContext.getCurrentRole(), dancerId,
+                ResourcePermission.DANCER_SERVICE_MANAGE);
         org.quwuting.quwutingservice.dancer.entity.DancerService service =
                 dancerServiceRepository.findByIdAndDeletedFalse(serviceId)
                         .orElseThrow(() -> new BusinessException(1001, "服务不存在"));
@@ -1078,7 +1092,7 @@ public class DancerService {
         dancerServiceRepository.save(service);
         detailCacheService.invalidate(dancerId); // 服务范围在详情公共缓存内，写路径显式失效
         invalidateListCache(); // 服务类别筛选的列表成员资格变化（全清，条目数小可接受）
-        log.info("管理员 {} 下架舞伴 {} 的服务「{}」", adminId, dancerId, service.getLabel());
+        log.info("资料管理员 {} 下架舞伴 {} 的服务「{}」", operatorId, dancerId, service.getLabel());
     }
 
     /**
@@ -1560,8 +1574,8 @@ public class DancerService {
     public List<DancerPhotoResponse> addPhotos(Long userId, Long dancerId,
                                                List<String> urls, List<String> blurUrls, UserRole currentRole) {
         Dancer dancer = findDancerOrThrow(dancerId);
-        if (!canManage(dancer, userId, currentRole)) {
-            throw new BusinessException(1003, "仅舞伴本人或管理员可上传照片");
+        if (!canManage(dancer, userId, currentRole, ResourcePermission.DANCER_MEDIA_MANAGE)) {
+            throw new BusinessException(1003, "无相册维护权限");
         }
         if (urls == null || urls.isEmpty()) {
             throw new BusinessException(1001, "请至少选择一张照片");
@@ -1625,8 +1639,8 @@ public class DancerService {
     public List<DancerPhotoResponse> addVideos(Long userId, Long dancerId,
                                                AddDancerVideosRequest req, UserRole currentRole) {
         Dancer dancer = findDancerOrThrow(dancerId);
-        if (!canManage(dancer, userId, currentRole)) {
-            throw new BusinessException(1003, "仅舞伴本人或管理员可上传视频");
+        if (!canManage(dancer, userId, currentRole, ResourcePermission.DANCER_MEDIA_MANAGE)) {
+            throw new BusinessException(1003, "无相册维护权限");
         }
         List<String> urls = req.urls();
         if (urls == null || urls.isEmpty()) {
@@ -1699,8 +1713,8 @@ public class DancerService {
     @Transactional
     public void removePhoto(Long userId, Long dancerId, Long photoId, UserRole currentRole) {
         Dancer dancer = findDancerOrThrow(dancerId);
-        if (!canManage(dancer, userId, currentRole)) {
-            throw new BusinessException(1003, "仅舞伴本人或管理员可删除照片");
+        if (!canManage(dancer, userId, currentRole, ResourcePermission.DANCER_MEDIA_MANAGE)) {
+            throw new BusinessException(1003, "无相册维护权限");
         }
         DancerPhoto photo = photoRepository.findByIdAndDeletedFalse(photoId)
                 .orElseThrow(() -> new BusinessException(1001, "照片不存在"));
@@ -1933,7 +1947,7 @@ public class DancerService {
 
     // ─── 可见性 / 查询辅助 ──────────────────────────────────────────────────────
 
-    /** 可见性规则：NORMAL 公开；PENDING/HIDDEN 仅创建人本人 + 平台管理员（管理员角色经缓存获取） */
+    /** 可见性规则：NORMAL 公开；非公开资料仅平台管理员或具备任一舞伴维护能力者可见。 */
     private boolean canView(Dancer dancer, Long userId, UserRole role) {
         if (dancer.getStatus() == DancerStatus.NORMAL) {
             return true;
@@ -1941,7 +1955,7 @@ public class DancerService {
         if (role == UserRole.ADMIN) {
             return true;
         }
-        return userId != null && dancer.getCreatedBy().equals(userId);
+        return !managementCapabilities(userId, role, dancer.getId()).isEmpty();
     }
 
     private Dancer findDancerOrThrow(Long dancerId) {
@@ -2091,15 +2105,30 @@ public class DancerService {
         return photoRepository.findMaxSortOrder(dancerId);
     }
 
-    /**
-     * 管理权限：本人（createdBy 匹配）或平台管理员。
-     * 与 canView 的差异：编辑/照片上传/删除等写操作仅面向本人与管理员，
-     * 普通用户对舞伴唯一可写公开影响 = 认可 + 字典标签（隐私边界，见类 javadoc）。
-     */
-    private boolean canManage(Dancer dancer, Long userId, UserRole role) {
-        if (role == UserRole.ADMIN) {
-            return true;
+    private boolean canManage(Dancer dancer, Long userId, UserRole role,
+                              ResourcePermission permission) {
+        return resourceAccessService.hasPermission(userId, role, ResourceType.DANCER,
+                dancer.getId(), permission);
+    }
+
+    private void requirePermission(Long userId, UserRole role, Long dancerId,
+                                   ResourcePermission permission) {
+        if (!resourceAccessService.hasPermission(userId, role, ResourceType.DANCER, dancerId, permission)) {
+            throw new BusinessException(1003, "无该资料的维护权限");
         }
-        return userId != null && dancer.getCreatedBy().equals(userId);
+    }
+
+    private Set<ResourcePermission> managementCapabilities(Long userId, UserRole role, Long dancerId) {
+        if (userId == null) {
+            return Set.of();
+        }
+        if (role == UserRole.ADMIN) {
+            EnumSet<ResourcePermission> all = EnumSet.noneOf(ResourcePermission.class);
+            Arrays.stream(ResourcePermission.values())
+                    .filter(permission -> permission.supports(ResourceType.DANCER))
+                    .forEach(all::add);
+            return Set.copyOf(all);
+        }
+        return resourceAccessService.capabilitiesFor(userId, ResourceType.DANCER, dancerId);
     }
 }

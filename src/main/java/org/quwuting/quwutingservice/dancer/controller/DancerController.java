@@ -8,8 +8,10 @@ import org.quwuting.quwutingservice.dancer.dto.request.AddDancerVideosRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.RecognizeDancerRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.RecordDancerViewRequest;
 import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerRequest;
+import org.quwuting.quwutingservice.dancer.dto.request.UpsertDancerServiceRequest;
 import org.quwuting.quwutingservice.dancer.dto.response.AdViewResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerDetailResponse;
+import org.quwuting.quwutingservice.dancer.dto.response.DancerDemandRecord;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerPhotoResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerServiceResponse;
 import org.quwuting.quwutingservice.dancer.dto.response.DancerStatsResponse;
@@ -125,6 +127,30 @@ public class DancerController {
                 id, UserContext.getCurrentUserId(), UserContext.getCurrentRole()));
     }
 
+    @PostMapping("/{id}/services")
+    public ApiResponse<DancerServiceResponse> addService(
+            @PathVariable Long id,
+            @Valid @RequestBody UpsertDancerServiceRequest request) {
+        Long userId = UserContext.requireAuth();
+        return ApiResponse.ok(dancerService.addService(userId, id, request));
+    }
+
+    @PostMapping("/{id}/services/{serviceId}")
+    public ApiResponse<DancerServiceResponse> updateService(
+            @PathVariable Long id,
+            @PathVariable Long serviceId,
+            @Valid @RequestBody UpsertDancerServiceRequest request) {
+        Long userId = UserContext.requireAuth();
+        return ApiResponse.ok(dancerService.updateService(userId, id, serviceId, request));
+    }
+
+    @PostMapping("/{id}/services/{serviceId}/remove")
+    public ApiResponse<Void> removeService(@PathVariable Long id, @PathVariable Long serviceId) {
+        Long userId = UserContext.requireAuth();
+        dancerService.removeService(userId, id, serviceId);
+        return ApiResponse.ok(null);
+    }
+
     /** 舞伴标签聚合（公开软鉴权；2026-08-19 扩展：响应含 myTags——当前用户今日
      *  投票，舞伴认可明细页行活跃态数据源，见 DancerTagsResponse） */
     @GetMapping("/{id}/tags")
@@ -170,6 +196,19 @@ public class DancerController {
     public ApiResponse<List<DancerUnlockRecord>> unlocks(@PathVariable Long id,
                                                          @RequestParam String targetType) {
         return ApiResponse.ok(dancerStatsService.unlocks(id, targetType));
+    }
+
+    /**
+     * 需求热度明细（资料创建者或管理员；聚合统计公开，逐条邀约保持受保护）。
+     * 仅返回去标识化邀约内容与状态，提出者身份不出端。
+     */
+    @GetMapping("/{id}/demand-records")
+    public ApiResponse<Page<DancerDemandRecord>> demandRecords(@PathVariable Long id,
+                                                               @RequestParam String category,
+                                                               @RequestParam(defaultValue = "0") int page,
+                                                               @RequestParam(defaultValue = "20") int size) {
+        return ApiResponse.ok(dancerStatsService.demandRecords(UserContext.requireAuth(),
+                UserContext.getCurrentRole(), id, category, page, size));
     }
 
     /**

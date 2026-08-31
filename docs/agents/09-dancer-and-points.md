@@ -28,8 +28,9 @@
 舞伴标签字典**全部为正向信号**。
 
 **来源分层（2026-08-10 修订，根因：早期"一刀切禁止照片"的约束未区分上传者身份）**：
-普通用户对舞伴唯一可写公开影响 = 认可 + 字典标签（禁传照片/禁编辑）；舞伴本人（createdBy 匹配）
-与管理员可编辑资料、上传相册照片（照片逐张 PENDING 审核后公开，见「相册与照片审核」）。
+普通用户对舞伴唯一可写公开影响 = 认可 + 字典标签（禁传照片/禁编辑）；平台管理员或具备该舞伴
+明确资源能力的“平台资料管理员”可维护资料/媒体/服务/门槛。`createdBy` 仅保留创建来源语义，
+不再作为权限事实源，详见 `31-resource-access.md`。
 
 ### 数据模型（8 张表，全部继承 BaseEntity；2026-08-07 起 Flyway 迁移 + validate，禁 ddl-auto 演进）
 
@@ -61,7 +62,7 @@
   （兑现驳回通知"可修改资料后重新提交"的产品承诺，2026-08-10 补齐）。
 - **HOME 关系 = 完整替换语义**：homeVenueId null = 清除全部 HOME；传新值软删旧 HOME 并幂等建新 HOME
   （编辑是"常驻舞厅变更"而非"追加"，防多次编辑累积多个"常去"）。
-- **权限判定**：`DancerService.canManage()`（本人或 ADMIN），编辑/传照/删照均先过此校验。
+- **权限判定**：`ResourceAccessService` 按 `DANCER_PROFILE_EDIT`、`DANCER_MEDIA_MANAGE` 等具体能力校验；ADMIN 全局放行，禁止 createdBy fallback。
 
 ### 相册与照片审核（2026-08-10 新增）
 
@@ -689,7 +690,7 @@ Mockito 单测覆盖：创建（PENDING 默认/NORMAL 后台/空白昵称/常驻
 - **接口**：
   - `POST /points/gates` body `{targetType, targetId, cost}`：cost&gt;0 设置/更新
     （≤ `app.points.gate.max-cost`，PointsProperties 配置化禁硬编码）；cost=0 清除
-    （软删）。权限 = 目标属主（舞伴本人 createdBy）或管理员（与 dancer canManage 语义一致）。
+    （软删）。权限 = `DANCER_GATE_MANAGE`（必须与资料或媒体能力同授）或平台管理员。
   - `POST /points/unlock` body `{targetType, targetId}`：登录解锁；校验链 = 门槛存在
     （cost&gt;0 未软删）→ 目标可见（照片 PUBLIC + 舞伴 NORMAL / 联系方式 → 舞伴 NORMAL）
     → 幂等（已解锁直接返回内容）→ 余额（原子条件扣减 deductBalance，1011）→

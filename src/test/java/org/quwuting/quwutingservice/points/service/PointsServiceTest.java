@@ -32,6 +32,7 @@ import org.quwuting.quwutingservice.points.repository.PointsGateRepository;
 import org.quwuting.quwutingservice.points.repository.PointsAccountRepository;
 import org.quwuting.quwutingservice.points.repository.PointsTransactionRepository;
 import org.quwuting.quwutingservice.points.repository.PointsUnlockRepository;
+import org.quwuting.quwutingservice.resourceaccess.service.ResourceAccessService;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
@@ -92,16 +93,20 @@ class PointsServiceTest {
     @Mock
     private DancerListCacheService dancerListCacheService;
     @Mock
+    private org.quwuting.quwutingservice.dancer.service.DancerUnlockCacheInvalidator dancerUnlockCacheInvalidator;
+    @Mock
     private OpsConfigService opsConfigService;
+        @Mock
+        private ResourceAccessService resourceAccessService;
 
     private PointsService pointsService;
     @BeforeEach
     void setUp() {
         pointsService = new PointsService(accountRepository, transactionRepository, checkinRepository,
-                gateRepository, unlockRepository, venueLookupService, dancerRepository,
+                gateRepository, unlockRepository, resourceAccessService, venueLookupService, dancerRepository,
                 dancerPhotoRepository, dancerServiceRepository, demandRecordRepository,
                 pointsProperties, venueHeatService, dancerDetailCacheService,
-                dancerListCacheService, opsConfigService);
+                dancerListCacheService, dancerUnlockCacheInvalidator, opsConfigService);
         // 各测试按需 stub（Mockito strict stubs：不使用的 stubbing 会在测试级报多余）
     }
 
@@ -372,6 +377,9 @@ class PointsServiceTest {
             assertEquals(null, resp.demandMessage());
             verify(unlockRepository).save(any());
             verify(demandRecordRepository, never()).save(any());
+            // 真实写入 → 必须触发舞伴域缓存失效矩阵（解锁统计 + HOT 排序的输入护栏，
+            // 与 DemandRelayServiceTest 获批写路径契约成对——2026-08-31 根因收敛）
+            verify(dancerUnlockCacheInvalidator).afterUnlockWrite(9L);
         }
     }
 }

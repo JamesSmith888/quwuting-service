@@ -38,6 +38,9 @@ import org.quwuting.quwutingservice.points.repository.PointsAccountRepository;
 import org.quwuting.quwutingservice.points.repository.PointsGateRepository;
 import org.quwuting.quwutingservice.points.repository.PointsTransactionRepository;
 import org.quwuting.quwutingservice.points.repository.PointsUnlockRepository;
+import org.quwuting.quwutingservice.resourceaccess.enums.ResourcePermission;
+import org.quwuting.quwutingservice.resourceaccess.enums.ResourceType;
+import org.quwuting.quwutingservice.resourceaccess.service.ResourceAccessService;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.entity.Venue;
@@ -46,8 +49,6 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -146,6 +147,7 @@ public class PointsService {
     private final DailyCheckinRepository checkinRepository;
     private final PointsGateRepository gateRepository;
     private final PointsUnlockRepository unlockRepository;
+    private final ResourceAccessService resourceAccessService;
     private final VenueLookupService venueLookupService;
     private final DancerRepository dancerRepository;
     private final DancerPhotoRepository dancerPhotoRepository;
@@ -160,9 +162,16 @@ public class PointsService {
      *  单一失效入口，见 DancerDetailCacheService javadoc） */
     private final org.quwuting.quwutingservice.dancer.service.DancerDetailCacheService dancerDetailCacheService;
     /** 舞伴列表缓存失效入口（2026-08-29 排序 v2：解锁改变 HOT 排序主导信号
-     *  「近7天联系解锁数」——真实解锁写入后与详情缓存同点全清列表缓存，
+     *  「近7天联系解锁数」——真实解锁写入后与详情缓存同点精失效列表条目，
      *  见 DancerListCacheService 失效矩阵与 PointsService#invalidateDancerStatsAfterCommit） */
     private final org.quwuting.quwutingservice.dancer.service.DancerListCacheService dancerListCacheService;
+
+    /**
+     * 解锁写路径缓存失效协调器（2026-08-31 根因收敛）：解锁记录真实写入后的舞伴域
+     * 缓存失效矩阵唯一入口（详情族级联 + 列表精失效 + afterCommit 语义），本服务与
+     * DemandRelayService 共用——矩阵内容改一处全局生效，见其类注释。
+     */
+    private final org.quwuting.quwutingservice.dancer.service.DancerUnlockCacheInvalidator dancerUnlockCacheInvalidator;
     /** 运营配置（2026-08-26 联系方式「每日首免」开关，热更新即时生效） */
     private final OpsConfigService opsConfigService;
 
@@ -584,8 +593,9 @@ public class PointsService {
             throw new BusinessException(1001, "门槛积分最高 " + pointsProperties.gate().maxCost());
         }
         Dancer dancer = resolveGateOwner(targetType, targetId); // 目标不存在/无门槛资格 → 1001
-        if (currentRole != UserRole.ADMIN && !dancer.getCreatedBy().equals(userId)) {
-            throw new BusinessException(1003, "仅舞伴本人或管理员可设置积分门槛");
+        if (!resourceAccessService.hasPermission(userId, currentRole, ResourceType.DANCER,
+                dancer.getId(), ResourcePermission.DANCER_GATE_MANAGE)) {
+            throw new BusinessException(1003, "无积分门槛维护权限");
         }
         PointsGate gate = gateRepository.findByTargetTypeAndTargetId(targetType, targetId).orElse(null);
         if (cost == 0) {
@@ -682,7 +692,7 @@ public class PointsService {
             return new UnlockResponse(true, currentBalance(userId), targetType, targetId,
                     target.content(), target.contactImageUrl(),
                     demandDetail != null ? demandDetail.demandMessage() : null, false, demandDetail,
-                    recorded != null ? recorded.id() : null, null, null);
+                    recorded != null ? recorded.id() : null, null, null, null);
         }
         // 同一用户并发解锁串行化（防「双请求同时通过幂等检查 → 双双扣费」；
         // 锁必须在幂等检查之前获取，见 repository javadoc）
@@ -697,7 +707,9 @@ public class PointsService {
         // ① 已获批（存在 APPROVED/AUTO_RELEASED 邀约）→ 幂等直返（重新生成本次
         //    需求描述落库，不重复扣费——同通用幂等分支行为）；
         // ② 已存在 PENDING 邀约 → 返回等待态不新建（防重复骚扰舞伴）；
-        // ③ 无 → 落库 PENDING 返回等待态。
+        // ③ 已存在 REJECTED/EXPIRED 终态 → 返回最近一条终态不新建（2026-08-31，
+        //    被拒/超时后再次提交诚实告知「未通过」，防误导 + 防重复骚扰）；
+        // ④ 无 → 落库 PENDING 返回等待态。
         // demand 为 null（view 直达防御路径）且未获批 → 同样返回 PENDING 语义
         // （demandId=null），绝不下发未获批的联系方式。中转模式不扣积分、不写
         // 解锁记录——获批时由 DemandRelayService 写（避免「花了积分没拿到微信」
@@ -711,10 +723,28 @@ public class PointsService {
                 String demandMessage = demandDetail != null ? demandDetail.demandMessage() : null;
                 return new UnlockResponse(true, currentBalance(userId), targetType, targetId,
                         target.content(), target.contactImageUrl(), demandMessage, false, demandDetail,
-                        recorded != null ? recorded.id() : null, null, null);
+                        recorded != null ? recorded.id() : null, null, null, null);
             }
             DemandRecord pending = demandRecordRepository
                     .findPendingByUserIdAndDancerId(userId, targetId).orElse(null);
+            // ④ 被拒终态（2026-08-31，docs/agents/22 状态机补全）：存在 REJECTED
+            //    邀约 → 返回最近一条终态（unlocked=false + statusText 权威友好文案），
+            //    <b>不新建 PENDING</b>——被拒后客人再次提交，必须诚实告知「上次邀约
+            //    未通过」而非静默再次发起（否则前端显示「邀约成功/已送达」= 误导
+            //    文案；且重复骚扰已明确拒绝的舞伴）。被拒后的产品出路 = 24 号文档
+            //    「换乘站」（demand-detail 知因 + 请求平台代找），不在 unlock 路径
+            //    继续流转。
+            //    <b>EXPIRED（24h 未回复超时）不拦截</b>——statusText「可稍后再试」
+            //    语义 = 允许客人重新发起（舞伴可能只是没看到），落入下方新建 PENDING。
+            DemandRecord rejected = demandRecordRepository
+                    .findRejectedByUserIdAndDancerId(userId, targetId).orElse(null);
+            if (rejected != null
+                    && DemandStatus.parseOrNull(rejected.getStatus()) == DemandStatus.REJECTED) {
+                return new UnlockResponse(false, currentBalance(userId), targetType, targetId,
+                        null, null, null, false, null, rejected.getId(),
+                        rejected.getStatus(), null,
+                        DemandStatus.REJECTED.statusText());
+            }
             DemandRecorded recorded = pending == null
                     ? recordDemand(userId, targetId, demand, DemandStatus.PENDING.name()) : null;
             Long demandId = pending != null ? pending.getId()
@@ -724,7 +754,7 @@ public class PointsService {
                     : (recorded != null && recorded.createdAt() != null
                             ? recorded.createdAt().plusHours(RELAY_TIMEOUT_HOURS) : null);
             return new UnlockResponse(false, currentBalance(userId), targetType, targetId,
-                    null, null, null, false, null, demandId, DemandStatus.PENDING.name(), expireAt);
+                    null, null, null, false, null, demandId, DemandStatus.PENDING.name(), expireAt, null);
         }
         // 幂等：已解锁 → 直接返回内容（不重复扣费；串行化后此处判定确定可靠）。
         // 已解锁舞伴重新选需求（新意图/新时间）→ 重新生成需求描述并落库，不扣费。
@@ -736,7 +766,7 @@ public class PointsService {
             String demandMessage = demandDetail != null ? demandDetail.demandMessage() : null;
             return new UnlockResponse(true, currentBalance(userId), targetType, targetId,
                     target.content(), target.contactImageUrl(), demandMessage, false, demandDetail,
-                    recorded != null ? recorded.id() : null, null, null);
+                    recorded != null ? recorded.id() : null, null, null, null);
         }
         // 费用计算：无门槛恒免费；有门槛联系方式每日首免（受运营开关
         // dancer.contact.daily.free 控制，V49 默认 false = 下线——暂不提供首免，
@@ -791,7 +821,7 @@ public class PointsService {
         String demandMessage = demandDetail != null ? demandDetail.demandMessage() : null;
         return new UnlockResponse(true, newBalance, targetType, targetId,
                 target.content(), target.contactImageUrl(), demandMessage, freeToday, demandDetail,
-                null, null, null);
+                null, null, null, null);
     }
 
     /**
@@ -1294,21 +1324,19 @@ public class PointsService {
     /**
      * 解锁写路径 → 舞伴缓存失效（2026-08-21 解锁入统计失效矩阵；2026-08-29 排序 v2
      * 追加列表缓存——联系解锁数是 HOT 排序主导信号）。
-     * <ul>
-     *   <li>{@link DancerDetailCacheService#invalidate}：级联失效内层 DancerStatsService
-     *       （unlockStats 输入 + 统计页「排名热度」卡输入），单一失效入口见其 javadoc；</li>
-     *   <li>{@link DancerListCacheService#invalidateByDancerId}：排序信号输入变化 →
-     *       <b>精失效</b>该舞伴所在列表条目（2026-08-30 精失效改造——联系解锁数是 HOT
-     *       排序主导信号、写频率高，旧 {@code invalidateAll()} 全清会打穿列表缓存
-     *       命中率，与认可/收藏同失效矩阵，见 DancerListCacheService javadoc）。</li>
-     * </ul>
+     * <p>
+     * 2026-08-31 根因收敛：失效矩阵本体（详情族级联 + 列表精失效 + afterCommit
+     * 语义）收敛到 {@link DancerUnlockCacheInvalidator#afterUnlockWrite}——解锁
+     * 记录有直连/中转获批/自动发放/代找替代多条写路径，矩阵手抄多份曾发生静默
+     * 漂移（中转路径漏失效列表缓存），本方法只保留「目标 → 舞伴 ID」定位职责，
+     * 失效细节一概委托协调器（矩阵唯一事实源，见其类注释）。
+     * <p>
      * 目标定位：
      * <ul>
      *   <li>DANCER_CONTACT：target_id = 舞伴 ID 直连；</li>
-     *   <li>DANCER_PHOTO：target_id = 照片 ID，回查 dancer_id；</li>
+     *   <li>DANCER_PHOTO / DANCER_VIDEO：target_id = 媒体 ID，回查 dancer_id；</li>
      * </ul>
-     * 照片已软删/不存在时跳过（无舞伴可失效）。事务提交后执行（afterCommit），
-     * 单元测试无事务时直接内联失效（对齐 DancerService 同款兜底）。
+     * 媒体已软删/不存在时跳过（无舞伴可失效）。
      */
     private void invalidateDancerStatsAfterCommit(PointsGateTargetType targetType, Long targetId) {
         Long dancerId;
@@ -1318,22 +1346,7 @@ public class PointsService {
             DancerPhoto photo = dancerPhotoRepository.findByIdAndDeletedFalse(targetId).orElse(null);
             dancerId = photo != null ? photo.getDancerId() : null;
         }
-        if (dancerId == null) {
-            return;
-        }
-        Long targetDancerId = dancerId;
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    dancerDetailCacheService.invalidate(targetDancerId);
-                    dancerListCacheService.invalidateByDancerId(targetDancerId);
-                }
-            });
-        } else {
-            dancerDetailCacheService.invalidate(targetDancerId);
-            dancerListCacheService.invalidateByDancerId(targetDancerId);
-        }
+        dancerUnlockCacheInvalidator.afterUnlockWrite(dancerId);
     }
 
     /**

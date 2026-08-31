@@ -3,10 +3,12 @@ package org.quwuting.quwutingservice.dancer.dto.response;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import org.quwuting.quwutingservice.dancer.enums.DancerStatus;
 import org.quwuting.quwutingservice.dancer.enums.DancerVerificationStatus;
+import org.quwuting.quwutingservice.resourceaccess.enums.ResourcePermission;
 import org.quwuting.quwutingservice.tagdict.dto.response.TagItemResponse;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 舞伴详情页数据源。
@@ -57,6 +59,8 @@ public record DancerDetailResponse(
         /** 最近一次授予认证的时间（仅 VERIFIED 时有值，前端可展示"已于 X 核验"） */
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime verifiedAt,
         boolean isMine,
+        /** 当前用户对本舞伴资料拥有的管理能力；匿名/未授权为空集合。 */
+        Set<ResourcePermission> managementCapabilities,
         boolean myRecognizedToday,
         /**
          * 今日认可携带的标签（2026-08-15 单票模型：至多 1 个；旧多标签历史数据可能 >1；

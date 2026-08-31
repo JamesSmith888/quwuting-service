@@ -34,6 +34,36 @@ public interface DemandRecordRepository extends JpaRepository<DemandRecord, Long
     @Query("SELECT d FROM DemandRecord d WHERE d.userId = :userId ORDER BY d.id DESC")
     Page<DemandRecord> findByUserIdOrderByIdDesc(@Param("userId") Long userId, Pageable pageable);
 
+        /**
+         * 舞伴资料管理者查看某服务类别的邀约记录（2026-08-31 需求热度下钻）。
+         * service_ids 是历史兼容逗号串，需通过 JSON_TABLE 关联服务类别，JPQL 无法表达。
+         */
+        @Query(value = """
+                        SELECT d.*
+                        FROM qwt_demand_records d
+                        JOIN JSON_TABLE(
+                                CONCAT('["', REPLACE(d.service_ids, ',', '","'), '"]'),
+                                '$[*]' COLUMNS (sid BIGINT PATH '$')
+                        ) jt
+                        JOIN qwt_dancer_services s ON s.id = jt.sid
+                        WHERE d.dancer_id = :dancerId AND s.category = :category
+                        ORDER BY d.created_at DESC, d.id DESC
+                        """,
+                        countQuery = """
+                                        SELECT COUNT(*)
+                                        FROM qwt_demand_records d
+                                        JOIN JSON_TABLE(
+                                                CONCAT('["', REPLACE(d.service_ids, ',', '","'), '"]'),
+                                                '$[*]' COLUMNS (sid BIGINT PATH '$')
+                                        ) jt
+                                        JOIN qwt_dancer_services s ON s.id = jt.sid
+                                        WHERE d.dancer_id = :dancerId AND s.category = :category
+                                        """,
+                        nativeQuery = true)
+        Page<DemandRecord> findByDancerIdAndServiceCategory(@Param("dancerId") Long dancerId,
+                                                                                                                 @Param("category") String category,
+                                                                                                                 Pageable pageable);
+
     /**
      * 单用户需求单明细（2026-08-28 管理端用户详情下钻，docs/agents/23）：id 倒序——
      * 「需求单 N 条」/按状态分布统计点击查看每条明细的数据源。status 可空 = 全部；
@@ -61,6 +91,20 @@ public interface DemandRecordRepository extends JpaRepository<DemandRecord, Long
     @Query("SELECT d FROM DemandRecord d WHERE d.userId = :userId AND d.dancerId = :dancerId " +
             "AND d.status IN ('APPROVED', 'AUTO_RELEASED') ORDER BY d.id DESC")
     Optional<DemandRecord> findApprovedByUserIdAndDancerId(@Param("userId") Long userId,
+                                                           @Param("dancerId") Long dancerId);
+
+    /**
+     * 客人最近一条被拒/超时邀约（REJECTED/EXPIRED；2026-08-31，被拒/超时终态闭环）：
+     * 中转舞伴被拒（REJECTED）或 24h 未回复超时（EXPIRED）后，客人再次提交邀约
+     * （unlock）时判断依据——<b>REJECTED 返回该终态而非静默新建 PENDING</b>
+     * （防重复骚扰已明确拒绝的舞伴 + 诚实告知「上次邀约未通过」，杜绝「被拒后
+     * 前端仍显示邀约成功」的误导；EXPIRED 由调用方放行新建 PENDING——「稍后再试」
+     * 语义，舞伴可能只是没看到）；倒序取最近一条（与 findPendingByUserIdAndDancerId
+     * 同构，调用方按 status 精确分流）。
+     */
+    @Query("SELECT d FROM DemandRecord d WHERE d.userId = :userId AND d.dancerId = :dancerId " +
+            "AND d.status IN ('REJECTED', 'EXPIRED') ORDER BY d.id DESC")
+    Optional<DemandRecord> findRejectedByUserIdAndDancerId(@Param("userId") Long userId,
                                                            @Param("dancerId") Long dancerId);
 
     /** 管理端待办（指定舞伴集合内 PENDING 分页倒序，新邀约在前；走 pending 索引） */

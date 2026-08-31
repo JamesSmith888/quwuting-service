@@ -5,8 +5,8 @@ package org.quwuting.quwutingservice.venuecrowd.dto.request;
  * <p>
  * 快捷按钮枚举载荷（零自由文本——个人主体 UGC 文本审核红线第四次同构解）：
  * <ul>
- *   <li>{@code femaleLevel}（必填，1-4）：在店舞伴（女）数量档位（主信号）；</li>
- *   <li>{@code maleLevel}（选填，1-4）：男客数量档位（次信号，锚点同女），null = 跳过。</li>
+ *   <li>{@code femaleLevel}（必填，1-8）：在店舞伴（女）数量档位（主信号）；</li>
+ *   <li>{@code maleLevel}（选填，1-8）：男客数量档位（次信号，档位同女），null = 跳过。</li>
  * </ul>
  * 枚举值由服务端 {@code CrowdFemaleLevel.of / CrowdMaleLevel.of} 校验，越界拒绝。
  */

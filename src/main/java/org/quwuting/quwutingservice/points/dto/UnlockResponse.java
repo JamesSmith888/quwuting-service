@@ -31,6 +31,13 @@ import org.quwuting.quwutingservice.points.enums.PointsGateTargetType;
  *       「等待回复」态）；=APPROVED/AUTO_RELEASED 表示已获批、联系方式照常下发
  *       （幂等直返）；{@code expireAt} = 24h 降级截止时间（PENDING 时下发，
  *       前端倒计时）。未开启中转舞伴恒 null，行为与旧版完全一致。</li>
+ *   <li>{@code statusText}（2026-08-31 新增，被拒/超时终态闭环）：仅
+ *       {@code demandStatus}=REJECTED/EXPIRED 时下发——被拒/超时后客人再次提交
+ *       邀约（unlock 幂等路径）返回<b>最近一条终态邀约</b>而非静默新建 PENDING
+ *       （防再次骚扰舞伴 + 诚实告知被拒，不再显示「邀约成功」误导文案）；
+ *       内容 = {@code DemandStatus.statusText()} 服务端权威客人友好文案
+ *       （「TA 暂时不方便接收邀约，你可以看看其他舞伴」），前端零拼接。
+ *       其余状态恒 null。</li>
  * </ul>
  */
 public record UnlockResponse(
@@ -45,7 +52,8 @@ public record UnlockResponse(
         DemandDetail demandDetail,
         Long demandId,
         String demandStatus,
-        java.time.LocalDateTime expireAt
+        java.time.LocalDateTime expireAt,
+        String statusText
 ) {
 
     /**

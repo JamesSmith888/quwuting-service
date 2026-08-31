@@ -24,8 +24,6 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -88,10 +86,17 @@ public class DemandRelayService {
     private final PointsUnlockRepository unlockRepository;
     /** 站内信（2026-08-26：邀约状态变化通知客人的站内通道，同事务写入） */
     private final MessageService messageService;
-    /** 舞伴详情缓存失效入口（2026-08-26：获批真实写入解锁记录后经 afterCommit 失效
-     *  舞伴统计缓存——解锁改变 dancer-stats 输入（unlockStats 累计人次/人数），对齐
-     *  PointsService 解锁写路径同款边界；幂等跳过（记录已存在）不需失效） */
-    private final org.quwuting.quwutingservice.dancer.service.DancerDetailCacheService dancerDetailCacheService;
+    /**
+     * 解锁写路径缓存失效协调器（2026-08-31 根因收敛，<b>替代旧「仅详情缓存失效」
+     * 手抄样板</b>）：获批/自动发放/代找替代真实写入解锁记录后经
+     * {@code afterUnlockWrite} 失效舞伴域缓存矩阵（详情族级联 + <b>列表精失效</b>
+     * ——HOT 排序主导信号 = 近7天联系解锁数）。历史根因：本类旧实现只失效详情
+     * 族，与 {@code PointsService#invalidateDancerStatsAfterCommit}（详情 + 列表）
+     * 不对称——「多写路径 × 失效矩阵」手抄漂移，收敛为协调器单入口后无法再漏
+     * （矩阵唯一事实源见 {@code DancerUnlockCacheInvalidator} 类注释）。
+     * 幂等跳过（记录已存在）不需失效，不调用。
+     */
+    private final org.quwuting.quwutingservice.dancer.service.DancerUnlockCacheInvalidator dancerUnlockCacheInvalidator;
     /** 贡献档案（2026-08-27，docs/agents/24：转发话术信任信号——客人贡献等级称号
      *  批量聚合防 N+1，与工作台列表同页面批量取用） */
     private final ContributionService contributionService;
@@ -496,20 +501,11 @@ public class DemandRelayService {
         }
         log.info("邀约 {} 写解锁记录：user={} dancer={}（免费发放）",
                 record.getId(), record.getUserId(), record.getDancerId());
-        // 解锁改变舞伴统计输入（unlockStats 累计人次/人数）：真实写入后经事务
-        // afterCommit 失效舞伴统计缓存（对齐 PointsService#unlock 同款边界兜底——
-        // 提交后失效保证并发读者回源必读到已提交数据；幂等跳过分支无新数据不需失效）
-        Long dancerId = record.getDancerId();
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    dancerDetailCacheService.invalidate(dancerId);
-                }
-            });
-        } else {
-            dancerDetailCacheService.invalidate(dancerId);
-        }
+        // 解锁改变舞伴统计与列表排序输入（unlockStats 累计人次/人数 + HOT 排序主导
+        // 信号「近7天联系解锁数」）：真实写入后经事务 afterCommit 失效舞伴域缓存矩阵
+        // （对齐 PointsService#invalidateDancerStatsAfterCommit 同款边界——提交后失效
+        // 保证并发读者回源必读到已提交数据；幂等跳过分支无新数据，上方已 return）
+        dancerUnlockCacheInvalidator.afterUnlockWrite(record.getDancerId());
     }
 
     /**

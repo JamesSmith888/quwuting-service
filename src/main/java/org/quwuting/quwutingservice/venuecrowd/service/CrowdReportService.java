@@ -31,7 +31,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -372,7 +371,7 @@ public class CrowdReportService {
                 female.getAnchor(), w.count(), w.share());
     }
 
-    /** 次信号视图（男客 1-4，锚点同女——冷清 0-20 / 一般 约50 / 不错 约100 / 火爆 300+） */
+    /** 次信号视图（男客 1-8，细粒度档位同女） */
     private CrowdSummary.CrowdLevelView maleLevelView(Winner w) {
         CrowdMaleLevel male = CrowdMaleLevel.of(w.level());
         return new CrowdSummary.CrowdLevelView(male.getLevel(), male.getDisplayName(),
@@ -383,10 +382,10 @@ public class CrowdReportService {
     private record Winner(int level, double share, int count) {
     }
 
-    /** 主信号展示文案：「舞伴 不错（约100）· 3 位舞友 · 1 小时前」 */
+    /** 主信号展示文案：「舞伴 约100 · 3 位舞友 · 1 小时前」 */
     private String buildMainText(CrowdSummary.CrowdLevelView female, int reporterCount,
                                  String ageText, CrowdTier tier) {
-        String core = "舞伴 " + female.levelName() + "（" + female.levelHint() + "）· "
+        String core = "舞伴 " + female.levelName() + " · "
                 + reporterCount + " 位舞友 · " + ageText;
         if (tier == CrowdTier.CONFLICT) {
             return core + " · 请以现场为准";
@@ -394,10 +393,10 @@ public class CrowdReportService {
         return core;
     }
 
-    /** 次信号展示文案：「男客 一般（约50）· 2 人」（2026-08-29 用户改判：男客同女 4 档 + 锚点） */
+    /** 次信号展示文案：「男客 约50 · 2 人」 */
     private String buildMaleText(CrowdSummary.CrowdLevelView male) {
         CrowdMaleLevel maleLevel = CrowdMaleLevel.of(male.level());
-        return "男客 " + maleLevel.getDisplayName() + "（" + maleLevel.getAnchor() + "）· " + male.count() + " 人";
+        return "男客 " + maleLevel.getDisplayName() + " · " + male.count() + " 人";
     }
 
     /** 相对时间（「刚刚 / N 分钟前 / N 小时前」）——服务端权威，前端零拼接 */

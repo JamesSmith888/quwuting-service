@@ -89,6 +89,15 @@
 
 **事务兜底约定**：内联失效（写事务内）+ `afterCommit`/`afterCompletion` 兜底（防并发读者缓存旧值 / 事务回滚污染缓存）；同一写路径内列表+详情双失效时，列表侧兜底由精失效方法统一注册，详情侧单独注册，避免重复注册。
 
+**2026-08-31 解锁写路径矩阵收敛**：解锁记录写路径共四条（直连 `PointsService#unlock` /
+邀约获批 / 24h 自动发放 / 代找替代，后三条在 `DemandRelayService`），「解锁写入 → 失效
+详情族（级联统计）+ 列表精失效」的 afterCommit 样板曾散落两处手抄并发生漂移（中转路径
+漏失效列表缓存，HOT 排序在 60s refresh 兜底前读到旧分）。现收敛为单入口
+`DancerUnlockCacheInvalidator#afterUnlockWrite(dancerId)`（矩阵唯一事实源：详情族级联
+`DancerDetailCacheService.invalidate` + 列表精失效 `DancerListCacheService.invalidateByDancerId`，
+事务内注册 afterCommit、无事务立即失效；幂等跳过不调用）。四条写路径统一走协调器，
+新增写路径只调用一个方法，矩阵内容改一处全局生效——防同类漂移的长期方案。
+
 ### 用户级缓存（DancerFavoritesCacheService，对「个人态永不缓存」的语义细化）
 
 `listFavorites` 接入 `favoritesCacheService.get(userId, this::assembleFavorites)`：Caffeine `Cache<Long, List<DancerSummaryResponse>>`，**键 = userId**，30s TTL + 500 容量，Caffeine 单飞防击穿；loader 由 DancerService 注入（组装逻辑单一权威在 `DancerService#buildSummaries`）。

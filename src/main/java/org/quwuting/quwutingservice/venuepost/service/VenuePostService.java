@@ -3,6 +3,9 @@ package org.quwuting.quwutingservice.venuepost.service;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.resourceaccess.enums.ResourcePermission;
+import org.quwuting.quwutingservice.resourceaccess.enums.ResourceType;
+import org.quwuting.quwutingservice.resourceaccess.service.ResourceAccessService;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.entity.Venue;
@@ -30,6 +33,7 @@ public class VenuePostService {
     private final VenuePostRepository venuePostRepository;
     private final VenueRepository venueRepository;
     private final VenueHeatService venueHeatService;
+    private final ResourceAccessService resourceAccessService;
 
     /**
      * 分页查询场所动态（公开接口，按发布时间倒序）。
@@ -61,7 +65,8 @@ public class VenuePostService {
     public VenuePostResponse createPost(Long venueId, CreatePostRequest req) {
         Venue venue = venueRepository.findByIdAndDeletedFalse(venueId)
                 .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
-        UserContext.requireManageOrAdmin(venue.getClaimedBy());
+        resourceAccessService.requireCurrentUser(ResourceType.VENUE, venueId,
+            ResourcePermission.VENUE_POST_MANAGE);
 
         boolean isAdmin = UserContext.getCurrentRole() == UserRole.ADMIN;
         PostPublisherType publisherType = isAdmin ? PostPublisherType.ADMIN : PostPublisherType.OWNER;

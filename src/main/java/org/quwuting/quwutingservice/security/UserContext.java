@@ -44,27 +44,9 @@ public final class UserContext {
     public static Long requireAdmin() {
         Long userId = requireAuth();
         if (getCurrentRole() != UserRole.ADMIN) {
-            throw new BusinessException(1003, "仅管理员可执行此操作");
+            throw new BusinessException(1003, "该操作仅限平台账号");
         }
         return userId;
-    }
-
-    /**
-     * 要求门店管理权限：平台管理员或门店认领人。
-     * 用于场所更新、动态发布等管理写操作——安全边界在后端，前端 canManage 仅驱动 UI 展示。
-     *
-     * @param claimedBy 门店认领人用户 ID（Venue.claimedBy），null 表示未被认领
-     * @return 当前用户 ID
-     */
-    public static Long requireManageOrAdmin(Long claimedBy) {
-        Long userId = requireAuth();
-        if (getCurrentRole() == UserRole.ADMIN) {
-            return userId;
-        }
-        if (claimedBy != null && claimedBy.equals(userId)) {
-            return userId;
-        }
-        throw new BusinessException(1003, "无管理权限");
     }
 
     public static void clear() {

@@ -35,6 +35,9 @@ import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.message.service.MessageService;
 import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
+import org.quwuting.quwutingservice.resourceaccess.enums.ResourcePermission;
+import org.quwuting.quwutingservice.resourceaccess.enums.ResourceType;
+import org.quwuting.quwutingservice.resourceaccess.service.ResourceAccessService;
 import org.quwuting.quwutingservice.tagdict.service.TagDictService;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
@@ -93,9 +96,13 @@ class DancerServiceTest {
     @Mock
     private DancerListCacheService listCacheService;
     @Mock
+    private org.quwuting.quwutingservice.dancer.service.DancerFavoritesCacheService favoritesCacheService;
+    @Mock
     private OpsConfigService opsConfigService;
     @Mock
     private TagDictService tagDictService;
+        @Mock
+        private ResourceAccessService resourceAccessService;
 
     private DancerService dancerService;
 
@@ -123,11 +130,20 @@ class DancerServiceTest {
 
     @BeforeEach
     void setUp() {
-        dancerService = new DancerService(dancerRepository, dancerCityRepository, dancerVenueRepository, recognitionRepository,
+        dancerService = new DancerService(dancerRepository, resourceAccessService, dancerCityRepository, dancerVenueRepository, recognitionRepository,
                 recognitionTagRepository, photoRepository, adViewRepository, dancerServiceRepository, verificationLogRepository,
-                dancerFavoriteRepository, detailCacheService, listCacheService, venueLookupService,
+                dancerFavoriteRepository, detailCacheService, listCacheService, favoritesCacheService, venueLookupService,
                 messageService, pointsService, imageValidator, new org.quwuting.quwutingservice.config.DancerAdProperties(""),
                 opsConfigService, tagDictService);
+
+        lenient().when(resourceAccessService.hasPermission(eq(1L), eq(UserRole.USER), eq(ResourceType.DANCER), eq(1L),
+                any(ResourcePermission.class))).thenReturn(true);
+        lenient().when(resourceAccessService.hasPermission(anyLong(), eq(UserRole.ADMIN), eq(ResourceType.DANCER),
+                anyLong(), any(ResourcePermission.class))).thenReturn(true);
+        lenient().when(resourceAccessService.capabilitiesFor(1L, ResourceType.DANCER, 1L))
+                .thenReturn(java.util.EnumSet.of(ResourcePermission.DANCER_PROFILE_EDIT,
+                        ResourcePermission.DANCER_MEDIA_MANAGE, ResourcePermission.DANCER_SERVICE_MANAGE,
+                        ResourcePermission.DANCER_GATE_MANAGE, ResourcePermission.DANCER_DEMAND_RECORDS_READ));
 
         dancer = new Dancer();
         dancer.setId(1L);

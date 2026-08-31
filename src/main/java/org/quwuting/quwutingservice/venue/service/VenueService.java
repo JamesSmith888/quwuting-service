@@ -1,18 +1,19 @@
 package org.quwuting.quwutingservice.venue.service;
 
-import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.text.TextSanitizer;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.resourceaccess.enums.ResourcePermission;
+import org.quwuting.quwutingservice.resourceaccess.enums.ResourceType;
+import org.quwuting.quwutingservice.resourceaccess.service.ResourceAccessService;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.venuereaction.ReactionCode;
 import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
-import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.venue.config.VenueDefaultsConfig;import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
 import org.quwuting.quwutingservice.venue.dto.request.CreateVenueRequest;
@@ -91,6 +92,7 @@ public class VenueService {
     private static final List<String> POSITIVE_REACTION_CODES = ReactionCode.positiveCodeNames();
 
     private final VenueRepository venueRepository;
+    private final ResourceAccessService resourceAccessService;
     private final VenuePostRepository venuePostRepository;
     private final VenueStatusLogRepository venueStatusLogRepository;
     /** 浏览记录（列表/详情响应组装累计浏览量 viewCount 用，2026-08-12 新增） */
@@ -247,10 +249,10 @@ public class VenueService {
     }
 
     /**
-     * 更新场所信息（管理员或门店认领人）。
+     * 更新场所信息（平台管理员或获授权的资料管理员）。
      * <p>
      * 全量覆盖可编辑字段（与 CreateVenueRequest 同结构），claimedBy 不在此接口变更。
-     * 权限校验：{@link UserContext#requireManageOrAdmin(Long)}——ADMIN 或 claimedBy 匹配。
+    * 权限校验统一读取资源授权；claimedBy 仅保留认领摘要语义。
      * <p>
      * 2026-08-20 门店照片域：<b>忽略 req.photos()</b>——照片改由独立接口逐张管理
      * （POST /venues/{id}/photos 上传、/photos/{photoId}/remove 删除），编辑表单不再
@@ -265,7 +267,8 @@ public class VenueService {
     public VenueResponse updateVenue(Long id, CreateVenueRequest req) {
         Venue venue = venueRepository.findByIdAndDeletedFalse(id)
                 .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
-        UserContext.requireManageOrAdmin(venue.getClaimedBy());
+        resourceAccessService.requireCurrentUser(ResourceType.VENUE, id,
+            ResourcePermission.VENUE_PROFILE_EDIT);
         validateTickets(req.tickets());
         // 2026-08-24 修复「只改位置也报 1005 图片地址不合法」：图片未变更不重校验。
         // 存量 URL（历史 picsum 占位图 / 高德图床直写主图）不在 ImageContentValidator
@@ -433,7 +436,8 @@ public class VenueService {
         if (!photo.getVenueId().equals(venueId)) {
             throw new BusinessException(1001, "照片不属于该门店");
         }
-        boolean canManage = computeCanManage(venueLookupService.findById(venueId));
+        boolean canManage = resourceAccessService.canCurrentUser(ResourceType.VENUE, venueId,
+            ResourcePermission.VENUE_PHOTO_DELETE);
         boolean isOwnerOfNonPublic = photo.getCreatedBy().equals(userId)
                 && photo.getStatus() != VenuePhotoStatus.PUBLIC;
         if (!canManage && !isOwnerOfNonPublic) {
@@ -540,7 +544,9 @@ public class VenueService {
      * PENDING/REJECTED——普通用户看不到他人的待审/驳回照片。按 sortOrder 升序。
      */
     public List<VenuePhotoResponse> fetchVenuePhotos(Long venueId, Long userId) {
-        boolean canManage = computeCanManage(venueLookupService.findById(venueId));
+        venueLookupService.findById(venueId);
+        boolean canManage = resourceAccessService.canCurrentUser(ResourceType.VENUE, venueId,
+            ResourcePermission.VENUE_PHOTO_DELETE);
         return venuePhotoRepository.findByVenueIdAndDeletedFalseOrderBySortOrderAscIdAsc(venueId).stream()
                 .filter(p -> p.getStatus() == VenuePhotoStatus.PUBLIC
                         || canManage
@@ -696,7 +702,9 @@ public class VenueService {
         // MySQL 迁移（2026-08-30）：EXISTS 投影为 0/1 整数（PG 为 boolean），按 Long 判等
         boolean hasMyStatusReport = detailStats.getHasmyreport() != null && detailStats.getHasmyreport() == 1L;
         // canManage：venue 实体（缓存命中）内存计算，零查询
-        boolean canManage = computeCanManage(venueLookupService.findById(id));
+        venueLookupService.findById(id);
+        boolean canManage = resourceAccessService.canCurrentUser(ResourceType.VENUE, id,
+            ResourcePermission.VENUE_PROFILE_EDIT);
         // 认领申请状态（2026-08-11）：未登录恒 null，登录才查（驱动「认领舞厅」
         // 菜单项禁用/审核中态，见 VenueDetailResponse javadoc）
         ClaimStatus myClaimStatus = null;
@@ -958,23 +966,6 @@ public class VenueService {
 
     private static String blankToNull(String value) {
         return StringUtils.hasText(value) ? value.trim() : null;
-    }
-
-    /**
-     * 管理权判定规则：
-     * 1. 平台管理员 → 对所有门店有管理权；
-     * 2. 门店认领人（claimedBy）→ 对认领门店有管理权；
-     * 3. 匿名 / 其他用户 → 无管理权。
-     */
-    private boolean computeCanManage(Venue venue) {
-        Long userId = UserContext.getCurrentUserId();
-        if (userId == null) {
-            return false;
-        }
-        if (UserContext.getCurrentRole() == UserRole.ADMIN) {
-            return true;
-        }
-        return userId.equals(venue.getClaimedBy());
     }
 
     /** 序列化字符串列表为 JSON 数组字符串（tags / photos 共用），空列表存 null */

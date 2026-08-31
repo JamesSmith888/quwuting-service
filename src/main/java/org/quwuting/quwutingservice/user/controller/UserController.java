@@ -3,6 +3,9 @@ package org.quwuting.quwutingservice.user.controller;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
+import org.quwuting.quwutingservice.resourceaccess.dto.response.ManagedResourceResponse;
+import org.quwuting.quwutingservice.resourceaccess.enums.ResourceType;
+import org.quwuting.quwutingservice.resourceaccess.service.ResourceGrantService;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.user.dto.request.UpdateProfileRequest;
 import org.quwuting.quwutingservice.user.dto.response.UserInfoResponse;
@@ -11,7 +14,10 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /**
  * 用户接口（均需登录）。
@@ -25,6 +31,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class UserController {
 
     private final UserService userService;
+    private final ResourceGrantService resourceGrantService;
 
     /**
      * 获取当前登录用户的最新信息。
@@ -37,6 +44,13 @@ public class UserController {
     public ApiResponse<UserInfoResponse> getCurrentUser() {
         Long userId = UserContext.requireAuth();
         return ApiResponse.ok(userService.getUserInfo(userId));
+    }
+
+    @GetMapping("/me/managed-resources")
+    public ApiResponse<List<ManagedResourceResponse>> managedResources(
+            @RequestParam(required = false) ResourceType resourceType) {
+        Long userId = UserContext.requireAuth();
+        return ApiResponse.ok(resourceGrantService.managedResources(userId, resourceType));
     }
 
     /**

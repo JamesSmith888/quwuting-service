@@ -1,5 +1,6 @@
 package org.quwuting.quwutingservice.venue.repository;
 
+import jakarta.persistence.LockModeType;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.config.VenueHeatWeights;
@@ -7,6 +8,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -19,9 +21,27 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
 
     Optional<Venue> findByIdAndDeletedFalse(Long id);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT v FROM Venue v WHERE v.id = :id AND v.deleted = false")
+    Optional<Venue> findByIdAndDeletedFalseForUpdate(@Param("id") Long id);
+
     /**
      * 批量按 ID 查询场所（消除 N+1：收藏列表等场景需一次性加载多个场所） */
     List<Venue> findByIdInAndDeletedFalse(List<Long> ids);
+
+    /**
+     * 管理端资源搜索（2026-08-31：新增协作页「选择门店或舞伴」数据源）：
+     * 名称/地址模糊匹配（keyword 由调用方包装为 %xx%），不限状态（含 HIDDEN 亦可选为协作目标，
+     * 与被授权者可见性无关）。返回 Object[]{id, name, city, district, image_url}。
+     */
+    @Query(value = """
+            SELECT v.id, v.name, v.city, v.district, v.image_url
+            FROM qwt_venues v
+            WHERE v.deleted = false
+              AND (v.name LIKE :keyword OR v.address LIKE :keyword)
+            ORDER BY v.id DESC
+            """, nativeQuery = true)
+    List<Object[]> searchGrantTarget(@Param("keyword") String keyword, Pageable pageable);
 
     /**
      * 缺坐标场所（2026-08-11 批量补齐坐标用）：deleted=false 且 latitude/longitude
