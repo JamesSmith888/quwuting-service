@@ -19,6 +19,9 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
     Optional<User> findByOpenIdAndDeletedFalse(String openId);
 
+    /** Web 管理后台密码登录用：取平台管理员账号（2026-08-31） */
+    Optional<User> findFirstByRoleAndDeletedFalse(UserRole role);
+
     Optional<User> findByIdAndDeletedFalse(Long id);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)

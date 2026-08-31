@@ -3,6 +3,8 @@ package org.quwuting.quwutingservice.auth.service;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
@@ -99,4 +101,108 @@ public class WechatService {
             Integer errcode,
             String errmsg
     ) {}
+
+    // ── Web 管理后台扫码登录（2026-08-31） ─────────────────────────────────
+
+    private static final String GET_ACCESS_TOKEN_URL =
+            "https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={appid}&secret={secret}";
+    private static final String GET_UNLIMITED_QRCODE_URL =
+            "https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token={token}";
+
+    /** access_token 缓存（微信有效期 7200s，提前 300s 刷新） */
+    private volatile String accessToken;
+    private volatile long accessTokenExpiresAt;
+
+    /**
+     * 获取微信 access_token（内存缓存，7200s 过期提前 300s 刷新）。
+     * 用于小程序码生成等需稳定服务端凭据的接口。
+     */
+    public String getAccessToken() {
+        if (accessToken != null && System.currentTimeMillis() < accessTokenExpiresAt - 300_000L) {
+            return accessToken;
+        }
+        synchronized (this) {
+            if (accessToken != null && System.currentTimeMillis() < accessTokenExpiresAt - 300_000L) {
+                return accessToken;
+            }
+            String body = restClient.get()
+                    .uri(GET_ACCESS_TOKEN_URL, appid, secret)
+                    .retrieve()
+                    .body(String.class);
+            if (body == null || body.isBlank()) {
+                throw new BusinessException(5001, "微信接口无响应");
+            }
+            AccessTokenResponse resp;
+            try {
+                resp = objectMapper.readValue(body, AccessTokenResponse.class);
+            } catch (Exception e) {
+                log.error("WeChat getAccessToken response parse failed, body={}", body, e);
+                throw new BusinessException(5001, "微信接口响应格式异常");
+            }
+            if (resp.errcode() != null && resp.errcode() != 0) {
+                log.warn("WeChat getAccessToken failed: errcode={}, errmsg={}", resp.errcode(), resp.errmsg());
+                throw new BusinessException(5001, "获取微信凭据失败: " + resp.errmsg());
+            }
+            accessToken = resp.access_token();
+            accessTokenExpiresAt = System.currentTimeMillis() + resp.expires_in() * 1000L;
+            return accessToken;
+        }
+    }
+
+    /**
+     * 生成小程序码（getwxacodeunlimit）——Web 管理后台扫码登录用。
+     * 成功返回 PNG 图片字节；失败抛业务异常。page 不校验已发布（check_path=false），
+     * env_version 由调用方按环境传入（release/trial/develop）。
+     *
+     * @param scene       ≤32 字符的会话标识（本平台为 "wa_" + 会话 ID）
+     * @param page        小程序页面路径（需在 app.json 注册）
+     * @param envVersion  release / trial / develop
+     */
+    public byte[] getUnlimitedQrCode(String scene, String page, String envVersion) {
+        String token = getAccessToken();
+        String reqBody;
+        try {
+            reqBody = objectMapper.writeValueAsString(java.util.Map.of(
+                    "scene", scene,
+                    "page", page,
+                    "check_path", false,
+                    "env_version", envVersion
+            ));
+        } catch (Exception e) {
+            log.error("小程序码参数序列化失败", e);
+            throw new BusinessException(5001, "小程序码参数序列化失败");
+        }
+        ResponseEntity<byte[]> resp = restClient.post()
+                .uri(GET_UNLIMITED_QRCODE_URL, token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(reqBody)
+                .retrieve()
+                .toEntity(byte[].class);
+
+        byte[] bodyBytes = resp.getBody();
+        if (bodyBytes == null || bodyBytes.length == 0) {
+            throw new BusinessException(5001, "微信接口无响应");
+        }
+        // 成功返回 image/* 二进制；失败返回 JSON（Content-Type: application/json）
+        MediaType ct = resp.getHeaders().getContentType();
+        boolean isJson = ct != null && ct.includes(MediaType.APPLICATION_JSON);
+        if (isJson || bodyBytes[0] == '{') {
+            try {
+                QrCodeError err = objectMapper.readValue(bodyBytes, QrCodeError.class);
+                log.warn("WeChat getwxacodeunlimit failed: errcode={}, errmsg={}", err.errcode(), err.errmsg());
+                throw new BusinessException(5001, "生成小程序码失败: " + err.errmsg());
+            } catch (BusinessException be) {
+                throw be;
+            } catch (Exception e) {
+                throw new BusinessException(5001, "小程序码接口响应异常");
+            }
+        }
+        return bodyBytes;
+    }
+
+    /** 微信 access_token 响应体 */
+    private record AccessTokenResponse(String access_token, Integer expires_in, Integer errcode, String errmsg) {}
+
+    /** getwxacodeunlimit 错误响应体（成功时是二进制图片，无 JSON） */
+    private record QrCodeError(Integer errcode, String errmsg) {}
 }

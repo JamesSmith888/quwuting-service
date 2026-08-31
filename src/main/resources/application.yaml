@@ -68,6 +68,16 @@ jwt:
   secret: ${JWT_SECRET}
   expiry-days: 7
 
+# Web 管理后台登录（2026-08-31，quwuting-admin-web）：
+# - 扫码登录为主通道（小程序码，复用小程序 + 用户体系）
+# - 账号密码为兜底通道（密码走环境变量，空 = 禁用密码登录）
+# - qrcode-env：release（正式版）/ trial（体验版）/ develop（开发版）
+web-auth:
+  username: admin
+  password: ${WEB_ADMIN_PASSWORD:}
+  qrcode-env: release
+  qrcode-page: pages/admin-web-login/admin-web-login
+
 # 门店系统默认标签（2026-08-20 停用：原「交谊舞/舞厅」对全部门店自动注入被判定无用，
 # 配置置空 = 所有门店不再自动带任何默认标签；机制保留，未来如需恢复直接在此补充即可）
 venue:
