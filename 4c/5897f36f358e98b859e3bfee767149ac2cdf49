@@ -1,0 +1,14 @@
+quwuting.code-workspace
+  h_fbb9b8e239a0dd 8-13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "4c5897f36f358e98b859e3bfee767149ac2cdf49",
+  "prompts": {},
+  "humans": {
+    "h_fbb9b8e239a0dd": {
+      "author": "James Smith(杨鑫) <xin.y@trip.com>"
+    }
+  }
+}
