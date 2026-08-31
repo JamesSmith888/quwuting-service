@@ -9,15 +9,22 @@
 
 ```
 src/main/resources/
-  application.yaml          ← 公共配置（不含敏感信息，所有 profile 共享）
-  application-dev.yaml      ← 本地开发（不提交 git，已加入 .gitignore）
-  application-prod.yaml     ← 生产（已提交，敏感值全部通过环境变量注入）
+  application.yaml          ← 公共配置（不含敏感信息，所有 profile 共享；敏感键为无空默认占位哨兵）
+  application-dev.yaml      ← 本地开发（不提交 git，已加入 .gitignore，含本地敏感值）
+  application-mysql.yaml    ← 本地 MySQL 迁移验证（不提交 git，含本地敏感值）
+  application-prod.yaml     ← 生产（已提交；敏感键为 ${VAR} 无空默认占位，由外部配置覆盖）
+${APP_DIR}/config/
+  application-prod.yaml     ← 生产敏感值（服务器本地维护，gitignored；Spring Boot 外部化配置，
+                              优先级高于 classpath 同名文件；模板 deploy/config-prod.example.yaml）
 ```
 
 - 基础 `application.yaml` 的 `ddl-auto` 为 `validate`（2026-08-07 起 Flyway 迁移 + validate 校验策略，dev/prod 一致）——schema 变更由 `db/migration/V{n}` 脚本版本化执行，Hibernate 启动时只校验实体与表结构一致；规则见「Schema 演进与数据库完整性」章节
-- 禁止在任何 yaml 文件中硬编码数据库密码、密钥等敏感信息
-- 本地开发使用 `application-dev.yaml`，该文件已列入 `.gitignore`
+- 禁止在任何 yaml 文件中硬编码数据库密码、密钥等敏感信息；**敏感值一律放 gitignored yml**：
+  本地 = classpath `application-dev.yaml` / `application-mysql.yaml`；生产 = 服务器
+  `${APP_DIR}/config/application-prod.yaml`（**2026-08-31 起弃用环境变量注入**，
+  systemd unit 不再挂 EnvironmentFile，deploy.sh 检查外部配置存在）。
 - 环境变量占位符禁止带空默认值（`${SECRET}` 而非 `${SECRET:}`），确保遗漏配置时启动即失败
+  ——外部 config 未覆盖、环境变量未注入时，占位解析失败即启动报错（哨兵）。
 
 ### 生产部署
 
@@ -28,7 +35,9 @@ src/main/resources/
 - **禁止在生产环境使用 `mvn spring-boot:run`**。该命令会同时运行 Maven JVM + fork 应用 JVM，双倍内存开销且无进程守护。生产唯一启动方式为 systemd 管理的 `java -jar`。
 - **JVM 必须配置内存上限**。由 `deploy/deploy.sh` 在 ExecStart 中硬编码 `-Xmx` / `-XX:MaxMetaspaceSize` / `-XX:+ExitOnOutOfMemoryError`，禁止使用无约束的默认值。
 - **必须通过 systemd 管理进程**（自动重启、资源硬限制、日志归集）。systemd unit 由 `deploy/deploy.sh` 自动探测 JAVA_HOME 后内联生成（避免硬编码 `/usr/bin/java` 导致 status=203/EXEC）。
-- **业务配置直接写在服务器上的 `application-dev.yaml`**，不依赖外部环境变量文件（简化部署流程，该文件不进 git）。
+- **生产敏感值放外部 config yml，不用环境变量**（2026-08-31 起）：服务器维护
+  `${APP_DIR}/config/application-prod.yaml`（gitignored，Spring Boot 外部化加载，
+  优先级高于 classpath），模板 `deploy/config-prod.example.yaml`；systemd 不注入敏感变量。
 
 **部署流程（一键脚本）**：
 
@@ -37,8 +46,9 @@ src/main/resources/
 # 1. 确保仓库已 clone 到 /root/quwuting-service
 git clone https://github.com/JamesSmith888/quwuting-service.git /root/quwuting-service
 
-# 2. 确保 src/main/resources/application-dev.yaml 中有真实的业务配置（DB/JWT/Supabase）
-#    该文件已在服务器上，不进 git
+# 2. 创建外部敏感配置（不进 git）：复制模板并填真实值（DB/微信/JWT/Supabase）
+cp deploy/config-prod.example.yaml /root/quwuting-service/config/application-prod.yaml
+vi /root/quwuting-service/config/application-prod.yaml
 
 # 3. 一键部署（打包 + 创建用户 + 写 systemd unit + 启动）
 sudo bash deploy/deploy.sh
@@ -48,7 +58,7 @@ git pull
 sudo bash deploy/deploy.sh --no-user --no-unit   # 仅重新打包+重启
 ```
 
-脚本支持 `--no-user`（跳过用户创建）、`--no-unit`（跳过 unit 重写）、`--no-package`（跳过 Maven 打包）。默认使用 `dev` profile（可通过 `SPRING_PROFILE` 环境变量覆盖）。
+脚本支持 `--no-user`（跳过用户创建）、`--no-unit`（跳过 unit 重写）、`--no-package`（跳过 Maven 打包）。默认使用 `prod` profile（2026-08-30 起，MySQL 生产；可通过 `SPRING_PROFILE` 环境变量覆盖）。
 
 **deploy.sh 关键机制说明**：
 
@@ -104,7 +114,7 @@ Supabase 事务池化（6543）抖动（用户确认：Supabase 当前不稳定�
 | 连接池 | 基础配置 `application.yaml` 统一声明 hikari 块：`keepalive-time: 60000` + `validation-timeout: 3000` + 5/2/5min/15min/10s/leak30s | 每 60s 对空闲连接执行 `isValid` 探活（PG JDBC 42.7.11 的 isValid 是真实往返，已验证），死连接**借出前即被剔除**，socket 不被池化器/NAT 空闲回收 |
 | 异常响应 | `DataAccessResourceFailureException` → **HTTP 503 + code 5003**「服务暂时不可用，请稍后重试」；兜底 Exception → **HTTP 500**（不再 200） | 服务器错误语义正确；前端 5xx 重试可触发 |
 | 前端请求层 | 幂等 GET 遇到 HTTP 5xx 自动重试 1 次（300ms，与网络层失败同预算） | 数据库抖动瞬时故障**用户无感自愈**；POST 等非幂等不重试 |
-| 部署（待办） | 生产切换到 prod profile（需先给 systemd 注入 DB_URL/DB_USERNAME/DB_PASSWORD 等环境变量） | 消除"生产跑 dev 配置"隐患（show-sql 开启、密钥在 jar 内、logging 收敛未生效） |
+| 部署 | 生产已切 prod profile + RDS MySQL（2026-08-30 完成）；敏感值放服务器 `config/application-prod.yaml`（2026-08-31 起，外部化配置） | 消除"生产跑 dev 配置"隐患（show-sql 开启、密钥在 jar 内、logging 收敛未生效） |
 
 ### 强制约定
 
@@ -112,7 +122,7 @@ Supabase 事务池化（6543）抖动（用户确认：Supabase 当前不稳定�
 - 任何指向 6543 池化器的 JDBC URL（含 `${DB_URL}` 的值）必须含 `prepareThreshold=0&connectTimeout=5&socketTimeout=8&tcpKeepAlive=true`。
 - 兜底异常必须返回 5xx（HTTP 语义），禁止再以 200 伪装服务器错误。
 - 前端请求层：5xx 重试仅限幂等 GET；POST/PUT 等禁止。
-- 生产仍以 dev profile 运行为**已知技术债**（见上表"部署（待办）"），切换前必须先在 systemd 补齐环境变量并回归验证。
+- 生产已运行 prod profile + RDS MySQL（2026-08-30 切换完成，见上表"部署"行）；敏感配置统一 gitignored yml（本地 application-dev/mysql.yaml、生产服务器 config/application-prod.yaml），**禁止新增环境变量注入敏感值**。
 
 ---
 

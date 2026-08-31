@@ -168,3 +168,14 @@ supabase:
     # 历史遗留 Supabase 项目 URL（2026-08-22 项目切换兼容：旧项目图片未迁移，编辑回显
     # 提交被域名白名单拒绝「图片地址不合法」；校验白名单 = projectUrl + 本列表，均为自有项目）
     legacy-project-urls: ${SUPABASE_LEGACY_PROJECT_URLS:}
+
+# 门店营业管线执行（2026-08-31，Web 管理后台「门店同步 → 拉取数据」触发）
+# - python/script：子进程调用 quwuting-ops/venue-opening/main.py 的可执行文件与脚本路径；
+#   本地开发指向本机管线，服务器指向服务器上的管线副本（均为绝对路径最稳）。
+# - base-url：子进程调后端接口（上报报告/写库）的入口；服务器上就是自身，本地指向本地后端。
+# - ADMIN_TOKEN 不在此配置：后端取触发者登录 token 透传给子进程，复用 Web 登录态。
+venue-sync:
+  pipeline:
+    python: ${VENUE_PIPELINE_PYTHON:python3}
+    script: ${VENUE_PIPELINE_SCRIPT:./venue-opening/main.py}
+    base-url: ${VENUE_PIPELINE_BASE_URL:http://127.0.0.1:8080}

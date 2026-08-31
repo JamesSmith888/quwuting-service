@@ -48,3 +48,15 @@ nohup.out
 
 ### OS ###
 .DS_Store
+
+### Server external config (敏感值 gitignored yml，本地/生产双份维护) ###
+# 生产：jar 同目录 config/application-{profile}.yaml（Spring Boot 外部化配置，优先级高于 classpath）
+# 本地：如需外部化同样放 config/ 下；classpath 的 application-dev/mysql.yaml 已由上方规则忽略
+**/config/application-prod.yaml
+**/config/application-prod.yml
+**/config/application-dev.yaml
+**/config/application-dev.yml
+**/config/application-mysql.yaml
+**/config/application-mysql.yml
+**/config/application-secrets.yaml
+**/config/application-secrets.yml

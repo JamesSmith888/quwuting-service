@@ -1,26 +1,50 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# quwuting-service 环境文件模板（2026-08-30 PG→MySQL 迁移后配置策略）
+# quwuting-service 生产外部配置模板（2026-08-31 配置策略调整）
 #
-# 用法：复制本文件到服务器 /etc/quwuting-service/environment 并填入真实值，
-#       systemd 通过 EnvironmentFile 注入（见 deploy/deploy.sh 与 unit 模板）。
+# 用法：复制本文件到服务器 ${APP_DIR}/config/application-prod.yaml（APP_DIR 默认
+#       /root/quwuting-service，即 jar 同目录的 config/ 子目录），填入真实值。
+#       Spring Boot 外部化配置目录 ./config/ 的 application-{profile}.yaml
+#       优先级高于 jar 内 classpath 同名文件 → 覆盖 git 内 application-prod.yaml
+#       的 ${DB_URL:} 等空占位；systemd 不再注入任何敏感环境变量（deploy.sh）。
 # ⚠ 该文件含生产凭据，禁止提交 git / 复制到仓库任何目录 / 外传。
 #
-# DB（阿里云 RDS MySQL，生产优先内网地址；外网地址仅本机运维直连）
-DB_URL=jdbc:mysql://<RDS内网地址>:3306/qwt_mysql?useUnicode=true&characterEncoding=utf8&connectionCollation=utf8mb4_unicode_ci&serverTimezone=Asia/Shanghai&connectTimeout=5000&socketTimeout=8000&rewriteBatchedStatements=true
-DB_USERNAME=qwt_app
-DB_PASSWORD=<强密码>
+# 本地开发敏感值则维护在 classpath 的 application-dev.yaml / application-mysql.yaml
+# （同样 gitignored）——本地与生产各持一份 gitignored yml，互不干扰。
+# ─────────────────────────────────────────────────────────────────────────────
 
-# 微信小程序（application.yaml 占位 ${WECHAT_SECRET}）
-WECHAT_SECRET=<微信小程序 secret>
+spring:
+  datasource:
+    # 阿里云 RDS MySQL（生产优先内网地址；外网地址仅本机运维直连）。
+    # 必须附加 serverTimezone=Asia/Shanghai & characterEncoding=utf8 &
+    # useSSL=false&connectTimeout=5000&socketTimeout=8000。
+    url: jdbc:mysql://<RDS内网地址>:3306/qwt_mysql?useUnicode=true&characterEncoding=utf8&connectionCollation=utf8mb4_unicode_ci&serverTimezone=Asia/Shanghai&connectTimeout=5000&socketTimeout=8000&rewriteBatchedStatements=true
+    username: qwt_app
+    password: <强密码>
 
-# JWT 签名（application.yaml 占位 ${JWT_SECRET}）
-JWT_SECRET=<JWT 签名密钥，建议 openssl rand -base64 32>
+# 微信小程序（覆盖 application.yaml 占位 ${WECHAT_SECRET}）
+wechat:
+  secret: <微信小程序 secret>
+
+# JWT 签名（覆盖 application.yaml 占位 ${JWT_SECRET}；建议 openssl rand -base64 32）
+jwt:
+  secret: <JWT 签名密钥>
 
 # Supabase Storage（前端直传，后端签发凭证；与 DB 解耦，迁移后继续使用）
-SUPABASE_PROJECT_URL=https://<project-ref>.supabase.co
-SUPABASE_ANON_KEY=<anon key>
-SUPABASE_STORAGE_BUCKET=qwt-public
+supabase:
+  storage:
+    project-url: https://<project-ref>.supabase.co
+    anon-key: <anon key>
+    bucket: qwt-public
+    # 历史遗留 Supabase 项目 URL（旧项目图片未迁移，校验白名单；逗号分隔）
+    # legacy-project-urls: https://<legacy-ref>.supabase.co
 
-# 可选（腾讯位置服务 / 高德，无则留空）
-# QQMAP_KEY=
-# AMAP_KEY=
+# 可选（腾讯位置服务 / 高德，无则删除整个键）
+# app:
+#   geocode:
+#     key: <腾讯位置服务 key>
+#   amap:
+#     key: <高德 key>
+
+# 管理后台密码（覆盖 ${WEB_ADMIN_PASSWORD:}；留空 = 密码登录通道禁用）
+# web-auth:
+#   password: <管理后台密码>

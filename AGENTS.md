@@ -16,7 +16,7 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务，为去舞厅小程序
 - **连接池韧性（Supabase 不稳定）**：6543 JDBC URL 必含 `prepareThreshold=0&connectTimeout=5&socketTimeout=8&tcpKeepAlive=true`；连接池参数唯一事实源 = `application.yaml`（禁环境 yaml 重复声明）
 - **性能第一约束 = 最少 DB 往返**（跨洲 371ms/次）：列表/详情公共数据必须缓存、个人态永不缓存、写路径显式失效——详见 [`29-performance.md`](docs/agents/29-performance.md)
 - **舞伴统计**：联系方式解锁只计首次成功获取；每次成功提交邀约均计需求热度。需求明细仅资料管理者/管理员可读，展示资料批量查询且不返回联系方式/openId——详见 [`30-dancer-statistics-integrity.md`](docs/agents/30-dancer-statistics-integrity.md)
-- **技术债**：生产 systemd 跑 dev profile（`application-dev.yaml` 生效），切 prod 需先补 systemd 环境变量注入
+- **技术债**：~~生产跑 dev profile~~ 已于 2026-08-30 切 prod + RDS MySQL；**敏感配置一律 gitignored yml（2026-08-31 起弃环境变量）**：本地 application-dev/mysql.yaml、生产服务器 `${APP_DIR}/config/application-prod.yaml`（外部化配置），详见 [`14-deployment-and-schema.md`](docs/agents/14-deployment-and-schema.md)
 - 命名：表 `qwt_` 前缀；根包 `org.quwuting.quwutingservice`
 
 ## 主题索引（渐进式披露）
@@ -38,7 +38,7 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务，为去舞厅小程序
 | [`11-storage.md`](docs/agents/11-storage.md) | 文件存储（前端直传 Supabase、FileCategory、内容校验安全模型） | 上传相关 |
 | [`12-api-conventions.md`](docs/agents/12-api-conventions.md) | HTTP API 规范（仅 GET/POST）、统一响应格式、错误码登记表 | 写新接口前 |
 | [`13-code-standards.md`](docs/agents/13-code-standards.md) | JPA 实体、多值字段 JSON 列、Repository、DTO、异常处理、请求耗时日志、Jackson 3.x、命名 | 写后端代码前 |
-| [`14-deployment-and-schema.md`](docs/agents/14-deployment-and-schema.md) | 配置管理、生产部署、连接池与数据库抖动韧性、Flyway Schema 演进与完整性 | 部署、Schema 变更 |
+| [`14-deployment-and-schema.md`](docs/agents/14-deployment-and-schema.md) | 配置管理（**敏感值一律 gitignored yml：本地 dev/mysql + 生产外部 config/application-prod.yaml，弃环境变量注入，2026-08-31**）、生产部署、连接池与数据库抖动韧性、Flyway Schema 演进与完整性 | 部署、Schema 变更 |
 | [`15-governance.md`](docs/agents/15-governance.md) | 禁止操作、AI 代理常见错误表、验证清单 | 每次修改后、提交前 |
 | [`16-ops-config.md`](docs/agents/16-ops-config.md) | 运营配置（feature flag）设施：qwt_ops_config 表、读写接口、管理端入口、键即代码契约 | 新增可配置产品规则时 |
 | [`17-group-chats.md`](docs/agents/17-group-chats.md) | 舞友群（V33：微信引流，平台无一键加群 API → 长按识别二维码；scope 三态维度互斥校验；公开分组读 + ADMIN CRUD；qr_code_url 挂 ImageContentValidator；GROUP_QR 存储分类，2026-08-17） | 群聊相关 |
@@ -47,7 +47,7 @@ Spring Boot 4.1 + Java 25 + Spring Data JPA 后端服务，为去舞厅小程序
 | [`29-performance.md`](docs/agents/29-performance.md) | **性能优化**（2026-08-30 首页慢根因定位：跨洲 DB 往返 371ms/次 × 列表接口 8~9 次 = 秒级）：缓存分层策略唯一权威——个人态永不进共享缓存 / **用户级缓存（键=userId 短 TTL 30s 不跨用户泄漏，允许）** / 无坐标列表主查询 60s 缓存（`VenueService.venueListCache`，写路径显式失效）/ 角标人数 30s + 最新上报行 30s（只缓存原始行禁缓存相对时间文案）+ 信任权重 60s（`CrowdReportService` 三级缓存）；带坐标查询永不缓存；**2026-08-30 舞伴域：列表缓存精失效（反向索引 dancerId→keys，排序信号写只清该舞伴条目替代全清）+ 收藏列表用户级缓存 30s + getDetail 8 分支 CompletableFuture 并行（专用 4 线程池对齐 Hikari 上限）+ fetchPhotos 照片/视频门槛解锁合并 IN 查询 + 前端 refreshCurrentUser 30s TTL + view 上报本地队列 10s 批量去重串行**；未竟事项=HEAT_SCORE 双算、DB 迁国内、前端分包 | 性能优化/缓存相关 |
 | [`30-dancer-statistics-integrity.md`](docs/agents/30-dancer-statistics-integrity.md) | 舞伴解锁统计事实与需求热度下钻：多条实际发放路径经统一失效器收敛；聚合公开、邀约明细受资料管理权限保护且去标识化 | 改解锁/统计/邀约明细时 |
 | [`31-resource-access.md`](docs/agents/31-resource-access.md) | 平台全局 ADMIN + 门店/舞伴资源级授权：能力矩阵、有效期、撤销审计、认领迁移与审核安全展示 | 改角色、管理权限、认领或资料维护入口时 |
-| [`32-web-auth-and-venue-sync.md`](docs/agents/32-web-auth-and-venue-sync.md) | **Web 管理后台（2026-08-31，独立前端 quwuting-admin-web，独立于小程序生态）**：密码登录（WEB_ADMIN_PASSWORD 环境变量，扫码链路保留待用）+ 门店同步报告（管线上报幂等 upsert、apply 仅 EXACT/ALIAS 复用 applyBatch）；部署 admin.starseek.online（nginx 静态+反代，弃 CF Tunnel） | 动 web-auth / venue-sync / Web 后台时 |
+| [`32-web-auth-and-venue-sync.md`](docs/agents/32-web-auth-and-venue-sync.md) | **Web 管理后台（2026-08-31，独立前端 quwuting-admin-web，独立于小程序生态）**：密码登录（WEB_ADMIN_PASSWORD 环境变量，扫码链路保留待用）+ 门店同步报告（管线上报幂等 upsert、apply 仅 EXACT/ALIAS 复用 applyBatch + 单条写库 apply-item；前端决策漏斗 6 视图 + 平台门店对比块（状态=实时批量查询 status-batch，点击看详情）；页面「拉取数据」一键跑管线 = 后端子进程 + 触发者 token 透传 + 状态轮询，替代手动 main.py）+ 手动映射别名（网上门店名→平台门店，管线 --refresh-aliases 拉取）；部署 admin.starseek.online（nginx 静态+反代，弃 CF Tunnel） | 动 web-auth / venue-sync / Web 后台时 |
 
 ---
 

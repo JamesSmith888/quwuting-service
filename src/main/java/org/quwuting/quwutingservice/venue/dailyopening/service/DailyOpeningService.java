@@ -72,10 +72,13 @@ public class DailyOpeningService {
                     item.status().name(), item.confidence().name(), now, now);
             applied++;
 
-            // 2) 高置信反转：仅 OPEN + EXACT/ALIAS 触发
+            // 2) 反转：仅 OPEN + 可信来源触发
+            //    可信来源 = EXACT/ALIAS（自动可反转）或 forceReversal
+            //    （2026-09-01：管理员在管理端单条写库确认放行，低置信 CONTAINED/FUZZY
+            //    经人工审核也可反转；快照 confidence 仍存原始值，审计不失真）
             if (item.status() != DailyOpeningStatus.OPEN
-                    || (item.confidence() != DailyOpeningConfidence.EXACT
-                        && item.confidence() != DailyOpeningConfidence.ALIAS)) {
+                    || (!isAutoReversible(item)
+                        && item.forceReversal() != Boolean.TRUE)) {
                 continue;
             }
             Venue venue = venueRepository.findById(item.venueId()).orElse(null);
@@ -114,5 +117,11 @@ public class DailyOpeningService {
         }
 
         return new BatchApplyResult(items.size(), applied, reversals.size(), notFound, reversals);
+    }
+
+    /** 自动可反转 = EXACT/ALIAS（高置信；低置信需管理员确认 forceReversal） */
+    private boolean isAutoReversible(ApplyDailyOpeningRequest item) {
+        DailyOpeningConfidence c = item.confidence();
+        return c == DailyOpeningConfidence.EXACT || c == DailyOpeningConfidence.ALIAS;
     }
 }

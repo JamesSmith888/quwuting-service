@@ -6,15 +6,15 @@
 # 满足 AGENTS.md 核心约束：java -jar + JVM 内存限制 + systemd
 # Restart=always + cgroup MemoryMax 三件套。
 #
-# 配置策略（2026-08-30 PG→MySQL 迁移后）：
-# - 数据源 = 阿里云 RDS MySQL（application-prod.yaml 已切 MySQL，环境变量占位）；
-# - 业务配置（DB/JWT/Supabase）统一由 EnvironmentFile 注入（默认
-#   /etc/quwuting-service/environment，服务器本地维护，**禁止提交 git**）；
-# - 密码只存在于服务器 EnvironmentFile / systemd unit，仓库零敏感信息。
+# 配置策略（2026-08-30 PG→MySQL 迁移后；2026-08-31 改为 gitignored yml，弃环境变量）：
+# - 数据源 = 阿里云 RDS MySQL（application-prod.yaml 已切 MySQL）；
+# - 敏感值（DB/JWT/Supabase/微信）统一放服务器 ${APP_DIR}/config/application-prod.yaml
+#   （Spring Boot 外部化配置，优先级高于 classpath，**gitignored**，模板 deploy/config-prod.example.yaml）；
+# - 仓库零敏感信息，systemd 不注入任何敏感环境变量。
 #
 # 用法（首次部署，root 直接执行）：
 #   1. 把仓库 clone 到 /root/quwuting-service（或通过环境变量覆盖 APP_DIR）
-#   2. 创建环境文件 $ENV_FILE（模板见 deploy/env.example），填入 DB_*/JWT/Supabase
+#   2. 创建外部配置 $APP_DIR/config/application-prod.yaml（模板见 deploy/config-prod.example.yaml）
 #   3. sudo bash deploy/deploy.sh
 #
 # 后续升级：
@@ -33,7 +33,8 @@ LOG_DIR="${LOG_DIR:-/var/log/${APP_NAME}}"
 UNIT_FILE="/etc/systemd/system/${APP_NAME}.service"
 JAR_GLOB="${APP_DIR}/target/${APP_NAME}-*.jar"
 SPRING_PROFILE="${SPRING_PROFILE:-prod}"   # 2026-08-30: MySQL 生产环境，默认 prod
-ENV_FILE="${ENV_FILE:-/etc/${APP_NAME}/environment}"  # 敏感配置（DB/JWT/Supabase），服务器本地，不入 git
+# 生产敏感配置 = Spring Boot 外部化配置（jar 同目录 config/，gitignored，优先级高于 classpath）
+EXT_CONFIG="${APP_DIR}/config/application-${SPRING_PROFILE}.yaml"
 
 # JVM 参数（阿里云 ECS 2C/2G 实测合理值）
 # Xmx512m: 堆上限，RSS 实际 ≈ Xmx + 250MB ≈ 762MB
@@ -73,14 +74,14 @@ die() { echo -e "\033[1;31m[deploy]\033[0m $*" >&2; exit 1; }
 command -v java >/dev/null 2>&1 || die "未安装 java；请先 'dnf install -y java-latest-openjdk-headless'"
 command -v systemctl >/dev/null 2>&1 || die "无 systemd；本脚本依赖 systemd"
 
-# 检查 EnvironmentFile 存在且含关键变量（配置策略：敏感值服务器本地维护，不入 git）
-[[ -f "$ENV_FILE" ]] || die "缺少环境文件 $ENV_FILE（模板见 deploy/env.example：DB_URL/DB_USERNAME/DB_PASSWORD/JWT_SECRET/WECHAT_SECRET/SUPABASE_*）"
-grep -q '^DB_URL=' "$ENV_FILE" || die "环境文件 $ENV_FILE 缺少 DB_URL"
-grep -q '^DB_USERNAME=' "$ENV_FILE" || die "环境文件 $ENV_FILE 缺少 DB_USERNAME"
-grep -q '^DB_PASSWORD=' "$ENV_FILE" || die "环境文件 $ENV_FILE 缺少 DB_PASSWORD"
-log "环境文件: $ENV_FILE"
+# 检查外部敏感配置存在（配置策略：敏感值 gitignored yml 服务器本地维护，不入 git）
+[[ -f "$EXT_CONFIG" ]] || die "缺少外部配置 $EXT_CONFIG（模板见 deploy/config-prod.example.yaml：DB/微信/JWT/Supabase 真实值）"
+grep -q '^  url: jdbc:mysql' "$EXT_CONFIG" || die "外部配置 $EXT_CONFIG 缺少 spring.datasource.url（jdbc:mysql 开头）"
+grep -q '^    username:' "$EXT_CONFIG" || die "外部配置 $EXT_CONFIG 缺少 spring.datasource.username"
+grep -q '^    password:' "$EXT_CONFIG" || die "外部配置 $EXT_CONFIG 缺少 spring.datasource.password"
+log "外部敏感配置: $EXT_CONFIG（Spring Boot 外部化加载，优先级高于 classpath）"
 [[ -f "$APP_DIR/src/main/resources/application-${SPRING_PROFILE}.yaml" ]] \
-  || die "缺少 application-${SPRING_PROFILE}.yaml（${SPRING_PROFILE} profile 配置在 git 中，含 ${DB_URL} 占位）"
+  || die "缺少 application-${SPRING_PROFILE}.yaml（${SPRING_PROFILE} profile 配置在 git 中，敏感键为空占位）"
 
 # ── 1. 创建系统用户（无登录 shell，无 home，专跑应用） ─────────────────────
 if ! $SKIP_USER && ! id -u "$APP_USER" >/dev/null 2>&1; then
@@ -173,9 +174,8 @@ User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${APP_DIR}
 
-# 敏感配置注入（DB/JWT/Supabase；文件服务器本地维护，不入 git）
-EnvironmentFile=${ENV_FILE}
-
+# 敏感配置：Spring Boot 外部化加载 ${APP_DIR}/config/application-prod.yaml
+# （gitignored，优先级高于 classpath；模板 deploy/config-prod.example.yaml，禁止提交 git）
 # JVM 参数 + jar 路径 + Spring profile（prod = RDS MySQL，配置见 application-prod.yaml）
 ExecStart=${JAVA_HOME}/bin/java ${JVM_FLAGS} -jar ${JAR_PATH} --spring.profiles.active=${SPRING_PROFILE}
 
