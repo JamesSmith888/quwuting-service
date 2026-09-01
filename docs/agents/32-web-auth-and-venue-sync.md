@@ -46,21 +46,37 @@ admin.starseek.online ──DNS A 记录──> ECS(114.55.0.14) ──nginx─�
 
 - `POST /admin/venue-sync/reports`：幂等 upsert（同 `source_id` 同 `report_date` 覆盖，生成列部分唯一索引）；summary 剔除 `_` 开头内部聚合键。
 - `GET /admin/venue-sync/reports?limit=`（≤30 倒序）、`GET .../{id}`、`POST .../{id}/apply`。
+- **detail 注入 apply_state（2026-09-01；快照机制退出后仅 would_reverse）**：`GET .../{id}`
+  返回条目已带后端权威计算的 `apply_state.would_reverse` = 资讯 OPEN + 平台**当前**状态
+  CEASED/SUSPENDED（实时查库，非报告条目 venue.status 快照）；未匹配条目无此字段。
+  「可直接更新」视图按 would_reverse 过滤——写库 = 仅反转，需要更新的唯一判据。
+- `POST /admin/venue-sync/reports/{id}/apply-selected`（**2026-09-01 「可直接更新」tab 专属
+  批量写库**）：请求 `{venueIds}`（≤500，重复 id 自动去重），仅提交 venue 命中且
+  confidence ∈ {EXACT, ALIAS} 的选中条目（forceReversal=false，语义与整报告 apply 一致），
+  空提交集抛 1001「所选条目均不可批量写库」。写库后详情刷新，已反转条目自动从该视图消失。
 - `POST /admin/venue-sync/reports/{id}/apply-item`（**2026-08-31 单条写库；09-01 放宽 + 确认放行**）：条目级「写库」按钮，
   请求 `{venueId, sourceName}` 定位报告条目（venueId + source_name 联合防同名多店误定位），
   **已匹配平台门店即可**；**单条写库 = 管理员人工确认**（`ApplyDailyOpeningRequest.forceReversal=true`）——
   EXACT/ALIAS 可反转；CONTAINED/FUZZY 低置信经管理员确认后同样允许反转（若资讯 OPEN 且平台
-  CEASED/SUSPENDED），快照仍存原始 confidence（审计不失真）。管线批量/自动路径 forceReversal 恒 false
-  （保守：低置信只落快照不反转）——旧管线 body 缺该字段，反序列化默认 false 兼容。
-- **apply 只提交 `confidence ∈ {EXACT, ALIAS}` 且 `venue.venue_id` 非空**的条目，组装 batch 复用 `DailyOpeningService.applyBatch`（写快照 + 高置信状态反转），返回 `BatchApplyResult`。
-- **快照定位（2026-09-01 用户确认：保留待用）**：写库 = 落快照（`qwt_venue_daily_openings`，信息源当日声称事实，幂等 upsert）+ 状态反转两件事；快照当前**零消费者**（只写不读），作为信息源证据链有意留存（未来营业稳定性/可信度分析的数据基础），**勿当无用表清理**。
+  CEASED/SUSPENDED）。管线批量/自动路径 forceReversal 恒 false
+  （保守：低置信不反转）——旧管线 body 缺该字段，反序列化默认 false 兼容。
+- **apply 只提交 `confidence ∈ {EXACT, ALIAS}` 且 `venue.venue_id` 非空**的条目，组装 batch 复用 `DailyOpeningService.applyBatch`（**2026-09-01 起仅状态反转**），返回 `BatchApplyResult`（total/statusReversed/venueNotFound/reversals，**已无 snapshotApplied**）。
+- **🚨 快照机制退出（2026-09-01 用户明确「不用快照机制」，此前 09-01 上午「保留待用」决定作废）**：
+  写库 = **仅状态反转**，不再落每日快照；`qwt_venue_daily_openings`（PG V63 / MySQL V3）**冻结**——
+  表与存量保留、代码停止写入（实体/仓储标注冻结，upsert 无调用方；历史快照仍可作为
+  营业稳定性/可信度分析证据，未来如需恢复再启用）。管线 `--apply` 同语义。
+- **更新记录（2026-09-01，替代快照版「已更新」视图）**：`GET /admin/venue-sync/reversals?limit=`（≤50）
+  返回系统自动反转门店详情——VenueStatusLog 中 changedBy IS NULL（系统/Agent 来源；人工编辑=userId）
+  且 CEASED/SUSPENDED → OPEN 的变更（venueId/venueName/city/fromStatus/toStatus/reversedAt，时间倒序，
+  门店已删时名称城市为 null）。Web 后台「更新记录」弹层数据源；反转来源唯一 = DailyOpeningService（
+  单条人工放行与批量路径同走 changedBy=null）。
 - **状态口径（2026-08-31 明确；09-01 修订为实时）**：① 条目状态 tag = 信息源宣称的当日状态（UI「资讯·xx」）；
   ② 「平台门店」对比条 = **平台实时状态**——2026-09-01 起调 `POST /admin/venue-sync/venues/status-batch`
   批量查库（`findByIdInAndDeletedFalse` 单次往返，前端加载报告详情后拉一次）展示当前状态，
   **不再显示报告快照**（快照会过时误导：菲琳/玫瑰天堂快照 CEASED 而平台已 OPEN，用户投诉「明明营业却显示停业」）；
   ③ 详情弹层 = 实时详情（复用 GET /admin/venue-sync/venues/{id}）。
   apply 反转**单向**（仅「资讯 OPEN + 平台 CEASED/SUSPENDED」反转），**不会把营业中的门店标停业**。
-- 条目字段（管线 report["results"] 镜像）：city / source_name / source_name_raw / status / confidence / alias_key / venue{venue_id,name,city,status}。
+- 条目字段（管线 report["results"] 镜像）：city / source_name / source_name_raw / status / confidence / alias_key / **match_detail（2026-09-01 管线注入**：method + detail 中文说明「为什么能匹配到」——exact_normalized / exact_strip_suffix / alias / contained_full / contained_sticky；**需重新拉取数据后新报告才携带，历史报告无此字段**）/ venue{venue_id,name,city,status}。
 - 实体 `@Lob String summary/items` 映射 MySQL longtext（与 V5 迁移列类型一致，validate 校验）。
 
 DB：`qwt_venue_sync_reports`（V5 迁移）。
@@ -102,17 +118,33 @@ DB：`qwt_venue_sync_aliases`（PG V64 / MySQL V6 迁移；幂等 = 部分唯一
 
 - 登录：密码表单（`POST /web-auth/password-login`），未配置密码时提示无法登录；token 存 localStorage。
 - 门店同步页：**「拉取数据」按钮**（管线一键执行 + 状态轮询 + 日志弹层）+ 最近报告概览（匹配率/置信度分布）+ 条目列表 + 确认写库 + 历史切换。
-- **条目列表 = 决策漏斗 6 视图（2026-08-31 重构，`filterByView`）**：全部 / 匹配到的（venue 非空）/
-  可直接更新（EXACT+ALIAS，即 apply 提交集）/ 精确匹配（EXACT）/ 需人工复核（CONTAINED+FUZZY）/
-  未匹配（venue 空 = 新店线索）。每个 tab 带 item 级计数；未匹配/包含条目提供「映射」按钮
-  一键带入城市+店名打开映射弹层；概览 stats 为 summary opening 级权威数字（含多命中差异，口径不同）。
+- **条目列表 = 决策漏斗 6 视图（2026-08-31 重构，`filterByView`；2026-09-01「可直接更新」口径=仅反转）**：
+  全部 / 匹配到的（venue 非空）/
+  可直接更新（**EXACT+ALIAS 且 would_reverse=true**——资讯 OPEN + 平台当前停业/歇业，
+  即 apply-selected 提交集；apply_state 缺失时默认视为需更新不隐藏数据）/ 精确匹配（EXACT）/
+  需人工复核（CONTAINED+FUZZY）/ 未匹配（venue 空 = 新店线索）。每个 tab 带 item 级计数；
+  未匹配/包含条目提供「映射」按钮一键带入城市+店名打开映射弹层；概览 stats 为 summary
+  opening 级权威数字（含多命中差异，口径不同）。
+- **「可直接更新」tab 专属批量写库（2026-09-01）**：tab 顶部工具条显示「共 N 条需要更新」+
+  「批量写库」按钮，调 apply-selected 只写列表内待反转条目（venueIds 去重），写库后刷新详情
+  已反转条目自动消失（平台状态变 OPEN → would_reverse=false）；空态文案
+  「没有需要反转的条目（资讯营业 + 平台停业/歇业的门店已全部处理）」。概览「确认写库」保留 =
+  整报告批量反转兜底。写库结果 toast = 反转 N 家（无快照概念）。
+- **更新记录弹层（2026-09-01）**：概览卡片「更新记录」按钮 → 底部弹层调
+  `GET /admin/venue-sync/reversals`（≤50 条）展示系统自动反转门店详情
+  （门店名 + 城市 + 停业/歇业 → 营业 + 反转时间；门店已删标「已删除」）；点击门店可看详情弹层。
 - **平台门店对比块（2026-08-31）**：条目 venue 非空时行内渲染「平台门店」对比条
   （名称 + 状态 tag + 城市）——资讯店名与系统门店同屏对照；点击调
   `GET /admin/venue-sync/venues/{id}`（**走 /admin 前缀**——管理后台 nginx/vite 反代
   只覆盖 /admin、/web-auth，小程序 /venues 前缀打不通，2026-08-31 事故）弹层展示
   门店详情（城市/区/地址/营业时段/门票/电话/简介/更新时间）。
-- **条目级写库（2026-08-31）**：命中平台门店且 EXACT/ALIAS 的条目显示「写库」按钮，
-  逐条确认后调 apply-item；「可直接更新」视图每条均可单独决策，避免整报告批量误伤。
+- **匹配依据展示（2026-09-01）**：条目携带 match_detail 时，在条目 cell 与「平台门店」
+  对比条之间渲染一行「匹配依据」小条（灰底 + 「匹配依据」标签 + 中文说明），
+  admin 可追溯「为什么能匹配到」（如「去除通用后缀后完全一致」「命中管理员配置的
+  别名映射」「资讯名是平台名的子串（包含关系）」「粘连 token 拆分」）；历史报告
+  无 match_detail 不展示该行。
+- **条目级写库（2026-08-31；09-01 仅反转）**：命中平台门店且 EXACT/ALIAS 的条目显示「写库」按钮，
+  逐条确认后调 apply-item（CONTAINED/FUZZY 也允许，确认 = 人工放行反转）；「可直接更新」视图每条均可单独决策，避免整报告批量误伤。
 - 映射管理弹层（`src/components/AliasManagePopup.vue`）：新增/编辑（城市+网上名称+门店搜索选择
   `GET /admin/venue-sync/venues?keyword=`（走 /admin 反代）+ 备注）+ 已配置列表删除。保存后管线 `--refresh-aliases` 生效。
 - 本地无后端时：`npm run dev:mock`（mock server 8082 + vite 5173 同进程，proxy 指向 mock；**沙箱下两个独立后台进程网络互不可达，必须同进程**）。

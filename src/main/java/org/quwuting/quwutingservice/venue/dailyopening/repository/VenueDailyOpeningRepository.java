@@ -14,11 +14,10 @@ import java.util.List;
 /**
  * 门店每日营业快照仓储（2026-08-31，PG V63 / MySQL V3）。
  * <p>
- * upsert = 原生 INSERT ... ON DUPLICATE KEY UPDATE（MySQL 8；唯一键 = 生成列
- * uk_key_qwt_idx_daily_openings_unique，IF(deleted=0, MD5(venue_id#report_date#
- * source_id), NULL)——精确复刻 PG 部分唯一索引语义）——幂等确定性：同日同源重复
- * apply = UPDATE 原行（status/confidence 覆盖 + created_at 刷新），不产生新行；
- * 并发冲突由数据库兜底。
+ * ⚠️ <b>2026-09-01 快照机制退出：本仓储冻结</b>（表保留、存量保留，代码停止写入；
+ * upsert 仅作历史参考不再被任何业务路径调用）。如需恢复快照机制，回看本方法的
+ * MySQL 生成列唯一键语义（uk_key_qwt_idx_daily_openings_unique = IF(deleted=0,
+ * MD5(venue_id#report_date#source_id), NULL)，精确复刻 PG 部分唯一索引）。
  * <p>
  * ⚠️ 时间口径（记忆红线，同 V59）：created_at/updated_at 必须由 Java 传入
  * LocalDateTime.now()（JVM 时区=北京时间），禁止 DB 端 now()——Supabase 会话

@@ -1,0 +1,42 @@
+spring:
+  datasource:
+    # 注意：6543 是 Supabase 事务模式连接池，必须附加 prepareThreshold=0
+    # 禁用服务端命名预编译语句，否则报 "prepared statement S_N already exists"（42P05）。
+    # 2026-08-10 根因修复：追加 connectTimeout/socketTimeout/tcpKeepAlive——
+    # 数据库抖动时驱动不再阻塞在 TCP 重传上（实测挂死 19s > 前端 10s 超时），
+    # socketTimeout=8s 内快速失败返回错误；tcpKeepAlive + 连接池 keepalive-time 双重保活。
+    # 任何指向 6543 池化器的 URL 都必须包含这三项 + prepareThreshold=0（见 AGENTS.md）。
+    url: jdbc:postgresql://aws-0-ap-northeast-1.pooler.supabase.com:6543/postgres?sslmode=require&prepareThreshold=0&connectTimeout=5&socketTimeout=8&tcpKeepAlive=true
+    username: postgres.ijhuwkpumjnqxmfwobog
+    password: "JfvsmKcErYovETIh"
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      # Schema 演进（2026-08-07 起）：与生产一致走 Flyway 迁移 + validate 校验
+      # （见 application.yaml 注释与 AGENTS.md「Schema 演进与数据库完整性」）——
+      # 本地开发改表结构 = 在 db/migration 新增 V{n} 脚本，保证 dev/prod 同构。
+      ddl-auto: validate
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+# 本地开发用（此文件已加入 .gitignore，不会提交）
+wechat:
+  secret: 30c5f9461c6b8b85808e1ffc81ad985f
+
+jwt:
+  secret: q+liSOHIEXuZ63//HvKkpcGaXp6nLZ4yQgjZlzFbDWo=
+
+# Supabase Storage（前端直传，anon key 为公开密钥由 RLS 策略控制访问）
+supabase:
+  storage:
+    project-url: https://ijhuwkpumjnqxmfwobog.supabase.co
+    anon-key: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlqaHV3a3B1bWpucXhtZndvYm9nIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU3NTM4NDIsImV4cCI6MjEwMTMyOTg0Mn0.5ZcSymgf9PZxaw-CFFEsSJDZHZJKvjW4vG7TQPcpKb0
+    bucket: qwt-public
+
+# 腾讯位置服务 WebService key（2026-08-20 修复审核 1004；gitignore 双份维护，禁进 git）
+# 申请自 lbs.qq.com，key 需将服务器 IP 114.55.0.14 加入白名单或启用签名校验
+app:
+  geocode:
+    key: QTKBZ-32Y3I-K4WGL-UUYMG-W2UW5-66FER

@@ -4,10 +4,8 @@ import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.venue.dailyopening.dto.request.ApplyDailyOpeningBatchRequest;
 import org.quwuting.quwutingservice.venue.dailyopening.dto.request.ApplyDailyOpeningRequest;
 import org.quwuting.quwutingservice.venue.dailyopening.dto.response.BatchApplyResult;
-import org.quwuting.quwutingservice.venue.dailyopening.entity.VenueDailyOpening;
 import org.quwuting.quwutingservice.venue.dailyopening.enums.DailyOpeningConfidence;
 import org.quwuting.quwutingservice.venue.dailyopening.enums.DailyOpeningStatus;
-import org.quwuting.quwutingservice.venue.dailyopening.repository.VenueDailyOpeningRepository;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.entity.VenueStatusLog;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
@@ -19,63 +17,55 @@ import org.quwuting.quwutingservice.venuestatuswatcher.service.VenueStatusWatche
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
 /**
- * 门店每日营业快照服务（2026-08-31，V63，docs/agents/ 管线侧 quwuting-ops/venue-opening）。
+ * 门店状态反转服务（2026-08-31，V63；**2026-09-01 快照机制退出，仅剩反转**）。
  * <p>
- * 职责（两条路径，语义分离）：
- * <ol>
- *   <li><b>快照落库</b>：把信息源的「今日营业」当日快照写入
- *       qwt_venue_daily_openings（幂等 upsert，同店同日报导源至多一条）——
- *       只记录事实，不改 venue.status；</li>
- *   <li><b>高置信反转</b>：当快照 status=OPEN 且匹配置信度 ∈ {EXACT, ALIAS} 时，
- *       若平台 status ∈ {CEASED, SUSPENDED}（信息源今日营业 → 平台数据滞后），
- *       自动反转为 OPEN——走完整状态变更审计链（VenueStatusLog + 关注者通知 +
- *       热度/详情/列表缓存失效），与人工编辑同权。CONTAINED/FUZZY 只落快照不反转
- *       （存在误配风险，如「小马」命中酒吧），留人工复核。</li>
- * </ol>
- * 单向语义：反转只做 CEASED/SUSPENDED → OPEN（「救活」滞后门店）；OPEN 门店
- * 信息源某日漏报不会自动改回（快照缺失 ≠ 停业，避免误伤），长期停业确认仍走
- * 管理端人工通道。changedBy 恒为 null（系统/Agent 来源，与人工操作可区分审计）。
+ * 职责演进：原为「每日营业快照落库 + 高置信反转」两件事；2026-09-01 用户明确
+ * 「不用快照机制」后，<b>写库 = 仅状态反转</b>——不再写 qwt_venue_daily_openings
+ * （表与存量保留、停止写入；每日营业记录/证据链机制整体退出）。
+ * <p>
+ * 反转语义（单向，避免误伤）：
+ * <ul>
+ *   <li>仅处理资讯 OPEN 条目：当信息源声称「今日营业」且平台 status ∈ {CEASED,
+ *       SUSPENDED}（信息源营业 → 平台数据滞后）时，反转为 OPEN；</li>
+ *   <li>反转需来源可信：EXACT/ALIAS 自动可反转；CONTAINED/FUZZY 低置信仅当
+ *       forceReversal=true（2026-09-01：管理端单条写库人工确认放行）才反转；</li>
+ *   <li>资讯 CLOSED 不产生任何动作（快照缺失 ≠ 停业，避免「源某日漏报」误伤；
+ *       长期停业确认仍走管理端人工通道）；不会把营业中的门店标停业。</li>
+ * </ul>
+ * 反转走完整状态变更审计链（VenueStatusLog + 关注者通知 + 热度/详情/列表缓存失效），
+ * 与人工编辑同权；changedBy 恒为 null（null = 系统/Agent 来源，人工=userId——
+ * 「更新记录」按此区分系统反转与人工编辑）。
  */
 @Service
 @RequiredArgsConstructor
 public class DailyOpeningService {
 
-    private final VenueDailyOpeningRepository dailyOpeningRepository;
     private final VenueRepository venueRepository;
     private final VenueStatusLogRepository venueStatusLogRepository;
     private final VenueStatusWatcherService venueStatusWatcherService;
     private final VenueHeatService venueHeatService;
     private final VenueService venueService;
+    private final org.quwuting.quwutingservice.announcement.service.AnnouncementService announcementService;
 
     @Transactional
     public BatchApplyResult applyBatch(ApplyDailyOpeningBatchRequest request) {
         List<ApplyDailyOpeningRequest> items = request.items();
-        // ⚠️ 时间红线：JVM 时区（北京时间）传入，禁止 DB now()（Supabase 会话 UTC 错位 8h）
-        LocalDateTime now = LocalDateTime.now();
 
-        int applied = 0;
         int notFound = 0;
         List<BatchApplyResult.ReversalDetail> reversals = new ArrayList<>();
         Set<Long> reversedVenueIds = new LinkedHashSet<>();
 
         for (ApplyDailyOpeningRequest item : items) {
-            // 1) 快照 upsert（幂等）
-            dailyOpeningRepository.upsert(
-                    item.venueId(), item.reportDate(), item.sourceId(),
-                    item.status().name(), item.confidence().name(), now, now);
-            applied++;
-
-            // 2) 反转：仅 OPEN + 可信来源触发
-            //    可信来源 = EXACT/ALIAS（自动可反转）或 forceReversal
-            //    （2026-09-01：管理员在管理端单条写库确认放行，低置信 CONTAINED/FUZZY
-            //    经人工审核也可反转；快照 confidence 仍存原始值，审计不失真）
+            // 快照机制已退出：仅 OPEN + 来源可信的条目评估反转，资讯休息不落任何记录
+            // 来源可信 = EXACT/ALIAS（自动可反转）或 forceReversal
+            //（2026-09-01：管理员在管理端单条写库确认放行，低置信 CONTAINED/FUZZY
+            //  经人工审核也可反转）
             if (item.status() != DailyOpeningStatus.OPEN
                     || (!isAutoReversible(item)
                         && item.forceReversal() != Boolean.TRUE)) {
@@ -100,6 +90,7 @@ public class DailyOpeningService {
             statusLog.setFromStatus(current);
             statusLog.setToStatus(VenueStatus.OPEN);
             statusLog.setChangedBy(null); // null = 系统/Agent 来源（人工=userId）
+            statusLog.setChangeSource(item.source()); // 批量更新标识（AGENT_BATCH=Agent+Skill 批量，V8）
             venueStatusLogRepository.save(statusLog);
 
             venueStatusWatcherService.notifyStatusChanged(venue.getId(), current, VenueStatus.OPEN);
@@ -108,15 +99,19 @@ public class DailyOpeningService {
             reversedVenueIds.add(venue.getId());
             reversals.add(new BatchApplyResult.ReversalDetail(
                     venue.getId(), venue.getName(), current.name(),
-                    VenueStatus.OPEN.name(), item.sourceId(), item.confidence().name()));
+                    VenueStatus.OPEN.name(), item.sourceId(), item.confidence().name(),
+                    item.source()));
         }
 
         // 列表缓存为全局维度，批量反转后统一失效一次（避免逐店重复失效）
         if (!reversedVenueIds.isEmpty()) {
             venueService.invalidateVenueListCache();
+            // 数据更新公告（2026-09-01，docs/agents/34）：营业状态批量反转成功触发
+            // SYSTEM 公告；开关关闭/同日已存在 → 内部幂等跳过，不干扰写库主流程
+            announcementService.createDataUpdateAnnouncement(0, reversals.size());
         }
 
-        return new BatchApplyResult(items.size(), applied, reversals.size(), notFound, reversals);
+        return new BatchApplyResult(items.size(), reversals.size(), notFound, reversals);
     }
 
     /** 自动可反转 = EXACT/ALIAS（高置信；低置信需管理员确认 forceReversal） */

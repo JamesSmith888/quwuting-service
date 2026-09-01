@@ -30,6 +30,28 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     List<Venue> findByIdInAndDeletedFalse(List<Long> ids);
 
     /**
+     * Skill/Agent 比对候选门店导出（2026-09-01，GET /admin/venue-sync/venues/export）：
+     * city/status 精确筛选 + id 升序分页（稳定翻页）。轻量直查，不做 listVenues 的
+     * 重型组装（徽标/浏览量/照片/热度对机器比对无意义）——舞讯 Skill 按城市逐城
+     * 拉取候选库，一城一页（size 上限 500）即可覆盖。
+     */
+    @Query("""
+            SELECT v FROM Venue v
+            WHERE v.deleted = false
+              AND (:city IS NULL OR v.city = :city)
+              AND (:status IS NULL OR v.status = :status)
+            ORDER BY v.id ASC
+            """)
+    Page<Venue> findExportPage(@Param("city") String city, @Param("status") VenueStatus status,
+                               Pageable pageable);
+
+    /**
+     * 同城门店全集（2026-09-01，批量新增幂等判重用）：调用方在内存做名称归一化比对，
+     * 避免逐条 LIKE 查询。一城量级几十家，全量加载成本可接受。
+     */
+    List<Venue> findByCityAndDeletedFalse(String city);
+
+    /**
      * 管理端资源搜索（2026-08-31：新增协作页「选择门店或舞伴」数据源）：
      * 名称/地址模糊匹配（keyword 由调用方包装为 %xx%），不限状态（含 HIDDEN 亦可选为协作目标，
      * 与被授权者可见性无关）。返回 Object[]{id, name, city, district, image_url}。
@@ -364,6 +386,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * <p>
      * {@code radiusKm} 可空：null = 不限（谓词短路，行为与旧版完全一致）；有值 = 距离半径筛选
      * （仅当 :city 为空时生效，城市放行口径见 {@link #RADIUS_PREDICATE}）。
+     * <p>
+     * <b>{@code v.id DESC} tie-break（2026-09-01）</b>：同 {@link #searchRankedNoLocation}
+     * 分页漂移修复——距离/热度同分时排序不稳定会导致翻页遗漏。
      */
     @Query("""
             SELECT v FROM Venue v
@@ -373,7 +398,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             + COALESCE(100.0 / (1.0 +
             """ + DISTANCE_KM + """
             ), 0)
-            ) DESC
+            ) DESC, v.id DESC
             """)
     Page<Venue> searchRanked(@Param("city") String city,
                              @Param("district") String district,
@@ -392,13 +417,18 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     /**
      * 列表主查询（推荐排序，无用户坐标）：复合评分退化为 运营权重 + 热度。
      * 与 {@link #searchRanked} 共用筛选条件，仅排序公式不含距离项。
+     * <p>
+     * <b>{@code v.id DESC} tie-break（2026-09-01 分页漂移修复）</b>：热度分大量为 0
+     * 时排序键重复，无稳定 tie-break 会导致翻页边界漂移——同一批门店在页间重复/遗漏
+     * （实测 recommended 翻页 107 家中漏 26 家，首页列表可见性受影响；舞讯 Skill 候选
+     * 拉取因此误判 10 家「假新店」）。对齐 searchHeat/searchNearest 既有做法。
      */
     @Query("""
             SELECT v FROM Venue v
             """ + LIST_FILTERS + """
             ORDER BY
             """ + HEAT_SCORE + """
-            DESC
+            DESC, v.id DESC
             """)
     Page<Venue> searchRankedNoLocation(@Param("city") String city,
                                        @Param("district") String district,

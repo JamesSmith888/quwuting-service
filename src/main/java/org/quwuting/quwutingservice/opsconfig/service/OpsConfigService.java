@@ -55,6 +55,20 @@ public class OpsConfigService {
      */
     public static final String KEY_DANCER_CONTACT_DAILY_FREE = "dancer.contact.daily.free";
 
+    /**
+     * 数据更新公告「自动生成」开关（2026-09-01，默认 false = 下线；V7 迁移插入默认行）：
+     * venuesync 写库成功后（batch-create / 营业状态 batch 反转）自动创建 SYSTEM 来源
+     * 数据更新公告。关闭时 createDataUpdateAnnouncement 直接返回（不产生公告）。
+     */
+    public static final String KEY_ANNOUNCEMENT_DATA_UPDATE_ENABLED = "announcement.data_update.enabled";
+
+    /**
+     * 数据更新公告正文模板（2026-09-01，V7 迁移插入默认行）：占位符 {new} = 新增门店数、
+     * {reversed} = 恢复营业数；AnnouncementService.createDataUpdateAnnouncement 渲染后
+     * 写入公告 content（禁业务硬编码——模板可运营配置）。
+     */
+    public static final String KEY_ANNOUNCEMENT_DATA_UPDATE_TEMPLATE = "announcement.data_update.template";
+
     private final OpsConfigRepository opsConfigRepository;
 
     /** 单键配置缓存（LoadingCache + Optional 承载"键不存在"——Caffeine 禁 null 值） */

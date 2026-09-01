@@ -9,10 +9,12 @@ import org.quwuting.quwutingservice.venue.dto.response.VenueDetailResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.service.VenueService;
 import org.quwuting.quwutingservice.venuesync.dto.request.ApplySyncItemRequest;
+import org.quwuting.quwutingservice.venuesync.dto.request.ApplySyncSelectionRequest;
 import org.quwuting.quwutingservice.venuesync.dto.request.UploadSyncReportRequest;
 import org.quwuting.quwutingservice.venuesync.dto.request.VenueStatusBatchRequest;
 import org.quwuting.quwutingservice.venuesync.dto.response.SyncReportDetailResponse;
 import org.quwuting.quwutingservice.venuesync.dto.response.SyncReportListItemResponse;
+import org.quwuting.quwutingservice.venuesync.dto.response.VenueReversalRecord;
 import org.quwuting.quwutingservice.venuesync.dto.response.VenueStatusInfo;
 import org.quwuting.quwutingservice.venuesync.service.VenueSyncReportService;
 import org.springframework.data.domain.Page;
@@ -39,6 +41,11 @@ import java.util.Map;
  *   <li>POST /admin/venue-sync/reports/{id}/apply      — 按报告确认写库（EXACT/ALIAS）</li>
  *   <li>POST /admin/venue-sync/reports/{id}/apply-item — 单条写库（条目级「写库」按钮；
  *       仅 EXACT/ALIAS 且已匹配门店，快照+反转语义与批量一致，2026-08-31）</li>
+ *   <li>POST /admin/venue-sync/reports/{id}/apply-selected — 「可直接更新」tab 专属
+ *       批量写库（2026-09-01：按 venueIds 选中，仅 EXACT/ALIAS；详情条目已注入
+ *       apply_state.would_reverse 供该视图过滤）</li>
+ *   <li>GET  /admin/venue-sync/reversals                 — 更新记录（2026-09-01：
+ *       系统自动反转门店详情，读 VenueStatusLog changedBy IS NULL）</li>
  *   <li>GET  /admin/venue-sync/venues/{id}             — 平台门店详情（条目「平台门店」
  *       对比块查看；走 /admin 反代，不依赖小程序 /venues 前缀，2026-08-31）</li>
  * </ul>
@@ -90,6 +97,18 @@ public class AdminVenueSyncReportController {
         return ApiResponse.ok(reportService.applyItem(id, request.venueId(), request.sourceName()));
     }
 
+    /**
+     * 「可直接更新」tab 专属批量写库（2026-09-01）：按 venueIds 选中条目提交，
+     * 仅 EXACT/ALIAS 且已匹配门店（语义与整报告 apply 一致），重复/未匹配自动跳过。
+     */
+    @PostMapping("/reports/{id}/apply-selected")
+    public ApiResponse<BatchApplyResult> applySelected(
+            @PathVariable Long id,
+            @Valid @RequestBody ApplySyncSelectionRequest request) {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(reportService.applySelected(id, request.venueIds()));
+    }
+
     /** 平台门店详情（复用小程序详情服务；走 /admin 前缀，规避 nginx 反代未覆盖 /venues） */
     @GetMapping("/venues/{id}")
     public ApiResponse<VenueDetailResponse> venueDetail(@PathVariable Long id) {
@@ -114,5 +133,16 @@ public class AdminVenueSyncReportController {
             @Valid @RequestBody VenueStatusBatchRequest request) {
         UserContext.requireAdmin();
         return ApiResponse.ok(reportService.batchVenueStatus(request.venueIds()));
+    }
+
+    /**
+     * 更新记录（2026-09-01，快照机制退出后）：系统自动反转门店的详情记录
+     * （VenueStatusLog changedBy IS NULL 且 CEASED/SUSPENDED → OPEN，时间倒序）。
+     */
+    @GetMapping("/reversals")
+    public ApiResponse<List<VenueReversalRecord>> reversals(
+            @RequestParam(defaultValue = "50") int limit) {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(reportService.listReversals(limit));
     }
 }

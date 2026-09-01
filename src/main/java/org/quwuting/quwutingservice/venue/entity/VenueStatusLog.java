@@ -42,6 +42,15 @@ public class VenueStatusLog {
     /** 操作人用户 ID（管理员或认领人） */
     private Long changedBy;
 
+    /**
+     * 变更来源标识（2026-09-01，V8）：
+     * AGENT_BATCH = Agent+Skill 批量落库（舞讯同步 status-reverse 通道）；
+     * ADMIN = 管理端人工写库；null = 旧数据或其他系统自动变更。
+     * 供管理后台「更新记录」区分「批量更新」与人工/其他来源。
+     */
+    @Column(length = 20)
+    private String changeSource;
+
     @CreationTimestamp
     private LocalDateTime createdAt;
 }

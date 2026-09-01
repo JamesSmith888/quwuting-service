@@ -1,11 +1,14 @@
 package org.quwuting.quwutingservice.venue.repository;
 
 import org.quwuting.quwutingservice.venue.entity.VenueStatusLog;
+import org.quwuting.quwutingservice.venue.enums.VenueStatus;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -37,4 +40,13 @@ public interface VenueStatusLogRepository extends JpaRepository<VenueStatusLog, 
 
     /** 近30天状态变更记录（最多 5 条，按变更时间倒序），营业状态弹窗「状态记录」区块数据源 */
     List<VenueStatusLog> findTop5ByVenueIdAndCreatedAtAfterOrderByCreatedAtDesc(Long venueId, LocalDateTime after);
+
+    /**
+     * 系统自动反转记录（2026-09-01，Web 后台「更新记录」数据源）：changedBy IS NULL
+     * （系统/Agent 来源；人工编辑=userId）且 CEASED/SUSPENDED → OPEN 的变更，按时间倒序。
+     * 命中 qwt_idx_status_logs_venue_time 不直接生效（查询条件无 venueId 前缀），
+     * 但本查询低频（管理后台点击）且表量小，倒序 TOP-N 走主键扫描即可。
+     */
+    List<VenueStatusLog> findByChangedByIsNullAndToStatusAndFromStatusInOrderByCreatedAtDesc(
+            VenueStatus toStatus, Collection<VenueStatus> fromStatuses, Pageable pageable);
 }
