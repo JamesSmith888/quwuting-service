@@ -76,9 +76,11 @@ command -v systemctl >/dev/null 2>&1 || die "无 systemd；本脚本依赖 syste
 
 # 检查外部敏感配置存在（配置策略：敏感值 gitignored yml 服务器本地维护，不入 git）
 [[ -f "$EXT_CONFIG" ]] || die "缺少外部配置 $EXT_CONFIG（模板见 deploy/config-prod.example.yaml：DB/微信/JWT/Supabase 真实值）"
-grep -q '^  url: jdbc:mysql' "$EXT_CONFIG" || die "外部配置 $EXT_CONFIG 缺少 spring.datasource.url（jdbc:mysql 开头）"
-grep -q '^    username:' "$EXT_CONFIG" || die "外部配置 $EXT_CONFIG 缺少 spring.datasource.username"
-grep -q '^    password:' "$EXT_CONFIG" || die "外部配置 $EXT_CONFIG 缺少 spring.datasource.password"
+# 注意：grep 必须兼容任意 YAML 缩进（^[[:space:]]*），不要写死 2/4 空格——
+# 模板与本地 application-mysql.yaml 均用 4 空格缩进，写死空格会误报（2026-09-01 修复）
+grep -Eq '^[[:space:]]*url: jdbc:mysql' "$EXT_CONFIG" || die "外部配置 $EXT_CONFIG 缺少 spring.datasource.url（jdbc:mysql 开头）"
+grep -Eq '^[[:space:]]*username:' "$EXT_CONFIG" || die "外部配置 $EXT_CONFIG 缺少 spring.datasource.username"
+grep -Eq '^[[:space:]]*password:' "$EXT_CONFIG" || die "外部配置 $EXT_CONFIG 缺少 spring.datasource.password"
 log "外部敏感配置: $EXT_CONFIG（Spring Boot 外部化加载，优先级高于 classpath）"
 [[ -f "$APP_DIR/src/main/resources/application-${SPRING_PROFILE}.yaml" ]] \
   || die "缺少 application-${SPRING_PROFILE}.yaml（${SPRING_PROFILE} profile 配置在 git 中，敏感键为空占位）"

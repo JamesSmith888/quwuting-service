@@ -45,6 +45,8 @@ supabase:
 #   amap:
 #     key: <高德 key>
 
-# 管理后台密码（覆盖 ${WEB_ADMIN_PASSWORD:}；留空 = 密码登录通道禁用）
-# web-auth:
-#   password: <管理后台密码>
+# 管理后台密码（2026-09-01 起生产弃环境变量：此值替代 ${WEB_ADMIN_PASSWORD}，
+# **生产必须填写**，留空 = 密码登录通道禁用；本地开发凭据在 application-mysql.yaml）
+web-auth:
+  username: admin
+  password: <管理后台密码>
