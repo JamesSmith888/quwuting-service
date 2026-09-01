@@ -139,6 +139,26 @@ SQL 用 NOT EXISTS 子查询派生（对齐站内信 unread-count 模式）。
 - 路由重构为嵌套结构：`/` → AppLayout → `/sync`、`/announcements`；
   登录后默认跳 `/sync`（原 `home` 路由名废弃为 `sync`）。
 
+#### ⚠️ Vant fixed+placeholder 布局约定（2026-09-01 根因修复，长期有效）
+
+**事故**：AppLayout 底部 tabbar 曾出现「不悬浮视口底部（滚到列表末尾才见）+ 左移半宽
+飘出屏幕」。**根因**：Vant Tabbar 在 `fixed`+`placeholder` 同时为 true 时，外层会包一层
+`.van-tabbar__placeholder` 占位 div，**Vue 3 的外部 class / scoped attribute 全落在该
+占位层（组件根 vnode）而非 tabbar 本体**；把 `transform: translateX(-50%)` 居中 hack
+写在 `.layout-tabbar` 上 = 写在 tabbar 的**祖先**上，按 CSS 规范 transform 使该祖先成为
+fixed 后代的 containing block → tabbar 不再相对视口定位（`bottom:0` 钉在文档流末尾的
+placeholder 处）+ placeholder 自身 static 定位下块级靠左再左移半宽 → 左半截出屏。
+
+**约定（后续给 fixed Vant 组件加自定义样式时必须遵守）**：
+
+1. `fixed`+`placeholder` 组合下，class 落在 placeholder 层——该层只承担文档流占位，
+   **禁止**写 transform / filter / perspective / will-change（任何一项都会劫持 fixed）；
+2. 视觉样式一律 `:deep()` 命中组件本体（如 `.layout-tabbar :deep(.van-tabbar)`）；
+3. fixed 元素限宽居中用标准方案 `left: 0; right: 0; margin: 0 auto; max-width: 640px`，
+   **禁用** `left: 50% + translateX(-50%)` hack；
+4. 改动后必须在真实浏览器验证 `getBoundingClientRect()`（悬浮性）与 `offsetParent === null`
+   （containing block 未被劫持），不能只看 DOM 存在性。
+
 ### 公告管理页（M2 已落地 2026-09-01）
 
 - **列表页**（AnnouncementListView）：状态 tabs（全部/草稿/已发布/已下线）+ 分类下拉筛选、

@@ -9,8 +9,10 @@ import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
 import org.quwuting.quwutingservice.venue.entity.Venue;
+import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuecrowd.dto.request.SubmitCrowdReportRequest;
+import org.quwuting.quwutingservice.venuecrowd.dto.response.AdminCrowdReportDetail;
 import org.quwuting.quwutingservice.venuecrowd.dto.response.AdminCrowdReportSummary;
 import org.quwuting.quwutingservice.venuecrowd.dto.response.CrowdSummary;
 import org.quwuting.quwutingservice.venuecrowd.entity.VenueCrowdReport;
@@ -140,7 +142,15 @@ public class CrowdReportService {
     @Transactional
     public CrowdSummary submit(Long venueId, SubmitCrowdReportRequest request) {
         Long userId = UserContext.requireAuth();
-        requireVenue(venueId);
+        // 门店存在性 + 营业状态校验（2026-09-01 用户需求「非营业中的门店不允许上报」：
+        // 小程序端入口拦截（体验）+ 本处后端权威校验兜底——禁绕过前端直调 API 写入；
+        // 口径 = 存储态 status != OPEN（休息/装修/暂停/停业）拒绝；OPEN 门店未到营业
+        // 时段仍可报（今晚热度语义含「今晚」，提前报今晚人况是有效信息，不做时间派生限制）
+        Venue venue = venueRepository.findById(venueId)
+                .orElseThrow(() -> new BusinessException(1017, "门店不存在"));
+        if (venue.getStatus() != VenueStatus.OPEN) {
+            throw new BusinessException(1018, "门店当前未营业，暂不可上报今晚热度");
+        }
         // 枚举校验（快捷按钮载荷越界拒绝——零自由文本，无内容审核面）
         CrowdFemaleLevel female = CrowdFemaleLevel.of(request.femaleLevel());
         CrowdMaleLevel male = request.maleLevel() != null ? CrowdMaleLevel.of(request.maleLevel()) : null;
@@ -612,6 +622,70 @@ public class CrowdReportService {
         }
         summaries.sort(Comparator.comparingInt(AdminCrowdReportSummary::reportCount24h).reversed());
         return summaries;
+    }
+
+    /**
+     * 管理端按店明细分页（2026-09-01 热度管理下钻，GET /admin/crowd-reports/venues/{venueId}，
+     * 仅 ADMIN）：最近 {@link #ADMIN_WINDOW_HOURS}h 该店全部上报，createdAt 倒序分页。
+     * 运营据此定位「哪条不合理/错误」→ 删除（{@link #adminDelete}）；行字段服务端
+     * 权威（badgeText 三档/档位名+锚点/reportDate/modifyCount/绝对时间），前端零拼接。
+     */
+    @Transactional(readOnly = true)
+    public Page<AdminCrowdReportDetail> adminVenueDetails(Long venueId, int page, int size) {
+        LocalDateTime since = LocalDateTime.now().minusHours(ADMIN_WINDOW_HOURS);
+        Page<VenueCrowdReport> result = crowdReportRepository
+                .findByVenueIdAndCreatedAtAfterAndDeletedFalse(venueId, since,
+                        PageRequest.of(page, Math.min(size, HISTORY_PAGE_SIZE_LIMIT)));
+        List<VenueCrowdReport> rows = result.getContent();
+        if (rows.isEmpty()) {
+            return new PageImpl<>(List.of(), result.getPageable(), result.getTotalElements());
+        }
+        Set<Long> userIds = rows.stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
+        Map<Long, Double> weights = trustWeights(userIds);
+        Map<Long, String> nicknames = userRepository.findByIdInAndDeletedFalse(userIds).stream()
+                .collect(Collectors.toMap(User::getId,
+                        u -> u.getNickname() != null && !u.getNickname().isBlank()
+                                ? u.getNickname() : "匿名"));
+        List<AdminCrowdReportDetail> content = rows.stream()
+                .map(r -> {
+                    CrowdFemaleLevel female = CrowdFemaleLevel.of(r.getFemaleLevel());
+                    CrowdMaleLevel male = r.getMaleLevel() != null
+                            ? CrowdMaleLevel.of(r.getMaleLevel()) : null;
+                    return new AdminCrowdReportDetail(
+                            r.getId(),
+                            r.getUserId(),
+                            nicknames.getOrDefault(r.getUserId(), "匿名"),
+                            badgeFor(r.getUserId(), weights),
+                            female.getLevel(), female.getDisplayName(), female.getAnchor(),
+                            male != null ? male.getLevel() : null,
+                            male != null ? male.getDisplayName() : null,
+                            r.getReportDate(),
+                            r.getModifyCount() != null ? r.getModifyCount() : 0,
+                            r.getCreatedAt());
+                })
+                .toList();
+        return new PageImpl<>(content, result.getPageable(), result.getTotalElements());
+    }
+
+    /**
+     * 管理端删除单条上报（2026-09-01 用户需求「可删除不合理/错误的今晚热度上报记录」，
+     * DELETE /admin/crowd-reports/{id}，仅 ADMIN）：
+     * 软删除（deleted=true，全库统一口径）——summary/history/列表角标/管理端聚合
+     * 均带 deleted=false 过滤，删除后自动生效；该店角标与最新上报行缓存显式失效
+     * （{@link #invalidateVenueCrowdCaches}，不依赖 TTL）。
+     * <p>
+     * 删除后用户当日可重新上报：每日一记部分唯一索引谓词 WHERE deleted=false，
+     * 删除行不再命中约束 → 再次提交 upsert 生成新行（管理员删了错误记录，
+     * 用户可报回正确数据）。
+     */
+    @Transactional
+    public void adminDelete(Long reportId) {
+        VenueCrowdReport report = crowdReportRepository.findById(reportId)
+                .filter(r -> !r.isDeleted())
+                .orElseThrow(() -> new BusinessException(1019, "上报记录不存在或已删除"));
+        report.setDeleted(true);
+        crowdReportRepository.save(report);
+        invalidateVenueCrowdCaches(report.getVenueId());
     }
 
     private AdminCrowdReportSummary buildAdminSummary(Long venueId, String venueName,

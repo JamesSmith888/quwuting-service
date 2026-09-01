@@ -27,6 +27,10 @@ public interface VenueCrowdReportRepository extends JpaRepository<VenueCrowdRepo
     List<VenueCrowdReport> findByVenueIdAndCreatedAtAfterAndDeletedFalse(
             @Param("venueId") Long venueId, @Param("since") LocalDateTime since);
 
+    /** 管理端按店明细分页（2026-09-01 热度管理下钻）：24h 窗口 + 分页 + 未删，createdAt 倒序 */
+    Page<VenueCrowdReport> findByVenueIdAndCreatedAtAfterAndDeletedFalse(
+            @Param("venueId") Long venueId, @Param("since") LocalDateTime since, Pageable pageable);
+
     /** 全部热度历史（2026-08-29 历史页数据源）：该店全量未删上报，createdAt 倒序分页 */
     Page<VenueCrowdReport> findByVenueIdAndDeletedFalseOrderByCreatedAtDesc(
             @Param("venueId") Long venueId, Pageable pageable);
