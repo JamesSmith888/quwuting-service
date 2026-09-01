@@ -6,6 +6,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.favorite.entity.Favorite;
 import org.quwuting.quwutingservice.favorite.repository.FavoriteRepository;
+import org.quwuting.quwutingservice.message.service.MessageService;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
@@ -17,6 +18,7 @@ import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportService;
 import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
+import org.quwuting.quwutingservice.venuestatuswatcher.service.VenueStatusWatcherService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -45,6 +47,10 @@ public class FavoriteService {
      * 「N人报过」+ 「最新上报」行须同口径下发——同 isHot 历史缺陷模式，见
      * {@link #getFavoriteVenues} javadoc） */
     private final CrowdReportService crowdReportService;
+    /** 站内信服务（收藏门店「状态更新」角标数据源，2026-09-01，见 {@link #getFavoriteVenues}） */
+    private final MessageService messageService;
+    /** 营业状态关注服务（「收藏即关注」2026-09-01：收藏自动建立状态通知，取消收藏同步取消） */
+    private final VenueStatusWatcherService venueStatusWatcherService;
 
     // ── 收藏/取消收藏写操作频控（2026-08-13 防刷） ──────────────────────────
     // 根因（用户反馈："频繁/恶意点击取消收藏、收藏，统计图怎么表现才合理"）：
@@ -128,6 +134,11 @@ public class FavoriteService {
         // #latestTextsByVenue；历史缺陷同 isHot：漏注入导致"全部城市正常、收藏不显示"）
         Map<Long, String> crowdBadges = crowdReportService.badgeTextsByVenue(venueIds);
         Map<Long, String> crowdLatestTexts = crowdReportService.latestTextsByVenue(venueIds);
+        // 批量未读状态变更门店 ID（2026-09-01「收藏即关注」）：一次 IN 覆盖整页收藏，
+        // 无未读的门店不在集合中（与整页批量模式一致，避免 N+1）。数据源 = 未读
+        // VENUE_STATUS_CHANGED 站内信（收藏自动建立关注 → 状态变更即有提醒 → 角标）。
+        // 打开门店详情（venue-detail onLoad 调 status-alerts/read-by-venue）后已读收敛。
+        Set<Long> statusChangedVenueIds = messageService.findUnreadStatusChangedVenueIds(userId, venueIds);
         return venues.stream()
                 .map(v -> venueResponseMapper.toResponse(
                         v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
@@ -135,15 +146,23 @@ public class FavoriteService {
                         viewCounts.getOrDefault(v.getId(), 0L),
                         photosByVenue.getOrDefault(v.getId(), List.of()),
                         crowdBadges.get(v.getId()),
-                        crowdLatestTexts.get(v.getId())))
+                        crowdLatestTexts.get(v.getId()),
+                        statusChangedVenueIds.contains(v.getId())))
                 .toList();
     }
 
     /**
      * 收藏场所（幂等：已收藏则忽略）。
      * <p>
-     * 写操作即时失效热度缓存：收藏总数与近30天新增收藏是热度公式输入
-     * （权重 10 / 15）。热度缓存为 VenueHeatService 内嵌 LoadingCache，
+     * <b>「收藏即关注」联动（2026-09-01）</b>：收藏成功的同时自动建立营业状态关注
+     * （{@link VenueStatusWatcherService#ensureWatching}，同事务原子提交）——用户心智
+     * 「收藏 = 在意的店」，该店营业状态后续每次实际变更都收到站内信提醒（收藏列表
+     * 「状态更新」角标 + 首页提醒卡）。取消收藏（{@link #removeFavorite}）同步取消
+     * 关注；详情页「营业状态通知」开关仍可单独关闭（显式退订）。
+     * <p>
+     * 写操作即时失效热度缓存：收藏写入改变近30天新增收藏（热度公式收藏项唯一输入，
+     * 权重 15，取消软删自动抵消）与收藏总数（页面展示字段，2026-09-01 起不计入公式）。
+     * 热度缓存为 VenueHeatService 内嵌 LoadingCache，
      * 通过显式 invalidate 逐出（refresh 周期仅兜底）。
      */
     @Transactional
@@ -166,6 +185,8 @@ public class FavoriteService {
             fav.setUnfavoritedAt(null);
             favoriteRepository.save(fav);
             venueHeatService.invalidate(venueId);
+            // 收藏恢复 = 重新建立状态通知（取消收藏时已同步取消关注）
+            venueStatusWatcherService.ensureWatching(userId, venueId);
             return;
         }
 
@@ -178,6 +199,8 @@ public class FavoriteService {
         // 收藏的幂等返回实际变为 HTTP 500（与 DancerService.addFavorite 同根因同修复）
         favoriteRepository.upsertFavorite(userId, venueId, java.time.LocalDateTime.now());
         venueHeatService.invalidate(venueId);
+        // 收藏即关注：同一事务内建立营业状态通知（幂等，见 VenueStatusWatcherService）
+        venueStatusWatcherService.ensureWatching(userId, venueId);
     }
 
     /**
@@ -185,6 +208,10 @@ public class FavoriteService {
      * 取消时刻写入 unfavoritedAt（V19）——「收藏趋势 · 取消收藏」折线按此列按日分组，
      * 使"新增 − 取消"的净变化可被趋势图验证（见 V19 迁移注释与后端 AGENTS.md「趋势」）。
      * 真实取消写入前过频控（防频繁/恶意 toggle 刷取消折线，见类注释）。
+     * <p>
+     * 「收藏即关注」联动（2026-09-01）：取消收藏同步取消营业状态关注
+     * （{@link VenueStatusWatcherService#unwatch}，幂等）——不再在意的店不再推送
+     * 状态变更通知；未读的状态提醒站内信保留在消息中心（历史留档，不删）。
      */
     @Transactional
     public void removeFavorite(Long userId, Long venueId) {
@@ -199,6 +226,8 @@ public class FavoriteService {
                     fav.setUnfavoritedAt(java.time.LocalDateTime.now());
                     favoriteRepository.save(fav);
                     venueHeatService.invalidate(venueId);
+                    // 取消收藏 = 取消状态通知（详情页开关仍可单独再开）
+                    venueStatusWatcherService.unwatch(userId, venueId);
                 });
     }
 }

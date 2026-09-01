@@ -23,7 +23,11 @@ public record VenueHeatResponse(
         long viewUv30d,
 
         // ── 收藏 ──
-        /** 收藏总数 */
+        /**
+         * 收藏总数（累计，页面展示用——2026-09-01 起<b>不再参与热度公式</b>；
+         * 公式收藏项唯一输入 = 近30天新增收藏 newFavoriteCount30d，见 VenueHeatWeights。
+         * 根因：旧双列（总数×10 + 新增×15）是集合包含关系，一次收藏重复计 25 分。）
+         */
         long favoriteCount,
         /** 近30天新增收藏 */
         long newFavoriteCount30d,
@@ -66,7 +70,10 @@ public record VenueHeatResponse(
         List<ReactionTrendPoint> reactionTrend,
 
         // ── 动态 ──
-        /** 动态总数 */
+        /**
+         * 动态总数（展示用；2026-09-01 起热度公式输入 = 近30天新增动态 newPostCount30d，
+         * 动态为 admin 运营内容，存量项制造马太——见 VenueHeatWeights）
+         */
         long postCount,
         /** 近30天新增动态 */
         long newPostCount30d,
@@ -158,7 +165,7 @@ public record VenueHeatResponse(
 
         // ── 公式文案（后端生成，前端直接渲染） ──
         /** 热度规则简述（2026-08-27 起为「中等简洁人话版」，前端默认展示——如
-         *  "热度 76 = 近30天人气：浏览贡献 7（来源加权+近7天翻倍）· 收藏 5×10 · …"） */
+         *  "热度 76 = 近30天人气：浏览贡献 7（来源加权+近7天翻倍）· 新增收藏 5×15 · …"） */
         String formulaText,
         /** 热度规则详情（完整条目化规则，前端「查看完整计算规则」点击展开——含浏览
          *  来源加权/压缩换算、各维度权重、满意度中性偏移与负向反馈规则） */

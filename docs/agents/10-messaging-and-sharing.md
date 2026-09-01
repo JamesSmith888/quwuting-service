@@ -34,6 +34,7 @@
 | GET /users/me/messages | 我的站内信（分页倒序，read 派生布尔） |
 | GET /users/me/messages/unread-count | 未读数（个人中心 / 首页 FAB 未读徽标） |
 | GET /users/me/messages/status-alerts | 未读的关注门店状态变化提醒（首页提醒卡片数据源；最新 N 条，默认 3） |
+| POST /users/me/messages/status-alerts/read-by-venue | 按门店批量标记状态提醒已读（2026-09-01 收藏角标消费：打开门店详情 = 已看到最新状态；幂等，仅 VENUE_STATUS_CHANGED 类型） |
 | POST /users/me/messages/{id}/read | 单条标记已读（越权/已读幂等） |
 | POST /users/me/messages/read-all | 全部标记已读（前端打开消息中心即调用——标准通知中心范式） |
 
@@ -73,10 +74,16 @@
 复用既有消息基础设施，零外部依赖/零成本/零合规风险（与「状态流转对用户有结果的
 通知必须走站内信」长期约定一致）。
 
-**与收藏（qwt_favorites）解耦**：关注 = 只盯营业状态变化，不收藏也能开通知
-（如"这家暂停营业了，等它恢复"），语义独立。
+**与收藏（qwt_favorites）解耦（2026-08-12 初版）→ 2026-09-01「收藏即关注」耦合**：
+- 初版：关注 = 只盯营业状态变化，不收藏也能开通知（如"这家暂停营业了，等它恢复"），语义独立；
+- **2026-09-01 定稿「收藏即关注」**：收藏门店**自动建立**关注（`FavoriteService.addFavorite`
+  → `VenueStatusWatcherService.ensureWatching`，同事务原子提交；恢复收藏同理），取消收藏
+  **同步取消**关注（`removeFavorite` → `unwatch`）。用户心智「收藏 = 在意的店」→ 该店
+  营业状态变化主动通知（收藏列表「状态更新」角标 + 首页提醒卡）。详情页「营业状态通知」
+  开关保留为**显式退订/独立订阅**通道（未收藏也能开通知、收藏后可单独关）。存量收藏由
+  V65 迁移一次性回填关注记录（created_at 取收藏行 created_at，防重 NOT EXISTS）。
 
-### 数据模型（qwt_venue_status_watchers，V14 迁移）
+### 数据模型（qwt_venue_status_watchers，V14 迁移；存量收藏回填 V65）
 
 | 列 | 说明 |
 |---|---|
@@ -89,8 +96,8 @@
 
 | 接口 | 说明 |
 |---|---|
-| PUT /venues/{id}/status-watch | 开启关注（幂等：已关注直接成功；门店不存在抛 1001） |
-| DELETE /venues/{id}/status-watch | 关闭关注（幂等：未关注静默成功） |
+| POST /venues/{id}/status-watch | 开启关注（幂等：已关注直接成功；门店不存在抛 1001；2026-08-19 由 PUT 迁移对齐「只允许 GET 和 POST」） |
+| POST /venues/{id}/status-watch/cancel | 关闭关注（幂等：未关注静默成功；2026-08-19 由 DELETE 迁移） |
 | GET /venues/{id}/status-watch | 我的关注态（{ watching: boolean }） |
 
 ### 触发挂点（唯一入口 = VenueService 三个状态变更事实源）
@@ -114,6 +121,19 @@ to=OPEN 用「已恢复营业」，其余用 to 的 displayName，from 非空时
 VENUE_STATUS_CHANGED 的**未读**消息最新 N 条（`MessageRepository` 按
 userId+type+readAt IS NULL 查询）。未读即提醒；点击深链详情页 + 单条标记已读后
 从卡片消失（历史留在消息中心）。
+
+### 收藏列表「状态更新」角标（2026-09-01「收藏即关注」配套）
+
+- **数据源**：`FavoriteService.getFavoriteVenues` 批量查询未读 VENUE_STATUS_CHANGED
+  的门店 ID 集合（`MessageRepository#findUnreadVenueIdsByType`，一次 IN 覆盖整页
+  收藏，避免 N+1），注入 `VenueResponse.statusChanged`（仅收藏列表场景下发真实值，
+  城市列表/详情/回显恒 false——角标是收藏语义的提醒，同 crowdBadgeText 注入边界）。
+- **已读消费**：`POST /users/me/messages/status-alerts/read-by-venue`（venueId）——
+  打开门店详情（venue-detail onLoad fire-and-forget）即把该店全部未读
+  VENUE_STATUS_CHANGED 置已读（`MessageRepository#markReadByVenueAndType`，幂等，
+  仅该类型受影响）。打开门店 = 已看到最新状态，角标/首页提醒卡随已读收敛。
+- **缓存联动（前端）**：已读成功后失效三处 TTL 缓存——未读数、状态提醒列表、
+  收藏列表（角标以服务端为准收敛，避免 30s 缓存内残留）。
 
 ---
 

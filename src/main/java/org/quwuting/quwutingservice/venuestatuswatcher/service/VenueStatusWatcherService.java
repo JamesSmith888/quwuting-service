@@ -19,6 +19,10 @@ import java.util.List;
  * <ul>
  *   <li><b>写（用户）</b>：{@link #watch} / {@link #unwatch}——详情页开关，
  *       与收藏解耦（关注=只盯营业状态变化）；</li>
+ *   <li><b>写（收藏联动，2026-09-01「收藏即关注」）</b>：{@link #ensureWatching}——
+ *       收藏门店自动建立关注（用户心智「收藏 = 在意的店」→ 营业状态变化主动通知，
+ *       见 AGENTS.md「收藏门店营业状态通知」）；调用方 = FavoriteService 收藏/恢复
+ *       写路径；取消收藏经 {@link #unwatch} 同步取消关注（显式开关仍可单独关闭）；</li>
  *   <li><b>读（用户）</b>：{@link #isWatching}——详情页开关态；</li>
  *   <li><b>写（状态变更挂点）</b>：{@link #notifyStatusChanged}——门店营业状态实际
  *       变更时向全部关注者发站内信（同事务、幂等：一次状态变更一条消息），
@@ -44,6 +48,18 @@ public class VenueStatusWatcherService {
     public void watch(Long userId, Long venueId) {
         venueRepository.findByIdAndDeletedFalse(venueId)
                 .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
+        ensureWatching(userId, venueId);
+    }
+
+    /**
+     * 确保关注关系存在（幂等，2026-09-01「收藏即关注」新增）：已关注直接返回，未关注插入。
+     * 与 {@link #watch} 的区别 = <b>跳过场所存在性校验</b>（调用方已保证场所存在——收藏
+     * 写路径经 {@code VenueLookupService#findById} 校验、取消收藏的场所恒真实存在），省一次
+     * DB 往返（东京库跨洲往返是性能第一约束，见 FavoriteService 注释）。传播 REQUIRED
+     * 加入调用方事务（与收藏 upsert 同事务原子提交，收藏成功即关注建立，无中间态）。
+     */
+    @Transactional
+    public void ensureWatching(Long userId, Long venueId) {
         if (watcherRepository.existsByUserIdAndVenueIdAndDeletedFalse(userId, venueId)) {
             return; // 幂等：重复开启不重复插入
         }

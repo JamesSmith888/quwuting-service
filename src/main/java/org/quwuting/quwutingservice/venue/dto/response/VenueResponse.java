@@ -78,5 +78,15 @@ public record VenueResponse(
         String crowdLatestText,
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime createdAt,
         /** 数据最后更新时间（用户可见的时效性信号，用于判断信息可靠度） */
-        @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime updatedAt
+        @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime updatedAt,
+        /**
+         * 是否存在未读的关注门店状态变化提醒（2026-09-01「收藏即关注」，见
+         * {@code FavoriteService#getFavoriteVenues}）：该门店最近一次营业状态变更后
+         * 用户尚未打开过详情页（未读 VENUE_STATUS_CHANGED 站内信 > 0）。驱动收藏列表
+         * 卡片「状态更新」角标——用户心智「收藏 = 在意的店」，状态变了要主动提醒；
+         * 打开门店详情（后端按店批量已读）后随收藏列表重拉自动收敛。仅收藏列表
+         * 场景下发真实值；其他场景（城市列表/详情/编辑回显）恒为 false——状态角标
+         * 是收藏语义的提醒，城市列表不做（同 crowdBadgeText 仅列表场景的注入边界）。
+         */
+        boolean statusChanged
 ) {}

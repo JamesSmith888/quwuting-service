@@ -55,9 +55,9 @@ public class VenuePostService {
      * publisherType 由角色自动判定：ADMIN 角色 → 平台公告（publisherName="去舞厅平台"），
      * 认领人 → 商家动态（publisherName=门店名）。客户端不指定发布方身份。
      * <p>
-     * 写操作即时逐出两类缓存：动态总数是热度公式输入（postCount × 5）——热度为
+     * 写操作即时逐出两类缓存：近30天新增动态是热度公式输入（newPostCount30d × 5）——热度为
      * VenueHeatService 内嵌 LoadingCache，方法体内显式 invalidate；动态数也参与热门场所
-     * 排序（收藏×20 + 动态×10）——hotVenueIds 仍由 Spring CacheManager 托管，
+     * 排序（2026-09-01 起同为近30天新增动态 ×5）——hotVenueIds 仍由 Spring CacheManager 托管，
      * 用 @CacheEvict(allEntries) 逐出。
      */
     @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)

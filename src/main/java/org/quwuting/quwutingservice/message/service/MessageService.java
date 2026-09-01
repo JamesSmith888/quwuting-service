@@ -14,7 +14,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 站内信服务（通用消息中心后端，2026-08-08 新增，见 AGENTS.md「站内信（消息中心）」）。
@@ -109,5 +113,31 @@ public class MessageService {
     @Transactional
     public void markAllRead(Long userId) {
         messageRepository.markAllRead(userId, LocalDateTime.now());
+    }
+
+    /**
+     * 未读的关注门店状态变化提醒对应的门店 ID 集合（收藏列表「状态更新」角标数据源，
+     * 2026-09-01「收藏即关注」）：批量一次 IN 查询避免 N+1（同收藏列表整页批量模式）。
+     * venueIds 为空时返回空集合（跳过查询，零往返）。
+     */
+    @Transactional(readOnly = true)
+    public Set<Long> findUnreadStatusChangedVenueIds(Long userId, Collection<Long> venueIds) {
+        if (venueIds == null || venueIds.isEmpty()) {
+            return Collections.emptySet();
+        }
+        return new HashSet<>(messageRepository.findUnreadVenueIdsByType(
+                userId, MessageType.VENUE_STATUS_CHANGED, venueIds));
+    }
+
+    /**
+     * 按门店标记关注状态变化提醒已读（收藏门店状态角标消费，2026-09-01）：
+     * 打开门店详情 = 已看到最新状态 → 该店全部未读 VENUE_STATUS_CHANGED 置已读。
+     * 幂等：无未读时影响行数 0（收藏列表返回 onShow 重拉自然收敛角标）；
+     * 仅处理该类型，不影响其他类型站内信。
+     */
+    @Transactional
+    public void markStatusChangedReadByVenue(Long userId, Long venueId) {
+        messageRepository.markReadByVenueAndType(
+                userId, MessageType.VENUE_STATUS_CHANGED, venueId, LocalDateTime.now());
     }
 }

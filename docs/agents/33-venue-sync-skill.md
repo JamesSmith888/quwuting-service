@@ -141,8 +141,7 @@ Agent+Skill 通过 `POST /admin/venue-daily-openings/batch` 落库时，`ApplyDa
   两个排序补 `, v.id DESC`（对齐 searchHeat/searchNearest 既有做法），export 的
   `findExportPage` 用 `id ASC` 天然稳定不受影响。**教训沉淀进 SKILL.md**：候选拉取
   必须稳定排序（export 首选 / 公开接口带 sort=newest）。
-- 批量建档门店无坐标/营业时段等精细信息 → 列表排序（邻近加成/时段派生）对这类新店
-  不生效，属预期（「确认态 / 未经核实」哲学）；后续人工补全或地理编码回填
+- 批量建档门店无坐标/营业时段等精细信息 → 列表半径筛选（300km 圈，2026-09-01 起排序无邻近加成，纯热度）与时段派生对这类新店不生效，属预期（「确认态 / 未经核实」哲学）；后续人工补全或地理编码回填
   （POST /admin/venues/geocode/backfill 可一键补齐坐标）。
 - export 按 city 精确匹配——舞讯城市名必须映射到平台标准词表（GET /venues/cities），
   简称（蓉/渝/杭）先在 Skill 侧归一化。

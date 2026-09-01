@@ -116,6 +116,19 @@ public class VenueResponseMapper {
      */
     public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot, long viewCount,
                                     List<String> photos, String crowdBadgeText, String crowdLatestText) {
+        return toResponse(v, topReactions, isHot, viewCount, photos, crowdBadgeText, crowdLatestText, false);
+    }
+
+    /**
+     * 八参重载（2026-09-01 收藏门店状态角标新增）：statusChanged = 是否存在未读的
+     * VENUE_STATUS_CHANGED 站内信（未读 = 状态变更后未打开过详情页），驱动收藏列表
+     * 卡片「状态更新」角标（见 {@code FavoriteService#getFavoriteVenues} 批量查询）。
+     * 仅收藏列表场景传入真实值；城市列表/详情/编辑回显等场景用七参重载（恒 false）——
+     * 状态角标是收藏语义的提醒，其他场景不做（同 isHot/crowdBadgeText 注入边界）。
+     */
+    public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot, long viewCount,
+                                    List<String> photos, String crowdBadgeText, String crowdLatestText,
+                                    boolean statusChanged) {
         List<String> customTags = deserializeStringList(v.getTags(), "tags");
         List<String> effectiveTags = defaultsConfig.merge(customTags);
         List<String> defaultTags = defaultsConfig.tags();
@@ -147,7 +160,8 @@ public class VenueResponseMapper {
                 crowdBadgeText,
                 crowdLatestText,
                 v.getCreatedAt(),
-                v.getUpdatedAt()
+                v.getUpdatedAt(),
+                statusChanged
         );
     }
 

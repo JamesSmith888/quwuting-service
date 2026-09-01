@@ -56,6 +56,18 @@ public class MessageController {
         return ApiResponse.ok(messageService.listStatusAlerts(userId, limit));
     }
 
+    /**
+     * 按门店批量标记关注状态变化提醒已读（收藏门店「状态更新」角标消费，2026-09-01）：
+     * 打开门店详情 = 已看到最新状态 → 该店全部未读 VENUE_STATUS_CHANGED 置已读
+     * （幂等：无未读时影响行数 0；仅处理该类型，不影响其他类型站内信）。
+     */
+    @PostMapping("/status-alerts/read-by-venue")
+    public ApiResponse<Void> markStatusAlertsReadByVenue(@RequestParam Long venueId) {
+        Long userId = UserContext.requireAuth();
+        messageService.markStatusChangedReadByVenue(userId, venueId);
+        return ApiResponse.ok(null);
+    }
+
     /** 单条标记已读（幂等；越权静默成功——消息已按收件人过滤） */
     @PostMapping("/{id}/read")
     public ApiResponse<Void> markOneRead(@PathVariable Long id) {

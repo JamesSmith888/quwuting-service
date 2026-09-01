@@ -333,7 +333,8 @@ venue_id NOT NULL + UNIQUE(user_id, venue_id)、接口返回 VenueResponse。舞
 
 **设计决策**（与门店收藏的关键差异，见 V27 迁移注释）：
 - **独立表 `qwt_dancer_favorites` 而非多态化 qwt_favorites**：门店收藏表与热度趋势 SQL
-  （unfavorited_at 按日分组、收藏总数/近30天新增为热度公式输入）及 VenueResponse 深度耦合，
+  （unfavorited_at 按日分组、收藏趋势为热度统计输入；2026-09-01 起收藏总数退出热度公式，
+  仅近30天新增收藏计入）及 VenueResponse 深度耦合，
   多态化改造（target_type 列 + 唯一约束迁移 + 趋势 SQL 过滤）风险远大于收益。
 - **无 unfavorited_at / 无 Caffeine 频控**：门店收藏的取消时刻列与 60s 阈值频控根因是
   "取消收藏每次真实写入会刷高取消趋势折线"；舞伴收藏不输入任何趋势图，无膨胀风险，

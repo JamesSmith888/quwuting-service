@@ -31,10 +31,10 @@ class VenueListQueryHqlSyntaxTest {
 
     /** 与 VenueRepository @Query 拼接方式一致的完整 SELECT 语句（全部 7 个列表变体）。 */
     private static final String[] QUERIES = {
-            // searchRanked：推荐排序 + 坐标（LIST_FILTERS + RADIUS_PREDICATE + 复合评分 + 距离项）
+            // searchRanked：推荐排序 + 坐标（LIST_FILTERS + RADIUS_PREDICATE + 纯 HEAT_SCORE——
+            // 2026-09-01 距离加成移除：坐标仅用于半径筛选，排序不含距离项）
             "SELECT v FROM Venue v\n" + VenueRepository.LIST_FILTERS + VenueRepository.RADIUS_PREDICATE
-                    + " ORDER BY (" + VenueRepository.HEAT_SCORE
-                    + " + 100.0 / (1.0 + " + VenueRepository.DISTANCE_KM + ")) DESC",
+                    + " ORDER BY " + VenueRepository.HEAT_SCORE + " DESC, v.id DESC",
             // searchRankedNoLocation / searchHeat：LIST_FILTERS + HEAT_SCORE 排序
             "SELECT v FROM Venue v\n" + VenueRepository.LIST_FILTERS
                     + " ORDER BY " + VenueRepository.HEAT_SCORE + " DESC",

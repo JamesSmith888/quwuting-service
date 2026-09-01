@@ -18,15 +18,21 @@
 
 ```
 heatScore = max(0, 浏览贡献 = round(ln(1 + 加权浏览))        -- 2026-08-27 重构，见下
-          + favoriteCount × 10
-          + newFavoriteCount30d × 15
-          + postCount × 5
+          + newFavoriteCount30d × 15                         -- 2026-09-01 收敛：收藏只计近30天新增
+          + newPostCount30d × 5                              -- 2026-09-01 由动态总数改窗口
           + ratingCount30d × 8
           + positiveReactionCount30d × 3（仅 Polarity.POSITIVE 的 code，见「Reaction 快速反馈系统」章节）
           + pointsReceived30d × app.points.heat-weight（2026-08-10 V2 新增：近30天收到积分，
             权重运营可校准——初始 2，V2 三阶段校准机制见「积分系统」章节）
           + (satisfactionScore − 6) × 20（无评分时为 0，6 分为中性基准）)
 ```
+
+**收藏/动态口径收敛（2026-09-01）**：旧公式含「收藏总数 ×10 + 近30天新增 ×15」两列——
+它们是集合包含关系（新增 ⊂ 总数），一次新收藏被重复计 10+15=25 分；且收藏总数/动态总数
+都是永不过期的存量项，历史积累让老店永久占优（马太）。收敛后收藏只计近30天新增
+（取消软删自动抵消，1 次收藏→取消 = +15→−15 = 0，可对账）、动态只计近30天新增
+（admin 运营内容，存量不参与）。`favoriteCount` / `postCount` 仍下发仅作页面展示
+（累计），不计入公式——权重唯一事实源见 `VenueHeatWeights`。
 
 **浏览贡献重构（2026-08-27，马太效应反馈循环修复）**：原线性 `viewCount30d × 1`（近30天 PV
 直接加分）被排序位置偏差系统性放大——排名靠前 → 曝光多 → LIST 点入多 → 浏览涨 → 排名更前，
@@ -52,7 +58,7 @@ SQL 侧镜像一致性由 `VenueHeatServiceTest` 公式测试 + 本 AGENTS.md �
 4. **公式文案后端下发**：`VenueHeatResponse.formulaText/formulaDetail` 由后端生成（权重唯一事实源），前端直接渲染、**禁止硬编码权重**（历史上前端 computeHeatFormula 硬编码 ×1/×10/×15/×5/×8/×3/×20，权重调整后展示即失真——已删除）。
 
 **列表排序/热门标记的口径（2026-08-08 统一，修复双口径分叉）**：
-- 列表「热度最高」排序（`VenueRepository.searchHeat*`）、推荐排序的热度项（`searchRanked*`）、热门场所标记（`findHotVenueIds`）全部使用 `VenueRepository.HEAT_SCORE` 片段 = **行为热度镜像公式**（sortWeight + 浏览贡献 ln(1+加权浏览)（**2026-08-27 重构**，来源加权列表0.5/其他1/搜索1.5/分享2 + 近7天×2，见 `VIEW_BEHAVIOR`）+ 收藏×10 + 新增收藏×15 + 动态×5 + 评分×8 + 正向反馈×3 **+ 近30天收到积分×:pointsWeight（2026-08-10 V2）**，窗口在 SQL 内取 `CURRENT_DATE` 锚定「截至昨日」——**排序口径保持截至昨日**（与热度页 `VenueHeatService` 的 2026-08-13 实时口径不同：排序是稳定比较基准，实时化会让同日不同时刻排名漂移，且与 VenueHeatService 的"同源不同窗口"状态一致——热度指数计算与排名不要求逐位一致，见「场所热度」章节）。
+- 列表「热度最高」排序（`VenueRepository.searchHeat*`）、推荐排序的热度项（`searchRanked*`）、热门场所标记（`findHotVenueIds`）全部使用 `VenueRepository.HEAT_SCORE` 片段 = **行为热度镜像公式**（sortWeight + 浏览贡献 ln(1+加权浏览)（**2026-08-27 重构**，来源加权列表0.5/其他1/搜索1.5/分享2 + 近7天×2，见 `VIEW_BEHAVIOR`）+ **近30天新增收藏×15（2026-09-01 收敛：收藏总数仅展示、不再计入——旧双列集合包含重复计分 + 存量马太，见 `VenueHeatWeights`）** + **近30天新增动态×5（2026-09-01 由动态总数改窗口）** + 评分×8 + 正向反馈×3 **+ 近30天收到积分×:pointsWeight（2026-08-10 V2）**，窗口在 SQL 内取 `CURRENT_DATE` 锚定「截至昨日」——**排序口径保持截至昨日**（与热度页 `VenueHeatService` 的 2026-08-13 实时口径不同：排序是稳定比较基准，实时化会让同日不同时刻排名漂移，且与 VenueHeatService 的"同源不同窗口"状态一致——热度指数计算与排名不要求逐位一致，见「场所热度」章节）。
 - **零行为权重守卫（2026-08-27）**：`HEAT_SCORE` 拆为 `HEAT_BEHAVIOR`（行为热度，不含权重）+ 守卫壳——行为热度 = 0 的门店运营权重不参与排序（`CASE WHEN HEAT_BEHAVIOR > 0 THEN sortWeight ELSE 0 END + HEAT_BEHAVIOR`）。生产实证：79 家种子门店被批量赋予 30~50 权重、42 家零行为，仅靠权重挤占真实热门排位（MT舞酒吧 权重45+行为76 被抬到第3）。热门判定无需守卫——行为门槛（≥70）已兜底。详见 06-listing-and-stats.md「零行为权重守卫」。
 - **满意度偏移不进排序**：排序看"行为热度"（可 SQL 镜像、非负、稳定），口碑（±80 微调）在热度页综合呈现——语义划分：排序热度 = 行为热度，展示热度 = 行为热度 + 口碑偏移。
 - **约束（2026-08-10 V2 权重收敛）**：`HEAT_SCORE` 与 `findHotVenueIds` 是 SQL 双镜像；全部非配置化权重经 `VenueHeatWeights` 常量拼接、积分权重经 `:pointsWeight` 参数注入（配置唯一事实源 `app.points.heat-weight`）——**调整权重只改一处**（常量或配置），镜像一致性由 `VenueHeatServiceTest` 公式测试 + 代码注释互指维持。
@@ -121,7 +127,7 @@ LocalDate viewUntil = today.plusDays(1);                      // views 按 DATE 
 - 窗口骨架为 `[今天-30, 今天]`（31 个连续日期点，含今日），views 过滤 `[today-30, tomorrow)`、其余源表过滤 `[windowSince, now)`
 - 序列恒为 31 个连续日期点（generate_series 骨架保证），前端无需处理"缺失日期"分支
 - 与 `newFavoriteCount30d` 等 30 天窗口总数同源但独立查询，不做互相推导——两者语义不同（求和统计 vs 按天时间序列），保持查询职责单一
-- **口径差异（收藏趋势 vs 顶部收藏数）**：`favoriteCount` = 全量历史累计收藏（`deleted=false` 全量 COUNT），`favoriteTrend` = 近30天新增窗口——顶部有值但近30天无新增时趋势恒 0 属正常口径（2026-08-13 用户反馈根因；前端空图恒渲染 + 提示行承接，勿把两口径强行对齐）
+- **口径差异（收藏趋势 vs 顶部收藏数）**：`favoriteCount` = 全量历史累计收藏（`deleted=false` 全量 COUNT，2026-09-01 起仅展示、不计入热度公式），`favoriteTrend` = 近30天新增窗口——顶部有值但近30天无新增时趋势恒 0 属正常口径（2026-08-13 用户反馈根因；前端空图恒渲染 + 提示行承接，勿把两口径强行对齐）
 - 旧 `FavoriteRepository.countDailyFavoritesSince` 已删除（唯一调用方迁至趋势 mega-query）
 
 **收藏/取消收藏写操作频控（2026-08-13 防刷）**：`FavoriteService` 对**真实状态切换写入**（首次收藏 / 恢复收藏 / 取消收藏）做 60s 窗口阈值频控（内存 Caffeine，key = `user:venue`，窗口内放行 `TOGGLE_RATE_LIMIT_PER_WINDOW=3` 次，超出幂等忽略）。根因：「新增收藏」只在首次收藏时计（restore 不新增行、created_at 不变），天然防膨胀；但「取消收藏」每次真实取消都写 `unfavorited_at` 新时刻——恶意"收藏→取消"循环会把取消折线刷高（新增 +1、取消 +N 口径不对称）。频控后循环被压制成窗口内最多 3 次真实写入（正常用户 1 分钟 toggle 极少超 3 次，覆盖"收藏→取消→再收藏"），取消折线最多每分钟 +2，与真实操作语义一致。**幂等路径（已收藏再收藏等无写入）不计数不频控**——正常误点无害。与既有频控同族（VenueViewService 匿名浏览 60s、feedback 60s）；前端 `venue-detail.onToggleFavorite` 另有 in-flight 守卫防连点（请求完成前忽略重复点击）。
@@ -203,7 +209,7 @@ LocalDate viewUntil = today.plusDays(1);                      // views 按 DATE 
 |--------|---------|
 | score（TagInteractionService） | `tagAggregateStatsService.invalidate` + `venueHeatService.invalidate` |
 | toggle（VenueReactionService） | `venueReactionAggregateService.invalidate` + `venueHeatService.invalidate`（**2026-08-08 起经 `TransactionSynchronization.afterCommit` 延后到事务提交后执行**，见下「失效时机约束」） |
-| addFavorite / removeFavorite（FavoriteService） | `venueHeatService.invalidate`（收藏数是热度输入；幂等无写入分支不逐出） |
+| addFavorite / removeFavorite（FavoriteService） | `venueHeatService.invalidate`（近30天新增收藏是热度公式输入、收藏总数是展示字段；幂等无写入分支不逐出） |
 | recordView（VenueViewService，2026-08-13 新增） | `venueHeatService.invalidate`（浏览数是热度输入 viewTrend/viewSourceTrend/viewCount30d；**仅真实插入 affected>0 时注册**，同来源冲突 DO NOTHING 不逐出；经 afterCommit 延后到事务提交后，见「失效时机约束」） |
 | submitReport / cancelReport（StatusReportService） | `venueHeatService.invalidate`（活跃报告数是热度输出） |
 | createPost（VenuePostService） | `venueHeatService.invalidate` + `@CacheEvict(hotVenueIds, allEntries)`（动态数参与热度与热门排序） |

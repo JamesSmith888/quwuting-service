@@ -30,8 +30,9 @@ import java.util.concurrent.TimeUnit;
  * <p>
  * 热度指数 = 浏览贡献（ln(1+加权浏览)，来源加权列表0.5/其他1/搜索1.5/分享2 + 近7天×2，
  *           2026-08-27 重构——原线性 PV×1 被马太反馈循环放大，见 VenueHeatWeights）
- *           + 收藏总数 × W_FAVORITE + 近期新增收藏 × W_NEW_FAVORITE
- *           + 动态总数 × W_POST + 近期评价数 × W_RATING + 近30天正向 Reaction × W_REACTION
+ *           + 近30天新增收藏 × W_NEW_FAVORITE（2026-09-01 收敛：收藏总数仅展示、不计入
+ *             公式——旧双列「收藏总数×10 + 新增×15」是集合包含关系，一次收藏重复计 25 分）
+ *           + 近30天新增动态 × W_POST + 近期评价数 × W_RATING + 近30天正向 Reaction × W_REACTION
  *           + 满意度偏移 × W_SATISFACTION（无评分时为 0）。
  * <p>
  * 2026-08 缺陷修复确立的语义（见 AGENTS.md「场所热度」章节）：
@@ -271,10 +272,11 @@ public class VenueHeatService {
                 ? Math.round(satisfactionOffset * VenueHeatWeights.SATISFACTION)
                 : 0;
         long pointsWeight = pointsProperties.heatWeight();
+        // 收藏项 2026-09-01 收敛：仅近30天新增收藏计入（取消软删自动抵消），收藏总数仅展示不进公式；
+        // 动态项同改窗口：仅近30天新增动态（动态为 admin 运营内容，存量项制造马太，见 VenueHeatWeights）。
         long rawHeatScore = viewComponent
-                + favoriteCount * VenueHeatWeights.FAVORITE
                 + newFavoriteCount30d * VenueHeatWeights.NEW_FAVORITE
-                + postCount * VenueHeatWeights.POST
+                + newPostCount30d * VenueHeatWeights.POST
                 + ratingCount30d * VenueHeatWeights.RATING
                 + positiveReactionCount30d * VenueHeatWeights.REACTION
                 + pointsReceived30d * pointsWeight
@@ -296,9 +298,8 @@ public class VenueHeatService {
                 : "";
         String clampSuffix = heatClamped ? "（满意度负偏移按0计）" : "";
         String formulaText = "热度 " + heatScore + " = 近30天人气：浏览贡献 " + viewComponent
-                + "（来源加权+近7天翻倍）· 收藏 " + favoriteCount + "×" + VenueHeatWeights.FAVORITE
-                + " · 新增收藏 " + newFavoriteCount30d + "×" + VenueHeatWeights.NEW_FAVORITE
-                + " · 动态 " + postCount + "×" + VenueHeatWeights.POST
+                + "（来源加权+近7天翻倍）· 新增收藏 " + newFavoriteCount30d + "×" + VenueHeatWeights.NEW_FAVORITE
+                + " · 新动态 " + newPostCount30d + "×" + VenueHeatWeights.POST
                 + " · 评分 " + ratingCount30d + "×" + VenueHeatWeights.RATING
                 + " · 正向反馈 " + positiveReactionCount30d + "×" + VenueHeatWeights.REACTION
                 + " · 礼物 " + pointsReceived30d + "×" + pointsWeight
@@ -309,9 +310,9 @@ public class VenueHeatService {
         detail.append("· 浏览贡献 ").append(viewComponent).append(" 分：按来源加权（列表×0.5 / 其他×1 / 搜索×1.5 / 分享×2）、近7天翻倍，再压缩取整（加权 ")
                 .append(weightedViewsText).append(" → ").append(viewComponent)
                 .append(" 分）——降低“排得靠前→看的人多”造成的热度虚高，更反映主动兴趣\n");
-        detail.append("· 收藏总数×").append(VenueHeatWeights.FAVORITE).append("：当前 ").append(favoriteCount).append(" 次\n");
-        detail.append("· 近30天新增收藏×").append(VenueHeatWeights.NEW_FAVORITE).append("：当前 ").append(newFavoriteCount30d).append(" 次\n");
-        detail.append("· 动态总数×").append(VenueHeatWeights.POST).append("：当前 ").append(postCount).append(" 条\n");
+        detail.append("· 近30天新增收藏×").append(VenueHeatWeights.NEW_FAVORITE).append("：当前 ").append(newFavoriteCount30d)
+                .append(" 次（收藏总数 ").append(favoriteCount).append(" 次为累计展示、不计入热度；取消收藏自动抵消）\n");
+        detail.append("· 近30天新增动态×").append(VenueHeatWeights.POST).append("：当前 ").append(newPostCount30d).append(" 条\n");
         detail.append("· 近30天评分数×").append(VenueHeatWeights.RATING).append("：当前 ").append(ratingCount30d).append(" 条\n");
         detail.append("· 近30天正向反馈×").append(VenueHeatWeights.REACTION).append("：当前 ").append(positiveReactionCount30d)
                 .append(" 条（服务问题、排队太久等负向反馈不计入，单独展示）\n");

@@ -158,9 +158,9 @@ public class VenueService {
      * 缓存边界（与 {@link #venueDetailPublicCache} 同族语义，个人态永不缓存）：
      * <ul>
      *   <li><b>仅缓存 hasCoords=false 分支</b>（无坐标：全国 / 显式城市视角，按
-     *       行为热度排序的公共视图）——带坐标查询的排序含请求者位置的邻近加成
-     *       100/(1+km)，结果与坐标强相关，缓存共享语义不成立（本地店置顶是核心
-     *       体验，不得串用户）；</li>
+     *       行为热度排序的公共视图）——带坐标查询的结果集受 {@code radiusKm} 半径筛选
+     *       约束（2026-09-01 起排序不含邻近加成，但半径过滤使结果与请求者位置相关），
+     *       缓存共享语义不成立（不同位置用户 300km 半径内的门店集合不同）；</li>
      *   <li>缓存粒度 = <b>Page&lt;Venue&gt; 实体列表</b>（纯公共数据），不含任何
      *       用户相关字段——Reaction 个人参与态（reactedByMe）、canManage 等仍在
      *       缓存外实时查询组装（ReactionBadge 注释契约「个人状态永远实时查询」）；</li>
@@ -762,8 +762,9 @@ public class VenueService {
      * <ul>
      *   <li>recommended（默认）：复合评分 = 行为热度（{@code VenueRepository.HEAT_SCORE} 镜像公式，
      *       2026-08-08 与热度页统一，见「场所热度」章节；2026-08-27 起行为热度=0 的门店
-     *       运营权重不生效——零人气门店不靠权重霸榜）+ 邻近加成 100/(1+距离km)——有定位时
-     *       本地场所自然置顶，无定位时退化为行为热度；</li>
+     *       运营权重不生效——零人气门店不靠权重霸榜；<b>2026-09-01 距离加成移除</b>——
+     *       距离的唯一影响是 {@code radiusKm} 半径筛选（默认 300km），排序纯看热度，
+     *       本地近 ≠ 靠前（用户实证：热度 2 的本地店不应压过热度 17 的外地店）；</li>
      *   <li>distance：纯距离升序（仅展示有坐标的场所）；无定位时降级为推荐排序
      *       （无法按距离排序，防御性回退而非空列表）；</li>
      *   <li>heat：行为热度（不含距离项，与「热门场所标记」同口径）；</li>
@@ -860,8 +861,8 @@ public class VenueService {
      * <p>
      * 无坐标分支走 {@link #venueListCache}（2026-08-30 性能优化）：全国 / 显式城市
      * 视角的行为热度排序是公共数据（与请求用户无关、低频变化），60s 缓存 + 写路径
-     * 显式失效（见 {@link #invalidateVenueListCache}）；带坐标分支（排序含邻近加成，
-     * 结果与坐标强相关）恒实时查询。
+     * 显式失效（见 {@link #invalidateVenueListCache}）；带坐标分支（结果集受半径
+     * 筛选约束，与请求者位置相关）恒实时查询。
      */
     private Page<Venue> dispatchListQuery(VenueSortMode sortMode, String city, String district,
                                           VenueStatus status, String keywordPattern, String tagPattern,

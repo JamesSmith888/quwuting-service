@@ -267,7 +267,11 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * <p>
      * 语义与热门标记的「行为热度」（完整热度分扣除运营权重 sortWeight）完全一致：
      * <b>2026-08-27 起浏览项 = {@link #VIEW_BEHAVIOR}（来源加权 + 近7天×2 + ln 压缩）</b>
-     * + 收藏总数×10 + 近30天新增收藏×15 + 动态总数×5 + 近30天评分数×8
+     * + 近30天新增收藏×15（<b>2026-09-01 收敛</b>：收藏总数为累计展示、不再计入公式——
+     * 旧双列「收藏总数×10 + 新增×15」是集合包含关系，一次收藏重复计 10+15=25 分，
+     * 且存量永续制造马太，见 {@link org.quwuting.quwutingservice.config.VenueHeatWeights}）
+     * + 近30天新增动态×5（2026-09-01 由动态总数改窗口，admin 内容存量不参与）
+     * + 近30天评分数×8
      * + 近30天正向 Reaction×3 + 近30天收到积分 × :pointsWeight（2026-08-10 V2 新增，
      * 权重来自配置 app.points.heat-weight，运营校准对象）。
      * <p>
@@ -308,14 +312,12 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             ("""
             + VIEW_BEHAVIOR + """
              + (SELECT COUNT(*) FROM Favorite f
-                WHERE f.venueId = v.id AND f.deleted = false) * """
-            + VenueHeatWeights.FAVORITE + """
-             + (SELECT COUNT(*) FROM Favorite f2
-                WHERE f2.venueId = v.id AND f2.deleted = false
-                  AND f2.createdAt >= (CURRENT_DATE - 30 day) AND f2.createdAt < CURRENT_DATE) * """
+                WHERE f.venueId = v.id AND f.deleted = false
+                  AND f.createdAt >= (CURRENT_DATE - 30 day) AND f.createdAt < CURRENT_DATE) * """
             + VenueHeatWeights.NEW_FAVORITE + """
              + (SELECT COUNT(*) FROM VenuePost p
-                WHERE p.venueId = v.id AND p.deleted = false) * """
+                WHERE p.venueId = v.id AND p.deleted = false
+                  AND p.createdAt >= (CURRENT_DATE - 30 day) AND p.createdAt < CURRENT_DATE) * """
             + VenueHeatWeights.POST + """
              + (SELECT COUNT(*) FROM TagInteraction ti
                 WHERE ti.venueId = v.id AND ti.deleted = false AND ti.score IS NOT NULL
@@ -371,34 +373,32 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 排序公式（服务端排序保证分页正确性）：
      * <pre>
      * score = 行为热度（HEAT_SCORE = 受守卫的运营权重 + 浏览贡献 ln(1+加权浏览)
-     *                     （来源加权：列表0.5/其他1/搜索1.5/分享2，近7天×2）+ 收藏×10
-     *                     + 新增收藏×15 + 动态×5 + 评分×8 + 正向反馈×3 + 近30天积分×pointsWeight，
+     *                     （来源加权：列表0.5/其他1/搜索1.5/分享2，近7天×2）+ 近30天新增收藏×15
+     *                     + 近30天新增动态×5 + 评分×8 + 正向反馈×3 + 近30天积分×pointsWeight，
      *                     2026-08-27 起行为热度=0 的门店运营权重不生效，见 HEAT_SCORE 注释）
-     *       + 100 / (1 + 距离km)（邻近加成，Haversine；2026-08-28 起无坐标场所 COALESCE 兜底 0——
-     *         城市放行后无坐标门店进入结果集，排序键不得为 NULL（PG 的 DESC 默认 NULLS FIRST
-     *         会把整批无坐标门店顶到列表最前且顺序不稳定），退化为纯热度排序）
      * </pre>
-     * 距离项使本地场所在全国列表中自然置顶，跨城市时衰减至可忽略，由热度与运营权重决定顺序。
+     * <b>2026-09-01 距离加成移除</b>：旧公式含 {@code + 100/(1+距离km)} 邻近加成，用户实证
+     * 「热度2 的本地店压过热度17 的外地店」（西部舞厅 4.5km +18 分 vs 今之音乐酒吧 114km +0.9 分，
+     * 距离项 18 分 &gt; 两家店的活跃热度差 15 分）——用户明确「不会为了 300km 内的距离选 5km 的店」。
+     * 距离的唯一影响收敛为 {@code radiusKm} 半径筛选（默认 300km，见 Service 层 DEFAULT_RADIUS_KM），
+     * 排序纯看热度与受守卫的运营权重：本地近 ≠ 靠前，热度高者居上。
      * <p>
-     * <b>latitude / longitude 必须非 null</b>（由 Service 保证）：Postgres 将无类型的 null
-     * 绑定参数推断为 bytea，radians() 无法解析。无坐标场景必须改调 {@link #searchRankedNoLocation}，
-     * 不要向本方法传 null。
+     * 本方法坐标参数仅用于 {@link #RADIUS_PREDICATE} 半径筛选——<b>latitude / longitude
+     * 必须非 null</b>（由 Service 保证）：Postgres 将无类型的 null 绑定参数推断为 bytea，
+     * radians() 无法解析。无坐标场景必须改调 {@link #searchRankedNoLocation}，不要向本方法传 null。
      * <p>
      * {@code radiusKm} 可空：null = 不限（谓词短路，行为与旧版完全一致）；有值 = 距离半径筛选
      * （仅当 :city 为空时生效，城市放行口径见 {@link #RADIUS_PREDICATE}）。
      * <p>
      * <b>{@code v.id DESC} tie-break（2026-09-01）</b>：同 {@link #searchRankedNoLocation}
-     * 分页漂移修复——距离/热度同分时排序不稳定会导致翻页遗漏。
+     * 分页漂移修复——热度/权重同分时排序不稳定会导致翻页遗漏。
      */
     @Query("""
             SELECT v FROM Venue v
             """ + LIST_FILTERS + RADIUS_PREDICATE + """
-            ORDER BY (
+            ORDER BY
             """ + HEAT_SCORE + """
-            + COALESCE(100.0 / (1.0 +
-            """ + DISTANCE_KM + """
-            ), 0)
-            ) DESC, v.id DESC
+            DESC, v.id DESC
             """)
     Page<Venue> searchRanked(@Param("city") String city,
                              @Param("district") String district,
@@ -415,8 +415,10 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                              Pageable pageable);
 
     /**
-     * 列表主查询（推荐排序，无用户坐标）：复合评分退化为 运营权重 + 热度。
-     * 与 {@link #searchRanked} 共用筛选条件，仅排序公式不含距离项。
+     * 列表主查询（推荐排序，无用户坐标）：排序 = 受守卫的运营权重 + 行为热度。
+     * 与 {@link #searchRanked} 排序公式一致（2026-09-01 起 searchRanked 也不含距离项，
+     * 距离仅作 radiusKm 半径筛选）——两者唯一区别 = 本方法无 {@link #RADIUS_PREDICATE}
+     * 半径筛选（无坐标无法计算距离）。
      * <p>
      * <b>{@code v.id DESC} tie-break（2026-09-01 分页漂移修复）</b>：热度分大量为 0
      * 时排序键重复，无稳定 tie-break 会导致翻页边界漂移——同一批门店在页间重复/遗漏
@@ -933,14 +935,12 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                 FROM qwt_venue_views vv
                                 WHERE vv.venue_id = v.id AND vv.view_date >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND vv.view_date < CURRENT_DATE))
                            + (SELECT COUNT(*) FROM qwt_favorites f
-                              WHERE f.venue_id = v.id AND f.deleted = false) * """
-            + VenueHeatWeights.FAVORITE + """
-                           + (SELECT COUNT(*) FROM qwt_favorites f2
-                              WHERE f2.venue_id = v.id AND f2.deleted = false
-                                AND f2.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND f2.created_at < CURRENT_DATE) * """
+                              WHERE f.venue_id = v.id AND f.deleted = false
+                                AND f.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND f.created_at < CURRENT_DATE) * """
             + VenueHeatWeights.NEW_FAVORITE + """
                            + (SELECT COUNT(*) FROM qwt_venue_posts p
-                              WHERE p.venue_id = v.id AND p.deleted = false) * """
+                              WHERE p.venue_id = v.id AND p.deleted = false
+                                AND p.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND p.created_at < CURRENT_DATE) * """
             + VenueHeatWeights.POST + """
                            + (SELECT COUNT(*) FROM qwt_tag_interactions ti
                               WHERE ti.venue_id = v.id AND ti.deleted = false AND ti.score IS NOT NULL
