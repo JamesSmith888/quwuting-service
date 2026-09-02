@@ -29,15 +29,20 @@ import org.quwuting.quwutingservice.venue.repository.VenueRepository;
  */
 class VenueListQueryHqlSyntaxTest {
 
-    /** 与 VenueRepository @Query 拼接方式一致的完整 SELECT 语句（全部 7 个列表变体）。 */
+    /** 与 VenueRepository @Query 拼接方式一致的完整 SELECT 语句（列表变体 + 检索专用方法）。
+     *  2026-09-02 搜索增强：RECOMMENDED 系 ORDER BY 前插 RELEVANCE_KEYS（搜索相关度键，
+     *  含全限定枚举 OPEN 比较与 ESCAPE 字面量）；LIST_FILTERS 现内嵌 KW_MATCH
+     *  （EXISTS 子查询 + ESCAPE 字面量）与 :filterIds 白名单谓词。 */
     private static final String[] QUERIES = {
-            // searchRanked：推荐排序 + 坐标（LIST_FILTERS + RADIUS_PREDICATE + 纯 HEAT_SCORE——
+            // searchRanked：推荐排序 + 坐标（LIST_FILTERS + RADIUS_PREDICATE +
+            // RELEVANCE_KEYS（keyword 存在时相关度排序，null 时恒等键）+ HEAT_SCORE——
             // 2026-09-01 距离加成移除：坐标仅用于半径筛选，排序不含距离项）
             "SELECT v FROM Venue v\n" + VenueRepository.LIST_FILTERS + VenueRepository.RADIUS_PREDICATE
-                    + " ORDER BY " + VenueRepository.HEAT_SCORE + " DESC, v.id DESC",
-            // searchRankedNoLocation / searchHeat：LIST_FILTERS + HEAT_SCORE 排序
+                    + " ORDER BY " + VenueRepository.RELEVANCE_KEYS + VenueRepository.HEAT_SCORE
+                    + " DESC, v.id DESC",
+            // searchRankedNoLocation / searchHeat：LIST_FILTERS + RELEVANCE_KEYS + HEAT_SCORE 排序
             "SELECT v FROM Venue v\n" + VenueRepository.LIST_FILTERS
-                    + " ORDER BY " + VenueRepository.HEAT_SCORE + " DESC",
+                    + " ORDER BY " + VenueRepository.RELEVANCE_KEYS + VenueRepository.HEAT_SCORE + " DESC",
             // searchNearest：LIST_FILTERS + 坐标非空 + RADIUS_PREDICATE + 距离升序
             "SELECT v FROM Venue v\n" + VenueRepository.LIST_FILTERS
                     + " AND v.latitude IS NOT NULL AND v.longitude IS NOT NULL\n"

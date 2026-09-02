@@ -45,6 +45,10 @@ import java.util.stream.Collectors;
  *   <li>已读幂等：existsBy 前置检查 + (user_id, announcement_id) 唯一索引兜底 23505；</li>
  *   <li>PUBLISHED 仅允许追加正文（新内容必须以旧内容为前缀），禁静默篡改已发公告；</li>
  *   <li>定时发布/下线由 @Scheduled 强转（状态权威在后端，publish 只写计划时间）；</li>
+ *   <li>生命周期闭环（2026-09-02）：可见性 = PUBLISHED 且 publishAt ≤ now 且 offlineAt
+ *       未到（offlineAt 到点强转 OFFLINE）；草稿保存校验调度窗口；重发布清空过期遗留
+ *       offlineAt（OFFLINE 复活唯一通道，不清空会被 offlineDue 立即再度下线）；SYSTEM
+ *       数据更新公告按 ops-config auto_offline_hours（默认 24h）自动过期；</li>
  *   <li>SYSTEM 公告 operator_id 恒 null（系统/Agent 来源审计先例）；</li>
  *   <li>数据更新公告同日防重：查询防重 + V7 生成列唯一索引兜底并发。</li>
  * </ul>
@@ -57,6 +61,8 @@ public class AnnouncementService {
     private static final String DEFAULT_UPDATE_TEMPLATE = "今日舞讯更新：新增 {new} 家门店、{reversed} 家门店恢复营业";
     /** 数据更新公告固定标题（正文由 ops-config 模板渲染） */
     private static final String DATA_UPDATE_TITLE = "今日舞讯更新";
+    /** 数据更新公告自动下线缺省时长（小时）：舞讯公告时效性 = 当日，过期自动下线 */
+    private static final long DEFAULT_DATA_UPDATE_AUTO_OFFLINE_HOURS = 24;
 
     private final AnnouncementRepository announcementRepository;
     private final AnnouncementReadRepository readRepository;
@@ -139,6 +145,7 @@ public class AnnouncementService {
     @Transactional
     public AdminAnnouncementResponse create(CreateAnnouncementRequest request, Long adminId) {
         validateContent(request.content());
+        validateDraftSchedule(request.publishAt(), request.offlineAt());
         Announcement a = new Announcement();
         applyFields(a, request.title(), request.content(), request.category(),
                 request.pinned() != null && request.pinned(), request.publishAt(), request.offlineAt());
@@ -173,6 +180,7 @@ public class AnnouncementService {
             a.setContent(request.content());
         } else {
             validateContent(request.content());
+            validateDraftSchedule(request.publishAt(), request.offlineAt());
             applyFields(a, request.title(), request.content(), request.category(),
                     request.pinned() != null && request.pinned(), request.publishAt(), request.offlineAt());
         }
@@ -184,6 +192,10 @@ public class AnnouncementService {
      * 发布：publishAt 缺省 = 立即（publish_at=now + 状态 PUBLISHED）；
      * 指定未来时刻 = 定时（写入 publish_at，状态保持 DRAFT，@Scheduled 到点强转）。
      * 仅 DRAFT 可发布；重新发布（OFFLINE → PUBLISHED）同语义。
+     * <p>
+     * 过期 offlineAt 处置（2026-09-02 失效机制闭环）：立即/定时发布时，上一发布周期
+     * 遗留的 offlineAt 已过当前时间 → 清空（OFFLINE 态禁改编辑，重发布是唯一复活通道，
+     * 不清空则 30s 内 offlineDue 会把刚复活的公告再度强转下线）。
      */
     @Transactional
     public AdminAnnouncementResponse publish(Long id, PublishAnnouncementRequest request, Long adminId) {
@@ -193,9 +205,20 @@ public class AnnouncementService {
             if (!request.publishAt().isAfter(now)) {
                 throw new BusinessException(1001, "定时发布时间必须晚于当前时间（立即发布请留空）");
             }
+            if (a.getOfflineAt() != null && !a.getOfflineAt().isAfter(now)) {
+                // 过期遗留 → 清空（与立即发布同语义）
+                log.info("[announcement] publish clears stale offlineAt: id={} offlineAt={}", a.getId(), a.getOfflineAt());
+                a.setOfflineAt(null);
+            } else if (a.getOfflineAt() != null && !a.getOfflineAt().isAfter(request.publishAt())) {
+                throw new BusinessException(1001, "自动下线时间必须晚于定时发布时间，请先在草稿中调整");
+            }
             a.setPublishAt(request.publishAt());
             a.setStatus(AnnouncementStatus.DRAFT);
         } else {
+            if (a.getOfflineAt() != null && !a.getOfflineAt().isAfter(now)) {
+                log.info("[announcement] publish clears stale offlineAt: id={} offlineAt={}", a.getId(), a.getOfflineAt());
+                a.setOfflineAt(null);
+            }
             a.setPublishAt(now);
             a.setPublishedAt(now);
             a.setStatus(AnnouncementStatus.PUBLISHED);
@@ -274,6 +297,12 @@ public class AnnouncementService {
         a.setPublishAt(LocalDateTime.now());
         a.setPublishedAt(a.getPublishAt());
         a.setOperatorId(null); // 系统来源恒 null（Agent 来源审计先例）
+        // 自动下线（2026-09-02 失效机制闭环）：舞讯公告时效 = 当日，按 ops-config
+        // auto_offline_hours（默认 24h）到期后由 30s 调度强转 OFFLINE，不长期占据小程序顶部
+        long autoOfflineHours = resolveDataUpdateAutoOfflineHours();
+        if (autoOfflineHours > 0) {
+            a.setOfflineAt(a.getPublishAt().plusHours(autoOfflineHours));
+        }
         try {
             Announcement saved = announcementRepository.save(a);
             log.info("[announcement] data-update announcement created: id={} new={} reversed={}", saved.getId(), newVenues, reversed);
@@ -315,6 +344,43 @@ public class AnnouncementService {
         a.setPinned(pinned);
         a.setPublishAt(publishAt);
         a.setOfflineAt(offlineAt);
+    }
+
+    /**
+     * 草稿调度窗口校验（创建/更新共用）：offlineAt 设置时必须晚于当前时间
+     * （过去时点 = 无意义的即时下线），且若 publishAt 也设置则必须晚于发布时间
+     * （先发布后下线的时序约束，防止"发布即下线"窗口）。
+     */
+    private void validateDraftSchedule(LocalDateTime publishAt, LocalDateTime offlineAt) {
+        if (offlineAt == null) {
+            return;
+        }
+        if (!offlineAt.isAfter(LocalDateTime.now())) {
+            throw new BusinessException(1001, "自动下线时间必须晚于当前时间");
+        }
+        if (publishAt != null && !offlineAt.isAfter(publishAt)) {
+            throw new BusinessException(1001, "自动下线时间必须晚于发布时间");
+        }
+    }
+
+    /**
+     * 数据更新公告自动下线时长（小时）：ops-config {@code announcement.data_update.auto_offline_hours}，
+     * 缺省 {@link #DEFAULT_DATA_UPDATE_AUTO_OFFLINE_HOURS}；≤0 = 不自动下线；非法值告警回落缺省
+     * （配置错误不阻断公告生成）。
+     */
+    private long resolveDataUpdateAutoOfflineHours() {
+        String raw = opsConfigService.getValue(OpsConfigService.KEY_ANNOUNCEMENT_DATA_UPDATE_AUTO_OFFLINE_HOURS)
+                .orElse(null);
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_DATA_UPDATE_AUTO_OFFLINE_HOURS;
+        }
+        try {
+            return Long.parseLong(raw.trim());
+        } catch (NumberFormatException e) {
+            log.warn("[announcement] invalid auto_offline_hours config '{}', fallback to {}h", raw,
+                    DEFAULT_DATA_UPDATE_AUTO_OFFLINE_HOURS);
+            return DEFAULT_DATA_UPDATE_AUTO_OFFLINE_HOURS;
+        }
     }
 
     /** 用户端可见性校验：PUBLISHED + 已生效 + 未软删，否则 404（深链失效不渲染过期内容） */

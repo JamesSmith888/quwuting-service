@@ -68,7 +68,7 @@ class VenueHotVenueIdsSqlTest {
     @Test
     void hotFilteredListQueryExecutesAgainstRealDatabase() {
         Page<Venue> page = venueRepository.searchRankedNoLocation(
-                null, null, null, null, null,
+                null, null, null, null, null, null, null,
                 org.quwuting.quwutingservice.venuereaction.ReactionCode.positiveCodeNames(),
                 2 /* 积分权重（与 PointsProperties 默认一致；本测试只验证 SQL 语义层） */,
                 true, venueLookupService.getHotVenueIds(), PageRequest.of(0, 20));

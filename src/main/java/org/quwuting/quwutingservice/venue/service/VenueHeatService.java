@@ -223,7 +223,10 @@ public class VenueHeatService {
         long pointsReceived30d = orZero(counters.getPointsreceived30d());
         long ratingTotalCount = orZero(counters.getRaters());
         long suspensionCount30d = orZero(counters.getSuspensioncount());
-        long currentStatusDays = computeCurrentStatusDays(counters.getLateststatuslogtime());
+        // 最新状态日志时间：实时事实（无窗口上界）。null = 从未有过任何状态日志
+        //（仅日志体系建立前的历史存量店——建档/任何变更均必写日志，见各写路径注释）
+        LocalDateTime latestStatusLogTime = counters.getLateststatuslogtime();
+        long currentStatusDays = computeCurrentStatusDays(latestStatusLogTime);
         ActiveReportSummary reportSummary = new ActiveReportSummary(
                 (int) orZero(counters.getReportcount()),
                 counters.getLatestreporttime());
@@ -328,8 +331,11 @@ public class VenueHeatService {
         String formulaDetail = detail.toString();
 
         // ── 状态可信度（三维判定：状态类型 × 稳定性 × 持续天数；活跃报告 override） ──
+        // 2026-09-02 传入「是否有任何状态日志」以区分「今天刚翻转（0 天）」与「无日志老店
+        //（null→0 天）」，见 computeStatusConfidence 时间验证门槛注释（零点莎莎案例）。
         StatusConfidenceResult confidence = computeStatusConfidence(
-                venue.getStatus(), suspensionCount30d, currentStatusDays, reportSummary.activeCount());
+                venue.getStatus(), suspensionCount30d, currentStatusDays,
+                latestStatusLogTime != null, reportSummary.activeCount());
 
         // ── 收到礼物聚合（2026-08-12 礼物化：「收获的支持」礼物墙数据源；
         //     @Lazy 注入 PointsService 打破循环依赖，见构造器注释） ──
@@ -461,15 +467,28 @@ public class VenueHeatService {
      * （暂停=SUSPENDED 变迁，停业门店不会产生），旧矩阵因此把"长期停业"（本应是最强的停业
      * 证据）误判为 HIGH 却配上"稳定营业"文案。故判定必须按当前状态类型分治：
      * <pre>
-     * 营业中（OPEN）：
-     *   近30天 0 次暂停                → HIGH（稳定营业——不更新≠不准确）
-     *   近30天 ≥1 次暂停 + 持续 ≤7天   → MEDIUM（状态多变，近期确认过）
-     *   近30天 ≥1 次暂停 + 持续 >7天   → LOW（不稳定且久未确认，数据可能过时）
+     * 营业中（OPEN）——稳定性 = 无中断信号（近30天暂停次数）× 时间验证（本次营业持续时长）：
+     *   本次营业持续 &gt;7天（被时间验证）+ 近30天 0 次暂停 → HIGH（稳定营业——不更新≠不准确）
+     *   本次营业持续 &gt;7天 + 近30天 ≥1 次暂停         → LOW（不稳定且久未确认，数据可能过时）
+     *   本次营业持续 ≤7天 + 近30天 0 次暂停          → MEDIUM（建议确认——刚变更/刚恢复/刚建档，
+     *                                                      未经时间验证，不得判稳定营业）
+     *   本次营业持续 ≤7天 + 近30天 ≥1 次暂停         → MEDIUM（状态多变，近期确认过）
      *
      * 非营业（已停业/暂停营业/装修中/休息中）：
-     *   状态持续 >7天                  → HIGH（状态可信——长期未被纠正/反向信号 = 被时间验证）
+     *   状态持续 &gt;7天                  → HIGH（状态可信——长期未被纠正/反向信号 = 被时间验证）
      *   状态持续 ≤7天                  → MEDIUM（建议确认——刚变更，未经时间验证，可能随时恢复或为误报）
      * </pre>
+     * 第二次建模修正（2026-09-02，零点莎莎生产实证）：08-08 分治后 OPEN 分支仍以
+     * 「近30天 0 次暂停 → HIGH」为主干，该判据只对<b>一直营业的老店</b>成立——长期已停业的门店
+     * 今天翻正为 OPEN 时近30天 0 次暂停只是"停业不产生 SUSPENDED 日志"的假阴性信号
+     * （suspensioncount 统计的是 to_status=SUSPENDED 变迁，停业态不会产生），门店没有任何
+     * 正向营业证据却拿到最高档「稳定营业」，与状态记录里"已停业 → 营业中 今天"自相矛盾。
+     * 故 OPEN 分支先过「时间验证门槛」：本次营业中状态须持续 &gt;7 天才有资格进 HIGH/LOW，
+     * ≤7 天（刚翻正/刚恢复/刚建档）一律 MEDIUM。判断持续天数必须先区分「今天刚翻转（0 天）」
+     * 与「无任何状态日志（null→0 天）」——建档/任何变更均必写状态日志，无日志只可能是日志
+     * 体系建立前的历史存量老店，按久远老店兜底视同通过时间验证，避免 MySQL 切换时存量日志
+     * 缺失把老店误降档（且 null 恒伴随 0 暂停——有暂停史必然有日志，两分支不会自相矛盾）。
+     * <p>
      * 非营业分支不依赖暂停次数：对非营业门店该指标无区分力（0 次是常态），决定可信度的是
      * 「该状态已稳定持续多久」与「有无反向实时信号（活跃报告 override）」。等级结论（text）
      * 与判定依据（ruleDetail）随状态类型区分生成，杜绝"已停业却显示稳定营业"类语义错配。
@@ -481,19 +500,33 @@ public class VenueHeatService {
      * 「状态记录」区块的事件列表自证——证据即解释）。
      */
     private StatusConfidenceResult computeStatusConfidence(VenueStatus status, long suspensionCount30d,
-                                                           long currentStatusDays, int activeReportCount) {
+                                                           long currentStatusDays, boolean hasAnyStatusLog,
+                                                           int activeReportCount) {
         if (activeReportCount > 0) {
             return new StatusConfidenceResult(StatusConfidence.LOW, "数据可能过时",
                     "近4小时有 " + activeReportCount + " 人报告暂停营业，信息可能已过时。");
         }
         if (status == VenueStatus.OPEN) {
+            // 时间验证门槛：本次营业中状态已持续 >7 天才被时间验证（可进 HIGH/LOW）。
+            // 无任何状态日志（hasAnyStatusLog=false）仅可能是日志体系前的历史存量老店，
+            // 按久远老店兜底视同通过——见方法注释 2026-09-02 第二次建模修正。
+            boolean timeVerified = !hasAnyStatusLog || currentStatusDays > CONFIDENCE_RECENT_DAYS;
+            if (!timeVerified) {
+                // 本次营业 ≤7 天：未经时间验证（刚翻正/刚恢复/刚建档）。
+                // 2026-09-02 零点莎莎：长期已停业今日翻正，0 暂停但无任何正向证据 → MEDIUM，
+                // 不得因"近30天没暂停过"判 HIGH「稳定营业」（假阴性信号，见方法注释）。
+                if (suspensionCount30d == 0) {
+                    return new StatusConfidenceResult(StatusConfidence.MEDIUM, "建议确认",
+                            currentStatusDays <= 0
+                                    ? "今天刚变更为营业中，建议出发前核实。"
+                                    : currentStatusDays + " 天前刚变更为营业中，建议出发前核实。");
+                }
+                return new StatusConfidenceResult(StatusConfidence.MEDIUM, "状态多变",
+                        "近30天暂停过 " + suspensionCount30d + " 次，本次已连续营业 " + currentStatusDays + " 天。");
+            }
             if (suspensionCount30d == 0) {
                 return new StatusConfidenceResult(StatusConfidence.HIGH, "稳定营业",
                         "近30天无暂停记录，状态稳定可信。");
-            }
-            if (currentStatusDays <= CONFIDENCE_RECENT_DAYS) {
-                return new StatusConfidenceResult(StatusConfidence.MEDIUM, "状态多变",
-                        "近30天暂停过 " + suspensionCount30d + " 次，本次已连续营业 " + currentStatusDays + " 天。");
             }
             return new StatusConfidenceResult(StatusConfidence.LOW, "数据可能过时",
                     "近30天暂停过 " + suspensionCount30d + " 次，且已 " + currentStatusDays + " 天未更新，建议出发前核实。");

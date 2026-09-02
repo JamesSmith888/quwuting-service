@@ -12,6 +12,7 @@ import org.quwuting.quwutingservice.venue.dto.response.VenueDetailResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueHeatResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenuePhotoResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
+import org.quwuting.quwutingservice.venue.dto.response.VenueSuggestResponse;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.enums.ViewSource;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
@@ -131,6 +132,21 @@ public class VenueController {
     @GetMapping("/cities")
     public ApiResponse<List<CityStatsResponse>> listCities() {
         return ApiResponse.ok(venueService.listCityStats());
+    }
+
+    /**
+     * 门店名称联想建议（2026-09-02 搜索增强，首页搜索框联想下拉数据源）
+     * GET /venues/suggest?keyword=百乐&limit=6
+     * keyword 空/空白/含分隔符（空格逗号顿号斜杠 = 多词组合搜索）→ 返回空列表
+     * （联想只服务完整单串前缀/中缀补全，拆词搜索走 GET /venues 列表接口）；
+     * limit 默认 6、服务端收敛上限 8（见 VenueService#MAX_SUGGEST_SIZE）。
+     * 返回顺序：前缀命中 &gt; 中缀/别名命中，OPEN 前置、新收录兜底。
+     */
+    @GetMapping("/suggest")
+    public ApiResponse<List<VenueSuggestResponse>> suggestVenues(
+            @RequestParam(required = false) String keyword,
+            @RequestParam(defaultValue = "6") int limit) {
+        return ApiResponse.ok(venueService.listVenueSuggestions(keyword, limit));
     }
 
     /**

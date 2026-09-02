@@ -131,5 +131,49 @@ Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(
   - 其余场景（创建/编辑表单回显）恒 0，无展示语义。
 - **VenueResponseMapper 四参重载**：`toResponse(Venue, List<ReactionBadge>, boolean isHot, long viewCount)` ——卡片展示场景（列表/收藏/详情）的**唯一正确入口**；三参/双参/单参重载默认 `viewCount=0`，仅限无展示语义场景（javadoc 已显式标注）。
 
+### 关键词检索（keyword v2，2026-09-02；前端文档 = quwuting/docs/agents/35-venue-search.md）
+
+`GET /venues` 的 `keyword` 参数由 v1 的「name/address/description 三字段整串 LIKE」升级为
+**六字段 + 门店同步别名的拆词 AND 检索**（前端搜索增强配套，用户侧口径见前端 35 文档）：
+
+- **命中字段（`VenueRepository.KW_MATCH` 常量）**：name / address / description + city /
+  district（按区/城市找店）+ tags（特征词，JSON 数组字符串子串匹配，同 tag 筛选口径）
+  + `EXISTS(VenueSyncAlias sa WHERE sa.venueId = v.id AND sa.deleted = false AND
+  sa.sourceName LIKE :keyword)`（舞讯/圈子称呼映射 → 平台门店，跨 venuesync 包实体子查询，
+  零新表——映射沉淀见 quwuting-service/docs/agents/33-venue-sync-skill.md）。
+- **ESCAPE 配套**：KW_MATCH / RELEVANCE_KEYS / suggestByName / findIdsByKeyword 的全部
+  keyword LIKE 带 `ESCAPE '!'`（**2026-09-02 启动期 HQL 校验实证：ESCAPE 不能用反斜杠**
+  ——HQL 语义层要求 escape 字面量恰为单字符且 MySQL 对 backslash 有字符串字面转义语义，
+  双歧义；'!' 在 MySQL/JPQL 均无歧义）。Service 层 `escapeLikeLiteral` 把用户输入中
+  `!`/`%`/`_` 预转义（! → !!、% → !%、_ → !_）→ **字面子串匹配**（防单字符 `%` 触发
+  全表通配）。改此链路需重启校验（Spring Data 启动期 validateQuery 即暴露语义错误，
+  已由本次启动失败实证覆盖）。
+- **拆词 AND（`VenueService.splitSearchTerms` + `intersectKeywordIds`）**：分隔符
+  = 空格/全角空格/逗号/顿号/斜杠（`KEYWORD_SPLIT_REGEX`），上限 4 词（`MAX_KEYWORD_TOKENS`）、
+  原始输入截长 60（`MAX_KEYWORD_LENGTH`）。单词 → 整串子串 pattern + `kwPrefix`
+  （前缀 pattern，驱动相关度排序）；多词 → 逐词 `findIdsByKeyword`（%词% 命中六字段 +
+  别名）行集探测求交集 → `:filterIds` 白名单回灌主查询（`LIST_FILTERS` 新谓词
+  `AND (:filterIds IS NULL OR v.id IN :filterIds)`，同 hotIds ID 白名单模式，静态 JPQL
+  零动态 SQL）；交集空 → `new PageImpl<>(empty)` 短路返回不发主查询。
+- **搜索相关度排序（`VenueRepository.RELEVANCE_KEYS`，仅 RECOMMENDED 两个变体
+  searchRanked / searchRankedNoLocation）**：ORDER BY 前置键 ①名称前缀命中(0) > 名称
+  子串(1) > 其余字段/别名命中(2)；② 组内 OPEN(0) 前置；再 HEAT_SCORE DESC、id DESC。
+  **keyword 为 null 时两键恒等 → 排序退化为纯热度（行为零变化，单查询复用零扩散）**。
+  **口径红线：停业/暂停门店照常展示**——OPEN 仅组内排序加权、永不参与过滤（搜索只承诺
+  匹配不承诺状态；前端在搜索态隐藏排序按钮，强制 recommended = 相关度，见前端 35 文档）。
+  `searchRanked` / `searchRankedNoLocation` 签名新增 `kwPrefix` 参数（其余 4 变体不加——
+  Spring Data 不引用参数会报错，未用参数不得入签名）。
+- **联想建议（`GET /venues/suggest`，`VenueController` + `VenueService.listVenueSuggestions`
+  + `suggestByName`）**：联想键 = 完整单串（含分隔符返回空——组合搜索走列表接口）；
+  匹配 = name 前缀 > name 中缀 > 别名中缀，OPEN 前置、id DESC 兜底；limit 默认 6 /
+  收敛 8（`MAX_SUGGEST_SIZE`）。路由与 `GET /venues/{id}` 无冲突（精确路径优先）。
+  返回轻量投影 `VenueSuggestResponse{id,name,city,district,status}`（无重型组装）。
+- **无坐标缓存交互**：60s `venueListCache` 只服务单串 keyword（filterIds == null）——
+  `VenueListKey` 新增 `kwPrefixPattern`（与 keywordPattern 同源同变，ORDER BY 与结果
+  一致）；多词白名单结果与请求参数强耦合不入缓存，恒实时查询（`dispatchListQuery`
+  filterIds != null 分支绕过 cache）。
+- **兼容**：keyword 空/不传 → 全部谓词短路，行为与 v1 完全一致（老客户端零感知）；
+  6 方法签名加参已全量适配（dispatch / loader / VenueHotVenueIdsSqlTest）。
+
 ---
 

@@ -22,6 +22,7 @@ import org.quwuting.quwutingservice.venue.dto.response.CityStatsResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueDetailResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenuePhotoResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
+import org.quwuting.quwutingservice.venue.dto.response.VenueSuggestResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.entity.VenuePhoto;
 import org.quwuting.quwutingservice.venue.entity.VenueStatusLog;
@@ -59,6 +60,7 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -74,6 +76,18 @@ import java.util.stream.Collectors;
 public class VenueService {
 
     private static final int MAX_PAGE_SIZE = 50;
+
+    // ===== 关键词检索（2026-09-02 搜索增强 v2，见 listVenues 注释与
+    //       docs/agents/07-list-page.md「关键词匹配口径」） =====
+
+    /** 关键词拆词上限：超过截断取前 N——逐词行集探测次数与交集查询量受控 */
+    private static final int MAX_KEYWORD_TOKENS = 4;
+    /** 关键词原始输入长度上限（防超长 LIKE pattern，@RequestParam 之外的防御） */
+    private static final int MAX_KEYWORD_LENGTH = 60;
+    /** 关键词分隔符（半角/全角空格、中英文逗号、顿号、斜杠 → 拆词 AND） */
+    private static final String KEYWORD_SPLIT_REGEX = "[\\s,，、/]+";
+    /** 联想建议条数上限（suggest 轻量接口，前端滚动联想无需更多） */
+    private static final int MAX_SUGGEST_SIZE = 8;
 
     // ===== 门店照片域（2026-08-20，见 AGENTS.md「门店照片域」） =====
 
@@ -180,13 +194,16 @@ public class VenueService {
             .expireAfterWrite(60, TimeUnit.SECONDS)
             .build(this::loadVenueListPage);
 
-    /** 列表主查询无坐标视图缓存键（不可变参数指纹，见 {@link #venueListCache} 注释） */
+    /** 列表主查询无坐标视图缓存键（不可变参数指纹，见 {@link #venueListCache} 注释）。
+     *  kwPrefixPattern（2026-09-02 相关度排序前缀 pattern）与 keywordPattern 同源同变，
+     *  一并入键保证 ORDER BY 相关度键与结果一致。 */
     private record VenueListKey(
             VenueSortMode sortMode,
             String city,
             String district,
             VenueStatus status,
             String keywordPattern,
+            String kwPrefixPattern,
             String tagPattern,
             boolean hotOnly,
             int page,
@@ -806,11 +823,34 @@ public class VenueService {
                                           String window, String sort, Double radiusKm,
                                           Boolean hot, String tag,
                                           int page, int size) {
-        String keywordPattern = StringUtils.hasText(keyword) ? "%" + keyword.trim() + "%" : null;
-        String tagPattern = StringUtils.hasText(tag) ? "%" + tag.trim() + "%" : null;
+        // 关键词检索模型 v2（2026-09-02，docs/agents/07-list-page.md「关键词匹配口径」）：
+        //   - 归一：trim + 长度上限 → 按分隔符拆词 → 每词 LIKE 字面转义（!、%、_，
+        //     与 KW_MATCH / RELEVANCE_KEYS 的 ESCAPE '!' 配套）；
+        //   - 单词：整串子串匹配（KW_MATCH 六字段 + 门店同步别名）+ kwPrefix 前缀 pattern
+        //     （驱动搜索相关度排序，见 RELEVANCE_KEYS）；
+        //   - 多词：逐词 findIdsByKeyword 行集探测求交集 → :filterIds 白名单回灌主查询
+        //     （keyword=null + v.id IN 交集；多词是宽意图，结果量小，相关度 CASE 停用，
+        //     排序走热度——精确性由交集保证）；
+        //   - 空词：keyword 维度不过滤（与旧行为一致）。
+        // 停业/暂停门店全程不过滤（结果口径 = 搜索只承诺「匹配」不承诺「状态」，OPEN 仅
+        // 在 RECOMMENDED 相关度排序内加权前置，见 RELEVANCE_KEYS 注释——2026-09-02 用户拍板）。
         page = Math.max(0, page);
         size = Math.min(Math.max(1, size), MAX_PAGE_SIZE);
         PageRequest pageable = PageRequest.of(page, size);
+        List<String> searchTerms = splitSearchTerms(keyword);
+        String keywordPattern = null;
+        String kwPrefixPattern = null;
+        Set<Long> filterIds = null;
+        if (searchTerms.size() == 1) {
+            keywordPattern = "%" + searchTerms.get(0) + "%";
+            kwPrefixPattern = searchTerms.get(0) + "%";
+        } else if (searchTerms.size() > 1) {
+            filterIds = intersectKeywordIds(searchTerms);
+            if (filterIds.isEmpty()) {
+                return new PageImpl<>(Collections.emptyList(), pageable, 0);
+            }
+        }
+        String tagPattern = StringUtils.hasText(tag) ? "%" + tag.trim() + "%" : null;
         boolean hasCoords = latitude != null && longitude != null;
         // radiusKm 为 null / ≤ 0 视为不限（前端 0 = 不限，防御性归一）
         Double radius = (radiusKm != null && radiusKm > 0) ? radiusKm : null;
@@ -820,7 +860,8 @@ public class VenueService {
         Set<Long> hotVenueIds = venueLookupService.getHotVenueIds();
         boolean hotOnly = Boolean.TRUE.equals(hot);
         Page<Venue> result = dispatchListQuery(sortMode, blankToNull(city), blankToNull(district),
-                status, keywordPattern, tagPattern, hasCoords, latitude, longitude, radius,
+                status, keywordPattern, kwPrefixPattern, filterIds, tagPattern,
+                hasCoords, latitude, longitude, radius,
                 POSITIVE_REACTION_CODES, pointsProperties.heatWeight(),
                 hotOnly, hotVenueIds, pageable);
         // 批量查询整页场所的 Top Reaction 徽标，避免逐条查询造成的 N+1（见 VenueReactionService#batchGetBadges）
@@ -865,29 +906,51 @@ public class VenueService {
      * 筛选约束，与请求者位置相关）恒实时查询。
      */
     private Page<Venue> dispatchListQuery(VenueSortMode sortMode, String city, String district,
-                                          VenueStatus status, String keywordPattern, String tagPattern,
+                                          VenueStatus status, String keywordPattern, String kwPrefixPattern,
+                                          Set<Long> filterIds, String tagPattern,
                                           boolean hasCoords, Double latitude, Double longitude,
                                           Double radius, List<String> positiveCodes, int pointsWeight,
                                           boolean hotOnly, Set<Long> hotIds, PageRequest pageable) {
-        if (!hasCoords) {
+        // 无坐标分支：仅单串 keyword（filterIds 为 null）可入缓存——多词 AND 的白名单集合
+        // 与请求参数强耦合（无法收敛进 VenueListKey），且为精确意图的窄结果，恒实时查询。
+        if (!hasCoords && filterIds == null) {
             return venueListCache.get(new VenueListKey(
-                    sortMode, city, district, status, keywordPattern, tagPattern,
+                    sortMode, city, district, status, keywordPattern, kwPrefixPattern, tagPattern,
                     hotOnly, pageable.getPageNumber(), pageable.getPageSize()));
         }
+        // 多词 AND 无坐标（filterIds != null 且 !hasCoords）：不走缓存（见上），直接实时
+        // <b>无坐标变体</b>——latitude/longitude 为 null 时不可传入 double 形参的
+        // searchRanked/searchNearest（自动拆箱 NPE，2026-09-02 多词搜索实测），
+        // 分派口径与 loadVenueListPage 的无坐标 loader 完全一致（RECOMMENDED/DISTANCE
+        // 降级共用 searchRankedNoLocation）。
+        if (!hasCoords) {
+            return switch (sortMode) {
+                case RECOMMENDED, DISTANCE -> venueRepository.searchRankedNoLocation(
+                        city, district, status, keywordPattern, kwPrefixPattern, filterIds, tagPattern,
+                        positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
+                case HEAT -> venueRepository.searchHeat(
+                        city, district, status, keywordPattern, filterIds, tagPattern,
+                        positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
+                case NEWEST -> venueRepository.searchNewest(
+                        city, district, status, keywordPattern, filterIds, tagPattern,
+                        hotOnly, hotIds, pageable);
+            };
+        }
         return switch (sortMode) {
-            case RECOMMENDED -> venueRepository.searchRanked(city, district, status, keywordPattern, tagPattern,
+            case RECOMMENDED -> venueRepository.searchRanked(city, district, status, keywordPattern, kwPrefixPattern,
+                    filterIds, tagPattern,
                     latitude, longitude, radius, positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
-            case DISTANCE -> venueRepository.searchNearest(city, district, status, keywordPattern, tagPattern,
+            case DISTANCE -> venueRepository.searchNearest(city, district, status, keywordPattern, filterIds, tagPattern,
                     latitude, longitude, radius, hotOnly, hotIds, pageable);
             case HEAT -> hasCoords && radius != null
-                    ? venueRepository.searchHeatWithinRadius(city, district, status, keywordPattern, tagPattern,
+                    ? venueRepository.searchHeatWithinRadius(city, district, status, keywordPattern, filterIds, tagPattern,
                             latitude, longitude, radius, positiveCodes, pointsWeight, hotOnly, hotIds, pageable)
-                    : venueRepository.searchHeat(city, district, status, keywordPattern, tagPattern,
+                    : venueRepository.searchHeat(city, district, status, keywordPattern, filterIds, tagPattern,
                             positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
             case NEWEST -> hasCoords && radius != null
-                    ? venueRepository.searchNewestWithinRadius(city, district, status, keywordPattern, tagPattern,
+                    ? venueRepository.searchNewestWithinRadius(city, district, status, keywordPattern, filterIds, tagPattern,
                             latitude, longitude, radius, hotOnly, hotIds, pageable)
-                    : venueRepository.searchNewest(city, district, status, keywordPattern, tagPattern,
+                    : venueRepository.searchNewest(city, district, status, keywordPattern, filterIds, tagPattern,
                             hotOnly, hotIds, pageable);
         };
     }
@@ -905,13 +968,16 @@ public class VenueService {
         Set<Long> hotIds = venueLookupService.getHotVenueIds();
         return switch (key.sortMode()) {
             case RECOMMENDED, DISTANCE -> venueRepository.searchRankedNoLocation(
-                    key.city(), key.district(), key.status(), key.keywordPattern(), key.tagPattern(),
+                    key.city(), key.district(), key.status(), key.keywordPattern(), key.kwPrefixPattern(),
+                    null, key.tagPattern(),
                     POSITIVE_REACTION_CODES, pointsProperties.heatWeight(), key.hotOnly(), hotIds, pageable);
             case HEAT -> venueRepository.searchHeat(
-                    key.city(), key.district(), key.status(), key.keywordPattern(), key.tagPattern(),
+                    key.city(), key.district(), key.status(), key.keywordPattern(),
+                    null, key.tagPattern(),
                     POSITIVE_REACTION_CODES, pointsProperties.heatWeight(), key.hotOnly(), hotIds, pageable);
             case NEWEST -> venueRepository.searchNewest(
-                    key.city(), key.district(), key.status(), key.keywordPattern(), key.tagPattern(),
+                    key.city(), key.district(), key.status(), key.keywordPattern(),
+                    null, key.tagPattern(),
                     key.hotOnly(), hotIds, pageable);
         };
     }
@@ -935,6 +1001,34 @@ public class VenueService {
     public List<CityStatsResponse> listCityStats() {
         return venueRepository.findCityStats().stream()
                 .map(p -> new CityStatsResponse(p.getCity(), p.getVenueCount()))
+                .toList();
+    }
+
+    /**
+     * 门店名称联想建议（2026-09-02 搜索增强，GET /venues/suggest，首页搜索框联想下拉）。
+     * <p>
+     * 联想键 = <b>完整单串</b>：含分隔符（空格/逗号/顿号/斜杠）的多词输入不联想
+     * （拆词组合是精确搜索意图，走 GET /venues 列表接口——联想只服务「边打店名边补全」）。
+     * 匹配与排序（前缀命中 &gt; 中缀 &gt; 门店同步别名，OPEN 前置，新收录兜底）在
+     * {@link org.quwuting.quwutingservice.venue.repository.VenueRepository#suggestByName}
+     * 库内完成；limit 由前端传、服务端收敛至 {@link #MAX_SUGGEST_SIZE}。
+     * 数据规模数百级、前缀命中通常唯一，无需检索服务/热词聚合设施。
+     */
+    @Transactional(readOnly = true)
+    public List<VenueSuggestResponse> listVenueSuggestions(String keyword, int limit) {
+        if (!StringUtils.hasText(keyword)) return List.of();
+        String trimmed = keyword.trim();
+        if (trimmed.length() > MAX_KEYWORD_LENGTH) trimmed = trimmed.substring(0, MAX_KEYWORD_LENGTH);
+        if (trimmed.matches(".*" + KEYWORD_SPLIT_REGEX + ".*")) return List.of();
+        String term = escapeLikeLiteral(trimmed);
+        int size = Math.min(Math.max(1, limit), MAX_SUGGEST_SIZE);
+        List<Venue> venues = venueRepository.suggestByName(
+                term + "%", "%" + term + "%", PageRequest.of(0, size));
+        return venues.stream()
+                .map(v -> new VenueSuggestResponse(
+                        v.getId(), v.getName(), v.getCity(),
+                        v.getDistrict() == null ? "" : v.getDistrict(),
+                        v.getStatus() == null ? "" : v.getStatus().name()))
                 .toList();
     }
 
@@ -967,6 +1061,59 @@ public class VenueService {
 
     private static String blankToNull(String value) {
         return StringUtils.hasText(value) ? value.trim() : null;
+    }
+
+    // ===== 关键词检索 helpers（2026-09-02，与 repository 的 KW_MATCH/RELEVANCE_KEYS 配套） =====
+
+    /**
+     * 关键词拆词归一：trim + 截长 → 按 {@link #KEYWORD_SPLIT_REGEX} 拆词 → 去空 token →
+     * 截断至 {@link #MAX_KEYWORD_TOKENS} → 每词 LIKE 字面转义。返回空列表 = 无关键词。
+     * 转义（escapeLikeLiteral）后词内 {@code !}/{@code %}/{@code _} 为字面量，
+     * 与 repository 谓词/排序里的 {@code ESCAPE '!'} 配套，防通配符注入全表命中。
+     */
+    private List<String> splitSearchTerms(String keyword) {
+        if (!StringUtils.hasText(keyword)) return List.of();
+        String trimmed = keyword.trim();
+        if (trimmed.length() > MAX_KEYWORD_LENGTH) trimmed = trimmed.substring(0, MAX_KEYWORD_LENGTH);
+        return Arrays.stream(trimmed.split(KEYWORD_SPLIT_REGEX))
+                .map(String::trim)
+                .filter(StringUtils::hasText)
+                .limit(MAX_KEYWORD_TOKENS)
+                .map(VenueService::escapeLikeLiteral)
+                .toList();
+    }
+
+    /**
+     * LIKE 字面子串转义（与 repository 的 {@code ESCAPE '!'} 配套）：
+     * escape 字符 {@code !} 先转义自身（! → !!），再转义通配符 % / _（→ !% / !_）——
+     * 顺序不可颠倒（若先转 %/_，其前缀 ! 会被后续的 !→!! 误转成 !!%）。
+     * 选择 '!' 而非反斜杠：HQL 语义层要求 escape 字面量恰为单字符且 MySQL 对
+     * backslash 有字符串字面转义语义（双歧义），'!' 在 MySQL/JPQL 均无歧义。
+     */
+    private static String escapeLikeLiteral(String term) {
+        return term.replace("!", "!!").replace("%", "!%").replace("_", "!_");
+    }
+
+    /**
+     * 多词 AND 行集探测：逐词 {@code findIdsByKeyword}（%词% pattern，命中口径 =
+     * KW_MATCH 六字段 + 同步别名）求交集。任一词零命中 → 恒为空集（上游短路返回空页，
+     * 不再发主查询）。数据规模数百级：每词一次 LIKE 全扫毫秒级，最多
+     * {@link #MAX_KEYWORD_TOKENS} 次 + 一次内存交集。
+     */
+    private Set<Long> intersectKeywordIds(List<String> terms) {
+        Set<Long> acc = null;
+        for (String term : terms) {
+            List<Long> ids = venueRepository.findIdsByKeyword("%" + term + "%");
+            if (ids.isEmpty()) return Collections.emptySet();
+            Set<Long> current = new HashSet<>(ids);
+            if (acc == null) {
+                acc = current;
+            } else {
+                acc.retainAll(current);
+                if (acc.isEmpty()) return acc;
+            }
+        }
+        return acc == null ? Collections.emptySet() : acc;
     }
 
     /** 序列化字符串列表为 JSON 数组字符串（tags / photos 共用），空列表存 null */

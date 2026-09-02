@@ -245,10 +245,13 @@ class VenueHeatServiceTest {
     }
 
     // ── 状态可信度（2026-08-08 三维矩阵：状态类型 × 稳定性 × 持续天数） ────────────
-    // 根因回归：旧二维矩阵不区分状态类型，已停业门店（近30天暂停 0 次）恒命中 HIGH，
-    // 前端硬编码「稳定营业」→ "已停业却显示稳定营业"（寻梦缘123 生产实证）。
+    // 根因回归一（2026-08-08）：旧二维矩阵不区分状态类型，已停业门店（近30天暂停 0 次）恒命中
+    // HIGH，前端硬编码「稳定营业」→ "已停业却显示稳定营业"（寻梦缘123 生产实证）。
+    // 根因回归二（2026-09-02）：OPEN 分支补时间验证门槛——刚翻正门店（本次持续 ≤7 天）即便
+    // 0 次暂停也不得判 HIGH（停业不产生 SUSPENDED 日志的假阴性），降 MEDIUM「建议确认」
+    // （零点莎莎生产实证）；无任何状态日志的老店兜底 HIGH（区分 null→0 与今天翻正→0）。
     // 修复后判定与文案均在后端生成（statusConfidenceText / statusConfidenceRuleDetail），
-    // 以下用例断言「等级 × 文案」随状态类型正确分治。
+    // 以下用例断言「等级 × 文案」随状态类型与时间验证正确分治。
 
     private void stubStatusLog(LocalDateTime latestCreatedAt, long suspensionCount30d, long reportCount) {
         stubZeroCounters();
@@ -259,7 +262,7 @@ class VenueHeatServiceTest {
 
     @Test
     void openVenueStableIsHighWithStableBusinessText() {
-        // 营业中 + 0 次暂停（无论持续多久）→ HIGH「稳定营业」（原语义保持）
+        // 营业中 + 本次已持续 30 天（>7 天 = 被时间验证）+ 0 次暂停 → HIGH「稳定营业」
         stubStatusLog(LocalDateTime.now().minusDays(30), 0L, 0L);
 
         VenueHeatResponse resp = heatService.getHeat(1L);
@@ -270,6 +273,49 @@ class VenueHeatServiceTest {
                 "判定依据应一句话说清稳定性证据（2026-08-29 白话化：不再复述判定规则）");
         assertFalse(resp.statusConfidenceRuleDetail().contains("判定规则"),
                 "白话化后不得再出现规则术语前缀");
+    }
+
+    @Test
+    void openVenueJustReopenedTodayIsMediumSuggestion() {
+        // 2026-09-02 零点莎莎回归：长期已停业 → 今日翻正营业中（最新日志 = 今天，0 次暂停）。
+        // 旧矩阵「0 暂停 → HIGH 稳定营业」把无任何正向证据的刚翻正门店判为最稳定，
+        // 与状态记录里"已停业 → 营业中 今天"自相矛盾——修复后降 MEDIUM「建议确认」。
+        stubStatusLog(LocalDateTime.now(), 0L, 0L);
+
+        VenueHeatResponse resp = heatService.getHeat(1L);
+
+        assertEquals("MEDIUM", resp.statusConfidence());
+        assertEquals("建议确认", resp.statusConfidenceText());
+        assertTrue(resp.statusConfidenceRuleDetail().contains("今天刚变更为营业中"),
+                "判定依据应点明刚变更的时间事实");
+        assertTrue(resp.statusConfidenceRuleDetail().contains("建议出发前核实"),
+                "判定依据应含行动建议");
+    }
+
+    @Test
+    void openVenueReopenedDaysAgoWithinWindowIsMediumSuggestion() {
+        // 已停业/暂停 → 营业中 3 天（≤7 天，仍在时间验证窗口内）+ 0 次暂停 → MEDIUM「建议确认」
+        stubStatusLog(LocalDateTime.now().minusDays(3), 0L, 0L);
+
+        VenueHeatResponse resp = heatService.getHeat(1L);
+
+        assertEquals("MEDIUM", resp.statusConfidence());
+        assertEquals("建议确认", resp.statusConfidenceText());
+        assertTrue(resp.statusConfidenceRuleDetail().contains("3 天前刚变更为营业中"),
+                "判定依据应含距变更的天数");
+    }
+
+    @Test
+    void openVenueWithoutAnyStatusLogFallsBackToHigh() {
+        // 无任何状态日志（lateststatuslogtime = null → 0 天）的 OPEN 门店：
+        // 只可能是日志体系建立前的历史存量老店（建档/任何变更均必写日志，刚翻正不可能无日志），
+        // 兜底视同被时间验证 → 维持 HIGH，避免 MySQL 切换存量日志缺失把老店误降 MEDIUM。
+        stubStatusLog(null, 0L, 0L);
+
+        VenueHeatResponse resp = heatService.getHeat(1L);
+
+        assertEquals("HIGH", resp.statusConfidence());
+        assertEquals("稳定营业", resp.statusConfidenceText());
     }
 
     @Test

@@ -151,8 +151,66 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                        Pageable pageable);
 
     /**
+     * keyword 自由文本命中表达式（2026-09-02 搜索增强 v2，docs/agents/07-list-page.md
+     * 「关键词匹配口径」）：{@code :keyword} 为调用方包装的 {@code %xx%} 单串子串 pattern。
+     * <p>
+     * 命中字段 = 原 name/address/description 扩至 <b>六字段 + 门店同步别名</b>：
+     * <ul>
+     *   <li>city / district：按「城市/区/商圈」找店（用户输入「静安」命中 district、
+     *       「绍兴市」命中 city，无需先在左上角选城市）；</li>
+     *   <li>tags：按特征词找店（「龙女」「黑灯」等——tags 为 JSON 数组字符串列，
+     *       元素子串匹配口径与 tag 筛选谓词一致）；</li>
+     *   <li>qwt_venue_sync_aliases.source_name（{@link VenueSyncAlias}）：舞讯/圈子称呼
+     *       → 平台门店的映射（信息源店名），「圈内叫法搜得到」数据载体，零新表。</li>
+     * </ul>
+     * 匹配语义：单串子串（与 v 相关字段逐个 OR）；多词 AND 在 Service 层拆词后逐词
+     * 行集探测求交集 → {@code :filterIds} 白名单叠加（见 listVenues 注释）。
+     * 所有 LIKE 显式 {@code ESCAPE '!'}（<b>避开反斜杠</b>——HQL 语义层要求 escape
+     * 字面量恰好单字符，MySQL 对 backslash 又有字符串字面转义语义，双歧义；'!' 为
+     * 无歧义单字符）：用户输入的 {@code %}/{@code _}/{@code !} 经 Service 层
+     * {@code escapeLikeLiteral} 转义（! → !!、% → !%、_ → !_）后按<b>字面子串</b>
+     * 匹配，防单字符 {@code %} 触发全表通配。
+     */
+    String KW_MATCH = """
+            (v.name LIKE :keyword ESCAPE '!'
+             OR v.address LIKE :keyword ESCAPE '!'
+             OR v.description LIKE :keyword ESCAPE '!'
+             OR v.city LIKE :keyword ESCAPE '!'
+             OR v.district LIKE :keyword ESCAPE '!'
+             OR v.tags LIKE :keyword ESCAPE '!'
+             OR EXISTS (SELECT 1 FROM VenueSyncAlias sa
+                        WHERE sa.venueId = v.id AND sa.deleted = false
+                          AND sa.sourceName LIKE :keyword ESCAPE '!'))
+            """;
+
+    /**
+     * 搜索相关度排序键（2026-09-02，keyword 存在时 RECOMMENDED 排序的升级，见
+     * VenueService#dispatchListQuery 注释）：keyword 为 null 时两 CASE 键恒等
+     * （ELSE 2 / ELSE 1）→ 排序退化为纯热度（行为零变化，单查询复用零扩散）；
+     * keyword 存在时按组序：① 名称<b>前缀</b>命中(0) &gt; 名称<b>子串</b>命中(1)
+     * &gt; 其余字段/别名命中(2)；② 组内营业状态 OPEN(0) 前置。
+     * <p>
+     * <b>口径红线（2026-09-02 用户明确）</b>：停业/暂停门店<b>照常展示、不做状态
+     * 过滤</b>——OPEN 仅作同组内排序加权（搜索是出门前决策，营业中优先可防跑空，
+     * 但剥夺停业店曝光 = 与「搜索只承诺匹配、不承诺状态」的结果口径矛盾）。
+     */
+    String RELEVANCE_KEYS = """
+            CASE WHEN :kwPrefix IS NOT NULL AND v.name LIKE :kwPrefix ESCAPE '!' THEN 0
+                 WHEN :kwPrefix IS NOT NULL AND v.name LIKE :keyword ESCAPE '!' THEN 1
+                 ELSE 2 END,
+            CASE WHEN :kwPrefix IS NOT NULL AND v.status =
+                 org.quwuting.quwutingservice.venue.enums.VenueStatus.OPEN THEN 0
+                 ELSE 1 END,
+            """;
+
+    /**
      * 列表筛选条件（全部排序变体共用）。
      * 所有参数可空：null 表示不限制；keyword / tag 需调用方预先包装为 %xx%。
+     * <p>
+     * {@code keyword}（2026-09-02 字段扩展见 {@link #KW_MATCH}）；{@code filterIds}
+     * （2026-09-02 多词 AND 白名单，Service 层逐词行集探测交集后传入，null = 不限制）：
+     * 与 hotIds 同为「ID 白名单」通道（谓词短路写法一致），keyword=null + filterIds 非空
+     * = 白名单内按热度排序（多词精确意图结果量小，相关度 CASE 停用，见 listVenues 注释）。
      * <p>
      * {@code hotOnly} / {@code hotIds}（2026-08-08 新增「热门」快捷筛选）：
      * 热门筛选 = 仅保留热门场所（ID ∈ 城市内 top 20% 且 热度分 ≥ 门槛的集合，
@@ -174,10 +232,11 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
               AND (:city IS NULL OR v.city = :city)
               AND (:district IS NULL OR v.district = :district)
               AND (:status IS NULL OR v.status = :status)
-              AND (:keyword IS NULL
-                   OR v.name LIKE :keyword
-                   OR v.address LIKE :keyword
-                   OR v.description LIKE :keyword)
+              AND (:keyword IS NULL OR
+              """
+            + " " + KW_MATCH + " " + """
+              )
+              AND (:filterIds IS NULL OR v.id IN :filterIds)
               AND (:tag IS NULL OR v.tags LIKE :tag)
               AND (:hotOnly = false OR v.id IN :hotIds)
             """;
@@ -397,6 +456,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             SELECT v FROM Venue v
             """ + LIST_FILTERS + RADIUS_PREDICATE + """
             ORDER BY
+            """ + RELEVANCE_KEYS + """
             """ + HEAT_SCORE + """
             DESC, v.id DESC
             """)
@@ -404,6 +464,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                              @Param("district") String district,
                              @Param("status") VenueStatus status,
                              @Param("keyword") String keyword,
+                             @Param("kwPrefix") String kwPrefix,
+                             @Param("filterIds") Set<Long> filterIds,
                              @Param("tag") String tag,
                              @Param("latitude") double latitude,
                              @Param("longitude") double longitude,
@@ -429,6 +491,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             SELECT v FROM Venue v
             """ + LIST_FILTERS + """
             ORDER BY
+            """ + RELEVANCE_KEYS + """
             """ + HEAT_SCORE + """
             DESC, v.id DESC
             """)
@@ -436,6 +499,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                        @Param("district") String district,
                                        @Param("status") VenueStatus status,
                                        @Param("keyword") String keyword,
+                                       @Param("kwPrefix") String kwPrefix,
+                                       @Param("filterIds") Set<Long> filterIds,
                                        @Param("tag") String tag,
                                        @Param("positiveCodes") List<String> positiveCodes,
                                        @Param("pointsWeight") int pointsWeight,
@@ -465,6 +530,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                               @Param("district") String district,
                               @Param("status") VenueStatus status,
                               @Param("keyword") String keyword,
+                              @Param("filterIds") Set<Long> filterIds,
                               @Param("tag") String tag,
                               @Param("latitude") double latitude,
                               @Param("longitude") double longitude,
@@ -488,6 +554,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                            @Param("district") String district,
                            @Param("status") VenueStatus status,
                            @Param("keyword") String keyword,
+                           @Param("filterIds") Set<Long> filterIds,
                            @Param("tag") String tag,
                            @Param("positiveCodes") List<String> positiveCodes,
                            @Param("pointsWeight") int pointsWeight,
@@ -511,6 +578,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                        @Param("district") String district,
                                        @Param("status") VenueStatus status,
                                        @Param("keyword") String keyword,
+                                       @Param("filterIds") Set<Long> filterIds,
                                        @Param("tag") String tag,
                                        @Param("latitude") double latitude,
                                        @Param("longitude") double longitude,
@@ -534,6 +602,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                              @Param("district") String district,
                              @Param("status") VenueStatus status,
                              @Param("keyword") String keyword,
+                             @Param("filterIds") Set<Long> filterIds,
                              @Param("tag") String tag,
                              @Param("hotOnly") boolean hotOnly,
                              @Param("hotIds") Set<Long> hotIds,
@@ -553,6 +622,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                          @Param("district") String district,
                                          @Param("status") VenueStatus status,
                                          @Param("keyword") String keyword,
+                                         @Param("filterIds") Set<Long> filterIds,
                                          @Param("tag") String tag,
                                          @Param("latitude") double latitude,
                                          @Param("longitude") double longitude,
@@ -560,6 +630,46 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                          @Param("hotOnly") boolean hotOnly,
                                          @Param("hotIds") Set<Long> hotIds,
                                          Pageable pageable);
+
+    /**
+     * 关键词行集探测（2026-09-02 多词 AND 的 Service 层实现载体）：keyword（%xx%
+     * pattern，调用方包装）命中的门店 id 全集——命中口径 = {@link #KW_MATCH} 六字段 +
+     * 同步别名。Service 对拆出的每个词各调一次，交集 = 多词 AND 结果（数据规模数百级，
+     * 单次 LIKE 全扫毫秒级，无需索引/全文检索设施）；随后以 :filterIds 白名单回灌
+     * LIST_FILTERS 主查询（保持排序与分页在同一查询内完成）。
+     */
+    @Query("""
+            SELECT v.id FROM Venue v
+            WHERE v.deleted = false
+              AND
+            """ + KW_MATCH + """
+            """)
+    List<Long> findIdsByKeyword(@Param("keyword") String keyword);
+
+    /**
+     * 门店名称联想（2026-09-02 suggest，GET /venues/suggest）：prefix（%词）优先 +
+     * 中缀（%词%）+ 同步别名 source_name 中缀兜底，取前 {@code limit} 条——前缀命中
+     * 排前、营业中（OPEN）排前、新收录（id DESC）兜底。别名命中的门店按中缀同组
+     * （用户输圈内叫法时给出正式名联想）。keyword 含分隔符（多词）时不调用本方法
+     * （联想键只取完整单串，见 VenueService#listVenueSuggestions）。
+     */
+    @Query("""
+            SELECT v FROM Venue v
+            WHERE v.deleted = false
+              AND (v.name LIKE :prefix ESCAPE '!'
+                   OR v.name LIKE :infix ESCAPE '!'
+                   OR EXISTS (SELECT 1 FROM VenueSyncAlias sa
+                              WHERE sa.venueId = v.id AND sa.deleted = false
+                                AND sa.sourceName LIKE :infix ESCAPE '!'))
+            ORDER BY CASE WHEN v.name LIKE :prefix ESCAPE '!' THEN 0 ELSE 1 END,
+                     CASE WHEN v.status =
+                          org.quwuting.quwutingservice.venue.enums.VenueStatus.OPEN THEN 0
+                          ELSE 1 END,
+                     v.id DESC
+            """)
+    List<Venue> suggestByName(@Param("prefix") String prefix,
+                              @Param("infix") String infix,
+                              Pageable pageable);
 
     /** 城市维度统计：有场所的城市按场所数倒序（供前端"热门城市"选择，数据驱动、免维护） */
     @Query("""

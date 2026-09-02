@@ -69,6 +69,14 @@ public class OpsConfigService {
      */
     public static final String KEY_ANNOUNCEMENT_DATA_UPDATE_TEMPLATE = "announcement.data_update.template";
 
+    /**
+     * 数据更新公告自动下线时长（小时，2026-09-02，缺省 24；≤0 = 不自动下线）：
+     * SYSTEM 数据更新公告是"当日信息"，创建时 offline_at = publish_at + 本时长，
+     * 到点由 @Scheduled 强转 OFFLINE——每日公告天然自过期，不永久霸占可见列表。
+     * 运营可改值调整生命周期；无需迁移插入默认行（代码缺省兜底）。
+     */
+    public static final String KEY_ANNOUNCEMENT_DATA_UPDATE_AUTO_OFFLINE_HOURS = "announcement.data_update.auto_offline_hours";
+
     private final OpsConfigRepository opsConfigRepository;
 
     /** 单键配置缓存（LoadingCache + Optional 承载"键不存在"——Caffeine 禁 null 值） */
