@@ -416,6 +416,18 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 注意：本片段引用 {@code :positiveCodes} 与 {@code :pointsWeight}——使用本片段的
      * 查询方法必须声明这两个参数。HEAT_BEHAVIOR 在 CASE 条件与求和项各出现一次，
      * 子查询执行两遍；数据规模数百级 + 标量子查询命中 (venue_id, ...) 索引，无性能压力。
+     * <p>
+     * <b>2026-09-02 双算优化评估结论（勿重复探索，除非触发下列条件）</b>：消除双算
+     * 需「对同一标量 B = HEAT_BEHAVIOR 求和一次」+「判定 B &gt; 0」——守卫条件与求和项
+     * 是同一数值的两次使用，JPQL 无 WITH/CTE、无 SELECT/ORDER BY 内别名复用 → 纯
+     * JPQL 内<b>无法</b>单算（B 非负故 B&gt;0 等价"六来源任一存在窗口记录"，但六表 EXISTS
+     * OR 仍是 6 个子查询，与第二遍求和同数量级，不省）。等价改写唯一路径 = nativeQuery +
+     * 派生表/CTE（六来源表 UNION ALL 后 GROUP BY venue_id 一次聚合，MySQL 8 与 PG
+     * 均支持 WITH）重写全部列表主查询，RELEVANCE_KEYS / KW_MATCH 片段同步 native 化，
+     * VenueListQueryHqlSyntaxTest 同步改造——数据数百级 + 2026-08-30 生产切 RDS MySQL
+     * 本地毫秒级执行（跨洲往返瓶颈已随迁移消除），双算非实测瓶颈，重构收益/风险比
+     * 不成立。触发条件：qwt_venue 达万级且慢查询日志（show-sql 或 RDS 审计）实证本
+     * 排序键为主要耗时，再走 native/CTE 重构。
      */
     String HEAT_SCORE = """
             (CASE WHEN ("""

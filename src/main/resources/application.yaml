@@ -19,6 +19,15 @@ spring:
       keepalive-time: 60000            # 每 60s 对空闲连接执行 isValid 探活：提前剔除死连接、
                                        # 保持 socket 活跃，避免被池化器/NAT 空闲回收后"借出即挂"
   jpa:
+    # OSIV（Open Session In View）显式关闭（2026-09-02）：
+    # Spring Boot 默认 true，会让 EntityManager/连接在响应序列化期间保持打开
+    # （启动即 WARN "spring.jpa.open-in-view is enabled"）。本代码库实体无对象关联
+    # （Venue 等均为纯列映射）、无懒加载集合——所有 DTO 组装都在 @Transactional
+    # 服务方法内完成（列表/详情批量数据全靠手写 IN 查询规避 N+1），序列化阶段
+    # 不需要任何延迟加载 → 关闭无行为影响。收益：响应写出前连接即归还连接池
+    # （低流量 + 池小场景降低连接占用峰值）；并防未来新增实体关联时误依赖 OSIV
+    # 隐式开事务（生产级纪律：延迟加载必须在事务内显式完成）。
+    open-in-view: false
     hibernate:
       # Schema 演进策略（2026-08-07 起：Flyway 显式迁移 + validate 校验）：
       # ddl-auto 从 update 改为 validate——schema 变更一律由 db/migration/V{n} 脚本

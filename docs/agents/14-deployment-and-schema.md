@@ -126,8 +126,17 @@ Supabase 事务池化（6543）抖动（用户确认：Supabase 当前不稳定�
 
 ---
 
+## OSIV 显式关闭与连接生命周期（2026-09-02）
+
+`spring.jpa.open-in-view: false` 已写入基础 `application.yaml`（dev/prod 全环境生效）。
+
+- **为什么安全**：OSIV（Open Session in View）默认 true 会让 EntityManager 与底层连接在 **HTTP 响应序列化期间**保持打开（Spring Boot 启动 WARN `spring.jpa.open-in-view is enabled`）。本代码库实体为纯列映射、**无对象关联、无懒加载集合**——所有 DTO 组装都在 `@Transactional` 服务方法内完成（列表/详情批量数据全靠手写 IN 查询规避 N+1，见 13-code-standards.md），序列化阶段不访问任何懒加载属性 → 关闭零行为影响。
+- **收益**：响应写出前连接即归还连接池（池小 = 5 连接 + 低流量场景下降低连接占用峰值与 leak 窗口）；消除启动 WARN。
+- **强制约定**：关闭 OSIV 后**任何延迟加载必须显式在事务内完成**——新增实体关联/懒加载集合前先过本关：能批量 IN 查询就别用懒加载；确需懒加载必须在 `@Transactional` 方法内访问并 DTO 化。禁止靠重新开启 OSIV 掩盖（隐式开事务是生产隐患）。
+- 不额外声明 `hibernate.jdbc.batch_size` 等批量参数：本代码库批量读取靠手写 IN、批量写入靠原生 upsert（无多行 flush / 无懒加载集合场景），死配置无收益，禁摆设式添加。
 
 ---
+
 ## Schema 演进与数据库完整性（2026-08-07 起：Flyway 显式迁移 + validate）
 
 ### Schema 演进策略（Flyway 版本化迁移，Hibernate 只校验）
