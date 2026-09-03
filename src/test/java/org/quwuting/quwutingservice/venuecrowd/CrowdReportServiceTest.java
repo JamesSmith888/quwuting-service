@@ -17,6 +17,7 @@ import org.quwuting.quwutingservice.venuecrowd.entity.VenueCrowdReport;
 import org.quwuting.quwutingservice.venuecrowd.enums.CrowdFemaleLevel;
 import org.quwuting.quwutingservice.venuecrowd.enums.CrowdMaleLevel;
 import org.quwuting.quwutingservice.venuecrowd.repository.VenueCrowdReportRepository;
+import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportLikeService;
 import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportService;
 
 import java.time.LocalDate;
@@ -55,6 +56,9 @@ class CrowdReportServiceTest {
     @Mock
     private FavoriteRepository favoriteRepository;
 
+    @Mock
+    private CrowdReportLikeService crowdReportLikeService;
+
     private CrowdReportService crowdReportService;
 
     @BeforeEach
@@ -66,7 +70,8 @@ class CrowdReportServiceTest {
                 contributionService,
                 pointsService,
                 messageService,
-                favoriteRepository
+                favoriteRepository,
+                crowdReportLikeService
         );
     }
 

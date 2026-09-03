@@ -65,5 +65,14 @@ public enum MessageType {
      * （与 CROWD_CONFIRMED 积分发放同源幂等）。软关联 VENUE（深链门店详情页）。
      * 反向通知（收藏者看到收藏门店热度被确认）复用本类型，标题/内容区分口径。
      */
-    CROWD_CONFIRMED
+    CROWD_CONFIRMED,
+    /**
+     * 今晚热度行级点赞「有用」（2026-09-03 新增，docs/agents/27-venue-crowd-report.md
+     * 「行级点赞」）：某条上报<b>首次被赞且非自赞</b>时发送给上报者（人际认可层的
+     * 被看见回访闭环——赞 = 情绪反馈，与 CROWD_CONFIRMED 系统认可正交）；
+     * 同事务、幂等 = 仅该 (report, liker) 对首次赞（INSERT affected=1）触发一次，
+     * 取消后再赞不重发；内容<b>不点名赞者</b>（赞者匿名保护）。
+     * 软关联 VENUE（深链门店详情页热度卡）。
+     */
+    CROWD_REPORT_LIKED
 }

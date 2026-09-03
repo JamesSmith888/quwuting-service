@@ -117,6 +117,8 @@ public class CrowdReportService {
     private final MessageService messageService;
     /** 收藏该店的用户（2026-09-03 收藏联动通知受众查询） */
     private final FavoriteRepository favoriteRepository;
+    /** 行级点赞「有用」聚合（2026-09-03：summary/history 行赞数 + likedByMe 回填） */
+    private final CrowdReportLikeService crowdReportLikeService;
 
     // ===== 列表/详情公共读缓存（2026-08-30 性能优化，根因见 AGENTS.md「首页性能优化」） =====
     //
@@ -286,7 +288,8 @@ public class CrowdReportService {
         String mainText = buildMainText(femaleView, reporterCount, ageText, tier);
         String maleText = maleView != null ? buildMaleText(maleView) : null;
         List<CrowdSummary.CrowdReportRow> detailRows =
-                buildDetailRows(rows, weights, users, currentUserId);
+                buildDetailRows(rows, weights, users, currentUserId,
+                        likeAggregates(rows, currentUserId));
         return new CrowdSummary(true, femaleView, maleView, reporterCount, tier.name(),
                 tier.getText(), mainText, maleText, ageText, emptyText, mine(venueId), detailRows,
                 null, null);
@@ -321,6 +324,9 @@ public class CrowdReportService {
         // 用户资料批量回填（昵称防 N+1；2026-09-03 头像 + 本人标记 isMine 同源一次查全）
         Map<Long, User> users = usersByIds(userIds);
         Long currentUserId = UserContext.getCurrentUserId();
+        // 行级点赞赞数（2026-09-03）：历史页行赞数只读展示（整页锁定，无点赞交互）
+        Map<Long, Long> likeCounts = crowdReportLikeService.likeCountsByReportIds(
+                rows.stream().map(VenueCrowdReport::getId).toList());
         List<CrowdSummary.CrowdHistoryRow> content = rows.stream()
                 .map(r -> {
                     CrowdFemaleLevel female = CrowdFemaleLevel.of(r.getFemaleLevel());
@@ -338,7 +344,8 @@ public class CrowdReportService {
                             male != null ? male.getAnchor() : null,
                             r.getCreatedAt(),
                             ageTextFor(r.getCreatedAt()),
-                            r.getCreatedAt().isBefore(since));
+                            r.getCreatedAt().isBefore(since),
+                            likeCounts.getOrDefault(r.getId(), 0L).intValue());
                 })
                 .toList();
         return new PageImpl<>(content, result.getPageable(), result.getTotalElements());
@@ -513,7 +520,8 @@ public class CrowdReportService {
     private List<CrowdSummary.CrowdReportRow> buildDetailRows(List<VenueCrowdReport> rows,
                                                               Map<Long, Double> weights,
                                                               Map<Long, User> users,
-                                                              Long currentUserId) {
+                                                              Long currentUserId,
+                                                              CrowdLikeAggregates likes) {
         return rows.stream()
                 .sorted(Comparator.comparing(VenueCrowdReport::getCreatedAt).reversed())
                 .map(r -> {
@@ -529,9 +537,24 @@ public class CrowdReportService {
                             female.getDisplayName(), female.getAnchor(),
                             male != null ? male.getDisplayName() : null,
                             male != null ? male.getAnchor() : null,
-                            ageTextFor(r.getCreatedAt()));
+                            ageTextFor(r.getCreatedAt()),
+                            r.getId(),
+                            likes.counts().getOrDefault(r.getId(), 0L).intValue(),
+                            currentUserId != null && likes.liked().contains(r.getId()));
                 })
                 .toList();
+    }
+
+    /** 行级点赞聚合快照（详情页热度卡行「有用」按钮数据源；窗口/行数小，无缓存） */
+    private CrowdLikeAggregates likeAggregates(List<VenueCrowdReport> rows, Long currentUserId) {
+        List<Long> reportIds = rows.stream().map(VenueCrowdReport::getId).toList();
+        Map<Long, Long> counts = crowdReportLikeService.likeCountsByReportIds(reportIds);
+        Set<Long> liked = crowdReportLikeService.likedReportIds(currentUserId, reportIds);
+        return new CrowdLikeAggregates(counts, liked);
+    }
+
+    /** 行级点赞聚合中间结果（赞数 + 我已赞的 reportId 集） */
+    private record CrowdLikeAggregates(Map<Long, Long> counts, Set<Long> liked) {
     }
 
     /** 明细/历史行用户资料批量回填（2026-09-03：昵称 + 头像一次查全，防 N+1） */

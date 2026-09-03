@@ -75,7 +75,9 @@ public record CrowdSummary(
 
     /**
      * 单个用户的上报明细（详情页「今晚热度」表格式列表行，2026-08-29；2026-09-03
-     * 用户要求表格直接展示<b>头像 + 名称（超长省略）</b>）。
+     * 用户要求表格直接展示<b>头像 + 名称（超长省略）</b>；同日追加行级点赞
+     * 「有用」——reportId 行主键 + likeCount 赞数 + likedByMe 我是否已赞
+     * （登录态回填，前端渲染点亮态；未登录恒 false）。
      */
     public record CrowdReportRow(
             Long userId,
@@ -91,7 +93,13 @@ public record CrowdSummary(
             String femaleLevelHint,
             String maleLevelName,
             String maleLevelHint,
-            String ageText
+            String ageText,
+            /** 上报行 ID（2026-09-03 行级点赞主键——like/unlike 请求体） */
+            Long reportId,
+            /** 该行当前赞数（2026-09-03「有用」计数；纯展示、永不进算法） */
+            int likeCount,
+            /** 我是否已赞该行（2026-09-03；登录态回填，前端点亮态） */
+            boolean likedByMe
     ) {
     }
 
@@ -101,7 +109,9 @@ public record CrowdSummary(
      * <p>
      * 字段全部服务端权威派生（badgeText 三档 / 档位名+锚点 / ageText 相对时间 /
      * reportAt 绝对时间 yyyy-MM-dd HH:mm:ss / expired 窗口外标记——前端仅据此
-     * 派生「已过期」标签 + 置灰样式，零拼接）。
+     * 派生「已过期」标签 + 置灰样式，零拼接）。2026-09-03 追加 likeCount：
+     * 历史页行赞数<b>只读展示</b>（整页锁定，无点赞交互——过期行不可赞，封死
+     * 「赞远古行」刷法；未过期行回详情页热度卡点赞）。
      */
     public record CrowdHistoryRow(
             Long id,
@@ -123,7 +133,9 @@ public record CrowdSummary(
             /** 相对时间（「刚刚 / N 分钟前 / N 小时前」） */
             String ageText,
             /** 是否已出 6h 有效窗口（true = 历史参考，前端置灰 +「已过期」） */
-            boolean expired
+            boolean expired,
+            /** 该行当前赞数（2026-09-03 行级点赞；只读展示，纯展示永不进算法） */
+            int likeCount
     ) {
     }
 }

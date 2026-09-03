@@ -3,7 +3,9 @@ package org.quwuting.quwutingservice.venuecrowd.controller;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.venuecrowd.dto.request.SubmitCrowdReportRequest;
+import org.quwuting.quwutingservice.venuecrowd.dto.response.CrowdLikeResponse;
 import org.quwuting.quwutingservice.venuecrowd.dto.response.CrowdSummary;
+import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportLikeService;
 import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportService;
 import org.springframework.data.domain.Page;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -27,6 +29,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class CrowdReportController {
 
     private final CrowdReportService crowdReportService;
+    private final CrowdReportLikeService crowdReportLikeService;
 
     /**
      * 提交 / 更新今晚热度（需登录，每日一记幂等 upsert）。
@@ -70,5 +73,33 @@ public class CrowdReportController {
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size) {
         return ApiResponse.ok(crowdReportService.history(venueId, page, size));
+    }
+
+    /**
+     * 赞一条今晚热度上报（2026-09-03「人际认可」层，需登录；幂等——已赞返回当前态）。
+     * POST /venues/{venueId}/crowd-reports/{reportId}/like
+     * <p>
+     * 每人每行至多 1 票（全量唯一 (liker_id, report_id)，再点取消）；仅 6h 窗口内行
+     * 可赞（1019 行不存在/1019 归属不一致/1020 过窗）；首次赞且非自赞 → 给上报者发
+     * CROWD_REPORT_LIKED 站内信（同事务、取消再赞不重发）。响应 = 服务端权威当前态
+     * （likeCount/likedByMe），前端直接回写零拼接。赞数纯展示、永不进算法。
+     */
+    @PostMapping("/{reportId}/like")
+    public ApiResponse<CrowdLikeResponse> like(
+            @PathVariable Long venueId, @PathVariable Long reportId) {
+        return ApiResponse.ok(crowdReportLikeService.like(venueId, reportId));
+    }
+
+    /**
+     * 取消赞（2026-09-03，需登录；幂等——未赞过返回当前态）。
+     * POST /venues/{venueId}/crowd-reports/{reportId}/unlike
+     * <p>
+     * 与 like 同校验（仅 6h 窗口内行）；软删 toggle OFF（对齐 qwt_favorites），
+     * 取消后再赞 = 恢复原行且不重发被赞通知。
+     */
+    @PostMapping("/{reportId}/unlike")
+    public ApiResponse<CrowdLikeResponse> unlike(
+            @PathVariable Long venueId, @PathVariable Long reportId) {
+        return ApiResponse.ok(crowdReportLikeService.unlike(venueId, reportId));
     }
 }

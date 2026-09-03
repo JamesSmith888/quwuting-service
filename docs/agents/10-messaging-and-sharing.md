@@ -22,7 +22,7 @@
 | 列 | 说明 |
 |---|---|
 | user_id | 收件人（用户级资源，查询/已读一律按此过滤，越权返回空） |
-| type | MessageType 枚举：DANCER_REVIEW（审核结果）/ DANCER_STATUS（隐藏/恢复状态变更）/ FEEDBACK_RESULT（上报处理结果，2026-08-10 新增）/ STATUS_REPORT_RESULT（突发事件采纳结果，2026-08-10）/ VENUE_STATUS_CHANGED（关注门店状态变化，2026-08-12） |
+| type | MessageType 枚举：DANCER_REVIEW（审核结果）/ DANCER_STATUS（隐藏/恢复状态变更）/ FEEDBACK_RESULT（上报处理结果，2026-08-10 新增）/ STATUS_REPORT_RESULT（突发事件采纳结果，2026-08-10）/ VENUE_STATUS_CHANGED（关注门店状态变化，2026-08-12）/ CROWD_CONFIRMED（热度确认，2026-09-03 确认后积分，见前端 docs/agents/27-venue-crowd-report.md「确认后积分」）/ CROWD_REPORT_LIKED（收到热度点赞，2026-09-03 行级点赞，同上文档「行级点赞」——首次赞且非自赞触发） |
 | title / content | 标题 / 正文（TextSanitizer 清洗入库，长度 ≤100 / ≤500 与列定义一致） |
 | related_type / related_id | 业务软关联：DANCER → 舞伴详情页 / VENUE → 场所详情页，可空 |
 | read_at | 已读时间（null = 未读；未读数徽标依据） |
@@ -47,6 +47,13 @@
   2. `VenueFeedbackService.handleByAdmin`（上报处理结果，2026-08-10 新增：PENDING→
      任一终态**实际流转时**发送，与状态流转同事务、幂等——终态重复操作不重复发信；
      **匿名上报（userId null）不通知**，与积分奖励同一匿名边界）
+  3. `CrowdReportService`（热度确认，2026-09-03：上报被 ≥3 位舞友一致确认后发给被确认
+     上报者、收藏该门店用户首次达确认时发给收藏者——触发者本人不发，同事务、幂等，
+     详情见前端 docs/agents/27-venue-crowd-report.md「确认后积分」）
+  4. `CrowdReportLikeService.like`（收到热度点赞，2026-09-03 行级点赞：该行<b>首次</b>
+     被赞且<b>非自赞</b>时发给上报者，同事务；去重不依赖标志列——DB 受影响行数
+     affected==1 即首次赞，取消后再赞/重复赞不重发；不点名赞者，见前端
+     docs/agents/27-venue-crowd-report.md「行级点赞」）
 - **文案规则**：真实正式、只陈述事实（同前端「分享内容契约」）；驳回时 reason
   经 TextSanitizer 清洗后拼入正文；上报处理结果按终态区分奖励语义（ADOPTED 已奖励
   / ADOPTED_NO_REWARD 未奖励），奖励数额不在消息内硬编码（以积分流水为唯一事实源）
