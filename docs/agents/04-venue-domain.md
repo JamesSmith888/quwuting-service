@@ -42,15 +42,15 @@
 - `GET /admin/venues/photo-sync/progress` — 实时进度轮询（`SyncProgress`：running/total/processed/updated/failed/skipped/currentName/items 逐条结果）
 - `POST /admin/venues/photo-sync/retry` — 单店重匹配（body `{venueId, address?}`，同步返回单条 `SyncItem`；**address 可选**：空 = 名称模式强制重匹配（成功项复核后重取），非空 = 地址模式（完整地址检索取第一个 POI，覆盖「店名与高德登记不一致/搜不到」场景））
 - `POST /admin/venues/photo-sync/clear` — 清除门店图片（body `{venueId}`；主图 image_url 置空 + 物理删高德导入相册 + 缓存失效，回到无图态可重新同步——人工判定错配后回退）
-- `GET /admin/venues/photo-sync/list` — 门店图片状态分页（`hasImage` 主图有无 / `city` / `keyword` 名称模糊筛选；数据源 = **DB 现状**（qwt_venues + qwt_venue_photos 子查询聚合，`VenueRepository#findPhotoStatusPage`）非同步内存快照——服务重启不丢、可筛选分页，兼作成功项纠错入口）
+- `GET /admin/venues/photo-sync/list` — 门店图片状态分页（`hasImage` 主图有无 / `city` / `keyword` 名称模糊筛选；**默认按录入时间倒序** `created_at DESC, id DESC`（2026-09-03，新店批量录入场景最新优先）；数据源 = **DB 现状**（qwt_venues + qwt_venue_photos 子查询聚合，`VenueRepository#findPhotoStatusPage`）非同步内存快照——服务重启不丢、可筛选分页，兼作成功项纠错入口）
 
-**工作台与纠错生命周期（2026-08-22 拆独立页，遵循「列表+明细+写操作 → 独立页」架构约定）**：
-- 管理端入口 = `pages/admin-photo-sync`（上报管理页仅留一行入口条）；页面 = 同步控制（缺图数/一键同步/进度轮询/完成 toast 含近似匹配复核提示）+ 状态筛选（全部/有图/无图）+ 城市/名称筛选 + 分页列表 + 详情弹层（主图+相册预览 / 重新匹配（可带地址）/ 清除图片）；
+**工作台与纠错生命周期（2026-08-22 拆独立页；2026-09-03 入口迁移 Web 管理后台，小程序端页面已下架删除）**：
+- 管理端入口 = **quwuting-admin-web「更多 → 照片同步」**（`src/views/VenuePhotoSyncView.vue`；原小程序 `pages/admin-photo-sync` 四件套 + services/venuePhotoSync + 上报管理页入口条已全部移除）；页面 = 同步控制（缺图数/一键同步/进度轮询/完成 toast 含近似匹配复核提示）+ 状态筛选（全部/有图/无图）+ 城市/名称筛选 + 分页列表（**卡片级「一键录入」**：单店调 retry 并传门店现有 address，地址模式；无地址退化店名模式，成功就地更新卡片）+ 详情弹层（主图+相册预览 / 重新匹配（可带地址）/ 清除图片）；
 - **成功 ≠ 100% 正确**：`SyncItem` 携带 matchedName/confidence（100=精确，60~99=近似需复核）/poiId/city——近似匹配置信度驱动人工复核；有图门店（成功项）同样有纠错入口（详情弹层重匹配/清除）。
 
 **强制约定**：
 - 高德 key 只放后端配置（`app.amap.key`，生产经 `AMAP_KEY` 环境变量注入），禁止落前端（与 geocode 同合规策略）；
-- 异步执行：单线程 `ExecutorService` + `AtomicBoolean` running 防并发 + `AtomicReference<SyncProgress>` 内存进度（**单实例部署前提**，systemd 单进程可靠）；前端每 1.2s 轮询 progress，页面隐藏停轮询（`pageLifetimes.hide`）；
+- 异步执行：单线程 `ExecutorService` + `AtomicBoolean` running 防并发 + `AtomicReference<SyncProgress>` 内存进度（**单实例部署前提**，systemd 单进程可靠）；前端每 1.2s 轮询 progress，组件卸载清理定时器（小程序旧版另在 `pageLifetimes.hide` 停轮询，Web 版为 `onUnmounted` 清理）；
 - 幂等：只处理缺图门店，可反复触发补扫失败项；单店失败不影响其他项；
 - 限速：高德个人版 QPS≈3 → 逐条 `Thread.sleep(400ms)`；
 

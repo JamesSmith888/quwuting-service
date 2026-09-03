@@ -11,18 +11,20 @@ import org.quwuting.quwutingservice.base.BaseEntity;
 import java.time.LocalDate;
 
 /**
- * 门店热度上报（舞友上报今晚在店舞伴 / 男客情况，2026-08-29）。
+ * 门店热度上报（舞友上报今晚在店舞伴 / 男客情况，2026-08-29；2026-08-31 细粒度重构
+ * 去中文定性词为 8 档——本文件字段注释与构造注释随之更新，勿回退为 1-4/1-3 口径）。
  * <p>
- * 双维实时众包信号：{@code femaleLevel}（1-4，主信号）+ {@code maleLevel}
- * （1-3，次信号，可空）。每日一记（每人每店每天一票）——唯一约束经
- * V59 部分唯一索引（WHERE deleted=false）保证，应用层 ON CONFLICT 幂等 upsert。
+ * 双维实时众包信号：{@code femaleLevel}（1-8，主信号）+ {@code maleLevel}
+ * （1-8，次信号，可空；细粒度档位同女，0-20/约30/…/约300+）。每日一记（每人每店
+ * 每天一票）——唯一约束经 V59 部分唯一索引（WHERE deleted=false）保证，应用层
+ * MySQL ON DUPLICATE KEY 幂等 upsert。
  * <p>
  * 与 {@link org.quwuting.quwutingservice.venuestatusreport.entity.VenueStatusReport}
  * 的边界：status report = 突发事件（暂停/恢复/临检，2 天公示期，管理端处置）；
  * 本表 = 常态实时信号（6 小时窗口自动过期；全部历史走独立历史接口
- * /venues/{id}/crowd-reports/history 分页全量供回看，无管理端逐条处置）。不混用、
- * 不塞进
- * ReportType（突发事件语义），见 docs/agents/27-venue-crowd-report.md。
+ * /venues/{id}/crowd-reports/history 分页全量供回看）。2026-09-03 起管理端
+ * 「热度管理」可删除不合理单条（软删），删除后用户当日可重新上报。不混用、
+ * 不塞进 ReportType（突发事件语义），见 docs/agents/27-venue-crowd-report.md。
  */
 @Getter
 @Setter

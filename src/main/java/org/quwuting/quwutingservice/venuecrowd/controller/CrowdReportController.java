@@ -32,8 +32,10 @@ public class CrowdReportController {
      * 提交 / 更新今晚热度（需登录，每日一记幂等 upsert）。
      * POST /venues/{venueId}/crowd-reports
      * <p>
-     * 请求体：{ femaleLevel: 1-4（必填，在店舞伴档位）, maleLevel: 1-4（选填，男客数量档位，锚点同女） }。
-     * 返回更新后的聚合摘要（前端立即刷新展示 + mine 态）。
+     * 请求体：{ femaleLevel: 1-8（必填，在店舞伴档位，0-20/约30/…/约300+）,
+     * maleLevel: 1-8（选填，男客数量档位，细粒度同女；缺省 = 跳过） }。
+     * 返回更新后的聚合摘要（前端立即刷新展示 + mine 态 + rewardText/upgradedBadgeText
+     * 即时反馈——2026-09-03「确认后积分」）。
      */
     @PostMapping
     public ApiResponse<CrowdSummary> submit(

@@ -83,15 +83,36 @@ import java.util.Set;
  * <p>
  * <b>2026-08-24 常见表情全放开（根因驱动，详见前端 AGENTS.md「Reaction 表情」章节）</b>：
  * 本枚举 = <b>legacy 业务语义 code（12 项，保留全部历史数据与文案）+ 常见表情目录适配</b>。
- * 常见表情（~150 项，含三极性）单一事实源 = {@link org.quwuting.quwutingservice.emoji.EmojiCatalog}，
+ * 常见表情（2026-09-03 去噪收敛后 134 项，含三极性）单一事实源 = {@link org.quwuting.quwutingservice.emoji.EmojiCatalog}，
  * 本枚举的静态适配器（{@link #allCodes()} / {@link #isValid} / {@link #emojiOf} /
  * {@link #labelOf} / {@link #polarityOf}）在 legacy 之上叠加目录——<b>禁止</b>把目录项
  * 逐个复制成本枚举的 enum value（否则双端同步成本结构性膨胀，重蹈 08-12 收缩覆辙）。
  * 域内去重规则：目录项若 emoji（去除 VS16 后）与 legacy 撞车则剔除（同一域同一 emoji
  * 只有一个 code，防 Picker 双胞胎）——legacy 12 项占用的 emoji（🔥👍⭐🌸💋💃💁✌🪑😕😡😬）
  * 在门店域不再重复提供普通版。
+ * <p>
+ * <b>2026-09-03 新增两个圈内黑话 legacy（用户驱动，排序靠前）</b>：legacy 12 → 14。
+ * ① {@link #JICHE}（🛵 机车——台湾黑话负面形容舞伴难搞/态度差，NEGATIVE）；
+ * ② {@link #LONG}（🐉 龙——聋哑舞伴圈内叫法，NEUTRAL 事实信号）。两者均放声明序最前
+ * （Picker / 表情说明页最靠前）；emoji 占用清单追加 🛵🐉；DB 零迁移（纯新增 code，
+ * 无历史数据重映射）。
  */
 public enum ReactionCode {
+    /**
+     * 2026-09-03 新增（用户驱动，排序靠前）：圈内黑话标签，放本枚举<b>声明序最前</b>
+     * （allCodes() 顺序 = legacy 声明序在前 → Picker / 表情说明页最靠前展示）。
+     * 「机车」= 台湾黑话，负面形容舞伴难搞、态度差（🛵 取字面"摩托车"义）；
+     * NEGATIVE → 自动进负面信号单独计数（negativeCodeNames 派生），不进热度公式。
+     * code 用汉语拼音 JICHE——黑话无英文等价词，语义化翻译会失真（区别于 PRICE_HIKE
+     * 这类可英文化的语义 code）。
+     */
+    JICHE("🛵", "机车", Polarity.NEGATIVE),
+    /**
+     * 2026-09-03 新增（用户驱动，排序靠前）：「龙」= 聋哑舞伴的圈内叫法
+     * （谐音「聋」，🐉 取字面）。NEUTRAL 事实信号——不进热度公式（positiveCodeNames）、
+     * 不进「近期风险」区（negativeCodeNames），仅作展示；声明序紧随 JICHE 置前。
+     */
+    LONG("🐉", "龙", Polarity.NEUTRAL),
     HOT("🔥", "人气旺", Polarity.POSITIVE),
     RECOMMEND("👍", "值得推荐", Polarity.POSITIVE),
     /**

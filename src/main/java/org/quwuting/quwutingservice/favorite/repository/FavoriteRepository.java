@@ -45,4 +45,12 @@ public interface FavoriteRepository extends JpaRepository<Favorite, Long> {
            "AND f.venueId = v.id AND v.deleted = false " +
            "ORDER BY f.createdAt DESC")
     List<Venue> findFavoriteVenuesByUserId(@Param("userId") Long userId);
+
+    /**
+     * 收藏某门店的用户 ID 集合（2026-09-03 收藏联动通知，docs/agents/27「受众放大」：
+     * 该店热度确认事件推给收藏者——受益者 = 关注这家店的人，互惠闭环；仅未删收藏行）。
+     */
+    @Query("SELECT f.userId FROM Favorite f " +
+           "WHERE f.venueId = :venueId AND f.deleted = false")
+    List<Long> findUserIdsByVenueId(@Param("venueId") Long venueId);
 }

@@ -46,5 +46,15 @@ public enum PointsSourceType {
      * 分来源（(user, APP_FEEDBACK_REWARD, appFeedbackId)），否则跨表撞键会漏发。
      * 奖励金额与 FEEDBACK_REWARD 同池（app.points.feedback-reward，用户心智一致）。
      */
-    APP_FEEDBACK_REWARD
+    APP_FEEDBACK_REWARD,
+    /**
+     * 今晚热度上报被舞友确认（2026-09-03 新增，source_id = qwt_venue_crowd_reports.id，
+     * docs/agents/27-venue-crowd-report.md「确认后积分」）：6h 窗口内该店 ≥3 人档位
+     * 一致（众包互认，非管理员人工采纳）时发放给「与众数一致」的上报者，奖励与
+     * 信号质量对齐（刷分必须报真）；幂等键 = 上报行 id（每行至多一次，同日改档位
+     * 再确认不重复发）。金额独立键 app.points.crowd-confirm-reward（默认 3，低于
+     * 人工采纳 5——确认是同级互认而非权威认定）。计入贡献档案「上报采纳」维度
+     * （ContributionService.REPORT_SOURCE_TYPES），进而加速可信度权重（资深/常客）。
+     */
+    CROWD_CONFIRMED
 }

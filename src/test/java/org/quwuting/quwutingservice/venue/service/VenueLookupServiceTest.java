@@ -46,7 +46,7 @@ class VenueLookupServiceTest {
         service = new VenueLookupService(venueRepository, new VenueHotProperties(70),
                 new org.quwuting.quwutingservice.config.PointsProperties(2, 5, 5, 2,
                         new org.quwuting.quwutingservice.config.PointsProperties.GiftLimits(10, 20, 5),
-                        new org.quwuting.quwutingservice.config.PointsProperties.GateLimits(50)));
+                        new org.quwuting.quwutingservice.config.PointsProperties.GateLimits(50), 3));
     }
 
     @Test

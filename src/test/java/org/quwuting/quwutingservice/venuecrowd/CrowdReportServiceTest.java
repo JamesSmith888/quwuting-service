@@ -5,7 +5,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.quwuting.quwutingservice.favorite.repository.FavoriteRepository;
+import org.quwuting.quwutingservice.message.service.MessageService;
 import org.quwuting.quwutingservice.points.service.ContributionService;
+import org.quwuting.quwutingservice.points.service.PointsService;
 import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
@@ -43,6 +46,15 @@ class CrowdReportServiceTest {
     @Mock
     private ContributionService contributionService;
 
+    @Mock
+    private PointsService pointsService;
+
+    @Mock
+    private MessageService messageService;
+
+    @Mock
+    private FavoriteRepository favoriteRepository;
+
     private CrowdReportService crowdReportService;
 
     @BeforeEach
@@ -51,7 +63,10 @@ class CrowdReportServiceTest {
                 crowdReportRepository,
                 venueRepository,
                 userRepository,
-                contributionService
+                contributionService,
+                pointsService,
+                messageService,
+                favoriteRepository
         );
     }
 

@@ -24,7 +24,15 @@ public record PointsProperties(
         int heatWeight,
         GiftLimits gift,
         /** 积分解锁门槛限制（2026-08-14 公共模块：单点门槛上限） */
-        GateLimits gate
+        GateLimits gate,
+        /**
+         * 今晚热度上报被舞友确认后的奖励（积分，2026-09-03 新增，
+         * docs/agents/27-venue-crowd-report.md「确认后积分」）。
+         * 与 statusReportReward/feedbackReward 的差异：那些是管理员<b>人工采纳</b>
+         * （权威认定）；本键是<b>众包互认</b>（≥3 人档位一致自动确认）——
+         * 权威性低一档，默认 3（低于 5）。独立键便于运营分别调节。
+         */
+        int crowdConfirmReward
 ) {
 
     /** 赠送限制（单次/每日/单目标每日） */
@@ -35,7 +43,7 @@ public record PointsProperties(
 
     /** 配置缺失时的安全回退 */
     private static final PointsProperties DEFAULT = new PointsProperties(2, 5, 5, 2,
-            new GiftLimits(10, 20, 5), new GateLimits(50));
+            new GiftLimits(10, 20, 5), new GateLimits(50), 3);
 
     public PointsProperties {
         if (checkInReward <= 0) checkInReward = DEFAULT.checkInReward();
@@ -50,5 +58,6 @@ public record PointsProperties(
         if (gate.maxCost() <= 0) {
             gate = DEFAULT.gate();
         }
+        if (crowdConfirmReward <= 0) crowdConfirmReward = DEFAULT.crowdConfirmReward();
     }
 }

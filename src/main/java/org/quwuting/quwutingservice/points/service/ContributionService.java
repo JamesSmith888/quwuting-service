@@ -45,12 +45,21 @@ public class ContributionService {
 
     /** 合规规则文案（后端下发唯一事实源，前端直接渲染，禁止硬编码） */
     private static final String RULES_TEXT =
-            "贡献值是你在社区共建中的行为记录：上报采纳、每日打卡、认可舞伴、认领舞厅、" +
-            "分享、收藏都会累积贡献值。等级称号仅作纪念，不参与任何积分或兑换。";
+            "贡献值是你在社区共建中的行为记录：上报被采纳（含今晚热度被舞友确认）、每日打卡、" +
+            "认可舞伴、认领舞厅、分享、收藏都会累积贡献值。等级称号仅作纪念，不参与任何积分或兑换。";
 
-    /** 上报采纳来源集合（信息上报 + 暂停营业报告，采纳才发分 = 采纳数，见 PointsSourceType） */
+    /**
+     * 上报采纳来源集合（信息上报 + 暂停营业报告 + 今晚热度众包确认，采纳/确认才发分
+     * = 采纳数，见 PointsSourceType）。
+     * <p>
+     * 2026-09-03 加入 {@link PointsSourceType#CROWD_CONFIRMED}（docs/agents/27「确认后
+     * 积分」）：热度上报被 ≥3 人确认 = 众包互认的"报得准"，语义与人工采纳同族——
+     * 计入贡献档案 reportedCount（升等级）与 CrowdReportService 可信度权重采纳项
+     * （min(采纳,5)×0.5 加速资深/常客）。每行至多一次确认奖励，计数恒等行为次数。
+     */
     private static final List<PointsSourceType> REPORT_SOURCE_TYPES =
-            List.of(PointsSourceType.FEEDBACK_REWARD, PointsSourceType.STATUS_REPORT_REWARD);
+            List.of(PointsSourceType.FEEDBACK_REWARD, PointsSourceType.STATUS_REPORT_REWARD,
+                    PointsSourceType.CROWD_CONFIRMED);
 
     private final ContributionProperties properties;
     private final PointsTransactionRepository transactionRepository;

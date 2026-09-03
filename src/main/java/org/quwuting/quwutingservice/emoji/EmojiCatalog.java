@@ -9,8 +9,16 @@ import java.util.List;
  * <b>定位回归（根因分析，详见前后端 AGENTS.md「Reaction 表情」章节）</b>：Reaction 是
  * Telegram 式<b>情感表达媒介</b>，其价值随词汇广度与熟悉度增长；历史上按"决策信号价值/
  * 使用率"标准反复收缩字典（18→14→10→12 的折腾）是语义定位错误——决策信号本应由
- * 1-10 评分维度承担。本次将字典扩展到全部常见 Emoji（本目录 ~145 项，涵盖
+ * 1-10 评分维度承担。本次将字典扩展到全部常见 Emoji（本目录 152 项，涵盖
  * 表情/手势/爱心/庆祝/动植物/食物/天气/物品），并启用长期闲置的 NEUTRAL 极性档位。
+ * <p>
+ * <b>2026-09-03 去噪收敛（用户驱动，定向删除 18 项 → 134 项）</b>：全放开不等同于无门槛——目录里
+ * 与舞厅/舞伴评价场景<b>零关联的日常物象</b>（天气/自然 7 项 ☀️🌙🌈☁️❄️☔⚡、数码/办公/
+ * 交通/运动 11 项 ⌚📱💻📷🎬🎨📚✈️🚗⚽🏀）不具备任何情感表达价值，纯占 Picker 屏位，
+ * 定向移除（非 08-12 式按"使用率/决策信号"收缩，情绪/人物/庆祝类一字未动）。
+ * 保留判断标准 = 「能否在舞厅/舞伴场景想象出点击表达」：人物/情绪/动物/花卉/酒水保留，
+ * 场景外纯物象删除。删除为纯字典操作：toggle 入口 isValid 拦截、徽标构建对枚举外
+ * code 优雅忽略（buildTopBadgesFromCounts），历史已点击数据零报错仅不再展示。
  * <p>
  * <b>职责边界（防重蹈覆辙）</b>：
  * <ul>
@@ -182,30 +190,10 @@ public enum EmojiCatalog {
     EMOJI_2615("☕", "咖啡", "一杯热咖啡", Polarity.NEUTRAL),
     EMOJI_1F363("🍣", "寿司", "寿司", Polarity.NEUTRAL),
 
-    // ── 天气与自然（Weather & Nature） ────────────────────────────────────────
-    EMOJI_2600("☀️", "太阳", "太阳", Polarity.NEUTRAL),
-    EMOJI_1F319("🌙", "月亮", "弯弯的月亮", Polarity.NEUTRAL),
-    EMOJI_1F308("🌈", "彩虹", "彩虹", Polarity.POSITIVE),
-    EMOJI_2601("☁️", "云", "一朵云", Polarity.NEUTRAL),
-    EMOJI_2744("❄️", "雪花", "雪花", Polarity.NEUTRAL),
-    EMOJI_2614("☔", "雨伞", "撑开的雨伞", Polarity.NEUTRAL),
-    EMOJI_26A1("⚡", "闪电", "闪电", Polarity.NEUTRAL),
-
-    // ── 物品与活动（Objects & Activities） ────────────────────────────────────
-    EMOJI_231A("⌚", "手表", "手表", Polarity.NEUTRAL),
-    EMOJI_1F4F1("📱", "手机", "智能手机", Polarity.NEUTRAL),
-    EMOJI_1F4BB("💻", "笔记本电脑", "笔记本电脑", Polarity.NEUTRAL),
-    EMOJI_1F4F7("📷", "相机", "相机", Polarity.NEUTRAL),
-    EMOJI_1F3AC("🎬", "场记板", "电影场记板", Polarity.NEUTRAL),
+    // ── 物品（Objects） ──────────────────────────────────────────────────────
     EMOJI_1F4B0("💰", "钱袋", "装满钱的钱袋", Polarity.NEUTRAL),
     EMOJI_1F48E("💎", "宝石", "闪闪发光的宝石", Polarity.POSITIVE),
-    EMOJI_1F451("👑", "王冠", "王冠", Polarity.POSITIVE),
-    EMOJI_1F3A8("🎨", "调色板", "画画的调色板", Polarity.NEUTRAL),
-    EMOJI_1F4DA("📚", "书", "一摞书", Polarity.NEUTRAL),
-    EMOJI_2708("✈️", "飞机", "飞机", Polarity.NEUTRAL),
-    EMOJI_1F697("🚗", "汽车", "小汽车", Polarity.NEUTRAL),
-    EMOJI_26BD("⚽", "足球", "足球", Polarity.NEUTRAL),
-    EMOJI_1F3C0("🏀", "篮球", "篮球", Polarity.NEUTRAL);
+    EMOJI_1F451("👑", "王冠", "王冠", Polarity.POSITIVE);
 
     /** Emoji 极性：热度公式只计入 POSITIVE；NEGATIVE 单独计数展示；NEUTRAL 仅展示不入公式 */
     public enum Polarity {

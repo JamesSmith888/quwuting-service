@@ -25,11 +25,17 @@ import java.util.List;
  *   <li>{@code ageText}：最新上报相对时间（「刚刚 / N 分钟前 / N 小时前」）；</li>
  *   <li>{@code mine}：我今天的上报（未登录或未上报 null——前端据此渲染「报一下 / 已上报·可改」）；</li>
  *   <li>{@code rows}：每个用户的上报明细（2026-08-29 用户要求「表格式列表展示每个用户
- *       上报」；createdAt 倒序；**列表行不展示用户名**——badgeText 服务端权威三档
- *       （权重 ≥ VETERAN_WEIGHT 资深 / ≥ REGULAR_WEIGHT 常客 / 普通，表头已有「舞友」
- *       列名故行内不带「舞友」后缀）；nickname = **完整昵称，仅详情弹层展示**（纯
- *       展示不可点击，空昵称兜底「匿名」）；male 未报时 maleLevelName 为 null；
+ *       上报」；createdAt 倒序；**2026-09-03 用户要求详情页直接展示用户头像 + 名称
+ *       （超长省略）**——badgeText 服务端权威三档（权重 ≥ VETERAN_WEIGHT 资深 /
+ *       ≥ REGULAR_WEIGHT 常客 / 普通，行内与昵称并列）；avatarUrl = 上报者头像
+ *       （空则前端首字占位）；isMine = 是否本人（登录态回填，前端高亮 +「我」标记）；
+ *       nickname = 完整昵称（空昵称兜底「匿名」）；male 未报时 maleLevelName 为 null；
  *       **仅含 6h 窗口内有效行**——历史/过期记录走 {@code CrowdHistoryRow} 历史页）。</li>
+ *   <li>{@code rewardText}/{@code upgradedBadgeText}：<b>仅 POST 提交响应填充</b>的
+ *       即时反馈（GET 恒 null）——rewardText = 本次提交新触发「确认后积分」的服务端
+ *       权威文案（如「你的上报被 3 位舞友确认 · +3 积分已到账」）；upgradedBadgeText =
+ *       本次提交后身份升级文案（普通→常客→资深，如「身份升级：常客舞友」）；
+ *       两者为反馈闭环的即时确认（对齐「label 服务端权威」契约，前端零拼接）。</li>
  * </ul>
  */
 public record CrowdSummary(
@@ -44,7 +50,9 @@ public record CrowdSummary(
         String ageText,
         String emptyText,
         CrowdMineView mine,
-        List<CrowdReportRow> rows
+        List<CrowdReportRow> rows,
+        String rewardText,
+        String upgradedBadgeText
 ) {
 
     /** 单维度众数视图 */
@@ -65,17 +73,20 @@ public record CrowdSummary(
     ) {
     }
 
-    /** 单个用户的上报明细（详情页「今晚热度」表格式列表行，2026-08-29） */
+    /**
+     * 单个用户的上报明细（详情页「今晚热度」表格式列表行，2026-08-29；2026-09-03
+     * 用户要求表格直接展示<b>头像 + 名称（超长省略）</b>）。
+     */
     public record CrowdReportRow(
             Long userId,
-            /** 用户标识（服务端权威三档：资深 / 常客 / 普通；表头已有「舞友」列名，行内不带后缀） */
+            /** 用户标识（服务端权威三档：资深 / 常客 / 普通） */
             String badgeText,
-            /**
-             * 完整昵称（2026-08-29 用户拍板：详情弹层**直接展示完整昵称**，纯展示
-             * 不可点击跳转；列表行仍不显示昵称——公共面不点名，昵称仅详情补充；
-             * 空昵称兜底「匿名」）。
-             */
+            /** 完整昵称（2026-09-03 详情页表格直接展示；空兜底「匿名」） */
             String nickname,
+            /** 上报者头像 URL（2026-09-03；空 = 用户未设头像，前端渲染首字占位） */
+            String avatarUrl,
+            /** 是否本人（2026-09-03；登录态回填——前端高亮自己的行 +「我」标记） */
+            boolean isMine,
             String femaleLevelName,
             String femaleLevelHint,
             String maleLevelName,
@@ -99,6 +110,10 @@ public record CrowdSummary(
             String badgeText,
             /** 完整昵称（空兜底「匿名」） */
             String nickname,
+            /** 上报者头像 URL（2026-09-03；空 = 用户未设头像，前端渲染首字占位） */
+            String avatarUrl,
+            /** 是否本人（2026-09-03；登录态回填——前端高亮自己的行 +「我」标记） */
+            boolean isMine,
             String femaleLevelName,
             String femaleLevelHint,
             String maleLevelName,

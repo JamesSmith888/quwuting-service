@@ -95,6 +95,7 @@ public class PointsService {
             case UNLOCK -> "解锁";
             case UNLOCK_REFUND -> "解锁返还";
             case APP_FEEDBACK_REWARD -> "意见被采纳";
+            case CROWD_CONFIRMED -> "热度被确认";
         };
     }
 
@@ -472,6 +473,40 @@ public class PointsService {
         }
         return earn(reportUserId, pointsProperties.statusReportReward(),
                 PointsSourceType.STATUS_REPORT_REWARD, reportId, null);
+    }
+
+    /**
+     * 今晚热度上报被舞友确认的奖励（2026-09-03，docs/agents/27-venue-crowd-report.md
+     * 「确认后积分」；供 CrowdReportService 在 submit() 重算命中确认时同事务调用）。
+     * 确认 = 6h 窗口内 ≥3 人（含本人）档位一致（{@code CrowdTier.CONFIRMED}），
+     * 且本人上报档位 == 众数档位——奖励与信号质量对齐（刷分必须报真，管理层删除
+     * 已可兜底处置异常信号）。
+     * <p>
+     * source_id = 上报行 id（qwt_venue_crowd_reports.id）：每行至多拿一次——
+     * 同日改档位再次命中确认不重复发（幂等键 (user, CROWD_CONFIRMED, rowId)）；
+     * 与 rewardFeedback/rewardStatusReport 同模式（先软检查幂等 → earn 原子兜底）。
+     *
+     * @return 新余额；未发放（无归属/已发过）返回 null
+     */
+    @Transactional
+    public Long rewardCrowdConfirm(Long reportUserId, Long reportRowId) {
+        if (reportUserId == null || reportRowId == null) {
+            return null;
+        }
+        if (transactionRepository.findByUserIdAndSourceTypeAndSourceId(
+                reportUserId, PointsSourceType.CROWD_CONFIRMED, reportRowId).isPresent()) {
+            return null; // 幂等：该上报行已发过确认奖励
+        }
+        return earn(reportUserId, pointsProperties.crowdConfirmReward(),
+                PointsSourceType.CROWD_CONFIRMED, reportRowId, null);
+    }
+
+    /**
+     * 今晚热度确认奖励金额（供 CrowdReportService 拼接服务端权威文案/消息内容——
+     * 文案禁前端拼，金额禁业务硬编码）。
+     */
+    public int crowdConfirmReward() {
+        return pointsProperties.crowdConfirmReward();
     }
 
     // ─── 管理端调整 ─────────────────────────────────────────────────────────

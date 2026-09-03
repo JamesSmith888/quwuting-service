@@ -57,5 +57,13 @@ public enum MessageType {
      * 与 FEEDBACK_RESULT（门店维度上报）独立成类，标题/内容/深链目标不同。
      * 软关联 APP_FEEDBACK（深链意见反馈页「我的反馈」列表）。
      */
-    APP_FEEDBACK_RESULT
+    APP_FEEDBACK_RESULT,
+    /**
+     * 今晚热度确认（2026-09-03 新增，docs/agents/27-venue-crowd-report.md「确认后
+     * 积分」闭环）：上报被 ≥3 位舞友确认（众包互认）时发送给<b>被确认的上报者</b>
+     * （不含本次提交触发者——其提交响应已即时告知），同事务、每行上报至多发一次
+     * （与 CROWD_CONFIRMED 积分发放同源幂等）。软关联 VENUE（深链门店详情页）。
+     * 反向通知（收藏者看到收藏门店热度被确认）复用本类型，标题/内容区分口径。
+     */
+    CROWD_CONFIRMED
 }

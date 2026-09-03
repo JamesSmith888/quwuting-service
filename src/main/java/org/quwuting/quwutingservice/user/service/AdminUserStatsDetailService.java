@@ -331,6 +331,7 @@ public class AdminUserStatsDetailService {
             case UNLOCK -> "解锁";
             case UNLOCK_REFUND -> "解锁返还";
             case APP_FEEDBACK_REWARD -> "意见被采纳";
+            case CROWD_CONFIRMED -> "热度被确认";
         };
     }
 

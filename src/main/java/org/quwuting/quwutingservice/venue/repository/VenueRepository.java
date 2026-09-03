@@ -119,9 +119,10 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 门店图片状态分页（2026-08-22 新增，管理端图片同步工作台列表）：
      * 每行 = 门店基本信息 + 主图 URL + 公开相册数（qwt_venue_photos 子查询聚合）。
      * 筛选：hasImage（主图有无，null = 全部）、city（精确）、keyword（名称模糊，
-     * 调用方预先包装为 %xx%）。数据源 = DB 现状（非同步内存快照）——服务重启不丢、
-     * 与真实数据一致、可筛选分页，同时作为「成功项纠错」入口（成功 ≠ 100% 正确，
-     * 人工复核后重匹配/清除）。
+     * 调用方预先包装为 %xx%）。排序：录入时间倒序（2026-09-03，新店批量录入场景
+     * 最新门店优先；id 兜底保证同刻稳定序）。
+     * 数据源 = DB 现状（非同步内存快照）——服务重启不丢、与真实数据一致、可筛选分页，
+     * 同时作为「成功项纠错」入口（成功 ≠ 100% 正确，人工复核后重匹配/清除）。
      * 返回 Object[]{id, name, city, address, image_url, photo_count}。
      */
     @Query(value = """
@@ -134,7 +135,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                    OR (v.image_url IS NOT NULL AND v.image_url <> '') = :hasImage)
               AND (:city IS NULL OR v.city = :city)
               AND (:keyword IS NULL OR v.name LIKE :keyword)
-            ORDER BY v.id DESC
+            ORDER BY v.created_at DESC, v.id DESC
             """,
             countQuery = """
             SELECT COUNT(*) FROM qwt_venues v
