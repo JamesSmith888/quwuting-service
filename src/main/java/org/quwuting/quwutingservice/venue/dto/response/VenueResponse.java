@@ -88,5 +88,15 @@ public record VenueResponse(
          * 场景下发真实值；其他场景（城市列表/详情/编辑回显）恒为 false——状态角标
          * 是收藏语义的提醒，城市列表不做（同 crowdBadgeText 仅列表场景的注入边界）。
          */
-        boolean statusChanged
+        boolean statusChanged,
+        /**
+         * 门店报告「最新上报」行文案（2026-09-04，docs/agents/07-feedback-and-reporting.md）：
+         * 「{相对时间} · {类型} · 舞友上报」（如「2 分钟前 · 暂停营业 · 舞友上报」，
+         * 见 StatusReportLatestService#latestTextsByVenue）——公示期 2 天内每店最新一条
+         * 公示中报告（活跃口径与详情页公告条同源），驱动列表卡片「最新上报」行与今晚热度
+         * 文案（crowdLatestText）共用同一行控件轮播展示（2026-09-04 用户拍板，推翻同日
+         * 「中性角标 reportBadgeText」方案）。无公示中报告 / 无展示语义场景
+         * （详情/编辑/创建回显）为 null。
+         */
+        String statusLatestText
 ) {}

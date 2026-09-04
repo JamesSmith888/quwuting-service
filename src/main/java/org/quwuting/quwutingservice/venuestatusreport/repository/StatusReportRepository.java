@@ -11,10 +11,39 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
 public interface StatusReportRepository extends JpaRepository<VenueStatusReport, Long> {
+
+    /**
+     * 批量每店<b>最新一条公示中报告</b>（2026-09-04 列表「最新上报」行门店报告信号源，
+     * VenueService.listVenues / FavoriteService.getFavoriteVenues 整页调用）。
+     * <p>
+     * 公示中口径与详情页公告条<b>同源</b>（{@link #findAnnouncementsByVenue}
+     * includeExpired=false 的行集非空 ⇔ 本查询命中）——同一事实只呈现一次的口径纪律：
+     * {@code deleted=false OR adminAction='ADOPTED'} 且 expires_at &gt; now。
+     * <b>采纳也置 deleted=true（{@link #disposeById}），故谓词必须带 ADOPTED 分支</b>——
+     * 只写 deleted=false 会漏掉「已核实」报告（2026-09-04 角标版初版口径错误的根因修正）；
+     * REMOVED（deleted=true 且非 ADOPTED）不展示。子查询 = 同口径内每店最大 createdAt
+     * （同 VenueCrowdReportRepository#findLatestByVenueIdsSince 批量模式），一次 IN 覆盖
+     * 整页防 N+1；同店同刻并列（理论罕见）由 Service 按 venueId 取首条兜底。
+     *
+     * @return 每店最新一条公示中报告（venueId/类型/createdAt 供文案生成）；无公示中
+     *         报告的门店不在结果中
+     */
+    @Query("SELECT r FROM VenueStatusReport r " +
+           "WHERE r.venueId IN :venueIds " +
+           "  AND (r.deleted = false OR r.adminAction = :adopted) " +
+           "  AND r.expiresAt > :now " +
+           "  AND r.createdAt = (SELECT MAX(r2.createdAt) FROM VenueStatusReport r2 " +
+           "    WHERE r2.venueId = r.venueId " +
+           "      AND (r2.deleted = false OR r2.adminAction = :adopted) " +
+           "      AND r2.expiresAt > :now)")
+    List<VenueStatusReport> findLatestActiveByVenueIds(@Param("venueIds") Collection<Long> venueIds,
+                                                       @Param("now") LocalDateTime now,
+                                                       @Param("adopted") AdminAction adopted);
 
     /**
      * 查找用户对某场所的<b>活跃报告</b>（未逻辑删除、<b>未处置（admin_action IS

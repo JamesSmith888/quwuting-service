@@ -18,6 +18,7 @@ import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportService;
 import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
+import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportLatestService;
 import org.quwuting.quwutingservice.venuestatuswatcher.service.VenueStatusWatcherService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -47,6 +48,9 @@ public class FavoriteService {
      * 「N人报过」+ 「最新上报」行须同口径下发——同 isHot 历史缺陷模式，见
      * {@link #getFavoriteVenues} javadoc） */
     private final CrowdReportService crowdReportService;
+    /** 门店报告列表角标（2026-09-04「有用户上报」：收藏列表与城市列表同为 venue-card
+     * 展示场景，须同口径注入——同 isHot 历史缺陷模式；独立微服务规避构造器循环，见其类注释） */
+    private final StatusReportLatestService statusReportLatestService;
     /** 站内信服务（收藏门店「状态更新」角标数据源，2026-09-01，见 {@link #getFavoriteVenues}） */
     private final MessageService messageService;
     /** 营业状态关注服务（「收藏即关注」2026-09-01：收藏自动建立状态通知，取消收藏同步取消） */
@@ -134,6 +138,10 @@ public class FavoriteService {
         // #latestTextsByVenue；历史缺陷同 isHot：漏注入导致"全部城市正常、收藏不显示"）
         Map<Long, String> crowdBadges = crowdReportService.badgeTextsByVenue(venueIds);
         Map<Long, String> crowdLatestTexts = crowdReportService.latestTextsByVenue(venueIds);
+        // 批量门店报告「最新上报」行文案（2026-09-04：与今晚热度文案共用同一行控件轮播，
+        // 2026-09-04 用户拍板推翻同日「中性角标」方案；同 isHot 历史缺陷模式——收藏列表
+        // 漏注入会出现"城市列表有文案、收藏不显示"，见 StatusReportLatestService#latestTextsByVenue）
+        Map<Long, String> statusLatestTexts = statusReportLatestService.latestTextsByVenue(venueIds);
         // 批量未读状态变更门店 ID（2026-09-01「收藏即关注」）：一次 IN 覆盖整页收藏，
         // 无未读的门店不在集合中（与整页批量模式一致，避免 N+1）。数据源 = 未读
         // VENUE_STATUS_CHANGED 站内信（收藏自动建立关注 → 状态变更即有提醒 → 角标）。
@@ -147,7 +155,8 @@ public class FavoriteService {
                         photosByVenue.getOrDefault(v.getId(), List.of()),
                         crowdBadges.get(v.getId()),
                         crowdLatestTexts.get(v.getId()),
-                        statusChangedVenueIds.contains(v.getId())))
+                        statusChangedVenueIds.contains(v.getId()),
+                        statusLatestTexts.get(v.getId())))
                 .toList();
     }
 

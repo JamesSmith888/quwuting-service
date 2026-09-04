@@ -38,6 +38,7 @@ import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueViewRepository;
 import org.quwuting.quwutingservice.venuepost.repository.VenuePostRepository;
+import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportLatestService;
 import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportService;
 import org.quwuting.quwutingservice.venuestatuswatcher.service.VenueStatusWatcherService;
 import org.quwuting.quwutingservice.venueclaim.entity.VenueClaim;
@@ -115,6 +116,8 @@ public class VenueService {
     private final VenueReactionService venueReactionService;
     /** 门店热度上报（2026-08-29 列表角标批量生成，见 badgeTextsByVenue） */
     private final CrowdReportService crowdReportService;
+    /** 门店报告列表角标批量生成（2026-09-04「有用户上报」，独立微服务规避构造器循环，见其类注释） */
+    private final StatusReportLatestService statusReportLatestService;
     private final VenueHeatService venueHeatService;
     private final ObjectMapper objectMapper;
     private final VenueLookupService venueLookupService;
@@ -886,13 +889,20 @@ public class VenueService {
         // 「{时间} · {标识}舞友上报」，有上报即生成——实时动态与角标互补，
         // 见 CrowdReportService#latestTextsByVenue）
         Map<Long, String> crowdLatestTexts = crowdReportService.latestTextsByVenue(venueIds);
+        // 批量门店报告「最新上报」行文案（2026-09-04：公示期内每店最新一条公示中报告 →
+        // 「{时间} · {类型} · 舞友上报」，与今晚热度文案共用同一行控件轮播展示——2026-09-04
+        // 用户拍板推翻同日「中性角标」方案；活跃口径与详情页公告条同源——列表行有文案 ⇔
+        // 详情页有公告条，见 StatusReportLatestService#latestTextsByVenue）
+        Map<Long, String> statusLatestTexts = statusReportLatestService.latestTextsByVenue(venueIds);
         return result.map(v -> venueResponseMapper.toResponse(
                 v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
                 hotVenueIds.contains(v.getId()),
                 viewCounts.getOrDefault(v.getId(), 0L),
                 photosByVenue.getOrDefault(v.getId(), List.of()),
                 crowdBadges.get(v.getId()),
-                crowdLatestTexts.get(v.getId())));
+                crowdLatestTexts.get(v.getId()),
+                false,
+                statusLatestTexts.get(v.getId())));
     }
 
     /**

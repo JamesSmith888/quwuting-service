@@ -129,6 +129,22 @@ public class VenueResponseMapper {
     public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot, long viewCount,
                                     List<String> photos, String crowdBadgeText, String crowdLatestText,
                                     boolean statusChanged) {
+        return toResponse(v, topReactions, isHot, viewCount, photos, crowdBadgeText, crowdLatestText,
+                statusChanged, null);
+    }
+
+    /**
+     * 九参重载（2026-09-04 门店报告列表信号新增）：statusLatestText = 门店报告「最新上报」
+     * 行文案（「{相对时间} · {类型} · 舞友上报」，公示中口径与详情页公告条同源，见
+     * {@code StatusReportLatestService#latestTextsByVenue}），驱动列表卡片「最新上报」行
+     * 与 crowdLatestText（今晚热度文案）共用同一行控件轮播展示（2026-09-04 用户拍板，
+     * 推翻同日「中性角标」方案）。仅列表场景（城市列表/收藏列表）传入真实值；无展示
+     * 语义场景（详情/编辑/创建回显）传 null——详情页报告走公告条/门店报告卡，列表行
+     * 不重复承载完整决策信息（同一事实只呈现一次）。
+     */
+    public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot, long viewCount,
+                                    List<String> photos, String crowdBadgeText, String crowdLatestText,
+                                    boolean statusChanged, String statusLatestText) {
         List<String> customTags = deserializeStringList(v.getTags(), "tags");
         List<String> effectiveTags = defaultsConfig.merge(customTags);
         List<String> defaultTags = defaultsConfig.tags();
@@ -161,7 +177,8 @@ public class VenueResponseMapper {
                 crowdLatestText,
                 v.getCreatedAt(),
                 v.getUpdatedAt(),
-                statusChanged
+                statusChanged,
+                statusLatestText
         );
     }
 

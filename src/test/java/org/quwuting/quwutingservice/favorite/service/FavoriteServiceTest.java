@@ -18,6 +18,7 @@ import org.quwuting.quwutingservice.venue.service.VenueService;
 import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportService;
 import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
+import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportLatestService;
 import org.quwuting.quwutingservice.venuestatuswatcher.service.VenueStatusWatcherService;
 
 import java.util.Collections;
@@ -49,8 +50,8 @@ import static org.mockito.Mockito.when;
  *   <li>热门判定与城市列表同口径（同一 getHotVenueIds 缓存源）。</li>
  *   <li><b>收藏列表必须下发 statusChanged（2026-09-01「收藏即关注」）</b>——未读
  *       VENUE_STATUS_CHANGED 门店 ID 集合经 MessageService 批量查询注入
- *       VenueResponse.statusChanged（走八参重载），驱动收藏卡片「状态更新」角标；
- *       断言八参调用 + 布尔值正确（防回退七参恒 false，同 isHot 历史缺陷模式）。</li>
+ *       VenueResponse.statusChanged（走九参重载），驱动收藏卡片「状态更新」角标；
+ *       断言九参调用 + 布尔值正确（防回退七参恒 false，同 isHot 历史缺陷模式）。</li>
  * </ol>
  */
 @ExtendWith(MockitoExtension.class)
@@ -74,6 +75,9 @@ class FavoriteServiceTest {
     /** 门店热度上报（2026-08-29 收藏列表角标/最新上报行注入新增依赖） */
     @Mock
     private CrowdReportService crowdReportService;
+    /** 门店报告「最新上报」行文案（2026-09-04 列表行轮播注入新增依赖） */
+    @Mock
+    private StatusReportLatestService statusReportLatestService;
     /** 站内信服务（2026-09-01 收藏门店「状态更新」角标数据源新增依赖） */
     @Mock
     private MessageService messageService;
@@ -88,7 +92,7 @@ class FavoriteServiceTest {
         service = new FavoriteService(favoriteRepository, venueResponseMapper,
                 venueReactionService, venueLookupService, venueHeatService,
                 venueViewRepository, venueService, crowdReportService,
-                messageService, venueStatusWatcherService);
+                statusReportLatestService, messageService, venueStatusWatcherService);
     }
 
     private static Venue venue(Long id) {
@@ -98,7 +102,7 @@ class FavoriteServiceTest {
         return v;
     }
 
-    /** 按映射器入参回显构造响应（isHot/statusChanged 八参重载契约的观测点） */
+    /** 按映射器入参回显构造响应（isHot/statusChanged 九参重载契约的观测点） */
     private static VenueResponse response(Long id, boolean isHot, boolean statusChanged) {
         return new VenueResponse(
                 id, "舞厅" + id, VenueStatus.OPEN, "营业中", null,
@@ -106,7 +110,7 @@ class FavoriteServiceTest {
                 null, null, Collections.emptyList(), Collections.emptyList(),
                 Collections.emptyList(), null, null, Collections.emptyList(),
                 Collections.emptyList(), Collections.emptyList(), 0,
-                0L, isHot, null, null, null, null, statusChanged);
+                0L, isHot, null, null, null, null, statusChanged, null);
     }
 
     /**
@@ -126,7 +130,7 @@ class FavoriteServiceTest {
         when(venueService.loadPublicPhotosByVenueIds(anyList())).thenReturn(Collections.emptyMap());
         // 收藏门店状态角标（2026-09-01）：venue 1 有未读状态提醒、venue 2 无
         when(messageService.findUnreadStatusChangedVenueIds(eq(42L), anyList())).thenReturn(Set.of(1L));
-        when(venueResponseMapper.toResponse(any(Venue.class), anyList(), anyBoolean(), anyLong(), anyList(), any(), any(), anyBoolean()))
+        when(venueResponseMapper.toResponse(any(Venue.class), anyList(), anyBoolean(), anyLong(), anyList(), any(), any(), anyBoolean(), any()))
                 .thenAnswer(inv -> response(
                         ((Venue) inv.getArgument(0)).getId(), inv.getArgument(2), inv.getArgument(7)));
 
@@ -137,9 +141,10 @@ class FavoriteServiceTest {
         assertFalse(result.get(1).isHot(), "非热门集合内的场所不得误标热门");
         assertTrue(result.get(0).statusChanged(), "有未读状态提醒的收藏门店必须下发状态角标");
         assertFalse(result.get(1).statusChanged(), "无未读状态提醒的收藏门店不得误标状态角标");
-        // 防回归：必须走八参重载（七参重载 statusChanged 恒 false 是本缺陷模式；八参携带状态角标）
-        verify(venueResponseMapper).toResponse(hot, Collections.emptyList(), true, 0L, Collections.emptyList(), null, null, true);
-        verify(venueResponseMapper).toResponse(cold, Collections.emptyList(), false, 0L, Collections.emptyList(), null, null, false);
+        // 防回归：必须走九参重载（七参重载 statusChanged 恒 false 是本缺陷模式；八参携带状态角标，
+        // 九参追加门店报告「最新上报」行文案 statusLatestText——末参 null = 无公示中报告不下发）
+        verify(venueResponseMapper).toResponse(hot, Collections.emptyList(), true, 0L, Collections.emptyList(), null, null, true, null);
+        verify(venueResponseMapper).toResponse(cold, Collections.emptyList(), false, 0L, Collections.emptyList(), null, null, false, null);
     }
 
     /** 收藏列表为空时短路返回，不触发热门集合查询（无意义往返） */

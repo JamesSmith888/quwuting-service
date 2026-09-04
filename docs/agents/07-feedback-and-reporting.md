@@ -200,6 +200,15 @@
 - **聚合**：`StatusReportRepository.findAnnouncementsByVenue(venueId, now, includeExpired)` 按 `(venue_id, type)` 聚簇（COUNT / 已采纳数 / MAX(createdAt)），Service 层组摘要 `AnnouncementSummary`（type/typeDisplay/severity/count/adopted/latestAt），**排序 = 时间倒序（latestAt 降序，最新信号在前）为主、严重级为同时间次级排序**（**2026-08-20 修正**：状态类信号相互覆盖——门店先被报暂停营业（已采纳）、随后被报恢复营业（已采纳）时，最新采纳的恢复营业代表门店当前事实，即使严重级（recovery）低于暂停营业（medium）也必须在前，否则详情页公告条/公告页列表首条错误显示暂停营业；严重级改由前端色点表达，见 `StatusReportService.listAnnouncements`）；`includeExpired=true` 时聚簇含过期记录（类型枚举有限，摘要条数有界，无无限增长风险），时效由 `latestAt` 相对时间传达
 - **契约**：**不返回 note**（审核安全约定"note 仅管理端可见"，公开响应禁止携带——公告区不展示用户自由文本，规避微信审核风险）；`adopted` 驱动前端「已核实」标记；空结果 = 前端入口条/列表空态（详情页整行隐藏）
 
+### 列表「最新上报」行——门店报告信号（2026-09-04，同日两版演进）
+
+列表卡片（venue-card）底部「最新上报」行（今晚热度 2026-08-29 首创的实时动态行）**通用化为双信号共用控件**：门店报告文案 `statusLatestText` 与今晚热度文案 `crowdLatestText` 共用一行，双信号并存时前端每 4 秒上下滚动轮播（无缝循环）。**同日演进记录**：初版为标签行中性角标「有用户上报」，用户拍板改为共用上报行——角标丢失「谁/何时/什么事」的动态信息，行文案信息量完整（`reportBadgeText` 方案当日废止）。
+
+- **文案 = `{相对时间} · {类型} · 舞友上报`**（如「2 分钟前 · 暂停营业 · 舞友上报」，`StatusReportLatestService#latestTextsByVenue` 服务端权威、前端零拼接）：类型词是本信号的信息本体（不带类型词则与热度行无法区分）；分隔符与热度行「 · 」同族；上报者统一「舞友」不点名不分级（信任分档是热度上报域画像，门店报告域不重复建设）。**「已核实」（ADOPTED）标记与严重级色点不上列表行**——留详情页公告条完整呈现（注意力入口 vs 决策信息的分层不变）
+- **口径与详情页公告条同源（纪律红线 + 初版口径错误根因）**：公示中 = `deleted=false OR adminAction='ADOPTED'` 且 `expires_at > now`——**采纳也置 deleted=true（`disposeById`），谓词必须带 ADOPTED 分支**，只写 `deleted=false` 会漏掉「已核实」报告（初版角标查询的口径错误，本次修正）；REMOVED 不展示。**列表行有文案 ⇔ 详情页有公告条**，禁止两处口径漂移。批量查询 `StatusReportRepository.findLatestActiveByVenueIds`（JPQL `IN :venueIds` + 同口径 MAX(createdAt) 子查询取每店最新一条，整页一次防 N+1，同 `VenueCrowdReportRepository#findLatestByVenueIdsSince` 模式；同店同刻并列由 Service 取首条兜底）
+- **独立微服务 `StatusReportLatestService`（依赖方向约束）**：`StatusReportService` 依赖 `VenueService`（采纳联动），`VenueService` 列表流程需要本能力——反向注入即构造器循环；打破循环的 `@Lazy` 需显式构造器、与全库 Lombok `@RequiredArgsConstructor` 惯例冲突，故拆只依赖 Repository 的叶子服务（对齐 `CrowdReportService#latestTextsByVenue` 契约形态；相对时间含「天」档——公示期 2 天的信号最长约 48h，热度上报 6h 窗口用不到）
+- **注入边界（同 isHot 历史缺陷模式）**：仅列表场景传真实值——`VenueService.listVenues`（城市列表/搜索）与 `FavoriteService.getFavoriteVenues`（收藏列表）必须**同口径注入**；详情/编辑/创建回显恒 null（详情页自有公告条，不重复展示）。不缓存（单次 IN 查询开销小于失效链路复杂度，对齐 2026-09-03 赞数「不进 Caffeine」先例），报告写路径无需任何失效动作。前端轮播交互见 docs/agents/27-venue-crowd-report.md
+
 ### 我的上报记录（GET /status-reports/mine，2026-08-05 新增，2026-08-06 收敛）
 
 「我的上报记录」的用户侧数据源。**用户维度资源**（跨场所），路由放顶层 `/status-reports/mine` 而非场所子资源路径（与 `/favorites` 用户级资源模型一致，区别于 `/venues/{venueId}/status-reports` 的场所子资源）。
