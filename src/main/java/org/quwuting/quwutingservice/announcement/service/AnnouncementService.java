@@ -43,7 +43,11 @@ import java.util.stream.Collectors;
  * 关键契约：
  * <ul>
  *   <li>已读幂等：existsBy 前置检查 + (user_id, announcement_id) 唯一索引兜底 23505；</li>
- *   <li>PUBLISHED 仅允许追加正文（新内容必须以旧内容为前缀），禁静默篡改已发公告；</li>
+ *   <li>可见公告可在线编辑（2026-09-05 修订）：PUBLISHED 除 publishAt 外全字段可改并
+ *       即时生效（旧「仅允许追加正文」契约已废弃——运营纠错刚需，代价是不再防静默
+ *       篡改，由 operator_id 审计兜底）；publishAt 已生效不可改，OFFLINE 禁改；</li>
+ *   <li>首页公告栏口径（2026-09-05）：仅 pinned=true 的可见公告进首页公告栏，
+ *       非置顶公告只在公告中心出现（listVisible 的 pinned 过滤参数）；</li>
  *   <li>定时发布/下线由 @Scheduled 强转（状态权威在后端，publish 只写计划时间）；</li>
  *   <li>生命周期闭环（2026-09-02）：可见性 = PUBLISHED 且 publishAt ≤ now 且 offlineAt
  *       未到（offlineAt 到点强转 OFFLINE）；草稿保存校验调度窗口；重发布清空过期遗留
@@ -71,14 +75,19 @@ public class AnnouncementService {
 
     // ── 用户端 ────────────────────────────────────────────────
 
-    /** 可见公告列表（PUBLISHED + 已生效，pinned 优先倒序；read 批量派生） */
+    /**
+     * 可见公告列表（PUBLISHED + 已生效，pinned 优先倒序；read 批量派生）。
+     *
+     * @param pinned null = 全量（公告中心）；true = 仅置顶（首页公告栏数据源，
+     *               2026-09-05 契约：非置顶公告不进首页，只在公告中心出现）
+     */
     @Transactional(readOnly = true)
-    public Page<AnnouncementSummaryResponse> listVisible(Long userId, int page, int size) {
+    public Page<AnnouncementSummaryResponse> listVisible(Long userId, int page, int size, Boolean pinned) {
         // 排序由 findVisiblePage JPQL 内 ORDER BY 承担（pinned DESC, publishAt DESC, id DESC），
         // Pageable 不带 Sort——避免与 JPQL 排序重复拼接
         Pageable pageable = PageRequest.of(page, Math.min(size, 50));
         Page<Announcement> result = announcementRepository.findVisiblePage(
-                AnnouncementStatus.PUBLISHED, LocalDateTime.now(), pageable);
+                AnnouncementStatus.PUBLISHED, LocalDateTime.now(), pinned, pageable);
         Set<Long> readIds = result.isEmpty()
                 ? Set.of()
                 : announcementRepository.findReadAnnouncementIds(
@@ -145,7 +154,7 @@ public class AnnouncementService {
     @Transactional
     public AdminAnnouncementResponse create(CreateAnnouncementRequest request, Long adminId) {
         validateContent(request.content());
-        validateDraftSchedule(request.publishAt(), request.offlineAt());
+        validateSchedule(request.publishAt(), request.offlineAt());
         Announcement a = new Announcement();
         applyFields(a, request.title(), request.content(), request.category(),
                 request.pinned() != null && request.pinned(), request.publishAt(), request.offlineAt());
@@ -157,9 +166,17 @@ public class AnnouncementService {
     }
 
     /**
-     * 更新（状态机约束）：
-     * DRAFT 全字段可改；PUBLISHED 仅允许追加正文（新内容以旧内容为前缀，其余字段锁定）；
-     * OFFLINE 禁改（需重新 publish）。
+     * 更新（状态机约束，**2026-09-05 修订：发布中可编辑**）：
+     * <ul>
+     *   <li>DRAFT：全字段可改（含定时发布 publishAt）；</li>
+     *   <li>PUBLISHED：除「定时发布」外全字段可改并即时生效——标题/正文/分类/置顶/
+     *       自动下线均可在线修订（运营纠错刚需；旧契约「仅允许追加正文」已废弃，
+     *       它让错别字/过期标题只能靠下线重发，代价远大于静默篡改风险——公告本就是
+     *       平台官方内容，admin 修订留 operator_id 审计）；
+     *       <b>publishAt 锁定</b>：已生效的发布时间改成未来时刻会让公告对用户瞬间
+     *       消失，且定时发布本质是发布动作而非公告属性（要改请先下线再重新发布）；</li>
+     *   <li>OFFLINE：禁改（需重新 publish 走新发布周期）。</li>
+     * </ul>
      */
     @Transactional
     public AdminAnnouncementResponse update(Long id, UpdateAnnouncementRequest request, Long adminId) {
@@ -167,20 +184,17 @@ public class AnnouncementService {
         if (a.getStatus() == AnnouncementStatus.OFFLINE) {
             throw new BusinessException(1001, "已下线公告不可编辑，如需变更请重新发布");
         }
+        validateContent(request.content());
         if (a.getStatus() == AnnouncementStatus.PUBLISHED) {
-            if (!a.getTitle().equals(request.title())
-                    || a.getCategory() != request.category()
-                    || a.isPinned() != (request.pinned() != null && request.pinned())) {
-                throw new BusinessException(1001, "已发布公告仅允许追加正文，标题/分类/置顶不可变更");
-            }
-            if (!request.content().startsWith(a.getContent())) {
-                throw new BusinessException(1001, "已发布公告仅允许在原文末尾追加内容，禁止修改已有正文");
-            }
-            validateContent(request.content());
+            // 发布中：publishAt 既不校验也不落库（已生效时间，逻辑上不可改）
+            validateSchedule(null, request.offlineAt());
+            a.setTitle(request.title());
             a.setContent(request.content());
+            a.setCategory(request.category());
+            a.setPinned(request.pinned() != null && request.pinned());
+            a.setOfflineAt(request.offlineAt());
         } else {
-            validateContent(request.content());
-            validateDraftSchedule(request.publishAt(), request.offlineAt());
+            validateSchedule(request.publishAt(), request.offlineAt());
             applyFields(a, request.title(), request.content(), request.category(),
                     request.pinned() != null && request.pinned(), request.publishAt(), request.offlineAt());
         }
@@ -347,11 +361,14 @@ public class AnnouncementService {
     }
 
     /**
-     * 草稿调度窗口校验（创建/更新共用）：offlineAt 设置时必须晚于当前时间
-     * （过去时点 = 无意义的即时下线），且若 publishAt 也设置则必须晚于发布时间
-     * （先发布后下线的时序约束，防止"发布即下线"窗口）。
+     * 调度窗口校验（创建/更新共用）：offlineAt 设置时必须晚于当前时间（过去时点 =
+     * 无意义的即时下线，且会被 30s 调度立即强转）；若 publishAt 参与校验（草稿态）
+     * 则 offlineAt 还必须晚于发布时间（先发布后下线的时序约束，防"发布即下线"窗口）。
+     *
+     * @param publishAt 参与校验的计划发布时间；<b>null = 不校验该项</b>（发布中编辑时
+     *                  传入——publishAt 已生效、不可改，不参与窗口校验）
      */
-    private void validateDraftSchedule(LocalDateTime publishAt, LocalDateTime offlineAt) {
+    private void validateSchedule(LocalDateTime publishAt, LocalDateTime offlineAt) {
         if (offlineAt == null) {
             return;
         }

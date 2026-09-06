@@ -28,16 +28,22 @@ public class AnnouncementController {
 
     private final AnnouncementService announcementService;
 
-    /** 公告列表（分页倒序，pinned 优先；read 布尔已按当前用户派生） */
+    /**
+     * 公告列表（分页倒序，pinned 优先；read 布尔已按当前用户派生）。
+     *
+     * @param pinned 可选置顶过滤：true = 仅置顶（首页公告栏数据源，非置顶不进首页）；
+     *               不传 = 全量（公告中心）
+     */
     @GetMapping
     public ApiResponse<Page<AnnouncementSummaryResponse>> list(
             @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size) {
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false) Boolean pinned) {
         Long userId = UserContext.requireAuth();
-        return ApiResponse.ok(announcementService.listVisible(userId, page, size));
+        return ApiResponse.ok(announcementService.listVisible(userId, page, size, pinned));
     }
 
-    /** 未读公告数（首页公告条 / 我的页入口红点数据源） */
+    /** 未读公告数（我的页「公告中心」入口红点数据源；口径 = 全部可见公告，含非置顶） */
     @GetMapping("/unread-count")
     public ApiResponse<Long> unreadCount() {
         Long userId = UserContext.requireAuth();

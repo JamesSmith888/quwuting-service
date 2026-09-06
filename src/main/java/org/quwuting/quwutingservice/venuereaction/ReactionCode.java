@@ -82,20 +82,27 @@ import java.util.Set;
  * 的店热度反而更高"的语义硬伤。极性是热度公式的唯一事实源；前端 Picker 展示全量 Reaction 不受影响。
  * <p>
  * <b>2026-08-24 常见表情全放开（根因驱动，详见前端 AGENTS.md「Reaction 表情」章节）</b>：
- * 本枚举 = <b>legacy 业务语义 code（12 项，保留全部历史数据与文案）+ 常见表情目录适配</b>。
+ * 本枚举 = <b>legacy 业务语义 code（16 项，保留全部历史数据与文案）+ 常见表情目录适配</b>。
  * 常见表情（2026-09-03 去噪收敛后 134 项，含三极性）单一事实源 = {@link org.quwuting.quwutingservice.emoji.EmojiCatalog}，
  * 本枚举的静态适配器（{@link #allCodes()} / {@link #isValid} / {@link #emojiOf} /
  * {@link #labelOf} / {@link #polarityOf}）在 legacy 之上叠加目录——<b>禁止</b>把目录项
  * 逐个复制成本枚举的 enum value（否则双端同步成本结构性膨胀，重蹈 08-12 收缩覆辙）。
  * 域内去重规则：目录项若 emoji（去除 VS16 后）与 legacy 撞车则剔除（同一域同一 emoji
- * 只有一个 code，防 Picker 双胞胎）——legacy 12 项占用的 emoji（🔥👍⭐🌸💋💃💁✌🪑😕😡😬）
- * 在门店域不再重复提供普通版。
+ * 只有一个 code，防 Picker 双胞胎）——legacy 16 项占用的 emoji
+ * （🛵🐉🔥👍⭐🌸💋💃💁✌🪑😕😡😬🚬🚭）在门店域不再重复提供普通版。
  * <p>
  * <b>2026-09-03 新增两个圈内黑话 legacy（用户驱动，排序靠前）</b>：legacy 12 → 14。
  * ① {@link #JICHE}（🛵 机车——台湾黑话负面形容舞伴难搞/态度差，NEGATIVE）；
  * ② {@link #LONG}（🐉 龙——聋哑舞伴圈内叫法，NEUTRAL 事实信号）。两者均放声明序最前
  * （Picker / 表情说明页最靠前）；emoji 占用清单追加 🛵🐉；DB 零迁移（纯新增 code，
  * 无历史数据重映射）。
+ * <p>
+ * <b>2026-09-05 新增门店吸烟属性信号对（用户驱动）</b>：legacy 14 → 16。
+ * {@link #SMOKING}（🚬 可以抽烟）/ {@link #NO_SMOKING}（🚭 场内禁烟）——门店吸烟
+ * 政策的互斥事实对，用户按实际情况二选一表达。两者均 NEUTRAL 事实信号（属性非情绪）：
+ * 不进热度公式（positiveCodeNames）、不进「近期风险」区（negativeCodeNames），仅作
+ * 展示。声明序收在 legacy 末尾（核心人气/舞伴信号之后、目录表情之前——低频属性补充
+ * 非头部高频信号）；emoji 占用清单追加 🚬🚭；DB 零迁移（纯新增 code）。
  */
 public enum ReactionCode {
     /**
@@ -165,7 +172,20 @@ public enum ReactionCode {
      * 事实陈述式描述（前端），不指名个体、不评价人品；走 NEGATIVE 单独计数、
      * 前端「近期风险」聚合展示（见前端 AGENTS.md「负面信号聚合」）。
      */
-    MISMATCH("😬", "现场不符", Polarity.NEGATIVE);
+    MISMATCH("😬", "现场不符", Polarity.NEGATIVE),
+    /**
+     * 2026-09-05 新增（用户驱动）：门店吸烟属性信号对之一——🚬 场内允许吸烟。
+     * NEUTRAL 事实信号（属性非情绪）：不进热度公式（positiveCodeNames）、
+     * 不进「近期风险」区（negativeCodeNames），仅作展示。与 {@link #NO_SMOKING}
+     * 构成互斥事实对（用户按实际情况二选一表达）；声明序收在 legacy 末尾
+     * （低频属性补充非头部高频信号）。DB 零迁移（纯新增 code）。
+     */
+    SMOKING("🚬", "可以抽烟", Polarity.NEUTRAL),
+    /**
+     * 2026-09-05 新增（用户驱动）：门店吸烟属性信号对之一——🚭 场内禁止吸烟。
+     * 极性与声明序理由同 {@link #SMOKING}。
+     */
+    NO_SMOKING("🚭", "场内禁烟", Polarity.NEUTRAL);
 
     /** Reaction 极性：热度公式只计入 POSITIVE；NEGATIVE 单独计数展示、不参与公式 */
     public enum Polarity {
@@ -222,7 +242,7 @@ public enum ReactionCode {
     }
 
     /**
-     * 门店域全部合法 code（声明序：legacy 12 在前 + 目录去重后在后）。
+     * 门店域全部合法 code（声明序：legacy 16 在前 + 目录去重后在后）。
      * <b>唯一事实源</b>：getStats 遍历 / isValid / 极性列表全部经本方法取集合，
      * 禁止调用方自行遍历 values() 或遍历 EmojiCatalog 再各自 filter——
      * 否则新增/调整目录或去重规则时遗漏某一处即产生口径漂移（2026-08-24 确立，

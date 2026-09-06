@@ -3,6 +3,7 @@ package org.quwuting.quwutingservice.user.controller;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.user.dto.response.AdminDailyStatItem;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserDetailResponse;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserItem;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserStatsResponse;
@@ -10,6 +11,7 @@ import org.quwuting.quwutingservice.user.dto.response.AdminUserStatsRow;
 import org.quwuting.quwutingservice.user.enums.AdminUserStatsType;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.user.enums.UserSortMode;
+import org.quwuting.quwutingservice.user.service.AdminDailyStatsService;
 import org.quwuting.quwutingservice.user.service.AdminUserService;
 import org.quwuting.quwutingservice.user.service.AdminUserStatsDetailService;
 import org.springframework.data.domain.Page;
@@ -43,6 +45,7 @@ public class AdminUserController {
 
     private final AdminUserService adminUserService;
     private final AdminUserStatsDetailService statsDetailService;
+    private final AdminDailyStatsService dailyStatsService;
 
     /**
      * 用户分页列表（GET /admin/users?page=&size=&keyword=&role=&city=&sort=）。
@@ -70,6 +73,20 @@ public class AdminUserController {
     public ApiResponse<AdminUserStatsResponse> stats() {
         UserContext.requireAdmin();
         return ApiResponse.ok(adminUserService.stats());
+    }
+
+    /**
+     * 运营大盘按日统计（GET /admin/users/daily-stats?days=30，仅 ADMIN；2026-09-06，
+     * docs/agents/35-dashboard-stats.md）：近 N 天（含今日，缺省 30，钳制 7~90）逐日
+     * 返回 注册/打开（打卡口径）/真实互动/打卡型噪音 四序列——admin-web Dashboard
+     * 「30 天趋势 + 噪音占比」数据源，口径权威见 {@link AdminDailyStatsService}。
+     * 注意：<b>MySQL 8 方言</b>（生产 RDS MySQL），PG 环境不可执行。
+     */
+    @GetMapping("/daily-stats")
+    public ApiResponse<List<AdminDailyStatItem>> dailyStats(
+            @RequestParam(defaultValue = "30") int days) {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(dailyStatsService.dailyStats(days));
     }
 
     /**

@@ -81,8 +81,8 @@ SQL 用 NOT EXISTS 子查询派生（对齐站内信 unread-count 模式）。
 
 | 接口 | 说明 |
 |------|------|
-| GET /announcements | 列表（分页倒序；pinned 优先；read 布尔派生；含 category/source 标签） |
-| GET /announcements/unread-count | 未读数（首页公告条红点 / 我的页入口徽标数据源） |
+| GET /announcements | 列表（分页倒序；pinned 优先；read 布尔派生；含 category/source 标签）。**可选 `pinned` 过滤参数**（2026-09-05）：`true` = 仅置顶（首页公告栏数据源）；不传 = 全量（公告中心） |
+| GET /announcements/unread-count | 未读数（我的页入口徽标数据源；**口径 = 全部可见公告，含非置顶**——首页公告栏只出置顶，但公告中心红点要覆盖全部未读） |
 | GET /announcements/{id} | 详情（返回 markdown 原文 + 元信息；已下线/已删 → 404） |
 | POST /announcements/{id}/read | 标记已读（幂等；详情页打开即调） |
 
@@ -93,7 +93,7 @@ SQL 用 NOT EXISTS 子查询派生（对齐站内信 unread-count 模式）。
 | GET /admin/announcements | 列表（状态/分类/来源筛选 + 分页） |
 | GET /admin/announcements/{id} | 详情 / 编辑回显 |
 | POST /admin/announcements/create | 创建（默认存草稿 DRAFT） |
-| POST /admin/announcements/{id}/update | 更新（**草稿自由改；PUBLISHED 仅允许追加正文**并刷新 updated_at，禁静默篡改已发内容） |
+| POST /admin/announcements/{id}/update | 更新（**2026-09-05 修订：发布中可编辑**——PUBLISHED 除 publishAt 外全字段可改并即时生效；DRAFT 全字段可改；OFFLINE 禁改） |
 | POST /admin/announcements/{id}/publish | 发布（body 可带 publishAt 定时；publish_at 未到 → 状态仍 DRAFT 但置计划时间） |
 | POST /admin/announcements/{id}/offline | 下线（置 OFFLINE + offlined_at；小程序端详情 404，列表不展示） |
 | POST /admin/announcements/{id}/delete | 软删除（deleted=1） |
@@ -103,6 +103,24 @@ SQL 用 NOT EXISTS 子查询派生（对齐站内信 unread-count 模式）。
 
 - `DRAFT → PUBLISHED`（publish）；`PUBLISHED → OFFLINE`（offline）；任意态可软删除；
   **下线不可直接回已发布**（需重新 publish，作为新一次发布记录 updated）。
+- **编辑权限（2026-09-05 修订，用户拍板「发布中依旧可以编辑」）**：
+
+  | 状态 | 可编辑字段 | 锁定字段 |
+  |------|-----------|---------|
+  | DRAFT | 全部（标题/正文/分类/置顶/定时发布/自动下线） | — |
+  | PUBLISHED | 标题/正文/分类/置顶/自动下线（保存即对用户生效） | **定时发布 publishAt** |
+  | OFFLINE | —（需重新 publish 走新发布周期） | 全部 |
+
+  **为什么只锁 publishAt**：发布时间已生效，改到未来时刻会让公告对用户瞬间消失
+  （可见性谓词 `publishAt ≤ now`）；且「定时发布」本质是**发布动作**而非公告属性，
+  要改定时 = 重新安排一次发布（先下线再 publish）。其余字段都是公告自身的展示内容，
+  运营纠错（错别字 / 过期标题 / 撤掉置顶）是刚需——旧契约「仅允许追加正文」让改一个
+  错别字的代价变成「下线 + 重发」，代价远大于收益。静默篡改风险由 `operator_id`
+  审计兜底（公告是平台官方内容，无用户 UGC 争议面）。
+- **置顶口径（2026-09-05 修订，用户拍板）**：**只有 `pinned=true` 的可见公告进小程序
+  首页公告栏**（`GET /announcements?pinned=true`），非置顶公告只在公告中心出现。
+  首页位是强触达位，由运营用置顶显式决策——「发一条就霸屏」不合理。
+  未读数口径不变（全部可见公告），否则公告中心红点会漏掉非置顶未读。
 - 定时发布：`publish_at` 生效时刻的扫表任务（Spring @Scheduled 每 30s 扫
   `status=DRAFT AND publish_at<=now` → 置 PUBLISHED + published_at）。下线同理按
   offline_at 自动执行。**本期若不做调度器，则定时仅前端约定（到点前端拉列表可见），
@@ -166,9 +184,20 @@ placeholder 处）+ placeholder 自身 static 定位下块级靠左再左移半�
   阅读统计弹层、新建按钮。
 - **编辑页**（AnnouncementEditView，`/announcements/edit` 与 `/announcements/edit/:id` 双模式）：
   标题 / 分类 radio / 置顶 switch / **bytemd 编辑器（split 双栏编辑+预览，gfm 插件）** /
-  定时发布时间（datetime-local，留空 = 立即发布）；保存草稿 / 立即发布 / 定时发布三态；
-  PUBLISHED 态锁定标题/分类/置顶/定时并提示「仅允许在原文末尾追加」（前端 startsWith
-  预检 + 后端校验兜底）。
+  定时发布时间（datetime-local，留空 = 立即发布）/ 自动下线时间（同款控件）；
+  保存草稿 / 立即发布 / 定时发布三态。**2026-09-05 修订（发布中可编辑）**：
+
+  | 状态 | 页面形态 |
+  |------|---------|
+  | DRAFT | 全字段可编辑；底部「保存草稿」+「立即发布 / 定时发布」 |
+  | PUBLISHED | 标题/分类/置顶/自动下线/正文可编辑；**定时发布禁用**并提示「已发布，定时不可改（如需调整请先下线再重新发布）」；底部单一主按钮「保存修改」，提示保存后用户端立即生效 |
+  | OFFLINE | 全字段禁用（后端禁改）；底部「重新发布」按钮（唯一复活通道，无需退回列表页） |
+
+  - 置顶字段常驻说明：「置顶 = 展示在小程序首页公告栏；不置顶仅在公告中心展示」——
+    让「置顶」这个动作的结果对运营可见（首页位与公告中心位的分工）。
+  - **已发布公告的过期 offlineAt 回显时清空**：该值已失效（30s 调度即将强转下线），
+    带着它保存必然撞「必须晚于当前时间」校验，清空后由运营重新决定。
+  - 旧「已发布仅允许追加正文」契约（前端 startsWith 预检 + 后端校验）已整体移除。
 - **Markdown 编辑器选型已定：bytemd 1.22**（`bytemd` + `@bytemd/vue-next` + `@bytemd/plugin-gfm`；
   编辑页为懒加载 chunk ~650KB，仅进入编辑页加载，可接受）。备选 vditor 未启用。
 - services：`services/announcement.ts`（8 接口 + 类型 + 文案映射，对齐 venueSync.ts 风格）。
@@ -253,6 +282,18 @@ placeholder 处）+ placeholder 自身 static 定位下块级靠左再左移半�
   管理端 `npm run build`（vue-tsc + vite）✓；小程序 tsc + check:tokens ✓。
 - **契约微调**：status 由 tinyint(0/1/2) 改为 varchar STRING 枚举（对齐 ReportStatus 先例，
   禁 CHECK 一致）。
+
+### 2026-09-05 修订（用户拍板，两项契约变更）
+
+1. **发布中可编辑**：`update` 放开 PUBLISHED 的 title/content/category/pinned/offlineAt，
+   仅锁 publishAt；前端编辑页移除「仅允许追加正文」的 startsWith 预检与后端前缀校验，
+   OFFLINE 态改为全字段禁用 + 页面内「重新发布」按钮。后端 `validateDraftSchedule`
+   更名 `validateSchedule`（publishAt 传 null = 不参与窗口校验）。
+   **未加二次确认弹窗**——用户诉求就是「编辑不该被卡」，保存即生效，由 toast
+   「已保存，用户端立即生效」反馈结果。
+2. **首页公告栏只出置顶**：`findVisiblePage` / `listVisible` / `GET /announcements`
+   全链路新增可选 `pinned` 过滤；小程序首页 `listAnnouncements(0, 1, true)`。
+   未读数口径不变（全部可见公告）。**无需数据迁移**（pinned 列 V7 已有）。
 
 ## 风险与降级（P0：towxml × Skyline）
 

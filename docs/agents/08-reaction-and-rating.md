@@ -97,7 +97,7 @@
 
 Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对刷评价。字典是后台维护的 Java 枚举（`ReactionCode`），emoji + label 由后端唯一定义并通过接口下发，前端 Picker 的静态字典（`constants/reactions.ts`）是镜像副本需两端同步。
 
-**2026-08-24 常见表情全放开（双层字典架构）**：`ReactionCode` = **legacy 12 项业务语义 code（历史保留）+ 常见表情目录适配**——常见表情（~150 项三极性）单一事实源 = `EmojiCatalog.java`（独立包 `emoji`），本枚举的静态适配器 `allCodes/isValid/emojiOf/labelOf/polarityOf` 在 legacy 之上叠加目录（**禁止把目录项复制成枚举 value**）；域内去重：目录项 emoji 去除 VS16 后与 legacy 撞车即剔除。热度公式极性列表（`positiveCodeNames/negativeCodeNames`）经适配器自动含目录项，NEUTRAL 仅展示不入公式。详见文件末尾「2026-08-24」节。
+**2026-08-24 常见表情全放开（双层字典架构）**：`ReactionCode` = **legacy 16 项业务语义 code（初版 12 项历史保留；2026-09-03 +JICHE/LONG、2026-09-05 +SMOKING/NO_SMOKING）+ 常见表情目录适配**——常见表情（2026-09-03 去噪收敛后 134 项三极性）单一事实源 = `EmojiCatalog.java`（独立包 `emoji`），本枚举的静态适配器 `allCodes/isValid/emojiOf/labelOf/polarityOf` 在 legacy 之上叠加目录（**禁止把目录项复制成枚举 value**）；域内去重：目录项 emoji 去除 VS16 后与 legacy 撞车即剔除。热度公式极性列表（`positiveCodeNames/negativeCodeNames`）经适配器自动含目录项，NEUTRAL 仅展示不入公式。详见文件末尾「2026-08-24」节。
 
 | 代码 | Emoji | 说明 |
 |------|-------|------|
@@ -226,8 +226,8 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 **根因**：Reaction 本质是 Telegram 式情感表达媒介，价值随词汇广度与熟悉度增长；历史上按"决策信号价值/使用率"反复收缩字典（18→14→10→12）是语义定位错误，且"每表情一张 PNG + 双端手动同步"使扩展成本 > 收缩成本，结构性偏向收缩。详见[前端文档](../../quwuting/docs/agents/08-reaction-system.md) · 「2026-08-24 常见表情全放开」。
 
 **架构**：
-- **`EmojiCatalog.java`**（新，包 `org.quwuting.quwutingservice.emoji`）= 常见表情共享目录单一事实源：~152 项，每项 `code(EMOJI_<HEX>) / emoji / label(CLDR 中文短名) / description(黄脸/物象描述) / polarity(三极性 59 正/68 中/25 负)`。**不承担舞厅业务语义**（业务信号由 legacy code 承担，禁止给新表情塞业务文案）。源文件 UTF-8 明文，严禁手写反斜杠加 u 的 unicode 转义（Java 注释中的此类序列也会被预处理器解析导致编译失败）。
-- **`ReactionCode.java`** = legacy 12 业务 code（历史保留，值/文案零变化）+ 目录适配器：
+- **`EmojiCatalog.java`**（新，包 `org.quwuting.quwutingservice.emoji`）= 常见表情共享目录单一事实源：2026-09-03 去噪收敛后 134 项，每项 `code(EMOJI_<HEX>) / emoji / label(CLDR 中文短名) / description(黄脸/物象描述) / polarity(三极性 58 正/51 中/25 负)`。**不承担舞厅业务语义**（业务信号由 legacy code 承担，禁止给新表情塞业务文案）。源文件 UTF-8 明文，严禁手写反斜杠加 u 的 unicode 转义（Java 注释中的此类序列也会被预处理器解析导致编译失败）。
+- **`ReactionCode.java`** = legacy 16 业务 code（初版 12 项值/文案零变化；2026-09-03 +JICHE/LONG 圈内黑话、2026-09-05 +SMOKING/NO_SMOKING 门店吸烟属性对，均 NEUTRAL/NEGATIVE 详见[前端文档](../../quwuting/docs/agents/08-reaction-system.md)「2026-09-05」节）+ 目录适配器：
   `allCodes()`（唯一事实源，getStats 遍历/isValid/极性列表均经此取集合）、`isValid/emojiOf/labelOf/polarityOf`、`positiveCodeNames()/negativeCodeNames()`（自动含目录项；NEUTRAL 不进两者——热度公式只计 POSITIVE、NEGATIVE 单独计数，语义不变）。
   **域内去重**：目录项 emoji 去除 VS16（U+FE0F）后与 legacy 撞车即剔除（`catalogCodes()` 缓存，volatile 惰性）。
 - **`DancerTagCode.java`**（舞伴认可）= legacy 7 业务 code + 目录适配器（`allCodes/isValid/emojiOf/labelOf`）；

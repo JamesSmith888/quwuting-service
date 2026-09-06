@@ -10,11 +10,12 @@ import java.time.LocalDateTime;
 /**
  * 更新公告请求（POST /admin/announcements/{id}/update，需 ADMIN）。
  * <p>
- * 字段与创建一致；状态机约束在 Service：
+ * 字段与创建一致；状态机约束在 Service（2026-09-05 修订——发布中可编辑）：
  * <ul>
- *   <li>DRAFT：全字段可改；</li>
- *   <li>PUBLISHED：<b>仅允许追加正文</b>（新内容 = 原内容 + 追加），title/category/
- *       pinned/publishAt/offlineAt 锁定——禁静默篡改已发公告（docs/agents/34 契约）；</li>
+ *   <li>DRAFT：全字段可改（含 publishAt 定时发布）；</li>
+ *   <li>PUBLISHED：title/content/category/pinned/offlineAt 可改并即时生效；
+ *       <b>publishAt 锁定</b>（已生效的发布时间改到未来会让公告对用户瞬间消失，
+ *       要改定时请先下线再重新发布）；</li>
  *   <li>OFFLINE：禁改（需重新 publish 走新发布周期）。</li>
  * </ul>
  */

@@ -25,15 +25,23 @@ public interface AnnouncementRepository extends JpaRepository<Announcement, Long
     /**
      * 用户端可见公告列表（分页倒序，pinned 优先）：PUBLISHED + 已生效
      * （publishAt 为空 = 立即生效）且未软删。
+     * <p>
+     * pinned 过滤（2026-09-05 首页公告栏收口）：
+     * <ul>
+     *   <li>null = 不过滤（公告中心全量，置顶仅参与排序加权）；</li>
+     *   <li>true = 仅置顶（首页公告栏数据源——置顶 = 首页强触达，非置顶只在公告中心出现）。</li>
+     * </ul>
      */
     @Query("""
             SELECT a FROM Announcement a
             WHERE a.deleted = false AND a.status = :status
               AND (a.publishAt IS NULL OR a.publishAt <= :now)
+              AND (:pinned IS NULL OR a.pinned = :pinned)
             ORDER BY a.pinned DESC, a.publishAt DESC, a.id DESC
             """)
     Page<Announcement> findVisiblePage(@Param("status") AnnouncementStatus status,
                                        @Param("now") LocalDateTime now,
+                                       @Param("pinned") Boolean pinned,
                                        Pageable pageable);
 
     /**
