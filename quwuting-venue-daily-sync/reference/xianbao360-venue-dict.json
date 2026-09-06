@@ -1,624 +1,736 @@
 {
-  "source": "xianbao360",
-  "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-09-04",
-  "entries": [
-    {
-      "city": "西安市",
-      "news_name": "缤达",
-      "platform_name": "宾达舞厅",
-      "kind": "typo",
-      "note": "错别字（缤/宾），keyword 交叉验证确认"
-    },
-    {
-      "city": "西安市",
-      "news_name": "金栢丽",
-      "platform_name": "金柏音乐酒吧",
-      "kind": "variant",
-      "note": "异体字（栢/柏）"
-    },
-    {
-      "city": "盐城市",
-      "news_name": "幕色",
-      "platform_name": "暮色酒吧",
-      "kind": "typo",
-      "note": "错别字（幕/暮）"
-    },
-    {
-      "city": "无锡市",
-      "news_name": "永乐交谊舞",
-      "platform_name": "永乐舞厅",
-      "kind": "suffix",
-      "note": "交谊舞 = 类型后缀（2026-09-01 误判 CONTAINED 的根因，后缀表缺「交谊舞」）"
-    },
-    {
-      "city": "无锡市",
-      "news_name": "蓝月交谊舞",
-      "platform_name": "蓝月舞厅",
-      "kind": "suffix",
-      "note": "同上"
-    },
-    {
-      "city": "无锡市",
-      "news_name": "丽花宫交谊舞",
-      "platform_name": "丽花宫舞厅",
-      "kind": "suffix",
-      "note": "同上"
-    },
-    {
-      "city": "绍兴市",
-      "news_name": "魅影",
-      "platform_name": "魅影音乐酒吧",
-      "kind": "contained",
-      "note": "2026-09-01 CLOSED 不在反转范围（仅备注）；2026-09-03 舞讯双源点名，用户确认 CLOSED→OPEN（venueId=1089 已 OPEN）"
-    },
-    {
-      "city": "重庆市",
-      "news_name": "天长",
-      "platform_name": "天长地久舞厅",
-      "kind": "contained",
-      "note": "2026-09-01 用户确认反转"
-    },
-    {
-      "city": "西安市",
-      "news_name": "彼爱",
-      "platform_name": "彼爱时光音乐酒吧",
-      "kind": "contained",
-      "note": "2026-09-01 用户确认反转"
-    },
-    {
-      "city": "苏州市",
-      "news_name": "蓝堡",
-      "platform_name": "蓝堡娱乐宫",
-      "kind": "contained",
-      "note": "苏州蓝堡娱乐宫；注意嘉兴另有蓝堡舞厅（同城过滤不混淆）"
-    },
-    {
-      "city": "马鞍山市",
-      "news_name": "小马",
-      "platform_name": "小马TENEDR(调酒师)",
-      "kind": "contained",
-      "note": "2026-09-01 用户确认反转"
-    },
-    {
-      "city": "泰州市",
-      "news_name": "星宸",
-      "platform_name": "星宸茶吧",
-      "kind": "contained",
-      "note": "2026-09-01 用户确认反转"
-    },
-    {
-      "city": "杭州市",
-      "news_name": "御都汇碗",
-      "platform_name": "御都汇",
-      "kind": "contained",
-      "note": "粘连 token，2026-09-01 用户确认反转"
-    },
-    {
-      "city": "杭州市",
-      "news_name": "半渡",
-      "platform_name": "半渡音乐酒吧",
-      "kind": "contained",
-      "note": "2026-09-01 用户确认反转"
-    },
-    {
-      "city": "杭州市",
-      "news_name": "halo",
-      "platform_name": "HALO酒吧",
-      "kind": "exact",
-      "note": "大小写差异，2026-09-01 反转"
-    },
-    {
-      "city": "无锡市",
-      "news_name": "千里缘",
-      "platform_name": "千里缘",
-      "kind": "resolved",
-      "note": "2026-09-01 已录入（venueId=1147，梁溪区学前东路799号金格商业广场F3层）"
-    },
-    {
-      "city": "绵阳市",
-      "news_name": "金砂",
-      "platform_name": "星光印象",
-      "kind": "uncertain",
-      "note": "keyword 弱关联，待人工核实（表③候选）"
-    },
-    {
-      "city": "南通市",
-      "news_name": "蒙纳戈娱乐",
-      "platform_name": "蒙纳戈娱乐",
-      "kind": "renamed",
-      "note": "2026-09-01 平台原「蒙卡娱乐」（同址上海东路66号悦拾光3层），舞讯名一字之差（纳/卡），用户确认改名"
-    },
-    {
-      "city": "西安市",
-      "news_name": "蓝之梦大舞厅",
-      "platform_name": "蓝之梦大舞厅",
-      "kind": "renamed",
-      "note": "2026-09-01 平台原「艺之梦大舞厅」（同址东站路6号万家和超市二楼，desc 与舞讯公告逐字一致），用户确认改名"
-    },
-    {
-      "city": "西安市",
-      "news_name": "星语大舞厅",
-      "platform_name": "星语大舞厅",
-      "kind": "renamed",
-      "note": "2026-09-01 平台原「星浩大舞厅」（同址万兴广场四楼2号，desc 与舞讯公告逐字一致），用户确认改名"
-    },
-    {
-      "city": "眉山市",
-      "news_name": "汇锦音乐酒吧",
-      "platform_name": "汇锦音乐酒吧",
-      "kind": "resolved",
-      "note": "2026-09-01 新店已录入（venueId=1148，仁寿县怀仁街道城北路33号）"
-    },
-    {
-      "city": "新乡市",
-      "news_name": "王者娱乐中心",
-      "platform_name": "王者娱乐中心",
-      "kind": "resolved",
-      "note": "2026-09-01 新店已录入（venueId=1149，红旗区平原路地下商业街，status=CLOSED 今日停业）"
-    },
-    {
-      "city": "成都市",
-      "news_name": "王者台球莎莎舞俱乐部",
-      "platform_name": "王者台球莎莎舞俱乐部",
-      "kind": "resolved",
-      "note": "2026-09-01 新店已录入（venueId=1150，金牛区二环路北一段10号印象汇，早/午/晚三场）"
-    },
-    {
-      "city": "镇江市",
-      "news_name": "芭黎人歌舞厅",
-      "platform_name": "芭黎人歌舞厅",
-      "kind": "exact",
-      "note": "2026-09-01 平台已存在同址同 desc/时段/标签，跳过"
-    },
-    {
-      "city": "嘉兴市",
-      "news_name": "晚枫舞厅",
-      "platform_name": "晚枫舞厅",
-      "kind": "renamed",
-      "note": "2026-09-01 平台原「新鼎宸」（同址三港路555号盒马超市上3楼）CEASED，用户确认改名+恢复营业（venueId=960，8月29日恢复营业）"
-    },
-    {
-      "city": "眉山市",
-      "news_name": "盛邦娱乐",
-      "platform_name": "盛邦娱乐",
-      "kind": "resolved",
-      "note": "2026-09-01 新店已录入（venueId=1151，仁寿县普宁街道惠南南路三段1号盛邦国际2楼，午晚场13:30-17:30/19:30-02:00）"
-    },
-    {
-      "city": "咸阳市",
-      "news_name": "火舞",
-      "platform_name": "烈火音乐酒吧（火舞）",
-      "kind": "renamed",
-      "note": "2026-09-01 联网核实：舞讯「火舞（原烈火）」；腾讯/苹果地图「火舞音乐酒吧」=渭城区人民东路27号(34.338334,108.727829)，与平台烈火音乐酒吧 id=782 坐标仅差约30米 → 同一家。用户确认改名平台门店为「烈火音乐酒吧（火舞）」。注意：西安另有「火舞山」（原九儿）是另一家店"
-    },
-    {
-      "city": "镇江市",
-      "news_name": "喜见（喜见音乐烤吧）",
-      "platform_name": "芭黎人歌舞厅（喜见）",
-      "kind": "renamed",
-      "note": "2026-09-01 联网核实：砂舞导航站「镇江芭黎人歌舞厅 别名：喜见音乐烤吧」「丹阳·喜见音乐烤吧《原芭黎人》」；腾讯地图坐标几乎重合。用户确认改名平台门店为「芭黎人歌舞厅（喜见）」，并补详细地址（后巷中心大街286号老华明四楼）"
-    },
-    {
-      "city": "乐山市",
-      "news_name": "煌潮",
-      "platform_name": "煌潮舞厅",
-      "kind": "resolved",
-      "note": "2026-09-01 联网核实真实存在：腾讯地图「煌潮舞厅」=乐山市市中区绿心街道新天地·万兴城4幢嘉州新天地(29.600776,103.718489)；xianbao360 多期【乐山】煌潮{晚}、美星。已录入 venueId=1152。⚠️ 咸阳也有一家「煌潮」（渭城区新兴南路凤凰广场旁，原明月城店）——同名不同城，是两家店"
-    },
-    {
-      "city": "东莞市",
-      "news_name": "神话",
-      "platform_name": "神话酒吧（莎莎舞）",
-      "kind": "alias",
-      "note": "2026-09-02 市井慢时光/长文本 9-01 舞讯，用户确认反转（venueId=724）"
-    },
-    {
-      "city": "东莞市",
-      "news_name": "鑫莎（鑫盛）",
-      "platform_name": "鑫莎酒吧（莎莎舞）",
-      "kind": "alias",
-      "note": "2026-09-02 舞讯带别名（鑫盛），用户确认反转（venueId=720）"
-    },
-    {
-      "city": "东莞市",
-      "news_name": "零点莎莎",
-      "platform_name": "零点莎莎舞酒吧",
-      "kind": "suffix",
-      "note": "2026-09-02 用户确认反转（venueId=705）"
-    },
-    {
-      "city": "东莞市",
-      "news_name": "新都会清(美琪)",
-      "platform_name": "美琪清吧",
-      "kind": "contained",
-      "note": "2026-09-02 舞讯带店址(美琪)疑为美琪清吧；用户不确定，暂按映射处理（venueId=728，forceReversal 已执行）"
-    },
-    {
-      "city": "南宁市",
-      "news_name": "乐舞",
-      "platform_name": "乐舞汇",
-      "kind": "alias",
-      "note": "2026-09-02 用户确认反转（venueId=541）"
-    },
-    {
-      "city": "南宁市",
-      "news_name": "欢舞",
-      "platform_name": "欢舞汇",
-      "kind": "alias",
-      "note": "2026-09-02 用户确认反转（venueId=553）"
-    },
-    {
-      "city": "南宁市",
-      "news_name": "海角",
-      "platform_name": "海角舞汇-高颜值主场",
-      "kind": "alias",
-      "note": "2026-09-02 用户确认反转（venueId=540）"
-    },
-    {
-      "city": "南宁市",
-      "news_name": "乐满迪蝶",
-      "platform_name": "乐满迪舞汇",
-      "kind": "contained",
-      "note": "2026-09-02 一字差异（蝶/舞汇）；用户确认是攻略写错，平台名称正确（venueId=546，forceReversal 已执行）"
-    },
-    {
-      "city": "长沙市",
-      "news_name": "维秘慢摇",
-      "platform_name": "维秘慢摇吧",
-      "kind": "alias",
-      "note": "2026-09-02 用户确认反转（venueId=908）"
-    },
-    {
-      "city": "长沙市",
-      "news_name": "芳华18",
-      "platform_name": "芳华18·演艺·莎舞·同城社交",
-      "kind": "alias",
-      "note": "2026-09-02 用户确认反转（venueId=926）"
-    },
-    {
-      "city": "成都市",
-      "news_name": "追忆之梦",
-      "platform_name": "追忆之梦茶坊",
-      "kind": "alias",
-      "note": "2026-09-02 用户确认反转（venueId=493）"
-    },
-    {
-      "city": "绵阳市",
-      "news_name": "白渡清欢",
-      "platform_name": "白渡清欢音乐茶座",
-      "kind": "alias",
-      "note": "2026-09-02 用户确认反转（venueId=766）"
-    },
-    {
-      "city": "重庆市",
-      "news_name": "D调酒吧",
-      "platform_name": "D·调酒吧",
-      "kind": "variant",
-      "note": "2026-09-02 异体（D调/D·调），用户确认反转（venueId=528）"
-    },
-    {
-      "city": "杭州市",
-      "news_name": "舞夜",
-      "platform_name": "舞夜酒馆",
-      "kind": "alias",
-      "note": "2026-09-02 用户确认反转（venueId=377）"
-    },
-    {
-      "city": "深圳市",
-      "news_name": "七点",
-      "platform_name": "七点小酒馆",
-      "kind": "alias",
-      "note": "2026-09-02 用户确认反转（venueId=681）"
-    },
-    {
-      "city": "深圳市",
-      "news_name": "二哥",
-      "platform_name": "二哥半盏清吧馆",
-      "kind": "alias",
-      "note": "2026-09-02 用户确认反转（venueId=683）"
-    },
-    {
-      "city": "成都市",
-      "news_name": "摩尔顿",
-      "platform_name": "爵尔顿大型歌舞城",
-      "kind": "typo",
-      "note": "2026-09-02 联网核实：腾讯地图搜「摩尔顿舞厅」直接返回「爵尔顿大型歌舞城」= 四川省成都市金牛区西安路街道金仙桥路成都丝绸城楼上(30.677338,104.053841)，电话028-87703621，营业13:00-02:00；xianbao360 地址库亦为金牛区金仙桥路12号3栋3楼。**非新店**，平台 venueId=434 已存在（原名正确，摩尔顿为舞讯口误/OCR 误读）"
-    },
-    {
-      "city": "绵阳市",
-      "news_name": "蓝迪",
-      "platform_name": "享达娱乐音乐酒吧（蓝迪音乐茶吧）",
-      "kind": "renamed",
-      "note": "2026-09-02 联网核实：砂舞指南站「绵阳享达娱乐音乐酒吧 别名:蓝迪音乐茶吧 13:30-00:00」+ 头条「享达娱乐（已改名蓝迪音乐茶吧）」→ 蓝迪 = 平台 venueId=770。2026-09-04 舞讯再现「蓝迪」命中（平台现名带别名后缀「（蓝迪音乐茶吧）」，770 OPEN）"
-    },
-    {
-      "city": "重庆市",
-      "news_name": "五七",
-      "platform_name": "百林舞厅",
-      "kind": "alias",
-      "note": "2026-09-02 联网核实：「百林57舞厅（老重庆人喊五七）」= 江北区建新西路拓展大厦2楼（观音桥商圈），14:00-02:00；360地图「重庆百乐舞厅 两江新区小苑路观音桥佳侬商场A区」。**非新店，平台 venueId=518 已存在**"
-    },
-    {
-      "city": "重庆市",
-      "news_name": "世纪",
-      "platform_name": "世纪歌舞厅",
-      "kind": "resolved",
-      "note": "2026-09-02 联网核实后录入（venueId=1158，两江新区观音桥嘉陵公园佳侬商场A区1号，坐标 106.530721,29.571779，10:00-23:30，电话15123955207）。注意与百林57（五七）同在佳侬商场但为两家不同店"
-    },
-    {
-      "city": "重庆市",
-      "news_name": "爱乐门",
-      "platform_name": "爱乐门舞厅",
-      "kind": "resolved",
-      "note": "2026-09-02 联网核实后录入（venueId=1159，渝中区四贤巷3号青鸟大厦3层，坐标 106.573248,29.554721，8:30-21:00）。⚠️ 舞讯列在两江新区，实际地址在渝中区解放碑较场口"
-    },
-    {
-      "city": "重庆市",
-      "news_name": "梦莎",
-      "platform_name": "铜梁梦莎舞厅",
-      "kind": "resolved",
-      "note": "2026-09-02 联网核实后录入（venueId=1160，铜梁区东城街道吾悦广场下沉广场内，坐标 106.078372,29.839451）。注意别与盐城梦莎舞厅/义乌梦莎混淆"
-    },
-    {
-      "city": "重庆市",
-      "news_name": "简爱",
-      "platform_name": "简爱清吧舞厅",
-      "kind": "resolved",
-      "note": "2026-09-02 联网核实后录入（venueId=1161，万州区北滨大道二段环泰世纪新城，坐标 108.388842,30.798938）。同名不同城：西安/泰州另有简爱舞厅"
-    },
-    {
-      "city": "成都市",
-      "news_name": "红花瓣",
-      "platform_name": "",
-      "kind": "uncertain",
-      "note": "2026-09-02 市井慢时光成都「世纪 红花瓣」疑与长文本「世纪红 花舞盛宴」粘连，待人工核实"
-    },
-    {
-      "city": "东莞市",
-      "news_name": "莞遇",
-      "platform_name": "莞遇小酒馆",
-      "kind": "resolved",
-      "note": "2026-09-02 用户提供地图信息录入（venueId=1153，东城街道立新新源南路21号4栋104室，OPEN）"
-    },
-    {
-      "city": "南昌市",
-      "news_name": "乐瘾",
-      "platform_name": "乐瘾音乐餐吧",
-      "kind": "resolved",
-      "note": "2026-09-02 用户提供地图信息录入（venueId=1154，青山湖区顺外路392号君嘉广场1号楼5楼，OPEN）"
-    },
-    {
-      "city": "南通市",
-      "news_name": "魅莎",
-      "platform_name": "魅莎舞厅",
-      "kind": "resolved",
-      "note": "2026-09-02 用户提供地图信息录入（venueId=1155，海门区海门街道通江路58号富江商业广场2066室，OPEN；舞讯动态 8月15日恢复营业）"
-    },
-    {
-      "city": "嘉兴市",
-      "news_name": "金碧辉煌",
-      "platform_name": "金碧辉煌",
-      "kind": "resolved",
-      "note": "2026-09-02 用户提供地图信息录入（venueId=1156，桐乡市梧桐街道振兴中路2号，CLOSED 今日停业——动态 9月1日开业被清场）"
-    },
-    {
-      "city": "宁波市",
-      "news_name": "新艺城",
-      "platform_name": "新艺城舞动",
-      "kind": "resolved",
-      "note": "2026-09-02 用户提供地图信息录入（venueId=1157，镇海区静远西路405号3楼，OPEN 试营业 8月20日起）"
-    },
-    {
-      "city": "深圳市",
-      "news_name": "新肥龙",
-      "platform_name": "新肥龙莎莎舞厅",
-      "kind": "contained",
-      "note": "2026-09-03 舞讯点名，用户确认反转（venueId=680，CEASED→OPEN）"
-    },
-    {
-      "city": "绍兴市",
-      "news_name": "花都汇",
-      "platform_name": "花都汇歌舞式KTV",
-      "kind": "contained",
-      "note": "2026-09-03 舞讯点名，用户确认 CLOSED→OPEN（venueId=1093 已 OPEN）"
-    },
-    {
-      "city": "绍兴市",
-      "news_name": "晶莎",
-      "platform_name": "晶莎舞厅",
-      "kind": "contained",
-      "note": "2026-09-03 舞讯点名，用户确认 CLOSED→OPEN（venueId=1098 已 OPEN）"
-    },
-    {
-      "city": "深圳市",
-      "news_name": "佛得角小酒馆",
-      "platform_name": "佛得角小酒馆",
-      "kind": "resolved",
-      "note": "2026-09-03 用户提供地图信息录入（venueId=1162，罗湖区翠竹街道田贝四路109号4楼，洪湖地铁站C2口，8月30日开业，18:00-06:00，OPEN）"
-    },
-    {
-      "city": "苏州市",
-      "news_name": "帝境（音乐酒吧·KTV）",
-      "platform_name": "帝境音乐酒吧·KTV",
-      "kind": "resolved",
-      "note": "2026-09-03 用户提供地图信息录入（venueId=1163，昆山市陆家镇友谊路1号，午13:00-17:00 晚18:30-23:00，CLOSED 今日停业）"
-    },
-    {
-      "city": "扬州市",
-      "news_name": "一碗好酒馆",
-      "platform_name": "一碗好酒馆",
-      "kind": "resolved",
-      "note": "2026-09-03 用户提供地图信息录入（venueId=1164，江都区郭村镇周楼工业园区328国道旁，9月2日开业，13:00-01:30，OPEN）。⚠️ 舞讯曾列泰州段，实际地址扬州江都，以地图为准"
-    },
-    {
-      "city": "无锡市",
-      "news_name": "碧莲（歌舞厅）",
-      "platform_name": "碧莲歌舞厅",
-      "kind": "resolved",
-      "note": "2026-09-03 用户提供地图信息录入（venueId=1165，江阴市商业街与环镇路交叉口正北84米，18:00-22:00，OPEN）"
-    },
-    {
-      "city": "成都市",
-      "news_name": "怡情",
-      "platform_name": "怡情歌舞厅",
-      "venue_id": 473,
-      "kind": "exact",
-      "note": "2026-09-04 舞讯点名（郫都区），用户确认反转 CEASED→OPEN（sourceId=user-20260904）"
-    },
-    {
-      "city": "嘉兴市",
-      "news_name": "蓝波湾",
-      "platform_name": "洲泉蓝波湾舞厅",
-      "venue_id": 998,
-      "kind": "contained",
-      "note": "2026-09-04 uncertain 复核落地：998 平台名已为「洲泉蓝波湾舞厅」（桐乡洲泉镇湘溪大道86号与腾讯地图一致），舞讯【桐乡】蓝波湾命中，用户确认反转 CEASED→OPEN（CONTAINED+forceReversal，sourceId=user-20260904）"
-    },
-    {
-      "city": "苏州市",
-      "news_name": "帝境（昆山）",
-      "platform_name": "帝境音乐酒吧·KTV",
-      "venue_id": 1163,
-      "kind": "exact",
-      "note": "2026-09-03 录入（昆山陆家镇友谊路1号）；2026-09-04 舞讯点名营业，CLOSED→OPEN 走 POST /venues/1163/update 全量回填（时段/坐标保留）"
-    },
-    {
-      "city": "成都市",
-      "news_name": "es星海壹号",
-      "platform_name": "星海壹号（鑫天地）",
-      "venue_id": 457,
-      "kind": "alias",
-      "note": "2026-09-04 舞讯青羊区「es 星海壹号」，es 为前缀号/业态标记，同店（457 OPEN，无反转）"
-    },
-    {
-      "city": "成都市",
-      "news_name": "金卡乐",
-      "platform_name": "金卡罗歌舞城",
-      "venue_id": 444,
-      "kind": "typo",
-      "note": "2026-09-04 舞讯金牛区「金卡乐」= 金卡罗（乐/罗错字），同区金牛区五里墩支路（444 OPEN，无反转）"
-    },
-    {
-      "city": "成都市",
-      "news_name": "星曜乐",
-      "platform_name": "星耀乐舞厅",
-      "venue_id": 400,
-      "kind": "variant",
-      "note": "2026-09-04 舞讯成华区「星曜乐」= 星耀乐（曜/耀异体），同区成华区（400 OPEN，无反转）"
-    },
-    {
-      "city": "南通市",
-      "news_name": "玛莎",
-      "platform_name": "富都汇（玛莎嗨嗨）",
-      "venue_id": 110,
-      "kind": "alias",
-      "note": "2026-09-04 舞讯「玛莎」命中括号别名「玛莎嗨嗨」（110 OPEN，无反转）"
-    },
-    {
-      "city": "南昌市",
-      "news_name": "随圆",
-      "platform_name": "随圆酒吧",
-      "venue_id": 849,
-      "kind": "renamed",
-      "note": "2026-09-04 舞讯「随圆」（圆/园），用户已把平台 849 改名「随圆酒吧」（OPEN，无反转）"
-    },
-    {
-      "city": "深圳市",
-      "news_name": "星曜",
-      "platform_name": "星曜俱乐部",
-      "venue_id": 642,
-      "kind": "renamed",
-      "note": "2026-09-04 舞讯「星曜」（曜/耀），用户已把平台 642 改名「星曜俱乐部」（OPEN，无反转）"
-    },
-    {
-      "city": "滁州市",
-      "news_name": "丽莎/幻新/澜/老炮/澜夜",
-      "platform_name": "",
-      "kind": "unmatched",
-      "note": "2026-09-04 舞讯源把滁州店分排在江苏段与安徽段（【滁州】丽莎、幻新、澜、老炮 + 江苏段【滁州】澜夜、幻新）；滁州市平台未覆盖，全部归未覆盖城市清单，不建库不比对"
-    },
-    {
-      "city": "长沙市",
-      "news_name": "美琪/有酒说故事/音之舞",
-      "platform_name": "美琪娱乐俱乐部[919]/有酒说故事舞吧[913]/音之舞KTV舞厅[934]",
-      "kind": "exact",
-      "note": "2026-09-04 舞讯 EXACT 命中本地正本（均 OPEN）——removed_duplicates 所记 576/570/591 已不在库，正本 ID 以本条为准，防再次误删"
-    }
-  ],
-  "removed_duplicates": [
-    {
-      "city": "长沙市",
-      "platform_name": "音之舞KTV舞厅",
-      "venue_id": 591,
-      "note": "2026-09-01 用户确认重复数据并已删除"
-    },
-    {
-      "city": "长沙市",
-      "platform_name": "美琪娱乐俱乐部",
-      "venue_id": 576,
-      "note": "2026-09-01 用户确认重复数据并已删除（本地 develop 库仍存在，需在本地再删一次）"
-    },
-    {
-      "city": "长沙市",
-      "platform_name": "有酒说故事舞吧",
-      "venue_id": 570,
-      "note": "2026-09-01 用户确认重复数据并已删除（本地 develop 库仍存在，需在本地再删一次）"
-    }
-  ],
-  "uncertain_entries": [
-    {
-      "city": "东莞市",
-      "news_name": "新都会清(美琪)",
-      "platform_name": "美琪清吧",
-      "venue_id": 728,
-      "status": "tentatively_mapped",
-      "reason": "2026-09-02 用户原话「我也不确定，暂时考虑映射到美琪清吧」——已按映射执行反转，但映射本身未 100% 确认；2026-09-03 舞讯「新都会」独立再现，keyword 平台无独立店，仍视为美琪清吧（728 已 OPEN）",
-      "next_action": "后续若「新都会」携带店址/区镇出现，复核是否与美琪清吧拆分"
-    },
-    {
-      "city": "南宁市",
-      "news_name": "乐满迪蝶",
-      "platform_name": "乐满迪舞汇",
-      "venue_id": 546,
-      "status": "misprint",
-      "reason": "2026-09-02 用户原话「应该是别人的攻略写错了。我们平台名称是对的」——判定为攻略错字，平台名正确，已反转",
-      "next_action": "无（攻略错字已定性）；若后续攻略用名趋于统一可再核对"
-    },
-    {
-      "city": "成都市",
-      "news_name": "摩尔顿",
-      "platform_name": "爵尔顿大型歌舞城（疑似）",
-      "venue_id": 434,
-      "status": "unverified",
-      "reason": "2026-09-02 市井慢时光「摩尔顿」疑为长文本「爵尔顿」异写（venueId=434 OPEN），无 keyword 证据",
-      "next_action": "未写库（平台已 OPEN 无需动作）；下次舞讯若「摩尔顿」再出现，联网核实地址是否与爵尔顿一致"
-    },
-    {
-      "city": "成都市",
-      "news_name": "红花瓣",
-      "platform_name": "",
-      "venue_id": null,
-      "status": "unverified",
-      "reason": "2026-09-02 市井慢时光成都「世纪 红花瓣」疑与长文本「世纪红 花舞盛宴」粘连；keyword 无结果；联网深度调研（xianbao360 成都地址库/舞厅大全）均无「红花瓣」门店",
-      "next_action": "不录入。疑为 B 源把「世纪红」+「花舞盛宴」OCR 断词成「世纪 红花瓣」；后续舞讯若独立出现「红花瓣」再评估"
-    },
-    {
-      "city": "杭州市",
-      "news_name": "丽瑜娱乐",
-      "platform_name": "",
-      "venue_id": null,
-      "status": "unverified",
-      "reason": "2026-09-02 双源异名：长文本「丽瑜娱乐」/市井慢时光「丽珍娱乐」；联网调研无同名门店（xianbao360 多期杭州舞讯、杭州舞厅攻略均无），腾讯地图搜「丽瑜莎莎舞舞厅」仅模糊关联到「杭州百乐门歌舞厅」（拱墅区石桥路456号怀德文体中心四楼171室，30.342103,120.192805，16:00-02:00），无法证实为同一家",
-      "next_action": "暂不录入。等用户定名或后续舞讯再出现时核实；若确为杭州百乐门歌舞厅，则按该地址录入"
-    },
-    {
-      "city": "西安市",
-      "news_name": "密他",
-      "platform_name": "密他大舞厅",
-      "venue_id": 201,
-      "status": "unverified",
-      "reason": "2026-09-04 舞讯点名营业（EXACT 命中，平台 SUSPENDED 本应反转），但用户原话「密他今天是关门了的，我确定」——舞讯与实况冲突时以用户为准，未反转",
-      "next_action": "后续舞讯若密他再出现，仍需先问用户实况再反转，勿凭舞讯直接执行"
-    }
-  ]
+ "source": "xianbao360",
+ "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
+ "updated": "2026-09-06",
+ "entries": [
+  {
+   "city": "西安市",
+   "news_name": "缤达",
+   "platform_name": "宾达舞厅",
+   "kind": "typo",
+   "note": "错别字（缤/宾），keyword 交叉验证确认"
+  },
+  {
+   "city": "西安市",
+   "news_name": "金栢丽",
+   "platform_name": "金柏音乐酒吧",
+   "kind": "variant",
+   "note": "异体字（栢/柏）"
+  },
+  {
+   "city": "盐城市",
+   "news_name": "幕色",
+   "platform_name": "暮色酒吧",
+   "kind": "typo",
+   "note": "错别字（幕/暮）"
+  },
+  {
+   "city": "无锡市",
+   "news_name": "永乐交谊舞",
+   "platform_name": "永乐舞厅",
+   "kind": "suffix",
+   "note": "交谊舞 = 类型后缀（2026-09-01 误判 CONTAINED 的根因，后缀表缺「交谊舞」）"
+  },
+  {
+   "city": "无锡市",
+   "news_name": "蓝月交谊舞",
+   "platform_name": "蓝月舞厅",
+   "kind": "suffix",
+   "note": "同上"
+  },
+  {
+   "city": "无锡市",
+   "news_name": "丽花宫交谊舞",
+   "platform_name": "丽花宫舞厅",
+   "kind": "suffix",
+   "note": "同上"
+  },
+  {
+   "city": "绍兴市",
+   "news_name": "魅影",
+   "platform_name": "魅影音乐酒吧",
+   "kind": "contained",
+   "note": "2026-09-01 CLOSED 不在反转范围（仅备注）；2026-09-03 舞讯双源点名，用户确认 CLOSED→OPEN（venueId=1089 已 OPEN）"
+  },
+  {
+   "city": "重庆市",
+   "news_name": "天长",
+   "platform_name": "天长地久舞厅",
+   "kind": "contained",
+   "note": "2026-09-01 用户确认反转"
+  },
+  {
+   "city": "西安市",
+   "news_name": "彼爱",
+   "platform_name": "彼爱时光音乐酒吧",
+   "kind": "contained",
+   "note": "2026-09-01 用户确认反转"
+  },
+  {
+   "city": "苏州市",
+   "news_name": "蓝堡",
+   "platform_name": "蓝堡娱乐宫",
+   "kind": "contained",
+   "note": "苏州蓝堡娱乐宫；注意嘉兴另有蓝堡舞厅（同城过滤不混淆）"
+  },
+  {
+   "city": "马鞍山市",
+   "news_name": "小马",
+   "platform_name": "小马TENEDR(调酒师)",
+   "kind": "contained",
+   "note": "2026-09-01 用户确认反转"
+  },
+  {
+   "city": "泰州市",
+   "news_name": "星宸",
+   "platform_name": "星宸茶吧",
+   "kind": "contained",
+   "note": "2026-09-01 用户确认反转"
+  },
+  {
+   "city": "杭州市",
+   "news_name": "御都汇碗",
+   "platform_name": "御都汇",
+   "kind": "contained",
+   "note": "粘连 token，2026-09-01 用户确认反转"
+  },
+  {
+   "city": "杭州市",
+   "news_name": "半渡",
+   "platform_name": "半渡音乐酒吧",
+   "kind": "contained",
+   "note": "2026-09-01 用户确认反转"
+  },
+  {
+   "city": "杭州市",
+   "news_name": "halo",
+   "platform_name": "HALO酒吧",
+   "kind": "exact",
+   "note": "大小写差异，2026-09-01 反转"
+  },
+  {
+   "city": "无锡市",
+   "news_name": "千里缘",
+   "platform_name": "千里缘",
+   "kind": "resolved",
+   "note": "2026-09-01 已录入（venueId=1147，梁溪区学前东路799号金格商业广场F3层）"
+  },
+  {
+   "city": "绵阳市",
+   "news_name": "金砂",
+   "platform_name": "星光印象",
+   "kind": "uncertain",
+   "note": "keyword 弱关联，待人工核实（表③候选）"
+  },
+  {
+   "city": "南通市",
+   "news_name": "蒙纳戈娱乐",
+   "platform_name": "蒙纳戈娱乐",
+   "kind": "renamed",
+   "note": "2026-09-01 平台原「蒙卡娱乐」（同址上海东路66号悦拾光3层），舞讯名一字之差（纳/卡），用户确认改名"
+  },
+  {
+   "city": "西安市",
+   "news_name": "蓝之梦大舞厅",
+   "platform_name": "蓝之梦大舞厅",
+   "kind": "renamed",
+   "note": "2026-09-01 平台原「艺之梦大舞厅」（同址东站路6号万家和超市二楼，desc 与舞讯公告逐字一致），用户确认改名"
+  },
+  {
+   "city": "西安市",
+   "news_name": "星语大舞厅",
+   "platform_name": "星语大舞厅",
+   "kind": "renamed",
+   "note": "2026-09-01 平台原「星浩大舞厅」（同址万兴广场四楼2号，desc 与舞讯公告逐字一致），用户确认改名"
+  },
+  {
+   "city": "眉山市",
+   "news_name": "汇锦音乐酒吧",
+   "platform_name": "汇锦音乐酒吧",
+   "kind": "resolved",
+   "note": "2026-09-01 新店已录入（venueId=1148，仁寿县怀仁街道城北路33号）"
+  },
+  {
+   "city": "新乡市",
+   "news_name": "王者娱乐中心",
+   "platform_name": "王者娱乐中心",
+   "kind": "resolved",
+   "note": "2026-09-01 新店已录入（venueId=1149，红旗区平原路地下商业街，status=CLOSED 今日停业）"
+  },
+  {
+   "city": "成都市",
+   "news_name": "王者台球莎莎舞俱乐部",
+   "platform_name": "王者台球莎莎舞俱乐部",
+   "kind": "resolved",
+   "note": "2026-09-01 新店已录入（venueId=1150，金牛区二环路北一段10号印象汇，早/午/晚三场）"
+  },
+  {
+   "city": "镇江市",
+   "news_name": "芭黎人歌舞厅",
+   "platform_name": "芭黎人歌舞厅",
+   "kind": "exact",
+   "note": "2026-09-01 平台已存在同址同 desc/时段/标签，跳过"
+  },
+  {
+   "city": "嘉兴市",
+   "news_name": "晚枫舞厅",
+   "platform_name": "晚枫舞厅",
+   "kind": "renamed",
+   "note": "2026-09-01 平台原「新鼎宸」（同址三港路555号盒马超市上3楼）CEASED，用户确认改名+恢复营业（venueId=960，8月29日恢复营业）"
+  },
+  {
+   "city": "眉山市",
+   "news_name": "盛邦娱乐",
+   "platform_name": "盛邦娱乐",
+   "kind": "resolved",
+   "note": "2026-09-01 新店已录入（venueId=1151，仁寿县普宁街道惠南南路三段1号盛邦国际2楼，午晚场13:30-17:30/19:30-02:00）"
+  },
+  {
+   "city": "咸阳市",
+   "news_name": "火舞",
+   "platform_name": "烈火音乐酒吧（火舞）",
+   "kind": "renamed",
+   "note": "2026-09-01 联网核实：舞讯「火舞（原烈火）」；腾讯/苹果地图「火舞音乐酒吧」=渭城区人民东路27号(34.338334,108.727829)，与平台烈火音乐酒吧 id=782 坐标仅差约30米 → 同一家。用户确认改名平台门店为「烈火音乐酒吧（火舞）」。注意：西安另有「火舞山」（原九儿）是另一家店"
+  },
+  {
+   "city": "镇江市",
+   "news_name": "喜见（喜见音乐烤吧）",
+   "platform_name": "芭黎人歌舞厅（喜见）",
+   "kind": "renamed",
+   "note": "2026-09-01 联网核实：砂舞导航站「镇江芭黎人歌舞厅 别名：喜见音乐烤吧」「丹阳·喜见音乐烤吧《原芭黎人》」；腾讯地图坐标几乎重合。用户确认改名平台门店为「芭黎人歌舞厅（喜见）」，并补详细地址（后巷中心大街286号老华明四楼）"
+  },
+  {
+   "city": "乐山市",
+   "news_name": "煌潮",
+   "platform_name": "煌潮舞厅",
+   "kind": "resolved",
+   "note": "2026-09-01 联网核实真实存在：腾讯地图「煌潮舞厅」=乐山市市中区绿心街道新天地·万兴城4幢嘉州新天地(29.600776,103.718489)；xianbao360 多期【乐山】煌潮{晚}、美星。已录入 venueId=1152。⚠️ 咸阳也有一家「煌潮」（渭城区新兴南路凤凰广场旁，原明月城店）——同名不同城，是两家店"
+  },
+  {
+   "city": "东莞市",
+   "news_name": "神话",
+   "platform_name": "神话酒吧（莎莎舞）",
+   "kind": "alias",
+   "note": "2026-09-02 市井慢时光/长文本 9-01 舞讯，用户确认反转（venueId=724）"
+  },
+  {
+   "city": "东莞市",
+   "news_name": "鑫莎（鑫盛）",
+   "platform_name": "鑫莎酒吧（莎莎舞）",
+   "kind": "alias",
+   "note": "2026-09-02 舞讯带别名（鑫盛），用户确认反转（venueId=720）"
+  },
+  {
+   "city": "东莞市",
+   "news_name": "零点莎莎",
+   "platform_name": "零点莎莎舞酒吧",
+   "kind": "suffix",
+   "note": "2026-09-02 用户确认反转（venueId=705）"
+  },
+  {
+   "city": "东莞市",
+   "news_name": "新都会清(美琪)",
+   "platform_name": "美琪清吧",
+   "kind": "contained",
+   "note": "2026-09-02 舞讯带店址(美琪)疑为美琪清吧；用户不确定，暂按映射处理（venueId=728，forceReversal 已执行）"
+  },
+  {
+   "city": "南宁市",
+   "news_name": "乐舞",
+   "platform_name": "乐舞汇",
+   "kind": "alias",
+   "note": "2026-09-02 用户确认反转（venueId=541）"
+  },
+  {
+   "city": "南宁市",
+   "news_name": "欢舞",
+   "platform_name": "欢舞汇",
+   "kind": "alias",
+   "note": "2026-09-02 用户确认反转（venueId=553）"
+  },
+  {
+   "city": "南宁市",
+   "news_name": "海角",
+   "platform_name": "海角舞汇-高颜值主场",
+   "kind": "alias",
+   "note": "2026-09-02 用户确认反转（venueId=540）"
+  },
+  {
+   "city": "南宁市",
+   "news_name": "乐满迪蝶",
+   "platform_name": "乐满迪舞汇",
+   "kind": "contained",
+   "note": "2026-09-02 一字差异（蝶/舞汇）；用户确认是攻略写错，平台名称正确（venueId=546，forceReversal 已执行）"
+  },
+  {
+   "city": "长沙市",
+   "news_name": "维秘慢摇",
+   "platform_name": "维秘慢摇吧",
+   "kind": "alias",
+   "note": "2026-09-02 用户确认反转（venueId=908）"
+  },
+  {
+   "city": "长沙市",
+   "news_name": "芳华18",
+   "platform_name": "芳华18·演艺·莎舞·同城社交",
+   "kind": "alias",
+   "note": "2026-09-02 用户确认反转（venueId=926）"
+  },
+  {
+   "city": "成都市",
+   "news_name": "追忆之梦",
+   "platform_name": "追忆之梦茶坊",
+   "kind": "alias",
+   "note": "2026-09-02 用户确认反转（venueId=493）"
+  },
+  {
+   "city": "绵阳市",
+   "news_name": "白渡清欢",
+   "platform_name": "白渡清欢音乐茶座",
+   "kind": "alias",
+   "note": "2026-09-02 用户确认反转（venueId=766）"
+  },
+  {
+   "city": "重庆市",
+   "news_name": "D调酒吧",
+   "platform_name": "D·调酒吧",
+   "kind": "variant",
+   "note": "2026-09-02 异体（D调/D·调），用户确认反转（venueId=528）"
+  },
+  {
+   "city": "杭州市",
+   "news_name": "舞夜",
+   "platform_name": "舞夜酒馆",
+   "kind": "alias",
+   "note": "2026-09-02 用户确认反转（venueId=377）"
+  },
+  {
+   "city": "深圳市",
+   "news_name": "七点",
+   "platform_name": "七点小酒馆",
+   "kind": "alias",
+   "note": "2026-09-02 用户确认反转（venueId=681）"
+  },
+  {
+   "city": "深圳市",
+   "news_name": "二哥",
+   "platform_name": "二哥半盏清吧馆",
+   "kind": "alias",
+   "note": "2026-09-02 用户确认反转（venueId=683）"
+  },
+  {
+   "city": "成都市",
+   "news_name": "摩尔顿",
+   "platform_name": "爵尔顿大型歌舞城",
+   "kind": "typo",
+   "note": "2026-09-02 联网核实：腾讯地图搜「摩尔顿舞厅」直接返回「爵尔顿大型歌舞城」= 四川省成都市金牛区西安路街道金仙桥路成都丝绸城楼上(30.677338,104.053841)，电话028-87703621，营业13:00-02:00；xianbao360 地址库亦为金牛区金仙桥路12号3栋3楼。**非新店**，平台 venueId=434 已存在（原名正确，摩尔顿为舞讯口误/OCR 误读）"
+  },
+  {
+   "city": "绵阳市",
+   "news_name": "蓝迪",
+   "platform_name": "享达娱乐音乐酒吧（蓝迪音乐茶吧）",
+   "kind": "renamed",
+   "note": "2026-09-02 联网核实：砂舞指南站「绵阳享达娱乐音乐酒吧 别名:蓝迪音乐茶吧 13:30-00:00」+ 头条「享达娱乐（已改名蓝迪音乐茶吧）」→ 蓝迪 = 平台 venueId=770。2026-09-04 舞讯再现「蓝迪」命中（平台现名带别名后缀「（蓝迪音乐茶吧）」，770 OPEN）"
+  },
+  {
+   "city": "重庆市",
+   "news_name": "五七",
+   "platform_name": "百林舞厅",
+   "kind": "alias",
+   "note": "2026-09-02 联网核实：「百林57舞厅（老重庆人喊五七）」= 江北区建新西路拓展大厦2楼（观音桥商圈），14:00-02:00；360地图「重庆百乐舞厅 两江新区小苑路观音桥佳侬商场A区」。**非新店，平台 venueId=518 已存在**"
+  },
+  {
+   "city": "重庆市",
+   "news_name": "世纪",
+   "platform_name": "世纪歌舞厅",
+   "kind": "resolved",
+   "note": "2026-09-02 联网核实后录入（venueId=1158，两江新区观音桥嘉陵公园佳侬商场A区1号，坐标 106.530721,29.571779，10:00-23:30，电话15123955207）。注意与百林57（五七）同在佳侬商场但为两家不同店"
+  },
+  {
+   "city": "重庆市",
+   "news_name": "爱乐门",
+   "platform_name": "爱乐门舞厅",
+   "kind": "resolved",
+   "note": "2026-09-02 联网核实后录入（venueId=1159，渝中区四贤巷3号青鸟大厦3层，坐标 106.573248,29.554721，8:30-21:00）。⚠️ 舞讯列在两江新区，实际地址在渝中区解放碑较场口"
+  },
+  {
+   "city": "重庆市",
+   "news_name": "梦莎",
+   "platform_name": "铜梁梦莎舞厅",
+   "kind": "resolved",
+   "note": "2026-09-02 联网核实后录入（venueId=1160，铜梁区东城街道吾悦广场下沉广场内，坐标 106.078372,29.839451）。注意别与盐城梦莎舞厅/义乌梦莎混淆"
+  },
+  {
+   "city": "重庆市",
+   "news_name": "简爱",
+   "platform_name": "简爱清吧舞厅",
+   "kind": "resolved",
+   "note": "2026-09-02 联网核实后录入（venueId=1161，万州区北滨大道二段环泰世纪新城，坐标 108.388842,30.798938）。同名不同城：西安/泰州另有简爱舞厅"
+  },
+  {
+   "city": "成都市",
+   "news_name": "红花瓣",
+   "platform_name": "",
+   "kind": "uncertain",
+   "note": "2026-09-02 市井慢时光成都「世纪 红花瓣」疑与长文本「世纪红 花舞盛宴」粘连，待人工核实"
+  },
+  {
+   "city": "东莞市",
+   "news_name": "莞遇",
+   "platform_name": "莞遇小酒馆",
+   "kind": "resolved",
+   "note": "2026-09-02 用户提供地图信息录入（venueId=1153，东城街道立新新源南路21号4栋104室，OPEN）"
+  },
+  {
+   "city": "南昌市",
+   "news_name": "乐瘾",
+   "platform_name": "乐瘾音乐餐吧",
+   "kind": "resolved",
+   "note": "2026-09-02 用户提供地图信息录入（venueId=1154，青山湖区顺外路392号君嘉广场1号楼5楼，OPEN）"
+  },
+  {
+   "city": "南通市",
+   "news_name": "魅莎",
+   "platform_name": "魅莎舞厅",
+   "kind": "resolved",
+   "note": "2026-09-02 用户提供地图信息录入（venueId=1155，海门区海门街道通江路58号富江商业广场2066室，OPEN；舞讯动态 8月15日恢复营业）"
+  },
+  {
+   "city": "嘉兴市",
+   "news_name": "金碧辉煌",
+   "platform_name": "金碧辉煌",
+   "kind": "resolved",
+   "note": "2026-09-02 用户提供地图信息录入（venueId=1156，桐乡市梧桐街道振兴中路2号，CLOSED 今日停业——动态 9月1日开业被清场）"
+  },
+  {
+   "city": "宁波市",
+   "news_name": "新艺城",
+   "platform_name": "新艺城舞动",
+   "kind": "resolved",
+   "note": "2026-09-02 用户提供地图信息录入（venueId=1157，镇海区静远西路405号3楼，OPEN 试营业 8月20日起）"
+  },
+  {
+   "city": "深圳市",
+   "news_name": "新肥龙",
+   "platform_name": "新肥龙莎莎舞厅",
+   "kind": "contained",
+   "note": "2026-09-03 舞讯点名，用户确认反转（venueId=680，CEASED→OPEN）"
+  },
+  {
+   "city": "绍兴市",
+   "news_name": "花都汇",
+   "platform_name": "花都汇歌舞式KTV",
+   "kind": "contained",
+   "note": "2026-09-03 舞讯点名，用户确认 CLOSED→OPEN（venueId=1093 已 OPEN）"
+  },
+  {
+   "city": "绍兴市",
+   "news_name": "晶莎",
+   "platform_name": "晶莎舞厅",
+   "kind": "contained",
+   "note": "2026-09-03 舞讯点名，用户确认 CLOSED→OPEN（venueId=1098 已 OPEN）"
+  },
+  {
+   "city": "深圳市",
+   "news_name": "佛得角小酒馆",
+   "platform_name": "佛得角小酒馆",
+   "kind": "resolved",
+   "note": "2026-09-03 用户提供地图信息录入（venueId=1162，罗湖区翠竹街道田贝四路109号4楼，洪湖地铁站C2口，8月30日开业，18:00-06:00，OPEN）"
+  },
+  {
+   "city": "苏州市",
+   "news_name": "帝境（音乐酒吧·KTV）",
+   "platform_name": "帝境音乐酒吧·KTV",
+   "kind": "resolved",
+   "note": "2026-09-03 用户提供地图信息录入（venueId=1163，昆山市陆家镇友谊路1号，午13:00-17:00 晚18:30-23:00，CLOSED 今日停业）"
+  },
+  {
+   "city": "扬州市",
+   "news_name": "一碗好酒馆",
+   "platform_name": "一碗好酒馆",
+   "kind": "resolved",
+   "note": "2026-09-03 用户提供地图信息录入（venueId=1164，江都区郭村镇周楼工业园区328国道旁，9月2日开业，13:00-01:30，OPEN）。⚠️ 舞讯曾列泰州段，实际地址扬州江都，以地图为准"
+  },
+  {
+   "city": "无锡市",
+   "news_name": "碧莲（歌舞厅）",
+   "platform_name": "碧莲歌舞厅",
+   "kind": "resolved",
+   "note": "2026-09-03 用户提供地图信息录入（venueId=1165，江阴市商业街与环镇路交叉口正北84米，18:00-22:00，OPEN）"
+  },
+  {
+   "city": "成都市",
+   "news_name": "怡情",
+   "platform_name": "怡情歌舞厅",
+   "venue_id": 473,
+   "kind": "exact",
+   "note": "2026-09-04 舞讯点名（郫都区），用户确认反转 CEASED→OPEN（sourceId=user-20260904）"
+  },
+  {
+   "city": "嘉兴市",
+   "news_name": "蓝波湾",
+   "platform_name": "洲泉蓝波湾舞厅",
+   "venue_id": 998,
+   "kind": "contained",
+   "note": "2026-09-04 uncertain 复核落地：998 平台名已为「洲泉蓝波湾舞厅」（桐乡洲泉镇湘溪大道86号与腾讯地图一致），舞讯【桐乡】蓝波湾命中，用户确认反转 CEASED→OPEN（CONTAINED+forceReversal，sourceId=user-20260904）"
+  },
+  {
+   "city": "苏州市",
+   "news_name": "帝境（昆山）",
+   "platform_name": "帝境音乐酒吧·KTV",
+   "venue_id": 1163,
+   "kind": "exact",
+   "note": "2026-09-03 录入（昆山陆家镇友谊路1号）；2026-09-04 舞讯点名营业，CLOSED→OPEN 走 POST /venues/1163/update 全量回填（时段/坐标保留）"
+  },
+  {
+   "city": "成都市",
+   "news_name": "es星海壹号",
+   "platform_name": "星海壹号（鑫天地）",
+   "venue_id": 457,
+   "kind": "alias",
+   "note": "2026-09-04 舞讯青羊区「es 星海壹号」，es 为前缀号/业态标记，同店（457 OPEN，无反转）"
+  },
+  {
+   "city": "成都市",
+   "news_name": "金卡乐",
+   "platform_name": "金卡罗歌舞城",
+   "venue_id": 444,
+   "kind": "typo",
+   "note": "2026-09-04 舞讯金牛区「金卡乐」= 金卡罗（乐/罗错字），同区金牛区五里墩支路（444 OPEN，无反转）"
+  },
+  {
+   "city": "成都市",
+   "news_name": "星曜乐",
+   "platform_name": "星耀乐舞厅",
+   "venue_id": 400,
+   "kind": "variant",
+   "note": "2026-09-04 舞讯成华区「星曜乐」= 星耀乐（曜/耀异体），同区成华区（400 OPEN，无反转）"
+  },
+  {
+   "city": "南通市",
+   "news_name": "玛莎",
+   "platform_name": "富都汇（玛莎嗨嗨）",
+   "venue_id": 110,
+   "kind": "alias",
+   "note": "2026-09-04 舞讯「玛莎」命中括号别名「玛莎嗨嗨」（110 OPEN，无反转）"
+  },
+  {
+   "city": "南昌市",
+   "news_name": "随圆",
+   "platform_name": "随圆酒吧",
+   "venue_id": 849,
+   "kind": "renamed",
+   "note": "2026-09-04 舞讯「随圆」（圆/园），用户已把平台 849 改名「随圆酒吧」（OPEN，无反转）"
+  },
+  {
+   "city": "深圳市",
+   "news_name": "星曜",
+   "platform_name": "星曜俱乐部",
+   "venue_id": 642,
+   "kind": "renamed",
+   "note": "2026-09-04 舞讯「星曜」（曜/耀），用户已把平台 642 改名「星曜俱乐部」（OPEN，无反转）"
+  },
+  {
+   "city": "滁州市",
+   "news_name": "丽莎/幻新/澜/老炮/澜夜",
+   "platform_name": "",
+   "kind": "unmatched",
+   "note": "2026-09-04 舞讯源把滁州店分排在江苏段与安徽段（【滁州】丽莎、幻新、澜、老炮 + 江苏段【滁州】澜夜、幻新）；滁州市平台未覆盖，全部归未覆盖城市清单，不建库不比对"
+  },
+  {
+   "city": "长沙市",
+   "news_name": "美琪/有酒说故事/音之舞",
+   "platform_name": "美琪娱乐俱乐部[919]/有酒说故事舞吧[913]/音之舞KTV舞厅[934]",
+   "kind": "exact",
+   "note": "2026-09-04 舞讯 EXACT 命中本地正本（均 OPEN）——removed_duplicates 所记 576/570/591 已不在库，正本 ID 以本条为准，防再次误删"
+  },
+  {
+   "city": "成都市",
+   "news_name": "龙鑫娅",
+   "platform_name": "龙鑫亚",
+   "venue_id": 446,
+   "kind": "typo",
+   "note": "2026-09-05 舞讯 A 青羊区「龙鑫娅10/20」= 平台龙鑫亚（娅/亚异体，446 OPEN，无反转）"
+  },
+  {
+   "city": "成都市",
+   "news_name": "听青龙",
+   "platform_name": "昕青龙歌舞厅",
+   "venue_id": 402,
+   "kind": "variant",
+   "note": "2026-09-05 舞讯 B「听青龙」= 平台昕青龙歌舞厅（听/昕形近异体，402 OPEN，无反转）"
+  },
+  {
+   "city": "绵阳市",
+   "news_name": "嫒妙",
+   "platform_name": "嫚妙音乐茶吧",
+   "venue_id": 765,
+   "kind": "variant",
+   "note": "2026-09-05 舞讯 B「嫒妙」= 平台嫚妙音乐茶吧（嫒/嫚形近，765 OPEN，无反转）；A 源「嫚妙」exact 同店"
+  },
+  {
+   "city": "乐山市",
+   "news_name": "美星美晨",
+   "platform_name": "美星美辰歌舞厅",
+   "venue_id": 1015,
+   "kind": "variant",
+   "note": "2026-09-05 舞讯 A「美星美晨」= 平台美星美辰歌舞厅（晨/辰同音，1015 OPEN，无反转）；B 源短名「美星」同店"
+  },
+  {
+   "city": "泰州市",
+   "news_name": "星辰",
+   "platform_name": "星宸茶吧",
+   "venue_id": 810,
+   "kind": "variant",
+   "note": "2026-09-05 舞讯 B「星辰」= 平台星宸茶吧（辰/宸同音，810 OPEN，无反转）；A 源「星宸」09-01 dict contained 已录"
+  },
+  {
+   "city": "泰州市",
+   "news_name": "一碗好酒",
+   "platform_name": "一碗好酒馆",
+   "venue_id": 1164,
+   "kind": "cross-city",
+   "note": "2026-09-05 舞讯 A/B 均列泰州段点名「一碗好酒」，实为扬州江都 1164（09-03 用户录入时已确认舞讯常年误列泰州段，以地图为准）；今日 SUSPENDED→OPEN 已反转（sourceId=user-20260905）"
+  },
+  {
+   "city": "西安市",
+   "news_name": "密他",
+   "platform_name": "密他大舞厅",
+   "venue_id": 201,
+   "kind": "exact",
+   "note": "2026-09-05 用户确认已恢复营业（201 OPEN 与舞讯一致，无动作）；uncertain_entries 该条解除（09-04 用户称当日关门未反转 → 09-05 复核闭环）"
+  },
+  {
+   "city": "马鞍山市",
+   "news_name": "夜归人",
+   "platform_name": "夜归人酒吧",
+   "venue_id": 1007,
+   "kind": "exact",
+   "note": "2026-09-06 舞讯点名营业（19:00-02:00），CEASED→OPEN 反转（sourceId=user-20260906）"
+  },
+  {
+   "city": "常州市",
+   "news_name": "忆梦",
+   "platform_name": "忆梦歌舞",
+   "venue_id": 801,
+   "kind": "exact",
+   "note": "2026-09-06 舞讯溧阳段点名（18:00-02:00），CEASED→OPEN 反转"
+  },
+  {
+   "city": "常州市",
+   "news_name": "一十",
+   "platform_name": "一十酒舞吧",
+   "venue_id": 789,
+   "kind": "exact",
+   "note": "2026-09-06 舞讯常州段点名（清吧模式 11:30-17:30/18:30-23:30），CEASED→OPEN 反转"
+  },
+  {
+   "city": "南通市",
+   "news_name": "星鼎",
+   "platform_name": "星鼎娱乐厅KTV",
+   "venue_id": 99,
+   "kind": "exact",
+   "note": "2026-09-06 舞讯点名（14:00-02:00），CEASED→OPEN 反转"
+  },
+  {
+   "city": "南通市",
+   "news_name": "外滩",
+   "platform_name": "外滩歌舞厅",
+   "venue_id": 125,
+   "kind": "exact",
+   "note": "2026-09-06 舞讯如皋段点名（13:30-02:00），CEASED→OPEN 反转；勿与#126零点歌舞厅（如皋恒水路）混淆"
+  },
+  {
+   "city": "镇江市",
+   "news_name": "泓酒汇（原芭莎）",
+   "platform_name": "芭莎舞厅",
+   "venue_id": 874,
+   "kind": "alias",
+   "note": "2026-09-06 舞讯镇江段「泓酒汇（原芭莎）19:00-00:00」=平台芭莎舞厅（唯一），CEASED→OPEN 反转（ALIAS）；改名候选：芭莎舞厅→泓酒汇（用户确认后 rename）"
+  },
+  {
+   "city": "镇江市",
+   "news_name": "怡德（原超唱）",
+   "platform_name": "超唱小酒馆",
+   "venue_id": 892,
+   "kind": "alias",
+   "note": "2026-09-06 舞讯句容段「怡德（原超唱）14:00-02:00」=平台超唱小酒馆（OPEN 无反转）；改名候选：超唱小酒馆→怡德（用户确认后 rename）"
+  }
+ ],
+ "removed_duplicates": [
+  {
+   "city": "长沙市",
+   "platform_name": "音之舞KTV舞厅",
+   "venue_id": 591,
+   "note": "2026-09-01 用户确认重复数据并已删除"
+  },
+  {
+   "city": "长沙市",
+   "platform_name": "美琪娱乐俱乐部",
+   "venue_id": 576,
+   "note": "2026-09-01 用户确认重复数据并已删除（本地 develop 库仍存在，需在本地再删一次）"
+  },
+  {
+   "city": "长沙市",
+   "platform_name": "有酒说故事舞吧",
+   "venue_id": 570,
+   "note": "2026-09-01 用户确认重复数据并已删除（本地 develop 库仍存在，需在本地再删一次）"
+  }
+ ],
+ "uncertain_entries": [
+  {
+   "city": "东莞市",
+   "news_name": "新都会清(美琪)",
+   "platform_name": "美琪清吧",
+   "venue_id": 728,
+   "status": "tentatively_mapped",
+   "reason": "2026-09-02 用户原话「我也不确定，暂时考虑映射到美琪清吧」——已按映射执行反转，但映射本身未 100% 确认；2026-09-03 舞讯「新都会」独立再现，keyword 平台无独立店，仍视为美琪清吧（728 已 OPEN）",
+   "next_action": "后续若「新都会」携带店址/区镇出现，复核是否与美琪清吧拆分"
+  },
+  {
+   "city": "南宁市",
+   "news_name": "乐满迪蝶",
+   "platform_name": "乐满迪舞汇",
+   "venue_id": 546,
+   "status": "misprint",
+   "reason": "2026-09-02 用户原话「应该是别人的攻略写错了。我们平台名称是对的」——判定为攻略错字，平台名正确，已反转",
+   "next_action": "无（攻略错字已定性）；若后续攻略用名趋于统一可再核对"
+  },
+  {
+   "city": "成都市",
+   "news_name": "摩尔顿",
+   "platform_name": "爵尔顿大型歌舞城（疑似）",
+   "venue_id": 434,
+   "status": "unverified",
+   "reason": "2026-09-02 市井慢时光「摩尔顿」疑为长文本「爵尔顿」异写（venueId=434 OPEN），无 keyword 证据",
+   "next_action": "未写库（平台已 OPEN 无需动作）；下次舞讯若「摩尔顿」再出现，联网核实地址是否与爵尔顿一致"
+  },
+  {
+   "city": "成都市",
+   "news_name": "红花瓣",
+   "platform_name": "",
+   "venue_id": null,
+   "status": "unverified",
+   "reason": "2026-09-02 市井慢时光成都「世纪 红花瓣」疑与长文本「世纪红 花舞盛宴」粘连；keyword 无结果；联网深度调研（xianbao360 成都地址库/舞厅大全）均无「红花瓣」门店",
+   "next_action": "不录入。疑为 B 源把「世纪红」+「花舞盛宴」OCR 断词成「世纪 红花瓣」；后续舞讯若独立出现「红花瓣」再评估"
+  },
+  {
+   "city": "杭州市",
+   "news_name": "丽瑜娱乐",
+   "platform_name": "",
+   "venue_id": null,
+   "status": "unverified",
+   "reason": "2026-09-02 双源异名：长文本「丽瑜娱乐」/市井慢时光「丽珍娱乐」；联网调研无同名门店（xianbao360 多期杭州舞讯、杭州舞厅攻略均无），腾讯地图搜「丽瑜莎莎舞舞厅」仅模糊关联到「杭州百乐门歌舞厅」（拱墅区石桥路456号怀德文体中心四楼171室，30.342103,120.192805，16:00-02:00），无法证实为同一家",
+   "next_action": "暂不录入。等用户定名或后续舞讯再出现时核实；若确为杭州百乐门歌舞厅，则按该地址录入"
+  },
+  {
+   "city": "常州市",
+   "news_name": "老朱（原夜猫）",
+   "platform_name": "老猫音乐茶社",
+   "venue_id": 800,
+   "status": "unverified",
+   "reason": "2026-09-06 舞讯金坛段「老朱（原夜猫）12:00-00:00」=今日营业；平台仅#800老猫音乐茶社（金坛区，CEASED）可对应——但三名不一致：舞讯新名老朱、括注原名夜猫、平台现名老猫（老猫≠老朱，且原夜猫与平台老猫冲突），09-05 已列表② forceReversal 待放行。金坛区仅此一家舞厅，地理上最可能同一家但名称证据不足",
+   "next_action": "不自动反转/不改名；下次舞讯若再点名（老猫/老朱/夜猫任一），先问用户实况或联网核实店名后再 forceReversal+改名"
+  }
+ ]
 }

@@ -68,10 +68,12 @@ OPEN，用户投诉「明明营业却显示停业」）。
 
 ### Step 2 拉取平台门店候选（按量加载）
 
-1. 登录：token 获取顺序 = `--token` / `ADMIN_TOKEN` 环境变量 / **`/tmp/qw_token.json`
-   缓存（跨会话有效，先读它，401 才重新 login）**；都不在才 `python3 scripts/qw_api.py
-   login --base-url <BASE_URL>`（交互输入密码）。token 有效性一句话验证：
-   `curl -H "Authorization: Bearer $TOKEN" $BASE_URL/admin/venue-sync/reversals?limit=1`。
+1. 登录：token 获取顺序 = `--token` 参数 / `ADMIN_TOKEN` 环境变量 / **`/tmp/qw_token.json`
+   缓存（跨会话有效；⚠️ `qw_api.py` 不自动读缓存——须 `ADMIN_TOKEN=$(python3 -c
+   "import json;print(json.load(open('/tmp/qw_token.json'))['token'])")` 或 `--token`
+   传入，且变量名必须是 `ADMIN_TOKEN`（写 `TOKEN=` 无效，2026-09-06 实测），401 才
+   重新 login（`/tmp/qw_login.py` 远程读生产 web-auth 换新 token）**。token 有效性
+   一句话验证：`curl -H "Authorization: Bearer $TOKEN" $BASE_URL/admin/venue-sync/reversals?limit=1`。
 2. 拉取候选，**两档路径（2026-09-04 实证）**：
    - **覆盖城市 ≤5**：按城市逐个拉取 `--city 成都市`（一城一页足够，totalElements 超
      页内数按 page 递增）；
