@@ -88,8 +88,8 @@ import java.util.Set;
  * {@link #labelOf} / {@link #polarityOf}）在 legacy 之上叠加目录——<b>禁止</b>把目录项
  * 逐个复制成本枚举的 enum value（否则双端同步成本结构性膨胀，重蹈 08-12 收缩覆辙）。
  * 域内去重规则：目录项若 emoji（去除 VS16 后）与 legacy 撞车则剔除（同一域同一 emoji
- * 只有一个 code，防 Picker 双胞胎）——legacy 16 项占用的 emoji
- * （🛵🐉🔥👍⭐🌸💋💃💁✌🪑😕😡😬🚬🚭）在门店域不再重复提供普通版。
+ * 只有一个 code，防 Picker 双胞胎）——legacy 17 项占用的 emoji
+ * （🛵🐉🤩🔥👍⭐🌸💋💃💁✌🪑😕😡😬🚬🚭）在门店域不再重复提供普通版。
  * <p>
  * <b>2026-09-03 新增两个圈内黑话 legacy（用户驱动，排序靠前）</b>：legacy 12 → 14。
  * ① {@link #JICHE}（🛵 机车——台湾黑话负面形容舞伴难搞/态度差，NEGATIVE）；
@@ -103,6 +103,13 @@ import java.util.Set;
  * 不进热度公式（positiveCodeNames）、不进「近期风险」区（negativeCodeNames），仅作
  * 展示。声明序收在 legacy 末尾（核心人气/舞伴信号之后、目录表情之前——低频属性补充
  * 非头部高频信号）；emoji 占用清单追加 🚬🚭；DB 零迁移（纯新增 code）。
+ * <p>
+ * <b>2026-09-07 新增舞伴质量轴正端黑话（用户驱动）</b>：legacy 16 → 17。
+ * {@link #JIPIN}（🤩 极品——圈内夸赞该店舞伴质量/颜值出众的说法，POSITIVE）。
+ * 与 09-03 黑话族（JICHE 机车=态度负、LONG 龙=颜值中）对称补质量轴正端，形成
+ * 态度负 → 颜值中 → 颜值正小闭环；POSITIVE → 进热度公式（与 SWEET/MATURE 等舞伴
+ * 正向信号同族）。emoji 占用清单追加 🤩（目录「星星眼」项剔除，venue Picker
+ * 142 → 141）；DB 零迁移（纯新增 code，无历史数据重映射）。
  */
 public enum ReactionCode {
     /**
@@ -120,6 +127,16 @@ public enum ReactionCode {
      * 不进「近期风险」区（negativeCodeNames），仅作展示；声明序紧随 JICHE 置前。
      */
     LONG("🐉", "龙", Polarity.NEUTRAL),
+    /**
+     * 2026-09-07 新增（用户驱动，排序靠前）：圈内黑话「极品」——舞伴质量轴正端
+     * （与 JICHE 机车=态度负、LONG 龙=颜值中对称补位：态度负 → 颜值中 → 颜值正）。
+     * 🤩 星星眼取"眼前一亮"义——质量正端无字面物象可借（区别于机车→🛵/龙→🐉），
+     * 借语义表情；POSITIVE → 进热度公式（舞伴正向信号族，与 SWEET/MATURE 一致）。
+     * code 用汉语拼音 JIPIN（同 JICHE/LONG 先例——黑话无英文等价词，语义化翻译
+     * 会失真）；label 用单字眼「极品」不带"妹妹"等物化主语（公开文字合规分寸）；
+     * description 留空同 JICHE/LONG。
+     */
+    JIPIN("🤩", "极品", Polarity.POSITIVE),
     HOT("🔥", "人气旺", Polarity.POSITIVE),
     RECOMMEND("👍", "值得推荐", Polarity.POSITIVE),
     /**
