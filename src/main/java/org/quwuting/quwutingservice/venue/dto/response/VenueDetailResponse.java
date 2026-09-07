@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonFormat;
 import org.quwuting.quwutingservice.venueclaim.enums.ClaimStatus;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 场所详情响应体（GET /venues/{id}）。
@@ -30,6 +31,11 @@ import java.time.LocalDateTime;
  *   <li>myClaimStatus — 当前用户对该门店的认领申请状态（nullable，未登录恒为 null）。
  *       前端「认领舞厅」菜单项据此渲染"审核中"禁用态（PENDING 时）；APPROVED 时
  *       canManage 必为 true（菜单项整体隐藏），REJECTED/WITHDRAWN 时用户可重新申请。</li>
+ *   <li>aliases — 门店别名列表（2026-09-07 门店别名域，docs/agents/38-venue-aliases.md，
+ *       录入顺序）。详情专属下发（列表 VenueResponse 不携带——列表卡片不展示，
+ *       省批量注入成本）；归属详情「公共部分」缓存体（与请求用户无关的事实），
+ *       冷启动 +1 查、缓存命中零往返，管理端写路径经 VenueService#invalidateDetailPublic
+ *       失效。驱动详情页标题浮层别名行（搜别名进来的用户核对身份）。</li>
  * </ul>
  */
 public record VenueDetailResponse(
@@ -39,5 +45,6 @@ public record VenueDetailResponse(
         boolean hasMyStatusReport,
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime statusUpdatedAt,
         boolean claimed,
-        ClaimStatus myClaimStatus
+        ClaimStatus myClaimStatus,
+        List<String> aliases
 ) {}

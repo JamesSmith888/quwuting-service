@@ -153,16 +153,22 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
 
     /**
      * keyword 自由文本命中表达式（2026-09-02 搜索增强 v2，docs/agents/07-list-page.md
-     * 「关键词匹配口径」）：{@code :keyword} 为调用方包装的 {@code %xx%} 单串子串 pattern。
+     * 「关键词匹配口径」；2026-09-07 门店别名域接入，docs/agents/38-venue-aliases.md）：
+     * {@code :keyword} 为调用方包装的 {@code %xx%} 单串子串 pattern。
      * <p>
-     * 命中字段 = 原 name/address/description 扩至 <b>六字段 + 门店同步别名</b>：
+     * 命中字段 = 原 name/address/description 扩至 <b>六字段 + 双别名载体</b>：
      * <ul>
      *   <li>city / district：按「城市/区/商圈」找店（用户输入「静安」命中 district、
      *       「绍兴市」命中 city，无需先在左上角选城市）；</li>
      *   <li>tags：按特征词找店（「龙女」「黑灯」等——tags 为 JSON 数组字符串列，
      *       元素子串匹配口径与 tag 筛选谓词一致）；</li>
      *   <li>qwt_venue_sync_aliases.source_name（{@link VenueSyncAlias}）：舞讯/圈子称呼
-     *       → 平台门店的映射（信息源店名），「圈内叫法搜得到」数据载体，零新表。</li>
+     *       → 平台门店的映射（信息源店名），「圈内叫法搜得到」数据载体，零新表；</li>
+     *   <li>qwt_venue_aliases.alias（{@link VenueAlias}，2026-09-07）：管理员维护的
+     *       门店别名（曾用名/俗称/圈内涵称）——舞厅常改名，用户只记得老名字时靠它
+     *       搜店认店。与 sync alias 语义严格分离：sync alias 是管线匹配配置
+     *       （key 含 city、导出 aliases.json 给 matcher），本载体是用户可见的
+     *       门店身份属性（详情页展示）。</li>
      * </ul>
      * 匹配语义：单串子串（与 v 相关字段逐个 OR）；多词 AND 在 Service 层拆词后逐词
      * 行集探测求交集 → {@code :filterIds} 白名单叠加（见 listVenues 注释）。
@@ -198,7 +204,10 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     String RELEVANCE_KEYS = """
             CASE WHEN :kwPrefix IS NOT NULL AND v.name LIKE :kwPrefix ESCAPE '!' THEN 0
                  WHEN :kwPrefix IS NOT NULL AND v.name LIKE :keyword ESCAPE '!' THEN 1
-                 ELSE 2 END,
+                 WHEN :kwPrefix IS NOT NULL AND EXISTS (SELECT 1 FROM VenueAlias va
+                            WHERE va.venueId = v.id AND va.deleted = false
+                              AND va.alias LIKE :keyword ESCAPE '!') THEN 2
+                 ELSE 3 END,
             CASE WHEN :kwPrefix IS NOT NULL AND v.status =
                  org.quwuting.quwutingservice.venue.enums.VenueStatus.OPEN THEN 0
                  ELSE 1 END,
@@ -671,10 +680,14 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
 
     /**
      * 门店名称联想（2026-09-02 suggest，GET /venues/suggest）：prefix（%词）优先 +
-     * 中缀（%词%）+ 同步别名 source_name 中缀兜底，取前 {@code limit} 条——前缀命中
-     * 排前、营业中（OPEN）排前、新收录（id DESC）兜底。别名命中的门店按中缀同组
-     * （用户输圈内叫法时给出正式名联想）。keyword 含分隔符（多词）时不调用本方法
-     * （联想键只取完整单串，见 VenueService#listVenueSuggestions）。
+     * 中缀（%词%）+ 双别名载体中缀兜底（同步别名 source_name + 门店别名 alias，
+     * 2026-09-07 门店别名域同步口径——命中载体保持一致契约），取前 {@code limit} 条
+     * ——前缀命中排前、营业中（OPEN）排前、新收录（id DESC）兜底。别名命中的门店
+     * 按中缀同组（用户输圈内叫法/老名字时给出正式名联想）。keyword 含分隔符（多词）
+     * 时不调用本方法（联想键只取完整单串，见 VenueService#listVenueSuggestions）。
+     * <p>
+     * 前端联想浮层 2026-09-02 晚已下线（列表卡片覆盖联想场景），接口按既定决策保留
+     * （未来「热门搜索」复用容器 + 接口）——故命中口径仍随 KW_MATCH 同步演进。
      */
     @Query("""
             SELECT v FROM Venue v
@@ -683,7 +696,10 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                    OR v.name LIKE :infix ESCAPE '!'
                    OR EXISTS (SELECT 1 FROM VenueSyncAlias sa
                               WHERE sa.venueId = v.id AND sa.deleted = false
-                                AND sa.sourceName LIKE :infix ESCAPE '!'))
+                                AND sa.sourceName LIKE :infix ESCAPE '!')
+                   OR EXISTS (SELECT 1 FROM VenueAlias va
+                              WHERE va.venueId = v.id AND va.deleted = false
+                                AND va.alias LIKE :infix ESCAPE '!'))
             ORDER BY CASE WHEN v.name LIKE :prefix ESCAPE '!' THEN 0 ELSE 1 END,
                      CASE WHEN v.status =
                           org.quwuting.quwutingservice.venue.enums.VenueStatus.OPEN THEN 0
@@ -693,6 +709,21 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     List<Venue> suggestByName(@Param("prefix") String prefix,
                               @Param("infix") String infix,
                               Pageable pageable);
+
+    /**
+     * 管理端门店候选搜索（2026-09-07 门店别名域，Web 管理后台「门店别名」页配置时选店）：
+     * 名称子串匹配（ESCAPE '!' 字面口径与 KW_MATCH 一致，Service 层
+     * escapeLikeLiteral 包装 %xx%）；keyword 为 null（前端空关键词）时谓词短路恒真
+     * = 最近收录兜底（首次进入即有候选可点）。不限状态——停业/暂停门店同样可能
+     * 配置别名（曾用名）。数据规模数百级，单次 LIKE 全扫毫秒级，无需索引。
+     */
+    @Query("""
+            SELECT v FROM Venue v
+            WHERE v.deleted = false
+              AND (:keyword IS NULL OR v.name LIKE :keyword ESCAPE '!')
+            ORDER BY v.id DESC
+            """)
+    List<Venue> searchVenueAliasCandidates(@Param("keyword") String keyword, Pageable pageable);
 
     /** 城市维度统计：有场所的城市按场所数倒序（供前端"热门城市"选择，数据驱动、免维护） */
     @Query("""

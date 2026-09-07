@@ -8,6 +8,7 @@ import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * 微信订阅消息额度仓储（2026-09-07 新增，V11）。
@@ -114,4 +115,7 @@ public interface WxSubscribeQuotaRepository extends JpaRepository<WxSubscribeQuo
 
         int getAvailableCount();
     }
+
+    /** 用户某模板额度记录（GET /user/wx-subscribe-status 数据源；无记录 = 从未授权） */
+    Optional<WxSubscribeQuota> findByUserIdAndTemplateIdAndDeletedFalse(Long userId, String templateId);
 }

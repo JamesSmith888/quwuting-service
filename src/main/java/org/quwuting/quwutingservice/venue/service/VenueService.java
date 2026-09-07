@@ -24,6 +24,7 @@ import org.quwuting.quwutingservice.venue.dto.response.VenuePhotoResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueSuggestResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
+import org.quwuting.quwutingservice.venue.entity.VenueAlias;
 import org.quwuting.quwutingservice.venue.entity.VenuePhoto;
 import org.quwuting.quwutingservice.venue.entity.VenueStatusLog;
 import org.quwuting.quwutingservice.venue.enums.PartnerFeeUnit;
@@ -33,6 +34,7 @@ import org.quwuting.quwutingservice.venue.enums.VenueSortMode;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
 import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportService;
+import org.quwuting.quwutingservice.venue.repository.VenueAliasRepository;
 import org.quwuting.quwutingservice.venue.repository.VenuePhotoRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
@@ -130,6 +132,7 @@ public class VenueService {
     private final ImageContentValidator imageValidator;
     /** 门店相册照片（2026-08-20 门店照片域：独立表 + PENDING 先审后发，见 AGENTS.md「门店照片域」） */
     private final VenuePhotoRepository venuePhotoRepository;
+    private final VenueAliasRepository venueAliasRepository;
     /** 场所实体缓存显式逐出（照片写方法 key 依赖查询结果，@CacheEvict 无法表达，见 VenueClaimService 同款先例） */
     private final CacheManager cacheManager;
 
@@ -700,7 +703,8 @@ public class VenueService {
      * DB 往返压缩（2026-08-13 公共部分缓存后）：
      * <ul>
      *   <li><b>公共部分</b>（与请求用户无关）：venue 实体 + 默认窗口 Top Reaction 徽标 +
-     *       累计浏览量 + 状态更新时间 + 认领事实 → 内嵌 Caffeine 缓存
+     *       累计浏览量 + 状态更新时间 + 认领事实 + 门店别名（2026-09-07 门店别名域，
+     *       详见 {@link VenueDetailResponse#aliases}）→ 内嵌 Caffeine 缓存
      *       （{@link #venueDetailPublicCache}，refresh-ahead 30s），命中时零 DB 往返；</li>
      *   <li><b>用户相关部分</b>（永远实时）：动态总数 + 个人上报标记合并单查询
      *       （{@link VenuePostRepository#findDetailStats}，匿名 userId=null 时
@@ -708,7 +712,7 @@ public class VenueService {
      *       canManage 由 venue 实体（缓存命中）内存计算，零查询。</li>
      * </ul>
      * 缓存全命中 + 匿名时仅 1 次 DB 往返（detailStats）；登录命中 2 次（detailStats + claim）。
-     * 冷启动（公共部分回源）最多 4~5 次，回源后其余请求单飞共享。
+     * 冷启动（公共部分回源）最多 5~6 次（2026-09-07 起含别名单查），回源后其余请求单飞共享。
      */
     @Transactional(readOnly = true)
     public VenueDetailResponse getVenueDetail(Long id) {
@@ -737,12 +741,13 @@ public class VenueService {
                     .orElse(null);
         }
         return new VenueDetailResponse(pub.base(), canManage, postCount, hasMyStatusReport,
-                pub.statusUpdatedAt(), pub.claimed(), myClaimStatus);
+                pub.statusUpdatedAt(), pub.claimed(), myClaimStatus, pub.aliases());
     }
 
     /**
      * 详情接口公共部分计算（缓存 loader，勿直接调用——经 {@link #venueDetailPublicCache}）。
-     * 与请求用户无关：默认窗口（近7天）徽标 + 累计浏览量 + 状态最近变更时间 + 认领事实。
+     * 与请求用户无关：默认窗口（近7天）徽标 + 累计浏览量 + 状态最近变更时间 + 认领事实
+     * + 门店别名（2026-09-07，录入顺序）。
      * 注意 getBadges 传 userId=null（公共聚合不含个人参与态——个人态在 /reactions/stats
      * 实时返回；base.topReactions 仅承载列表快照/兜底展示）。
      */
@@ -756,9 +761,14 @@ public class VenueService {
         // 2026-08-20 门店照片域：详情基础响应照片改读独立表 PUBLIC（JSON 列废弃）
         List<String> photos = loadPublicPhotosByVenueIds(List.of(id)).getOrDefault(id, List.of());
         VenueResponse base = venueResponseMapper.toResponse(venue, topReactions, false, viewCount, photos);
+        // 门店别名（2026-09-07 门店别名域）：详情公共部分缓存体（录入顺序）；
+        // 管理端写路径经 invalidateDetailPublic 失效（VenueAliasService#upsert/#delete）
+        List<String> aliases = venueAliasRepository.findByVenueIdAndDeletedFalseOrderByIdAsc(id)
+                .stream().map(VenueAlias::getAlias).toList();
         return new VenueDetailPublic(base,
                 venueStatusLogRepository.findLatestStatusChangeTime(id),
-                venue.getClaimedBy() != null);
+                venue.getClaimedBy() != null,
+                aliases);
     }
 
     /**
@@ -772,8 +782,11 @@ public class VenueService {
 
     /**
      * 详情接口「公共部分」值对象（与请求用户无关，见 {@link #venueDetailPublicCache} 注释）。
+     * aliases（2026-09-07 门店别名域）：详情专属下发（列表不携带），归属公共部分——
+     * 与请求用户无关的门店身份事实，冷启动随回源 +1 查、缓存命中零往返。
      */
-    private record VenueDetailPublic(VenueResponse base, LocalDateTime statusUpdatedAt, boolean claimed) {}
+    private record VenueDetailPublic(VenueResponse base, LocalDateTime statusUpdatedAt,
+                                     boolean claimed, List<String> aliases) {}
 
     /**
      * 场所列表：筛选 + 排序 + 距离半径 + 分页。
@@ -829,7 +842,7 @@ public class VenueService {
         // 关键词检索模型 v2（2026-09-02，docs/agents/07-list-page.md「关键词匹配口径」）：
         //   - 归一：trim + 长度上限 → 按分隔符拆词 → 每词 LIKE 字面转义（!、%、_，
         //     与 KW_MATCH / RELEVANCE_KEYS 的 ESCAPE '!' 配套）；
-        //   - 单词：整串子串匹配（KW_MATCH 六字段 + 门店同步别名）+ kwPrefix 前缀 pattern
+        //   - 单词：整串子串匹配（KW_MATCH 六字段 + 双别名载体）+ kwPrefix 前缀 pattern
         //     （驱动搜索相关度排序，见 RELEVANCE_KEYS）；
         //   - 多词：逐词 findIdsByKeyword 行集探测求交集 → :filterIds 白名单回灌主查询
         //     （keyword=null + v.id IN 交集；多词是宽意图，结果量小，相关度 CASE 停用，
@@ -1106,7 +1119,7 @@ public class VenueService {
 
     /**
      * 多词 AND 行集探测：逐词 {@code findIdsByKeyword}（%词% pattern，命中口径 =
-     * KW_MATCH 六字段 + 同步别名）求交集。任一词零命中 → 恒为空集（上游短路返回空页，
+     * KW_MATCH 六字段 + 双别名载体）求交集。任一词零命中 → 恒为空集（上游短路返回空页，
      * 不再发主查询）。数据规模数百级：每词一次 LIKE 全扫毫秒级，最多
      * {@link #MAX_KEYWORD_TOKENS} 次 + 一次内存交集。
      */

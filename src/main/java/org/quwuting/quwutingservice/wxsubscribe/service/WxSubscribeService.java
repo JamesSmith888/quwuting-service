@@ -2,10 +2,13 @@ package org.quwuting.quwutingservice.wxsubscribe.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.wxsubscribe.dto.response.WxSubscribeStatusResponse;
 import org.quwuting.quwutingservice.wxsubscribe.entity.WxSubscribeLog;
+import org.quwuting.quwutingservice.wxsubscribe.entity.WxSubscribeQuota;
 import org.quwuting.quwutingservice.wxsubscribe.repository.WxSubscribeLogRepository;
 import org.quwuting.quwutingservice.wxsubscribe.repository.WxSubscribeQuotaRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
@@ -37,12 +40,35 @@ public class WxSubscribeService {
     }
 
     /**
+     * 当前用户订阅额度状态（GET /user/wx-subscribe-status 数据源）：无记录 = 从未
+     * 授权（granted/available 均 0，前端「微信提醒」子项未开启态）。
+     */
+    @Transactional(readOnly = true)
+    public WxSubscribeStatusResponse queryStatus(Long userId, String templateId) {
+        WxSubscribeQuota quota = quotaRepository
+                .findByUserIdAndTemplateIdAndDeletedFalse(userId, templateId).orElse(null);
+        if (quota == null) {
+            return new WxSubscribeStatusResponse(templateId, 0, 0);
+        }
+        return new WxSubscribeStatusResponse(templateId,
+                quota.getAvailableCount(), quota.getGrantedTotal());
+    }
+
+    /**
      * 记录一次发送结果并维护额度（发送成功扣减 / 43101 清零对账 / 其他失败不动）。
      * 留痕与额度更新同一事务原子提交。
+     * <p>
+     * <b>REQUIRES_NEW（2026-09-07 生产实测修复）</b>：本方法由
+     * {@code WxSubscribeSendService#onVenueStatusChanged}（@TransactionalEventListener
+     * AFTER_COMMIT 同步回调，同一请求线程）调用——afterCommit 阶段外层事务已提交但
+     * 事务同步尚未清理（doCleanupAfterCompletion 未执行），REQUIRED 传播会误判
+     * 「已有事务」而<b>加入已提交的失效事务</b>，Hibernate flush/commit 全部静默丢失
+     * （无异常、无日志、无落库——生产首测发送失败 47003 后 qwt_wx_subscribe_logs 为空、
+     * 额度未扣正是此现象）。REQUIRES_NEW 强制挂起并开独立事务，写入必然落库。
      *
      * @param delivered 微信 errcode == 0（服务通知已受理下发）
      */
-    @Transactional
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void recordDelivery(Long userId, Long venueId, String templateId,
                                boolean delivered, Integer errcode) {
         LocalDateTime now = LocalDateTime.now();

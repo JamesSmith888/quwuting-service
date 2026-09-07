@@ -40,9 +40,11 @@ import java.util.Map;
  *       DB 往返）；发送成功扣一条，43101 清零对账（账本在 {@link WxSubscribeService}）；</li>
  *   <li><b>access_token 单例</b>：复用 auth {@link WechatService#getAccessToken()}，
  *       遵守 AGENTS.md 36 号「禁第三实例」纪律（多实例各自刷新会互相顶掉 token）；</li>
- *   <li><b>模板字段 key</b>：data 按 thing1/thing2/time3 填充（消息类型/当前状态/
- *       时间，按模板关键词申请顺序编号）——<b>需与小程序后台模板详情实际 key 核对</b>，
- *       不符时微信报 47003（qwt_wx_subscribe_logs 留痕可定位）；</li>
+ *   <li><b>模板字段 key（2026-09-07 22:56 已与后台核对）</b>：data = phrase1（消息
+ *       类型，phrase 类 ≤5 字）/ thing2（当前状态，thing 类 ≤20 字）/ time3（时间，
+ *       time 类）——与申请模板时的关键词顺序一致，改模板字段布局时必须同步本处；
+ *       首测 47003「data.phrase1.value is empty」即旧版按 thing1 填充致 phrase1
+ *       缺失（必填校验拒绝整单）；</li>
  *   <li><b>规模假设</b>：关注者个位数~数十人，逐用户串行 HTTP（每用户一次微信
  *       调用，微信 subscribe/send 无批量接口）；量级上来后再转异步队列，当前
  *       同步执行换取链路简单。</li>
@@ -57,6 +59,10 @@ public class WxSubscribeSendService {
             "https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token={token}";
     /** 状态变更通知落地页（deep link 直达触发门店详情页） */
     private static final String VENUE_DETAIL_PAGE = "pages/venue-detail/venue-detail?id=";
+    /** 订阅通知落地标识（2026-09-07）：通知点击进入详情 → 前端自动弹营业状态详情弹窗
+     *  承接「看这家店变成什么样」，并据此识别「额度补充」场景（subscribe=1 仅本通知
+     *  落地携带，与浏览来源统计参数 from 隔离不复用） */
+    private static final String SUBSCRIBE_ENTRY_QUERY = "&subscribe=1";
     /** thing 类字段长度上限（微信 thing 关键词 ≤20 字符，超限报 47003） */
     private static final int THING_MAX_LENGTH = 20;
     /** 「当前状态」字段内门店名与状态的分隔符 */
@@ -131,12 +137,14 @@ public class WxSubscribeSendService {
         String accessToken = wechatService.getAccessToken();
 
         Map<String, Object> data = Map.of(
-                // 消息类型（模板关键词 1；key 需与后台模板详情核对，不符报 47003）
-                "thing1", Map.of("value", "营业状态变更"),
-                // 当前状态（模板关键词 2）=「门店名·状态」——模板无独立门店名字段，
-                // 用户的第一个问题永远是「哪家店」，拼进状态字段保住关键信息
+                // 消息类型 = phrase1（模板关键词 1，2026-09-07 22:56 用户后台核对：
+                // phrase 类型 ≤5 字，故用 4 字「营业变更」，勿填 6 字超限）
+                "phrase1", Map.of("value", "营业变更"),
+                // 当前状态 = thing2（模板关键词 2）=「门店名·状态」——模板无独立门店
+                // 名字段，用户的第一个问题永远是「哪家店」，拼进状态字段保住关键信息；
+                // thing 类型 ≤20 字（composeStatusText 内截断守卫）
                 "thing2", Map.of("value", composeStatusText(event.venueName(), event.to())),
-                // 时间（模板关键词 3）= 状态变更时刻
+                // 时间 = time3（模板关键词 3）= 状态变更时刻
                 "time3", Map.of("value", LocalDateTime.now().format(TIME_FORMATTER)));
 
         for (StatusChangeRecipient recipient : recipients) {
@@ -150,7 +158,7 @@ public class WxSubscribeSendService {
         Map<String, Object> body = Map.of(
                 "touser", recipient.getOpenId(),
                 "template_id", templateId,
-                "page", VENUE_DETAIL_PAGE + venueId,
+                "page", VENUE_DETAIL_PAGE + venueId + SUBSCRIBE_ENTRY_QUERY,
                 "miniprogram_state", miniprogramState,
                 "lang", "zh_CN",
                 "data", data);
