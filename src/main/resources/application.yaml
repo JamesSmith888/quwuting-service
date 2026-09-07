@@ -71,6 +71,10 @@ server:
 wechat:
   appid: wx054a26bf9b1424dc
   secret: ${WECHAT_SECRET}
+  # 分享小程序码 env_version（getwxacodeunlimit，2026-09-07 40-wxacode-share）：
+  # release=正式版 / trial=体验版 / develop=开发版——扫码打开对应版本的小程序，
+  # 生产恒 release；联调可临时改 trial（对齐 web-auth.qrcode-env 先例）
+  qrcode-env: release
 
 # JWT 签名配置（secret 必须通过环境变量注入，生产环境禁止使用默认值）
 jwt:

@@ -38,6 +38,20 @@ OPEN，用户投诉「明明营业却显示停业」）。
 5. **幂等不重复**：新增前必查候选库确认「同城同名不存在」；写库后如实汇报
    CREATED/EXISTED/FAILED 明细。
 
+## 🔄 双位置同步约定（2026-09-07 用户要求，最高优先）
+
+本 Skill 存在**两份副本**，任何一份有变动都必须保持同步，**Git 侧以项目路径为准**：
+
+- **项目路径（Git 管理，源文件）**：`/Users/xin.y/WeChatProjects/quwuting-service/quwuting-venue-daily-sync/`
+- **用户路径（WorkBuddy 运行时加载）**：`~/.workbuddy/skills/quwuting-venue-daily-sync/`
+
+**同步规则（每次会话开始时 + 每次改动后执行）**：
+1. 会话开始：`diff` 两边三件套（SKILL.md / scripts/qw_api.py / reference/*-dict.json），
+   以**较新的一方**覆盖另一方（通常项目路径更新，正向拷贝项目 → 用户级）。
+2. 会话中改动 SKILL.md / 字典 / 脚本后：**先写项目路径，再整体拷贝到用户路径**
+   （`cp -R`，排除 .DS_Store / __pycache__），保证 Git 侧始终是权威版本、可提交。
+3. 判别新旧：比对字典 JSON 的 `updated` 字段 + 文件 mtime；无法判断时问用户。
+
 ## 前置条件
 
 - 后端地址：`BASE_URL`（本地 http://localhost:8080；切生产前必须问用户）
