@@ -327,9 +327,11 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * <p>
      * 语义与热门标记的「行为热度」（完整热度分扣除运营权重 sortWeight）完全一致：
      * <b>2026-08-27 起浏览项 = {@link #VIEW_BEHAVIOR}（来源加权 + 近7天×2 + ln 压缩）</b>
-     * + 近30天新增收藏×15（<b>2026-09-01 收敛</b>：收藏总数为累计展示、不再计入公式——
+     * + 近30天新增收藏×8（<b>2026-09-01 收敛 + 2026-09-07 校准 15→8</b>：收藏总数为
+     * 累计展示、不再计入公式——
      * 旧双列「收藏总数×10 + 新增×15」是集合包含关系，一次收藏重复计 10+15=25 分，
-     * 且存量永续制造马太，见 {@link org.quwuting.quwutingservice.config.VenueHeatWeights}）
+     * 且存量永续制造马太；单次收藏不得碾压整月浏览贡献上限，见
+     * {@link org.quwuting.quwutingservice.config.VenueHeatWeights}）
      * + 近30天新增动态×5（2026-09-01 由动态总数改窗口，admin 内容存量不参与）
      * + 近30天评分数×8
      * + 近30天正向 Reaction×3 + 近30天收到积分 × :pointsWeight（2026-08-10 V2 新增，
@@ -397,19 +399,24 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     /**
      * 热度分（不含距离项）：运营权重 + 「行为热度」。
      * <p>
-     * <b>2026-08-27 零行为权重守卫</b>（生产实证修复：79 家种子门店被批量赋予 30~50
-     * 运营权重，其中 42 家行为热度为 0——零人气的"僵尸门店"仅靠权重挤占真实热门门店的
-     * 排位，MT舞酒吧 sortWeight=45 + 行为 76 被抬到列表第 3）。语义 = 与热门标记
-     * 「行为热度 ≥ 门槛」同构的曝光门槛：<b>行为热度 = 0 的门店（无实质活跃信号）
-     * 不因运营权重获得排序曝光</b>——
+     * <b>2026-08-27 零行为权重守卫；2026-09-07 阈值上修（悬崖解锁修复）</b>：
+     * 08-27 生产实证（79 家种子门店被批量赋予 30~50 运营权重、42 家行为热度为 0，
+     * "僵尸门店"仅靠权重挤占真实热门排位，MT舞酒吧 sortWeight=45 + 行为 76 被抬到
+     * 列表第 3）确立守卫；09-07 二次实证（西安火舞山音乐厅 1 次收藏即升至城市第 2）——
+     * 原二值开关「行为 &gt; 0 即全量解锁」在行为 0→单点信号（1 收藏）的瞬间叠加全部
+     * sortWeight，运营加权门店被单个稀疏行为直接抬升登顶，守卫退化为「零 vs 有」而非
+     * 「人气量级」。阈值上修为 <b>行为热度 ≥ {@link VenueHeatWeights#SORT_WEIGHT_GUARD_MIN_BEHAVIOR}
+     * （= 15，≈ 2 次收藏 ×8 的量级）才叠加运营权重</b>——语义 = 与热门标记
+     * 「行为热度 ≥ 门槛」同构的曝光门槛：<b>零行为或仅单点稀疏行为的门店（1 收藏 = 8 /
+     * 1 评分 = 8，均 &lt; 15）不因运营权重获得排序曝光</b>——
      * <pre>
-     * HEAT_SCORE = CASE WHEN HEAT_BEHAVIOR &gt; 0 THEN sortWeight ELSE 0 END
+     * HEAT_SCORE = CASE WHEN HEAT_BEHAVIOR &gt;= 15 THEN sortWeight ELSE 0 END
      *              + HEAT_BEHAVIOR
      * </pre>
-     * 行为热度 &gt; 0（有任一实质活跃信号）时运营权重照常参与——运营推广提升曝光属其
-     * 本职，仅对"零行为门店"失效。与 {@code findHotVenueIds} 的关系：热门判定已有
-     * 「行为热度 ≥ venue.hot.min-heat-score（默认 70）」绝对门槛兜底，零行为门店
-     * 行为=0 &lt; 70 恒不进热门集合，无需重复守卫（见 findHotVenueIds javadoc）。
+     * 行为热度 ≥ 阈值（有量级的实质活跃信号）时运营权重照常参与——运营推广提升曝光属其
+     * 本职，仅对"无行为/极稀疏行为"门店失效。与 {@code findHotVenueIds} 的关系：热门判定已有
+     * 「行为热度 ≥ venue.hot.min-heat-score（默认 70）」绝对门槛兜底，稀疏行为门店
+     * 行为 &lt; 70 恒不进热门集合，无需重复守卫（见 findHotVenueIds javadoc）。
      * <p>
      * <b>2026-08-08 口径统一</b>（修复列表/详情双口径分叉）：行为部分见
      * {@link #HEAT_BEHAVIOR}——本片段只是在其上叠加"受守卫的运营权重"。
@@ -419,10 +426,11 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 子查询执行两遍；数据规模数百级 + 标量子查询命中 (venue_id, ...) 索引，无性能压力。
      * <p>
      * <b>2026-09-02 双算优化评估结论（勿重复探索，除非触发下列条件）</b>：消除双算
-     * 需「对同一标量 B = HEAT_BEHAVIOR 求和一次」+「判定 B &gt; 0」——守卫条件与求和项
+     * 需「对同一标量 B = HEAT_BEHAVIOR 求和一次」+「判定 B ≥ 守卫阈值」——守卫条件与求和项
      * 是同一数值的两次使用，JPQL 无 WITH/CTE、无 SELECT/ORDER BY 内别名复用 → 纯
-     * JPQL 内<b>无法</b>单算（B 非负故 B&gt;0 等价"六来源任一存在窗口记录"，但六表 EXISTS
-     * OR 仍是 6 个子查询，与第二遍求和同数量级，不省）。等价改写唯一路径 = nativeQuery +
+     * JPQL 内<b>无法</b>单算（2026-09-07 守卫阈值上修至 ≥15 后结论不变：B 非负且需先求
+     * 出 B 才能与 15 比较——「六来源任一存在记录」的 EXISTS 拼法只能表达 &gt;0、无法表达
+     * 量级阈值；且六表 EXISTS OR 仍是 6 个子查询，与第二遍求和同数量级，不省）。等价改写唯一路径 = nativeQuery +
      * 派生表/CTE（六来源表 UNION ALL 后 GROUP BY venue_id 一次聚合，MySQL 8 与 PG
      * 均支持 WITH）重写全部列表主查询，RELEVANCE_KEYS / KW_MATCH 片段同步 native 化，
      * VenueListQueryHqlSyntaxTest 同步改造——数据数百级 + 2026-08-30 生产切 RDS MySQL
@@ -433,7 +441,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     String HEAT_SCORE = """
             (CASE WHEN ("""
             + HEAT_BEHAVIOR + """
-            ) > 0 THEN v.sortWeight ELSE 0 END
+            ) >= """
+            + VenueHeatWeights.SORT_WEIGHT_GUARD_MIN_BEHAVIOR + """
+            THEN v.sortWeight ELSE 0 END
              + """
             + HEAT_BEHAVIOR + """
             )
@@ -445,9 +455,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 排序公式（服务端排序保证分页正确性）：
      * <pre>
      * score = 行为热度（HEAT_SCORE = 受守卫的运营权重 + 浏览贡献 ln(1+加权浏览)
-     *                     （来源加权：列表0.5/其他1/搜索1.5/分享2，近7天×2）+ 近30天新增收藏×15
+     *                     （来源加权：列表0.5/其他1/搜索1.5/分享2，近7天×2）+ 近30天新增收藏×8
      *                     + 近30天新增动态×5 + 评分×8 + 正向反馈×3 + 近30天积分×pointsWeight，
-     *                     2026-08-27 起行为热度=0 的门店运营权重不生效，见 HEAT_SCORE 注释）
+     *                     2026-09-07 起行为热度 ≥ 15（≈2 次收藏）才叠加运营权重，见 HEAT_SCORE 注释）
      * </pre>
      * <b>2026-09-01 距离加成移除</b>：旧公式含 {@code + 100/(1+距离km)} 邻近加成，用户实证
      * 「热度2 的本地店压过热度17 的外地店」（西部舞厅 4.5km +18 分 vs 今之音乐酒吧 114km +0.9 分，

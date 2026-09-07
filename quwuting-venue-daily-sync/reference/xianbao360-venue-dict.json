@@ -1,7 +1,7 @@
 {
   "source": "xianbao360",
   "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-09-06",
+  "updated": "2026-09-07",
   "entries": [
     {
       "city": "西安市",
@@ -1215,6 +1215,150 @@
       "venue_id": 1219,
       "kind": "alias",
       "note": "早间清单短名；2026-09-06 建档案"
+    },
+    {
+      "city": "杭州市",
+      "news_name": "蓝玉",
+      "platform_name": "丁兰广场（蓝玉）",
+      "venue_id": 319,
+      "kind": "alias",
+      "note": "2026-09-07 双源AB均列「蓝玉」，括号别名命中，CEASED→OPEN 已反转（sourceId=user-20260907）"
+    },
+    {
+      "city": "大连市",
+      "news_name": "红玉",
+      "platform_name": "红五歌舞厅",
+      "venue_id": 1216,
+      "kind": "variant",
+      "note": "2026-09-07 A源写红玉/B源写红五，人工语义同店，SUSPENDED→OPEN 已反转"
+    },
+    {
+      "city": "成都市",
+      "news_name": "鑫天地",
+      "platform_name": "星海壹号（鑫天地）",
+      "venue_id": 457,
+      "kind": "alias",
+      "note": "2026-09-07 A源单列「鑫天地」实为#457括号别名（es/星海壹号同店）"
+    },
+    {
+      "city": "成都市",
+      "news_name": "花舞",
+      "platform_name": "花舞盛宴",
+      "venue_id": 482,
+      "kind": "alias",
+      "note": "2026-09-07 A源「花舞」=B源成都列表「花舞盛宴」；曾误配#419繁花舞厅已撤销，勿再反转419"
+    },
+    {
+      "city": "重庆市",
+      "news_name": "迪乐门(天长地久舞厅)",
+      "platform_name": "天长地久舞厅",
+      "venue_id": 513,
+      "kind": "renamed",
+      "note": "2026-09-07 B源南岸区新名迪乐门（括号注天长地久）；A源粘连写法「天长亮点」字典已有映射"
+    },
+    {
+      "city": "重庆市",
+      "news_name": "金沙川",
+      "platform_name": "金沙川歌舞厅",
+      "venue_id": 524,
+      "kind": "exact",
+      "note": "2026-09-07 A「金沙川」/B「金沙川俱乐部」双源，规则contained命中，登记加速"
+    },
+    {
+      "city": "滁州市",
+      "news_name": "满夜",
+      "platform_name": "澜夜酒吧",
+      "venue_id": 1173,
+      "kind": "variant",
+      "note": "2026-09-07 A源「满夜」满/澜形近，B源同店写澜夜；#1173 OPEN"
+    },
+    {
+      "city": "绵阳市",
+      "news_name": "婉妙",
+      "platform_name": "嫚妙音乐茶吧",
+      "venue_id": 765,
+      "kind": "variant",
+      "note": "2026-09-07 A源「婉妙」婉/嫒/嫚形近家族，#765 OPEN"
+    },
+    {
+      "city": "成都市",
+      "news_name": "舞点兰",
+      "platform_name": "舞点歌舞厅",
+      "venue_id": 410,
+      "kind": "variant",
+      "note": "2026-09-07 A源粘连写法「舞点兰」主要命中舞点#410；B源当日舞点#410/兰夜#406分列，粘连疑含两者"
+    },
+    {
+      "city": "长沙市",
+      "news_name": "有酒",
+      "platform_name": "有酒说故事舞吧",
+      "venue_id": 913,
+      "kind": "alias",
+      "note": "2026-09-07 A源短名「有酒」=B源全名，#913 OPEN"
+    },
+    {
+      "city": "苏州市",
+      "news_name": "交谊舞",
+      "platform_name": "（不建库）",
+      "venue_id": null,
+      "kind": "unmatched",
+      "note": "2026-09-07 双源均列，历史惯例按营业类型标识不建库，keyword 验证同城无同名店；维持跳过"
+    },
+    {
+      "city": "嘉兴市",
+      "news_name": "交谊舞",
+      "platform_name": "（不建库）",
+      "venue_id": null,
+      "kind": "unmatched",
+      "note": "2026-09-07 同苏州交谊舞惯例，维持跳过"
+    },
+    {
+      "city": "成都市",
+      "news_name": "伴生缘",
+      "platform_name": "伴生缘歌舞娱乐",
+      "venue_id": 453,
+      "kind": "alias",
+      "note": "2026-09-07 A源短名，用户确认同店放行（CONTAINED+force），CEASED→OPEN 已反转"
+    },
+    {
+      "city": "重庆市",
+      "news_name": "圣城",
+      "platform_name": "圣城歌舞中心",
+      "venue_id": 502,
+      "kind": "alias",
+      "note": "2026-09-07 B源短名，用户确认放行（CONTAINED+force），CEASED→OPEN 已反转"
+    },
+    {
+      "city": "扬州市",
+      "news_name": "浪莎",
+      "platform_name": "浪莎舞厅",
+      "venue_id": 836,
+      "kind": "exact",
+      "note": "2026-09-07 A源点名/B源称扬州无商家冲突，用户实况验证营业中放行，SUSPENDED→OPEN 已反转；后续遇冲突先问用户"
+    },
+    {
+      "city": "鞍山市",
+      "news_name": "振源",
+      "platform_name": "振源舞厅",
+      "venue_id": 1220,
+      "kind": "exact",
+      "note": "2026-09-07 深度调研核实（铁东区振源舞厅工商存续+长大商贸城POI）后建档 #1220；A源单写「振源」/B源同列"
+    },
+    {
+      "city": "重庆市",
+      "news_name": "夕阳红",
+      "platform_name": "夕阳红舞厅",
+      "venue_id": 1221,
+      "kind": "exact",
+      "note": "2026-09-07 深度调研核实（2022官方轨迹公告+腾讯地图南坪正街POI+2026-04报道南岸四家）后建档 #1221；地址南坪正街1-13号"
+    },
+    {
+      "city": "乐山市",
+      "news_name": "雲麗舞厅ktv",
+      "platform_name": "雲麗舞厅KTV",
+      "venue_id": 1222,
+      "kind": "exact",
+      "note": "2026-09-07 深度调研核实（腾讯地图万华国际4楼POI 19:00-03:00+乐山沄丽娱乐=原彩聚改名）后建档 #1222；B源今日列名"
     }
   ],
   "removed_duplicates": [
@@ -1282,6 +1426,55 @@
       "status": "unverified",
       "reason": "2026-09-02 双源异名：长文本「丽瑜娱乐」/市井慢时光「丽珍娱乐」；联网调研无同名门店（xianbao360 多期杭州舞讯、杭州舞厅攻略均无），腾讯地图搜「丽瑜莎莎舞舞厅」仅模糊关联到「杭州百乐门歌舞厅」（拱墅区石桥路456号怀德文体中心四楼171室，30.342103,120.192805，16:00-02:00），无法证实为同一家",
       "next_action": "暂不录入。等用户定名或后续舞讯再出现时核实；若确为杭州百乐门歌舞厅，则按该地址录入"
+    },
+    {
+      "city": "成都市",
+      "news_name": "都",
+      "status": "unverified",
+      "reason": "A源成都段首词单字「都」，疑原文截断；B源成都列表无可对应店名",
+      "next_action": "下次舞讯出现先问用户对应门店，勿建库"
+    },
+    {
+      "city": "西安市",
+      "news_name": "V美",
+      "status": "unverified",
+      "reason": "B源同日北郊写作V笑（#187 V笑演艺吧(max) OPEN），疑同店异写",
+      "next_action": "复核后续舞讯/用户实况后决定是否登记alias；不建库"
+    },
+    {
+      "city": "长沙市",
+      "news_name": "蓝钻",
+      "status": "unverified",
+      "reason": "B源同日写作蓝琪（#916 蓝琪舞汇 OPEN），疑同店异写",
+      "next_action": "复核后决定；不建库"
+    },
+    {
+      "city": "苏州市",
+      "news_name": "乐景",
+      "status": "unverified",
+      "reason": "B源同日写作乐乐（#1123 乐乐舞厅 OPEN），疑误植",
+      "next_action": "复核后决定是否登记alias；不建库"
+    },
+    {
+      "city": "苏州市",
+      "news_name": "气象",
+      "status": "unverified",
+      "reason": "B源同日写作景气（#1126 景气旺座舞厅 OPEN），疑误植",
+      "next_action": "复核后决定是否登记alias；不建库"
+    },
+    {
+      "city": "重庆市",
+      "news_name": "千帆",
+      "status": "unverified",
+      "reason": "2026-09-07 深度调研：舞讯多源多日期存在（xianbao360 2025-08-14/08-22/09-19、guoping 2025-12-22、市井慢时光 2026-09-07 均列出，第三方归九龙坡区），但无工商注册无地图POI，且与「子帆」（杨家坪新胜二村6栋，工商2013年注册，法人石锦芳）从未同日出现——疑为子帆异写或无证小场",
+      "next_action": "2026-09-07 用户决策：本次未录；继续观察，后续舞讯若千帆与子帆同日出现即证独立再录入"
+    },
+    {
+      "city": "湖州市",
+      "news_name": "梦田",
+      "status": "verified-livehouse",
+      "reason": "2026-09-07 深度调研：存在=新市梦田音乐Live House（德清县新市镇运河新天地步云路35号，17:00-06:00 正常营业，湖州首家梦田音乐品牌，kdclub/网易有报道），舞讯圈收录为湖州场子、B源标{卡座}——但业态为 LiveHouse 音乐酒吧非传统舞厅",
+      "next_action": "2026-09-07 用户决策：本次未录（LiveHouse 业态口径未拍板）；若后续确认收录，建议名「梦田音乐Live House（新市古镇店）」city=湖州市"
     }
   ]
 }

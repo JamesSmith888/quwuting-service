@@ -244,6 +244,23 @@ class VenueHeatServiceTest {
         assertTrue(resp.formulaDetail().contains("100.0 → 5"), "完整规则应展示加权输入到压缩贡献的换算");
     }
 
+    @Test
+    void newFavoriteWeightIsCalibratedToEight() {
+        stubZeroCounters();
+        // 2026-09-07 收藏权重 15→8 校准回归（西安火舞山「1 收藏升至第 2」生产实证）：
+        // 收藏是漏斗末端高意图信号但知晓率低、分母小样本噪声大，单次 15 分超过整月
+        // 浏览贡献上限——×8 与评分同档，不再一票碾压浏览基座。
+        when(counters.getFavrecent()).thenReturn(2L);
+        when(counters.getFavtotal()).thenReturn(9L);
+
+        VenueHeatResponse resp = heatService.getHeat(1L);
+
+        assertEquals(16L, resp.heatScore(), "收藏权重应已校准为 ×8（2 次新增收藏 = 16 分，旧 ×15 下为 30）");
+        assertTrue(resp.formulaText().contains("2×8"), "简洁规则应展示校准后的收藏权重 ×8");
+        assertFalse(resp.formulaText().contains("2×15"), "简洁规则不得残留旧 ×15 权重");
+        assertTrue(resp.formulaDetail().contains("收藏总数 9"), "收藏总数应仍下发展示（累计、不计入公式）");
+    }
+
     // ── 状态可信度（2026-08-08 三维矩阵：状态类型 × 稳定性 × 持续天数） ────────────
     // 根因回归一（2026-08-08）：旧二维矩阵不区分状态类型，已停业门店（近30天暂停 0 次）恒命中
     // HIGH，前端硬编码「稳定营业」→ "已停业却显示稳定营业"（寻梦缘123 生产实证）。

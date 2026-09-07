@@ -221,6 +221,9 @@ UNMATCHED 条目标记为「新店候选」前，若用户要求或对门店真�
   `python3 scripts/qw_api.py batch-create --items 'JSON数组' --base-url <BASE_URL>`
   items 元素 `{"name","city","district?","address?","status?"}`。同城同名已存在会
   返回 EXISTED（幂等兜底，正常现象——Step 3 已过滤，多因归一化差异）。
+  ⚠️ **请求体是 `{"items":[...]}` 包装不是裸数组**（2026-09-07 实测）：绕过
+  qw_api.py 直接 curl 时若发裸数组，后端反序列化失败返回 code=5000（非 400，
+  具有迷惑性）——优先走 qw_api.py 封装，脚本已正确包装。
   **后端语义**：仅「资讯 OPEN + 平台 CEASED/SUSPENDED」反转，其余静默跳过；
   审计 changedBy=null（Agent 来源），关注者自动收站内信、缓存自动失效。
   ⚠️ **录入后补全技巧（2026-09-02 实测）**：batch-create 只建基础字段
@@ -296,10 +299,20 @@ UNMATCHED 条目标记为「新店候选」前，若用户要求或对门店真�
 - 遗留：CONTAINED 待复核清单、FAILED 原因、数据存疑点——列给用户后续处理，
   不静默吞掉。
 
-### Step 6 公告询问（2026-09-02 用户要求，写库后必做）
+### Step 6 公告发布（2026-09-02 确立；2026-09-07 用户拍板改分级策略）
 
-**每次写库（反转/新增）完成后，必须主动询问用户是否给小程序发一条数据更新公告**
-——「数据更新公告」入口 = 全局公告系统（docs/agents/34，MANUAL 来源）。
+**分级策略（2026-09-07 用户明确，写进惯例）**：
+- **公告已发但需补充门店**（2026-09-07 用户口径「更新非重发」）：直接
+  `POST /admin/announcements/{id}/update` 原地更新正文（PUBLISHED 状态可全字段
+  编辑并即时生效，publishAt 锁定；标题/分类/置顶同请求体必填回传），**不要**
+  offline+create 重发新公告。
+- **表①「可直接反转/确定的数据」写库成功后：无需询问，直接按固定模板
+  create+publish 公告**（发布前仍先 `GET /admin/announcements` 核对今日是否已有
+  DATA_UPDATE，仅当今日已发且信息不全才 offline 旧条后发完整版）。
+- **表②逐条放行 / 表③新店录入 / 低置信或混合批次**等不确定数据写库后：**仍须
+  主动询问用户**是否发公告（不确定数据的公告口径需用户把关）。
+
+「数据更新公告」入口 = 全局公告系统（docs/agents/34，MANUAL 来源）。
 
 - **后端接口已具备，无需新增**（2026-09-02 核查）：
   `POST /admin/announcements/create`（body: `{title, content, category: "DATA_UPDATE",
@@ -356,6 +369,7 @@ UNMATCHED 条目标记为「新店候选」前，若用户要求或对门店真�
 | POST | /admin/venue-daily-openings/batch | 批量状态反转（后端 DailyOpeningService 权威语义） |
 | GET | /admin/venue-sync/reversals?limit= | 更新记录（本次反转可在其中核验） |
 | POST | /admin/announcements/create | 创建数据更新公告（MANUAL，Step 6 用） |
+| POST | /admin/announcements/{id}/update | 原地更新公告（PUBLISHED 全字段即时生效，补充门店用，勿重发） |
 | POST | /admin/announcements/{id}/publish | 发布公告（缺省立即发布） |
 
 统一响应包 `{code, message, data}`，code=0 成功。401 = token 过期，重新登录。

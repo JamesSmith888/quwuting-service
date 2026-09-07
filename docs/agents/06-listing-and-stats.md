@@ -7,7 +7,7 @@
 
 ## 列表排序与城市统计
 
-### 复合评分排序与排序方式（2026-08-06 扩展；2026-08-27 零行为守卫）
+### 复合评分排序与排序方式（2026-08-06 扩展；2026-08-27 零行为守卫；2026-09-07 守卫阈值上修 ≥15）
 
 `GET /venues` 支持可选 `latitude` / `longitude`（用户定位，gcj02），列表按服务端复合评分排序（分页正确性要求排序必须在库内完成）。2026-08-06 起支持 `sort`（`VenueSortMode` 枚举：recommended/distance/heat/newest，默认 recommended）与 `radiusKm`（可选，km，距离半径筛选）：
 
@@ -15,8 +15,9 @@
 recommended（默认，复合评分）score = 受守卫的运营权重 sortWeight
       + 行为热度（浏览贡献 = ln(1 + 加权浏览)（来源加权：列表0.5/其他1/搜索1.5/分享2，
         近7天×2——2026-08-27 马太效应重构，见下方「浏览贡献重构」小节）
-        + 近30天新增收藏×15（2026-09-01 收敛：收藏总数为累计展示、不计入公式——旧双列
-          「收藏总数×10 + 新增×15」是集合包含关系，一次收藏重复计 25 分，且存量永续制造马太）
+        + 近30天新增收藏×8（2026-09-01 收敛：收藏总数为累计展示、不计入公式——旧双列
+          「收藏总数×10 + 新增×15」是集合包含关系，一次收藏重复计 25 分，且存量永续制造马太；
+          2026-09-07 数值校准 15→8：单次收藏不得碾压整月浏览贡献上限，与评分 ×8 同档）
         + 近30天新增动态×5（2026-09-01 由动态总数改窗口，admin 内容存量不参与）
         + 近30天评分数×8 + 近30天正向反馈×3
         + 近30天收到礼物价值×pointsWeight）
@@ -29,7 +30,7 @@ heat      = 受守卫的运营权重 + 行为热度（与「热门场所标记�
 newest    = created_at DESC, id DESC
 ```
 
-**零行为权重守卫（2026-08-27，生产实证修复）**：行为热度 = 0 的门店（无任何近30天浏览/收藏/动态/评分/正向反馈/收到礼物的「僵尸门店」）**运营权重不参与排序**——`HEAT_SCORE = CASE WHEN HEAT_BEHAVIOR > 0 THEN sortWeight ELSE 0 END + HEAT_BEHAVIOR`（公式实现见 `VenueRepository.HEAT_BEHAVIOR` / `HEAT_SCORE`）。根因：79 家种子门店被批量赋予 30~50 运营权重，其中 42 家行为热度为 0，仅靠权重挤占真实热门门店排位（生产实证：MT舞酒吧 sortWeight=45 + 行为 76 被抬到列表第 3）。语义与热门标记「行为热度 ≥ 门槛」同构：**权重提升曝光是运营本职，但不伪造「有人气」**。行为热度 > 0 的门店权重照常生效。热门判定（findHotVenueIds）无需本守卫——绝对门槛（行为 ≥ min-heat-score）已兜底零行为门店。
+**零行为权重守卫（2026-08-27 生产实证修复；2026-09-07 阈值上修 ≥15 = 悬崖解锁修复）**：行为热度 **≥ 15（`VenueHeatWeights.SORT_WEIGHT_GUARD_MIN_BEHAVIOR`，≈ 2 次收藏 ×8 量级）** 的门店才叠加运营权重——零行为门店（无任何近30天浏览/收藏/动态/评分/正向反馈/收到礼物的「僵尸门店」）与<b>恰好一个稀疏行为</b>的门店（1 收藏 = 8 / 1 评分 = 8，均 &lt; 15）**运营权重不参与排序**：`HEAT_SCORE = CASE WHEN HEAT_BEHAVIOR >= 15 THEN sortWeight ELSE 0 END + HEAT_BEHAVIOR`（公式实现见 `VenueRepository.HEAT_BEHAVIOR` / `HEAT_SCORE`）。根因一（08-27）：79 家种子门店被批量赋予 30~50 运营权重，其中 42 家行为热度为 0，仅靠权重挤占真实热门门店排位（生产实证：MT舞酒吧 sortWeight=45 + 行为 76 被抬到列表第 3）。根因二（09-07，西安火舞山音乐厅「1 次收藏升至城市第 2」）：原 `行为 > 0` 二值开关在行为 0→单点信号（1 收藏）的瞬间从 0 跳到全量 sortWeight，运营加权门店被单个稀疏行为直接抬升登顶——守卫退化为「零 vs 有」而非「人气量级」，阈值上修为 15。语义与热门标记「行为热度 ≥ 门槛」同构：**权重提升曝光是运营本职，但不伪造「有人气」**。行为热度 ≥ 15 的门店权重照常生效。热门判定（findHotVenueIds）无需本守卫——绝对门槛（行为 ≥ min-heat-score）已兜底稀疏行为门店。
 
 **权重与公式演进**：旧公式（收藏×20 + 动态×10）已于 2026-08-10 V2 权重收敛重构为上述行为项（唯一事实源 = `VenueHeatWeights` + `PointsProperties#heatWeight()`，调整权重必须同步 `HEAT_SCORE` / `findHotVenueIds` / `VenueHeatService.computeHeat` 三处镜像，见后端 AGENTS.md「场所热度」章节）。**2026-09-01 口径收敛**：收藏总数 / 动态总数两项存量指标退出公式（收藏只计近30天新增、动态只计近30天新增）——根因见 `VenueHeatWeights` 注释（集合包含重复计分 + 存量马太，与 2026-08-27 浏览贡献重构方向一致）。
 
@@ -110,7 +111,7 @@ Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(
   2. **绝对行为热度门槛**：**行为热度**（完整热度分扣除运营权重 sortWeight，SQL 内 `heat_score - sort_weight`）≥ `venue.hot.min-heat-score`（配置，唯一事实源 = `VenueHotProperties`，**默认 70** ≈ 近30天 7 次收藏 / 70 次浏览 / 14 条动态）。没有实质用户活跃的场所（纯浏览/冷启动）即使城市内排名第一也不得标记热门。
   - **旧实现缺陷（根因）**：仅相对排名 + `GREATEST(1, CEIL(city_total×0.2))`"至少 1 家/城市"兜底——每城市第一名恒被标记热门，近30天仅 2 次浏览（热度分 2）的冷门店也带热门标签。"热门"退化为"小池塘里最不冷"。兜底已移除，排名与门槛是**与**关系。
   - **门槛作用范围（2026-08-08 用户反馈二次修复）**：作用于**行为热度部分**（不含运营权重 sortWeight）。sortWeight 仍参与城市内排名（top 20%）与列表排序——运营推广提升曝光属其本职；但**不得伪造热门资格**：历史实现把门槛放在含 sortWeight 的完整分上，运营加权门店（sortWeight=68 等）即使行为热度仅 2（近30天 2 次浏览）也被抬过门槛，出现"详情页热度指数 2 却有热门标签"的自相矛盾（生产实证：南充市 venue 90，sortWeight 20 + 行为 2 = 22 ≥ 20 命中）。门槛移到行为部分后：热门 ⟺ 行为热度 ≥ 门槛，与详情页热度 chip 的核心行为项口径一致。满意度偏移（评分纠偏小项，需 ≥3 评价人才参与计算）不参与热门判定——热门回答"去的人多不多"（行为热度），满意度回答"口碑好不好"（热度指数展示），两语义解耦。
-- **查询实现**：`VenueRepository.findHotVenueIds()` 使用 PostgreSQL 窗口函数（`ROW_NUMBER() OVER (PARTITION BY city ORDER BY heat_score DESC, id)`）在库内完成城市内排名，避免在 Java 侧逐城市遍历。三层子查询结构：最内层 `scored` 一次性计算热度分与 `sort_weight`（公式唯一出现点，避免 SQL 内重复书写导致镜像漂移）→ 中间层窗口排名（**必须同时投影 `heat_score` 与 `sort_weight`**——外层门槛 `heat_score - sort_weight >= :minHotScore` 引用两派生列，漏投影即报 `column ... does not exist`，见「列透传契约」）→ 最外层施加"排名 ≤ top20% 且 行为热度 ≥ 门槛"双条件。排序口径为 `sortWeight + 近30天浏览×1 + 收藏×10 + 新增收藏×15 + 动态×5 + 评分×8 + 正向反馈×3`（与 `HEAT_SCORE` 一致，不含距离项——距离是用户维度，场所热度排名不应因请求者位置变化）。Service 层通过 `VenueLookupService.getHotVenueIds()`（`@Cacheable(CACHE_HOT_VENUE_IDS)`，5min TTL，门槛参数经此注入 SQL——禁止在 SQL/调用方硬编码）获取热门 ID 集合，缓存命中时 <1ms，未命中时执行全表窗口函数查询。场所创建/更新/动态发布时通过 `@CacheEvict(allEntries=true)` 即时失效（收藏增删**不**逐出——5min TTL 的滞后是接受的权衡，见「写路径缓存逐出」矩阵）
+- **查询实现**：`VenueRepository.findHotVenueIds()` 使用 PostgreSQL 窗口函数（`ROW_NUMBER() OVER (PARTITION BY city ORDER BY heat_score DESC, id)`）在库内完成城市内排名，避免在 Java 侧逐城市遍历。三层子查询结构：最内层 `scored` 一次性计算热度分与 `sort_weight`（公式唯一出现点，避免 SQL 内重复书写导致镜像漂移）→ 中间层窗口排名（**必须同时投影 `heat_score` 与 `sort_weight`**——外层门槛 `heat_score - sort_weight >= :minHotScore` 引用两派生列，漏投影即报 `column ... does not exist`，见「列透传契约」）→ 最外层施加"排名 ≤ top20% 且 行为热度 ≥ 门槛"双条件。排序口径 = `HEAT_SCORE` 镜像（受守卫的 sortWeight + 浏览贡献 ln(1+加权浏览) + 近30天新增收藏×8 + 动态×5 + 评分×8 + 正向反馈×3 + 积分×pointsWeight，见「复合评分排序」）——不含距离项（距离是用户维度，场所热度排名不应因请求者位置变化）。Service 层通过 `VenueLookupService.getHotVenueIds()`（`@Cacheable(CACHE_HOT_VENUE_IDS)`，5min TTL，门槛参数经此注入 SQL——禁止在 SQL/调用方硬编码）获取热门 ID 集合，缓存命中时 <1ms，未命中时执行全表窗口函数查询。场所创建/更新/动态发布时通过 `@CacheEvict(allEntries=true)` 即时失效（收藏增删**不**逐出——5min TTL 的滞后是接受的权衡，见「写路径缓存逐出」矩阵）
 - **消费方（2026-08-08 修复收藏列表缺热门标签；同日新增「热门」快捷筛选）**：
   - 城市列表 `VenueService.listVenues`：`result.map()` 中传 `hotVenueIds.contains(v.getId())`；同时**支持 `hot=true` 筛选参数**（2026-08-08 新增，供前端「热门」快捷标签）——`hotOnly=true` 时经 `LIST_FILTERS` 的 `AND (:hotOnly = false OR v.id IN :hotIds)` 谓词按同一集合过滤，与城市/状态/距离/排序**正交可叠加**；热门集合在列表查询前一次获取（5min 缓存），筛选参数与 isHot 标记双职责复用；
   - 收藏列表 `FavoriteService.getFavoriteVenues`：**同口径下发**——历史缺陷：误用 `VenueResponseMapper` 双参重载（默认 `isHot=false`），热门舞厅在"全部城市"正常展示、收藏列表却不展示。修复后与城市列表一样经 `getHotVenueIds()` 取集合后走三参重载（收藏 Tab 无筛选栏，不提供 hot 参数）；

@@ -8,7 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * VenueHotProperties 配置缺省语义测试。
  * <p>
  * 覆盖 2026-08-08「热门场所标记」绝对门槛的容错契约：配置缺失/非法（≤0）时
- * 回退默认值 70（≈ 近30天 7 次收藏或 70 次浏览的最低活跃门槛）——防止配置笔误
+ * 回退默认值 70（2026-09-07 收藏 ×8 校准后 ≈ 近30天 9 次收藏或等值主动组合的
+ * 最低活跃门槛）——防止配置笔误
  * 导致热门门槛失效（门槛退化为 0 = 无绝对下限，伪热门缺陷复现）。
  */
 class VenueHotPropertiesTest {
