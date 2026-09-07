@@ -8,7 +8,9 @@ import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuestatuswatcher.entity.VenueStatusWatcher;
+import org.quwuting.quwutingservice.venuestatuswatcher.event.VenueStatusChangedEvent;
 import org.quwuting.quwutingservice.venuestatuswatcher.repository.VenueStatusWatcherRepository;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,7 +27,9 @@ import java.util.List;
  *       写路径；取消收藏经 {@link #unwatch} 同步取消关注（显式开关仍可单独关闭）；</li>
  *   <li><b>读（用户）</b>：{@link #isWatching}——详情页开关态；</li>
  *   <li><b>写（状态变更挂点）</b>：{@link #notifyStatusChanged}——门店营业状态实际
- *       变更时向全部关注者发站内信（同事务、幂等：一次状态变更一条消息），
+ *       变更时向全部关注者发站内信（同事务、幂等：一次状态变更一条消息）并发布
+ *       {@link VenueStatusChangedEvent}（AFTER_COMMIT 触发微信订阅消息「开门状态
+ *       变更提醒」下发，2026-09-07），
  *       调用方 = VenueService 三个状态变更入口（updateVenue / markSuspendedByReport /
  *       reopenByReport），见 AGENTS.md「关注门店营业状态通知 · 触发挂点」。</li>
  * </ul>
@@ -40,6 +44,7 @@ public class VenueStatusWatcherService {
     private final VenueStatusWatcherRepository watcherRepository;
     private final VenueRepository venueRepository;
     private final MessageService messageService;
+    private final ApplicationEventPublisher eventPublisher;
 
     /**
      * 开启关注（详情页开关 ON）。幂等：已关注时直接成功（唯一约束兜底防并发重入）。
@@ -106,6 +111,11 @@ public class VenueStatusWatcherService {
             messageService.create(watcher.getUserId(), MessageType.VENUE_STATUS_CHANGED,
                     TITLE, content, "VENUE", venueId);
         }
+        // 微信订阅消息（2026-09-07「开门状态变更提醒」）：同点发布事件，AFTER_COMMIT
+        // 消费（WxSubscribeSendService）——服务通知是关注者唯一被动触达通道，与站内信
+        // 互补；事件仅携带关注者快照，发送失败绝不影响本事务（见事件消费方兜底）。
+        eventPublisher.publishEvent(new VenueStatusChangedEvent(venueId, venue.getName(),
+                from, to, watchers.stream().map(VenueStatusWatcher::getUserId).toList()));
     }
 
     /**

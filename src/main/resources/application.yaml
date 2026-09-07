@@ -75,6 +75,11 @@ wechat:
   # release=正式版 / trial=体验版 / develop=开发版——扫码打开对应版本的小程序，
   # 生产恒 release；联调可临时改 trial（对齐 web-auth.qrcode-env 先例）
   qrcode-env: release
+  # 订阅消息（2026-09-07「开门状态变更提醒」一次性订阅，AGENTS.md「微信订阅消息通知」）：
+  # 模板 ID 为公开信息；miniprogram_state=下发版本（formal/trial/develop，联调切 trial）
+  subscribe:
+    status-template-id: IDDzJtOxuOu7iX-7UegZfnw7yOwEP5QHqJoLOxi5TxQ
+    miniprogram-state: formal
 
 # JWT 签名配置（secret 必须通过环境变量注入，生产环境禁止使用默认值）
 jwt:

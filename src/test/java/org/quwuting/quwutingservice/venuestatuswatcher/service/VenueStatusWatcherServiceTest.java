@@ -12,7 +12,9 @@ import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuestatuswatcher.entity.VenueStatusWatcher;
+import org.quwuting.quwutingservice.venuestatuswatcher.event.VenueStatusChangedEvent;
 import org.quwuting.quwutingservice.venuestatuswatcher.repository.VenueStatusWatcherRepository;
+import org.springframework.context.ApplicationEventPublisher;
 
 import java.util.List;
 import java.util.Optional;
@@ -49,9 +51,11 @@ class VenueStatusWatcherServiceTest {
     private VenueRepository venueRepository;
     @Mock
     private MessageService messageService;
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
 
     private VenueStatusWatcherService newService() {
-        return new VenueStatusWatcherService(watcherRepository, venueRepository, messageService);
+        return new VenueStatusWatcherService(watcherRepository, venueRepository, messageService, eventPublisher);
     }
 
     private Venue mockVenue(String name) {
@@ -161,5 +165,42 @@ class VenueStatusWatcherServiceTest {
 
         verify(watcherRepository, never()).findByVenueIdAndDeletedFalse(anyLong());
         verify(messageService, never()).create(anyLong(), any(), any(), any(), any(), anyLong());
+    }
+
+    @Test
+    void notifyStatusChanged_发布微信订阅通知事件_携带关注者快照() {
+        // 2026-09-07「开门状态变更提醒」：站内信同点发布事件，AFTER_COMMIT 消费方
+        // （WxSubscribeSendService）依赖 watcherUserIds 快照做额度筛选，不再二次查库
+        Venue venue = mockVenue("XX舞厅");
+        when(venueRepository.findByIdAndDeletedFalse(VENUE_ID)).thenReturn(Optional.of(venue));
+        VenueStatusWatcher w1 = new VenueStatusWatcher();
+        w1.setUserId(USER_ID);
+        VenueStatusWatcher w2 = new VenueStatusWatcher();
+        w2.setUserId(8L);
+        when(watcherRepository.findByVenueIdAndDeletedFalse(VENUE_ID))
+                .thenReturn(List.of(w1, w2));
+
+        newService().notifyStatusChanged(VENUE_ID, VenueStatus.OPEN, VenueStatus.SUSPENDED);
+
+        ArgumentCaptor<VenueStatusChangedEvent> eventCaptor =
+                ArgumentCaptor.forClass(VenueStatusChangedEvent.class);
+        verify(eventPublisher).publishEvent(eventCaptor.capture());
+        VenueStatusChangedEvent event = eventCaptor.getValue();
+        assertEquals(VENUE_ID, event.venueId());
+        assertEquals("XX舞厅", event.venueName());
+        assertEquals(VenueStatus.SUSPENDED, event.to());
+        assertEquals(List.of(USER_ID, 8L), event.watcherUserIds());
+    }
+
+    @Test
+    void notifyStatusChanged_无关注者_不发布微信订阅通知事件() {
+        // 空关注者早退（无通知对象），事件也不应发布——消费方无需处理空集合
+        when(venueRepository.findByIdAndDeletedFalse(VENUE_ID))
+                .thenReturn(Optional.of(mockVenue("XX舞厅")));
+        when(watcherRepository.findByVenueIdAndDeletedFalse(VENUE_ID)).thenReturn(List.of());
+
+        newService().notifyStatusChanged(VENUE_ID, VenueStatus.OPEN, VenueStatus.SUSPENDED);
+
+        verify(eventPublisher, never()).publishEvent(any(VenueStatusChangedEvent.class));
     }
 }
