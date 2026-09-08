@@ -29,4 +29,7 @@ public interface VenueAliasRepository extends JpaRepository<VenueAlias, Long> {
 
     /** 同店同名查找（不筛 deleted——含软删行，upsert 时复活重用） */
     Optional<VenueAlias> findByVenueIdAndAlias(Long venueId, String alias);
+
+    /** 多店有效别名批量取（2026-09-08：export 比对底座装配，一页门店一次 IN 查询） */
+    List<VenueAlias> findByVenueIdInAndDeletedFalse(List<Long> venueIds);
 }

@@ -7,6 +7,7 @@ import org.quwuting.quwutingservice.venue.dto.BusinessHoursEntry;
 import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
+import org.quwuting.quwutingservice.venue.dto.response.VenueSnapshotItem;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.springframework.stereotype.Component;
@@ -185,6 +186,41 @@ public class VenueResponseMapper {
     /** 反序列化 JSON 数组字符串列（tags / photos / businessHours），空数据返回空列表而非 null */
     private List<String> deserializeStringList(String json, String fieldName) {
         return deserializeList(json, STRING_LIST, fieldName);
+    }
+
+    /**
+     * Venue 实体 → 离线快照静态子集条目（2026-09-08 弱网离线韧性，GET /venues/snapshot）。
+     *
+     * <p>复用本类的 JSON 反序列化与系统标签合并基础设施（tags/businessHours/tickets/
+     * partnerFees 口径与 {@link #toResponse} 完全一致），仅裁剪到静态字段子集——
+     * 动态信号（徽标/热度/浏览量/照片列表）不进快照，见 VenueSnapshotItem 类注释。
+     * 禁止改走 toResponse 后再抽字段：那会把无展示语义的动态字段带进快照序列化路径。
+     */
+    public VenueSnapshotItem toSnapshotItem(Venue v) {
+        List<String> customTags = deserializeStringList(v.getTags(), "tags");
+        List<String> effectiveTags = defaultsConfig.merge(customTags);
+        return new VenueSnapshotItem(
+                v.getId(),
+                v.getName(),
+                v.getStatus(),
+                v.getStatus().getDisplayName(),
+                v.getImageUrl(),
+                v.getDescription(),
+                v.getCity(),
+                v.getDistrict(),
+                v.getAddress(),
+                v.getLongitude(),
+                v.getLatitude(),
+                deserializeList(v.getBusinessHours(), BUSINESS_HOURS_LIST, "businessHours"),
+                deserializeList(v.getTickets(), TICKET_LIST, "tickets"),
+                deserializeList(v.getPartnerFees(), PARTNER_FEE_LIST, "partnerFees"),
+                v.getContactPhone(),
+                v.getWechatQr(),
+                effectiveTags,
+                defaultsConfig.tags(),
+                v.getSortWeight(),
+                v.getUpdatedAt()
+        );
     }
 
     /** 反序列化 JSON 数组字符串列为类型化列表，空数据返回空列表而非 null */

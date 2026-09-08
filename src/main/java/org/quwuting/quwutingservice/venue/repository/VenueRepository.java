@@ -52,6 +52,27 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     List<Venue> findByCityAndDeletedFalse(String city);
 
     /**
+     * 离线快照全量基线（2026-09-08 弱网离线韧性，GET /venues/snapshot 首次同步）：
+     * 全部活跃门店。当前量级约 1000 行 / 约 1MB JSON，一次性下发可接受；
+     * 快照条目为静态子集（轻量组装，无徽标/热度/照片批量查询），见 VenueSnapshotItem。
+     */
+    List<Venue> findAllByDeletedFalse();
+
+    /**
+     * 离线快照增量窗口（2026-09-08）：updatedAt ≥ since 的活跃行。updatedAt 由
+     * BaseEntity @UpdateTimestamp 自动维护，无需写路径配合。当前量级下表全扫成本
+     * 可忽略（不足万行），暂不为 updated_at 建索引（数据量到十万级再评估）。
+     */
+    List<Venue> findByDeletedFalseAndUpdatedAtGreaterThanEqual(LocalDateTime since);
+
+    /**
+     * 离线快照增量剔除集（2026-09-08）：since 窗口内被软删除的门店 id，客户端据此
+     * 从本地离线包剔除（软删行不进快照条目，仅以下发 id 的方式表达「已不存在」）。
+     */
+    @Query("SELECT v.id FROM Venue v WHERE v.deleted = true AND v.updatedAt >= :since")
+    List<Long> findDeletedIdsSince(@Param("since") LocalDateTime since);
+
+    /**
      * 管理端资源搜索（2026-08-31：新增协作页「选择门店或舞伴」数据源）：
      * 名称/地址模糊匹配（keyword 由调用方包装为 %xx%），不限状态（含 HIDDEN 亦可选为协作目标，
      * 与被授权者可见性无关）。返回 Object[]{id, name, city, district, image_url}。

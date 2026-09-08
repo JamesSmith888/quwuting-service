@@ -104,13 +104,23 @@ OPEN，用户投诉「明明营业却显示停业」）。
    `GET /venues`，**必须带 `sort=newest`**——默认 recommended 排序无 id tie-break，
    热度分相同（多为 0）时翻页漂移会漏门店（2026-09-01 实测成都 107 家翻页漏 26 家，
    导致 10 家「假新店」误判）。
-3. 建内存索引：`city → [(venueId, name, district, address, status)]`。
-   顺带用 `GET /venues/cities`（公开，无需登录）核对城市名是否为平台标准词表。
+3. 建内存索引：`city → [(venueId, name, district, address, status, aliases)]`。
+   **export 自带 `aliases` 列表（2026-09-08 起）**——平台门店别名字段（qwt_venue_aliases）
+   是舞讯名归位的权威运行时数据，索引必须带上。顺带用 `GET /venues/cities`（公开，
+   无需登录）核对城市名是否为平台标准词表。
 
-### Step 3 比对（城市 + 名称 + 地址，规则 + 语义）
+### Step 3 比对（城市 + 名称 + 地址 + 别名，规则 + 语义）
 
 对每条舞讯记录，在**同城候选**内比对（同名不同城的店是两家店，必须同城过滤）：
 
+> 🔑 **门店别名字段优先（2026-09-08 起，最高优先级）**：舞讯名 ∈ 同城候选的
+> `aliases` 列表（或归一化后相等）→ **直接判高置信 EXACT 级命中**，无需字典/规则
+> 猜测——别名域里的每一条都是历次对账确认过的曾用名/错别字/圈内涵称。⚠️ 随之而来
+> 的**回写义务**：本轮比对确认的新映射（typo/alias/renamed/新别名），写库确认后必须
+> 同步 `POST /admin/venue-aliases/batch-import`（逐条幂等，别名≠主名）把别名灌进
+> 平台别名字段，**再**回写本 Skill 字典——平台 alias = 运行时权威，字典 = Skill 侧
+> 经验沉淀 + 平台缺失时兜底，两层都要写（详见 Step 4 别名回写）。
+>
 > 🔑 **数据源匹配字典优先查阅（2026-09-01 起）**：比对前先查数据源对应字典
 > `reference/<数据源>-venue-dict.json`（如 `reference/xianbao360-venue-dict.json`）。
 > 字典条目 = 历次执行沉淀的「舞讯店名 → 平台门店」映射（错别字/异体字/后缀/粘连/已确认
@@ -156,6 +166,15 @@ OPEN，用户投诉「明明营业却显示停业」）。
   之间空格通常是同一家店的前缀标记，按一家处理（两种写法都录入匹配，同命中一家即合并）。
 - **同城命名家族模式**：南宁「XX舞汇」系（舞讯写短名 乐舞/欢舞/海角/天涯/天籁…）等
   家族模式下短名⊂长名是常态，批量 CONTAINED 属预期（多为已 OPEN 进表④，不逐条问）。
+- **「原X」= 更名线索（2026-09-08 起）**：舞讯带「梦都（原传奇）」「泓酒汇（原芭莎）」
+  「喜见（原芭黎人）」「老朱（原夜猫）」等括号原名时 = 门店更名信号——先查平台原名店
+  现状（常已存在且 OPEN/平台名已带别名括号），命中后按 renamed 登记并可询问用户是否
+  同步 updateVenue 更名；平台名若已含别名（芭莎舞厅（泓酒汇））则零动作。
+- **多数据源交叉（三源制，2026-09-08 实证）**：同日可能收到 A=市井慢时光图、B=舞厅百事通
+  长文本、C=群内「莎舞简讯」（带营业时段）多份——同城合并去重，店名**三源皆命中最强**；
+  C 源常补充 A/B 未点名的反转（2026-09-08 昆山新茶吧 #1114 仅 C 源点名即反转）；每源点名
+  的店名存在错别字差异（蜀尔顿/爵尔顿、菲利/菲琳、蓝钻/蓝堡舞吧(蓝钻)），靠字典+平台名
+  自带别名括号归位。
 - **removed_duplicates 命中先查正本**（2026-09-04 实证）：当时删的是重复份，正本可能
   仍在库且 OPEN（长沙 913/919/934）——先搜同城同名，有正本按正常流程处理，无正本才跳过。
 
@@ -236,6 +255,24 @@ UNMATCHED 条目标记为「新店候选」前，若用户要求或对门店真�
   的字段在 `data.venue` 子对象，不在 data 顶层——回填前取值取错层会读到空
   name/city，触发「城市不能为空」类 400，浪费时间；正确 = `cur = data["venue"]`。
   整店带营业时间的完整建档走 Step 4B，勿在本步重复造轮子。
+
+**别名回写（2026-09-08 起，写库确认后的固定动作）**：本轮比对确认的映射——
+typo（错别字）/ alias（别名/简称）/ variant（异体字）/ renamed（更名，旧名作别名）/
+括号拆分出的曾用名——在用户确认后同步灌入平台别名字段：
+
+```
+POST /admin/venue-aliases/batch-import
+{"items": [{"venueId": 434, "alias": "蜀尔顿"}, ...]}
+```
+
+- 逐条幂等：同店同名的有效行 skipped、软删行复活、单条失败不拖累整批（响应带
+  imported/skipped/failed 明细）；别名（trim 后）与门店**主名同名自动跳过**；
+- **新别名 = 双写**：先平台 alias 域（运行时权威，搜索/比对/详情即时生效），再本
+  Skill 字典 entries（经验沉淀 + 跨源兜底），两层缺一不可；
+- 🚫 **主名括号禁令**：门店主名带「（别名）」是 2026-09-08 之前无别名域时的临时
+  方案，已全量迁移（40 家拆分 → 别名 160 条）。此后**新增/更名一律禁止把别名写进
+  主名括号**——主名保持干净店名，别名走 `qwt_venue_aliases`（updateVenue 全量回填
+  时同样注意：name 只放主名）。
 
 > **数据更新公告联动（2026-09-01 全局公告系统，docs/agents/34）**：batch-create
 > 新增成功 / status-reverse 反转成功会触发后端自动生成「数据更新公告」（SYSTEM 来源，
@@ -364,9 +401,12 @@ UNMATCHED 条目标记为「新店候选」前，若用户要求或对门店真�
 |---|---|---|
 | POST | /web-auth/password-login | 登录换 JWT（body: {username, password}） |
 | GET | /venues/cities | 平台城市词表（公开） |
-| GET | /admin/venue-sync/venues/export?city=&status=&page=&size= | 候选门店按量加载（size≤500，轻量字段） |
+| GET | /admin/venue-sync/venues/export?city=&status=&page=&size= | 候选门店按量加载（size≤500，轻量字段 + aliases 别名列表） |
 | POST | /admin/venue-sync/venues/batch-create | 批量新增门店（同城同名幂等） |
 | POST | /admin/venue-daily-openings/batch | 批量状态反转（后端 DailyOpeningService 权威语义） |
+| GET | /admin/venue-aliases | 已配置别名的门店聚合列表 |
+| POST | /admin/venue-aliases | 单条别名 upsert（同店同名幂等） |
+| POST | /admin/venue-aliases/batch-import | 别名批量导入（2026-09-08，Skill 沉淀灌库，幂等+单条失败不拖整批） |
 | GET | /admin/venue-sync/reversals?limit= | 更新记录（本次反转可在其中核验） |
 | POST | /admin/announcements/create | 创建数据更新公告（MANUAL，Step 6 用） |
 | POST | /admin/announcements/{id}/update | 原地更新公告（PUBLISHED 全字段即时生效，补充门店用，勿重发） |
@@ -409,3 +449,8 @@ UNMATCHED 条目标记为「新店候选」前，若用户要求或对门店真�
 - **重复写库**：同一门店被重复提交（如与 Web 后台「门店同步」同日处理）时，状态反转
   以最后执行为准（applyBatch 幂等早退：已 OPEN 的条目静默跳过）；新增以 batch-create
   同城同名判重兜底（EXISTED），无锁冲突风险。
+- **门店删除/清理重复（2026-09-08 紫茂 #381/#382 实证）**：后端**无门店删除 HTTP 接口**
+  （已核对 /admin/venue-sync/venues 仅 export/batch-create；项目禁 PUT/DELETE），removed
+  重复数据由用户在管理后台/库内自理——Agent 识别到同名同址重复条目（两 venueId 同 district
+  同 address）时，不代删、不自动反转，呈「疑似重复」提示用户决策删除哪条，确认后由用户
+  删除；字典 removed_duplicates 段仅登记用户已删确认的店（防下次舞讯再把删除份当新店）。

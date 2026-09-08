@@ -5,8 +5,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.venue.entity.Venue;
+import org.quwuting.quwutingservice.venue.entity.VenueAlias;
 import org.quwuting.quwutingservice.venue.entity.VenueStatusLog;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
+import org.quwuting.quwutingservice.venue.repository.VenueAliasRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
 import org.quwuting.quwutingservice.venue.service.VenueService;
@@ -25,6 +27,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * 门店数据接口服务（2026-09-01，舞讯采集 Skill 专用）。
@@ -55,6 +58,7 @@ public class VenueSyncDataService {
 
     private final VenueRepository venueRepository;
     private final VenueStatusLogRepository venueStatusLogRepository;
+    private final VenueAliasRepository venueAliasRepository;
     private final VenueService venueService;
     private final CacheManager cacheManager;
     private final org.quwuting.quwutingservice.announcement.service.AnnouncementService announcementService;
@@ -63,17 +67,26 @@ public class VenueSyncDataService {
 
     /**
      * 候选门店分页导出：city/status 精确筛选 + id 升序稳定翻页。
-     * 返回精简字段（id/name/city/district/address/status），供 Skill 建内存索引后
-     * 与舞讯条目做城市 + 名称（+地址）多维度比对。
+     * 返回精简字段（id/name/city/district/address/status/aliases），供 Skill 建内存索引后
+     * 与舞讯条目做城市 + 名称（+地址+别名）多维度比对。
+     * <p>
+     * 2026-09-08 装配 aliases（qwt_venue_aliases 有效别名）：舞讯名命中别名即高置信
+     * EXACT 级——一页门店一次 IN 查询按店分组，避免逐店往返。
      */
     @Transactional(readOnly = true)
     public Page<VenueExportItem> exportVenues(String city, VenueStatus status, int page, int size) {
         int p = Math.max(0, page);
         int s = Math.min(Math.max(1, size), MAX_EXPORT_SIZE);
-        return venueRepository.findExportPage(blankToNull(city), status, PageRequest.of(p, s))
-                .map(v -> new VenueExportItem(
-                        v.getId(), v.getName(), v.getCity(), v.getDistrict(),
-                        v.getAddress(), v.getStatus().name()));
+        Page<Venue> venues = venueRepository.findExportPage(blankToNull(city), status, PageRequest.of(p, s));
+        List<Long> venueIds = venues.getContent().stream().map(Venue::getId).toList();
+        Map<Long, List<String>> aliasMap = venueIds.isEmpty() ? Map.of()
+                : venueAliasRepository.findByVenueIdInAndDeletedFalse(venueIds).stream()
+                        .collect(Collectors.groupingBy(VenueAlias::getVenueId,
+                                Collectors.mapping(VenueAlias::getAlias, Collectors.toList())));
+        return venues.map(v -> new VenueExportItem(
+                v.getId(), v.getName(), v.getCity(), v.getDistrict(),
+                v.getAddress(), v.getStatus().name(),
+                aliasMap.getOrDefault(v.getId(), List.of())));
     }
 
     // ===== 批量新增（POST /admin/venue-sync/venues/batch-create） =====

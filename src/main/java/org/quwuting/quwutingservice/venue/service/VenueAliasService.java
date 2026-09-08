@@ -3,7 +3,9 @@ package org.quwuting.quwutingservice.venue.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.venue.dto.request.BatchImportVenueAliasRequest;
 import org.quwuting.quwutingservice.venue.dto.request.UpsertVenueAliasRequest;
+import org.quwuting.quwutingservice.venue.dto.response.BatchImportVenueAliasResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueAliasGroupResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueAliasVenueOption;
 import org.quwuting.quwutingservice.venue.entity.Venue;
@@ -29,6 +31,7 @@ import java.util.stream.Collectors;
  * <ul>
  *   <li>list：已配置别名的门店聚合列表（Web 管理后台「门店别名」页数据源）；</li>
  *   <li>upsert：幂等（同店同名复活软删行，守住生成列部分唯一索引）；</li>
+ *   <li>batchImport：批量导入（舞讯 Skill 别名沉淀灌库，逐条独立提交）；</li>
  *   <li>delete：软删（重配同名时复活重用）；</li>
  *   <li>searchVenues：配置时选店的门店候选（名称模糊，不限状态）。</li>
  * </ul>
@@ -100,6 +103,65 @@ public class VenueAliasService {
         log.info("[venue-alias] upsert: venueId={} alias={} id={}",
                 request.venueId(), alias, saved.getId());
         return new VenueAliasGroupResponse.AliasItem(saved.getId(), saved.getAlias());
+    }
+
+    /**
+     * 批量导入别名（POST /admin/venue-aliases/batch-import，2026-09-08 舞讯 Skill 对接）。
+     * <p>
+     * 逐条独立提交（<b>外层不挂 @Transactional</b>）：{@code aliasRepository.save()}
+     * 各自独立事务提交，单条失败不拖累同批其他条目（与 VenueSyncDataService#batchCreateVenues
+     * 「禁跨批大事务」哲学一致——连接池仅 5 连接）。幂等口径：
+     * <ul>
+     *   <li>同店同名的有效行已存在 → skipped（幂等早退，不重复计数）；</li>
+     *   <li>软删行同名 → 复活重用，计 imported；</li>
+     *   <li>别名（trim 后）与门店主名同名 → skipped（无检索意义）；</li>
+     *   <li>门店不存在/已删/非法输入 → failed（带原因，不抛出中断整批）。</li>
+     * </ul>
+     * 每条写后失效详情缓存（别名进 computeVenueDetailPublic 缓存体）。
+     */
+    public BatchImportVenueAliasResponse batchImport(BatchImportVenueAliasRequest request) {
+        int imported = 0;
+        int skipped = 0;
+        List<BatchImportVenueAliasResponse.FailedItem> failed = new ArrayList<>();
+        List<UpsertVenueAliasRequest> items = request.items();
+
+        for (int i = 0; i < items.size(); i++) {
+            UpsertVenueAliasRequest item = items.get(i);
+            Long venueId = item.venueId();
+            String alias = item.alias() == null ? "" : item.alias().trim();
+            try {
+                Venue venue = requireVenue(venueId);
+                if (alias.isEmpty()) {
+                    failed.add(new BatchImportVenueAliasResponse.FailedItem(i, venueId, alias, "别名不能为空"));
+                    continue;
+                }
+                if (alias.equals(venue.getName())) {
+                    skipped++; // 别名与主名同名，无检索意义
+                    continue;
+                }
+                VenueAlias entity = aliasRepository.findByVenueIdAndAlias(venueId, alias)
+                        .orElse(null);
+                if (entity != null && !entity.isDeleted()) {
+                    skipped++; // 幂等：有效行已存在
+                    continue;
+                }
+                if (entity == null) {
+                    entity = new VenueAlias();
+                    entity.setVenueId(venueId);
+                    entity.setAlias(alias);
+                }
+                entity.setDeleted(false); // 软删行复活重用
+                aliasRepository.save(entity);
+                venueService.invalidateDetailPublic(venueId);
+                imported++;
+            } catch (Exception e) {
+                failed.add(new BatchImportVenueAliasResponse.FailedItem(i, venueId, alias,
+                        e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+            }
+        }
+        log.info("[venue-alias] batch-import: total={} imported={} skipped={} failed={}",
+                items.size(), imported, skipped, failed.size());
+        return new BatchImportVenueAliasResponse(items.size(), imported, skipped, failed);
     }
 
     /** 软删（重复添加同名时复活重用，不留脏唯一键） */

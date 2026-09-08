@@ -12,6 +12,7 @@ import org.quwuting.quwutingservice.venue.dto.response.VenueDetailResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueHeatResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenuePhotoResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
+import org.quwuting.quwutingservice.venue.dto.response.VenueSnapshotResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueSuggestResponse;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.enums.ViewSource;
@@ -132,6 +133,22 @@ public class VenueController {
     @GetMapping("/cities")
     public ApiResponse<List<CityStatsResponse>> listCities() {
         return ApiResponse.ok(venueService.listCityStats());
+    }
+
+    /**
+     * 门店基础数据离线快照（2026-09-08 弱网离线韧性，docs/agents/36-offline-resilience.md）
+     * GET /venues/snapshot?since=yyyy-MM-dd HH:mm:ss
+     * <p>
+     * since 空 = 全量（首次同步，当前约 1000 行 / 约 1MB）；非空 = 增量（updatedAt ≥ since
+     * 的活跃行 + 同窗口软删行 id）。公开读（匿名可用）——离线包同步发生在启动后台静默期，
+     * 与登录态无关。协议与容错契约见 {@code VenueService#getVenueSnapshot} 与
+     * {@code VenueSnapshotResponse} javadoc。路由与 /cities、/suggest 同模式：
+     * 字面量路径优先于 /{id} 变量匹配（Spring PathPattern specificity 保证）。
+     */
+    @GetMapping("/snapshot")
+    public ApiResponse<VenueSnapshotResponse> getVenueSnapshot(
+            @RequestParam(required = false) String since) {
+        return ApiResponse.ok(venueService.getVenueSnapshot(since));
     }
 
     /**

@@ -22,6 +22,7 @@ import org.quwuting.quwutingservice.venue.dto.response.CityStatsResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueDetailResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenuePhotoResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
+import org.quwuting.quwutingservice.venue.dto.response.VenueSnapshotResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueSuggestResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.entity.VenueAlias;
@@ -62,6 +63,8 @@ import org.springframework.util.StringUtils;
 import tools.jackson.databind.ObjectMapper;
 
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -742,6 +745,50 @@ public class VenueService {
         }
         return new VenueDetailResponse(pub.base(), canManage, postCount, hasMyStatusReport,
                 pub.statusUpdatedAt(), pub.claimed(), myClaimStatus, pub.aliases());
+    }
+
+    /** 快照同步游标的时间串格式（与响应体 @JsonFormat 同源，客户端原样回传 serverTime） */
+    private static final DateTimeFormatter SNAPSHOT_CURSOR_FORMAT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    /**
+     * 门店基础数据离线快照（2026-09-08 弱网离线韧性，docs/agents/36-offline-resilience.md）。
+     * GET /venues/snapshot?since=yyyy-MM-dd HH:mm:ss（公开读——启动后台静默同步，登录态无关）。
+     *
+     * <p>同步协议 = 时间戳游标增量（无侵入写路径）：
+     * <ul>
+     *   <li>since 空 → 全量活跃行（首次同步），removedIds 恒空；</li>
+     *   <li>since 非空 → updatedAt ≥ since 的活跃行 + 同窗口软删行 id（removedIds）。</li>
+     * </ul>
+     *
+     * <p>容错契约：since 非法（解析失败）按全量处理并告警——快照是幂等资源，
+     * 宁可多下发也不让客户端本地包与库静默漂移；窗口边界重叠（客户端游标 =
+     * 上次 serverTime，恰好等于最大 updatedAt 时该行不再下发，毫秒内多写极端场景
+     * 由客户端下次全量兜底——同步失败计数器连续超限即触发全量重置，见前端同步模块）。
+     *
+     * <p>轻量组装：直查实体 + toSnapshotItem 静态子集，不走 listVenues 的重型链路
+     * （徽标/热度/照片/浏览量批量查询对离线包无意义且成本高）。
+     */
+    public VenueSnapshotResponse getVenueSnapshot(String since) {
+        LocalDateTime sinceTime = null;
+        if (since != null && !since.isBlank()) {
+            try {
+                sinceTime = LocalDateTime.parse(since, SNAPSHOT_CURSOR_FORMAT);
+            } catch (DateTimeParseException e) {
+                // 非法游标 = 客户端本地包不可信，回退全量（幂等资源，多下发无害）
+                sinceTime = null;
+            }
+        }
+        List<Venue> venues = sinceTime == null
+                ? venueRepository.findAllByDeletedFalse()
+                : venueRepository.findByDeletedFalseAndUpdatedAtGreaterThanEqual(sinceTime);
+        List<Long> removedIds = sinceTime == null
+                ? Collections.emptyList()
+                : venueRepository.findDeletedIdsSince(sinceTime);
+        return new VenueSnapshotResponse(
+                LocalDateTime.now(),
+                venues.stream().map(venueResponseMapper::toSnapshotItem).toList(),
+                removedIds);
     }
 
     /**

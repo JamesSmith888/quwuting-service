@@ -4,7 +4,9 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.venue.dto.request.BatchImportVenueAliasRequest;
 import org.quwuting.quwutingservice.venue.dto.request.UpsertVenueAliasRequest;
+import org.quwuting.quwutingservice.venue.dto.response.BatchImportVenueAliasResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueAliasGroupResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueAliasVenueOption;
 import org.quwuting.quwutingservice.venue.service.VenueAliasService;
@@ -29,6 +31,7 @@ import java.util.List;
  *   <li>GET    /admin/venue-aliases                — 已配置别名的门店聚合列表</li>
  *   <li>GET    /admin/venue-aliases/venue-search   — 门店候选（配置时选店，keyword 可空）</li>
  *   <li>POST   /admin/venue-aliases                — 幂等 upsert（同店同名复活）</li>
+ *   <li>POST   /admin/venue-aliases/batch-import   — 批量导入（Skill 别名灌库，2026-09-08）</li>
  *   <li>DELETE /admin/venue-aliases/{id}           — 软删</li>
  * </ul>
  */
@@ -60,6 +63,18 @@ public class AdminVenueAliasController {
             @Valid @RequestBody UpsertVenueAliasRequest request) {
         UserContext.requireAdmin();
         return ApiResponse.ok(aliasService.upsert(request));
+    }
+
+    /**
+     * 批量导入别名（2026-09-08 舞讯 Skill 对接）。
+     * POST /admin/venue-aliases/batch-import — 逐条幂等（同店同名复活/有效行跳过），
+     * 单条失败不拖累整批，响应带 imported/skipped/failed 明细。
+     */
+    @PostMapping("/batch-import")
+    public ApiResponse<BatchImportVenueAliasResponse> batchImport(
+            @Valid @RequestBody BatchImportVenueAliasRequest request) {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(aliasService.batchImport(request));
     }
 
     /** 软删别名（重配同名时复活重用） */
