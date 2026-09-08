@@ -2,6 +2,9 @@ package org.quwuting.quwutingservice.wxsubscribe.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.user.entity.User;
+import org.quwuting.quwutingservice.user.repository.UserRepository;
 import org.quwuting.quwutingservice.wxsubscribe.dto.response.WxSubscribeStatusResponse;
 import org.quwuting.quwutingservice.wxsubscribe.entity.WxSubscribeLog;
 import org.quwuting.quwutingservice.wxsubscribe.entity.WxSubscribeQuota;
@@ -12,6 +15,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Objects;
 
 /**
  * 微信订阅消息额度/留痕账本（2026-09-07 新增，V11）。
@@ -28,6 +32,7 @@ public class WxSubscribeService {
 
     private final WxSubscribeQuotaRepository quotaRepository;
     private final WxSubscribeLogRepository logRepository;
+    private final UserRepository userRepository;
 
     /**
      * 记录一次授权（前端 requestSubscribeMessage 返回 accept 后上报触发）。
@@ -42,16 +47,50 @@ public class WxSubscribeService {
     /**
      * 当前用户订阅额度状态（GET /user/wx-subscribe-status 数据源）：无记录 = 从未
      * 授权（granted/available 均 0，前端「微信提醒」子项未开启态）。
+     * <p>
+     * batchLimit 随额度一起下发（2026-09-08 V13）：前端说明卡需要同时展示
+     * 「剩余次数」与「一次最多提醒几家」，合并到一个响应避免第二个请求。
      */
     @Transactional(readOnly = true)
     public WxSubscribeStatusResponse queryStatus(Long userId, String templateId) {
         WxSubscribeQuota quota = quotaRepository
                 .findByUserIdAndTemplateIdAndDeletedFalse(userId, templateId).orElse(null);
-        if (quota == null) {
-            return new WxSubscribeStatusResponse(templateId, 0, 0);
+        int available = quota == null ? 0 : quota.getAvailableCount();
+        int granted = quota == null ? 0 : quota.getGrantedTotal();
+        return new WxSubscribeStatusResponse(templateId, available, granted,
+                resolveBatchLimit(userId));
+    }
+
+    /** 用户突发档位（qwt_users.wx_notify_batch_limit；记录缺失/空值回落默认档） */
+    private int resolveBatchLimit(Long userId) {
+        return userRepository.findByIdAndDeletedFalse(userId)
+                .map(User::getWxNotifyBatchLimit)
+                .filter(Objects::nonNull)
+                .orElse(User.DEFAULT_WX_NOTIFY_BATCH_LIMIT);
+    }
+
+    /**
+     * 更新用户突发档位（POST /user/wx-subscribe-settings，2026-09-08 V13）。
+     * <p>
+     * 合法档位仅 {@value User#BATCH_LIMIT_UNLIMITED}（不限）/ 3 / 5——其余值一律
+     * 拒绝（1021）：档位是限流上界，放任任意值等于把防护交出去（配成 100 与不限
+     * 无异，配成 1 又会让用户以为功能坏了）。
+     *
+     * @return 生效后的档位（前端直接回写本地状态，无需再查一次）
+     */
+    @Transactional
+    public int updateBatchLimit(Long userId, int batchLimit) {
+        boolean legal = batchLimit == User.BATCH_LIMIT_UNLIMITED
+                || batchLimit == User.DEFAULT_WX_NOTIFY_BATCH_LIMIT
+                || batchLimit == User.BATCH_LIMIT_HEAVY;
+        if (!legal) {
+            throw new BusinessException(1021, "通知档位不合法（可选 3 / 5 / 0=不限）");
         }
-        return new WxSubscribeStatusResponse(templateId,
-                quota.getAvailableCount(), quota.getGrantedTotal());
+        User user = userRepository.findByIdAndDeletedFalse(userId)
+                .orElseThrow(() -> new BusinessException(1001, "用户不存在"));
+        user.setWxNotifyBatchLimit(batchLimit);
+        userRepository.save(user);
+        return batchLimit;
     }
 
     /**

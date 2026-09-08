@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.wxsubscribe.dto.request.WxSubscribeGrantRequest;
+import org.quwuting.quwutingservice.wxsubscribe.dto.request.WxSubscribeSettingsRequest;
 import org.quwuting.quwutingservice.wxsubscribe.dto.response.WxSubscribeStatusResponse;
 import org.quwuting.quwutingservice.wxsubscribe.service.WxSubscribeService;
 import org.springframework.beans.factory.annotation.Value;
@@ -58,10 +59,27 @@ public class WxSubscribeGrantController {
      * 当前用户订阅额度状态（GET /user/wx-subscribe-status）。
      * 三态判据（前端菜单/提示条渲染）：granted==0 未授权过；available>0 可发；
      * available==0 且 granted>0 额度已用完（可再授权补充）。
+     * 附带 batchLimit（突发档位，V13）供说明卡渲染档位选择。
      */
     @GetMapping("/wx-subscribe-status")
     public ApiResponse<WxSubscribeStatusResponse> status() {
         Long userId = UserContext.requireAuth();
+        return ApiResponse.ok(wxSubscribeService.queryStatus(userId, statusTemplateId));
+    }
+
+    /**
+     * 更新微信通知档位（POST /user/wx-subscribe-settings，2026-09-08 V13）。
+     * <p>
+     * 语义：**限制我们一次能打断用户几次，不是限制用户能囤多少额度**——批量状态
+     * 更新时超过档位的门店只走站内信（收藏列表角标照常），不扣额度。
+     * <p>
+     * 返回更新后的完整额度状态：前端直接回写，避免再发一次查询请求。
+     */
+    @PostMapping("/wx-subscribe-settings")
+    public ApiResponse<WxSubscribeStatusResponse> updateSettings(
+            @Valid @RequestBody WxSubscribeSettingsRequest request) {
+        Long userId = UserContext.requireAuth();
+        wxSubscribeService.updateBatchLimit(userId, request.batchLimit());
         return ApiResponse.ok(wxSubscribeService.queryStatus(userId, statusTemplateId));
     }
 }

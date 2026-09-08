@@ -89,12 +89,17 @@ public interface WxSubscribeQuotaRepository extends JpaRepository<WxSubscribeQuo
 
     /**
      * 状态变更发送收件人查询：给定关注者集合（事件方已按 deleted=false 过滤），
-     * 一次往返取齐 openid + 剩余额度（性能第一约束：最少 DB 往返；join users 取
-     * openid、quota 取额度，仅剩 available_count > 0 的用户进入发送）。
-     * 调用方保证 userIds 非空（空 IN 列表 SQL 语法错误）。
+     * 一次往返取齐 openid + 剩余额度 + 突发档位（性能第一约束：最少 DB 往返；
+     * join users 取 openid 与 wx_notify_batch_limit、quota 取额度，仅剩
+     * available_count > 0 的用户进入发送）。调用方保证 userIds 非空（空 IN 列表
+     * SQL 语法错误）。
+     * <p>
+     * batch_limit 随行取出（2026-09-08 V13）：突发限流是<b>逐用户</b>判定，
+     * 与 openid 同一次往返取回可避免 N 次回查 users 表。
      */
     @Query(value = """
-            SELECT u.id AS userId, u.open_id AS openId, q.available_count AS availableCount
+            SELECT u.id AS userId, u.open_id AS openId, q.available_count AS availableCount,
+                   u.wx_notify_batch_limit AS batchLimit
             FROM qwt_wx_subscribe_quota q
             JOIN qwt_users u ON u.id = q.user_id AND u.deleted = false
             WHERE q.template_id = :templateId AND q.deleted = false
@@ -114,6 +119,13 @@ public interface WxSubscribeQuotaRepository extends JpaRepository<WxSubscribeQuo
         String getOpenId();
 
         int getAvailableCount();
+
+        /**
+         * 该用户的突发窗口档位（qwt_users.wx_notify_batch_limit）：3/5 = 窗口内
+         * 最多下发条数，0 = 不限。突发窗口内已发满时本条跳过微信（站内信已发，
+         * 额度不扣），见 {@code WxSubscribeBurstLimiter}。
+         */
+        int getBatchLimit();
     }
 
     /** 用户某模板额度记录（GET /user/wx-subscribe-status 数据源；无记录 = 从未授权） */

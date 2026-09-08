@@ -8,9 +8,6 @@
 		},
 		{
 			"path": "../quwuting-admin-web"
-		},
-		{
-			"path": "../quwuting-ops"
 		}
 	],
 	"settings": {}

@@ -14,5 +14,11 @@ public record WxSubscribeStatusResponse(
         /** 剩余可发送额度 */
         int availableCount,
         /** 历史授权累计次数（区分「从未授权」与「已用完」） */
-        int grantedCount) {
+        int grantedCount,
+        /**
+         * 突发窗口内最多下发的微信通知条数（2026-09-08 新增，V13）：
+         * 3 = 默认档；5 = 重度档；0 = 不限（接收全部门店变动）。
+         * 前端据此渲染说明卡里的档位选择（用户可自主切换）。
+         */
+        int batchLimit) {
 }

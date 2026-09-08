@@ -47,7 +47,13 @@ import java.util.Map;
  *       缺失（必填校验拒绝整单）；</li>
  *   <li><b>规模假设</b>：关注者个位数~数十人，逐用户串行 HTTP（每用户一次微信
  *       调用，微信 subscribe/send 无批量接口）；量级上来后再转异步队列，当前
- *       同步执行换取链路简单。</li>
+ *       同步执行换取链路简单；</li>
+ *   <li><b>突发限流（2026-09-08 V13）</b>：额度可无限囤（每次授权 +1），批量状态
+ *       更新时若逐事件全发，关注 N 家的用户会一次收到 N 条服务通知 → 骚扰 →
+ *       用户关闭订阅（不可逆）。故逐用户过 {@link WxSubscribeBurstLimiter}：
+ *       突发窗口（默认 3 分钟）内超过该用户档位（默认 3 条，0 = 不限）的部分
+ *       <b>跳过微信</b>——关注者站内信已由 {@code notifyStatusChanged} 发出，
+ *       且本条<b>不扣额度</b>。限制的是我们打断用户的次数，不是用户授权额度。</li>
  * </ul>
  */
 @Slf4j
@@ -83,6 +89,7 @@ public class WxSubscribeSendService {
     private final WechatService wechatService;
     private final WxSubscribeQuotaRepository quotaRepository;
     private final WxSubscribeService subscribeService;
+    private final WxSubscribeBurstLimiter burstLimiter;
     private final String templateId;
     private final String miniprogramState;
 
@@ -91,6 +98,7 @@ public class WxSubscribeSendService {
             WechatService wechatService,
             WxSubscribeQuotaRepository quotaRepository,
             WxSubscribeService subscribeService,
+            WxSubscribeBurstLimiter burstLimiter,
             @Value("${wechat.subscribe.status-template-id}") String templateId,
             @Value("${wechat.subscribe.miniprogram-state:formal}") String miniprogramState) {
         HttpClient httpClient = HttpClient.newBuilder()
@@ -105,6 +113,7 @@ public class WxSubscribeSendService {
         this.wechatService = wechatService;
         this.quotaRepository = quotaRepository;
         this.subscribeService = subscribeService;
+        this.burstLimiter = burstLimiter;
         this.templateId = templateId;
         this.miniprogramState = miniprogramState;
     }
@@ -148,6 +157,12 @@ public class WxSubscribeSendService {
                 "time3", Map.of("value", LocalDateTime.now().format(TIME_FORMATTER)));
 
         for (StatusChangeRecipient recipient : recipients) {
+            // 突发限流（2026-09-08 V13）：窗口内该用户已收满其档位条数 → 跳过微信。
+            // 注意「不扣额度、不发微信」——关注者站内信已在 notifyStatusChanged 逐
+            // watcher 发出，信息不丢，只是不打断用户。
+            if (!burstLimiter.allow(recipient.getUserId(), recipient.getBatchLimit())) {
+                continue;
+            }
             sendToOne(recipient, event.venueId(), accessToken, data);
         }
     }
