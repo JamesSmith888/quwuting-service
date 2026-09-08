@@ -9,8 +9,9 @@ import java.util.List;
  * <b>定位回归（根因分析，详见前后端 AGENTS.md「Reaction 表情」章节）</b>：Reaction 是
  * Telegram 式<b>情感表达媒介</b>，其价值随词汇广度与熟悉度增长；历史上按"决策信号价值/
  * 使用率"标准反复收缩字典（18→14→10→12 的折腾）是语义定位错误——决策信号本应由
- * 1-10 评分维度承担。本次将字典扩展到全部常见 Emoji（本目录 152 项，涵盖
- * 表情/手势/爱心/庆祝/动植物/食物/天气/物品），并启用长期闲置的 NEUTRAL 极性档位。
+ * 1-10 评分维度承担。本次将字典扩展到全部常见 Emoji（2026-09-09 业务去噪后本目录
+ * 100 项，涵盖 表情/手势/爱心/人物/庆祝/花卉/酒水/少量物品），并启用长期闲置的
+ * NEUTRAL 极性档位。
  * <p>
  * <b>2026-09-03 去噪收敛（用户驱动，定向删除 18 项 → 134 项）</b>：全放开不等同于无门槛——目录里
  * 与舞厅/舞伴评价场景<b>零关联的日常物象</b>（天气/自然 7 项 ☀️🌙🌈☁️❄️☔⚡、数码/办公/
@@ -19,6 +20,15 @@ import java.util.List;
  * 保留判断标准 = 「能否在舞厅/舞伴场景想象出点击表达」：人物/情绪/动物/花卉/酒水保留，
  * 场景外纯物象删除。删除为纯字典操作：toggle 入口 isValid 拦截、徽标构建对枚举外
  * code 优雅忽略（buildTopBadgesFromCounts），历史已点击数据零报错仅不再展示。
+ * <p>
+ * <b>2026-09-09 业务去噪 + 人物年龄层（用户驱动，删 38 项 → 100 项）</b>：门店列表
+ * Picker 逐项盘点后删除与舞厅/舞友场景零关联的纯物象与恶搞类——动物全组 10、纯食物
+ * 12（保留 🍺🍻 夜场小酌/干杯）、植物 6（保留 🌹 送花/好感唯一物象）、场景外符号
+ * 7（💫💥💡🎂🚀🏆🎯）、恶搞类 3（😈💩👻）；新增成人人像年龄层 4 项（👩👨👵👴，
+ * 通用客群构成表达，label 中性，刻意不收未成年向人像）。判断标准仍为「能否在舞厅场景
+ * 想象出点击表达」——情绪脸/手势/爱心/庆祝/音乐/礼物等情感表达全保留。删除为纯字典
+ * 操作（同 09-03 策略）：DB 历史行保留，展示层按字典外 code 过滤，无 DB 迁移。
+ * 配套前端：Picker 默认收起「常用 24」（legacy 17 + 人物 4 + ❤️💰🎉），展开看全量。
  * <p>
  * <b>职责边界（防重蹈覆辙）</b>：
  * <ul>
@@ -100,9 +110,14 @@ public enum EmojiCatalog {
     EMOJI_1F635("😵", "头晕", "头晕眼花的表情", Polarity.NEUTRAL),
     EMOJI_1F910("🤐", "闭嘴", "拉链封嘴", Polarity.NEUTRAL),
     EMOJI_1F634("😴", "睡觉", "睡觉的脸", Polarity.NEUTRAL),
-    EMOJI_1F608("😈", "恶魔脸", "坏笑的恶魔脸", Polarity.NEGATIVE),
-    EMOJI_1F4A9("💩", "便便", "一坨便便", Polarity.NEUTRAL),
-    EMOJI_1F47B("👻", "幽灵", "白色小幽灵", Polarity.NEUTRAL),
+
+    // ── 人物（People，2026-09-09 新增：通用成人人像年龄层——门店/客群构成表达；
+    //    刻意不收 👧👦 未成年向人像（08-08 删「具体年龄+舞伴服务」合规先例）；两档年龄
+    //    = 中青年（👩👨）+ 老年（👵👴），label 取 CLDR 中性词、不赋业务文案） ──────
+    EMOJI_1F469("👩", "女人", "成年女性", Polarity.NEUTRAL),
+    EMOJI_1F468("👨", "男人", "成年男性", Polarity.NEUTRAL),
+    EMOJI_1F475("👵", "老奶奶", "老年女性", Polarity.NEUTRAL),
+    EMOJI_1F474("👴", "老爷爷", "老年男性", Polarity.NEUTRAL),
 
     // ── 手势（Hand Gestures） ──────────────────────────────────────────────────
     EMOJI_1F44D("👍", "赞", "竖大拇指，表示赞", Polarity.POSITIVE),
@@ -138,57 +153,19 @@ public enum EmojiCatalog {
     EMOJI_2728("✨", "闪亮", "闪闪发光", Polarity.POSITIVE),
     EMOJI_2B50("⭐", "星星", "五角星", Polarity.POSITIVE),
     EMOJI_1F31F("🌟", "闪光星", "闪闪发光的星星", Polarity.POSITIVE),
-    EMOJI_1F4AB("💫", "头晕眼花", "旋转的星星，晕", Polarity.NEUTRAL),
-    EMOJI_1F4A5("💥", "碰撞", "碰撞爆炸的效果", Polarity.NEUTRAL),
     EMOJI_1F525("🔥", "火", "一团火焰", Polarity.POSITIVE),
-    EMOJI_1F4A1("💡", "灯泡", "亮起的灯泡，有主意了", Polarity.POSITIVE),
     EMOJI_1F389("🎉", "派对彩带", "拉响的派对彩带", Polarity.POSITIVE),
     EMOJI_1F38A("🎊", "五彩纸屑", "五彩纸屑球", Polarity.POSITIVE),
     EMOJI_1F381("🎁", "礼物", "系着蝴蝶结的礼物盒", Polarity.POSITIVE),
-    EMOJI_1F382("🎂", "生日蛋糕", "点着蜡烛的生日蛋糕", Polarity.POSITIVE),
     EMOJI_1F3B5("🎵", "音符", "一个音符", Polarity.NEUTRAL),
     EMOJI_1F3B6("🎶", "音乐", "连排的音符", Polarity.NEUTRAL),
-    EMOJI_1F680("🚀", "火箭", "火箭，一飞冲天", Polarity.POSITIVE),
-    EMOJI_1F3C6("🏆", "奖杯", "冠军奖杯", Polarity.POSITIVE),
-    EMOJI_1F3AF("🎯", "靶心", "正中靶心", Polarity.POSITIVE),
     EMOJI_1F483("💃", "跳舞", "跳舞的女人", Polarity.NEUTRAL),
 
-    // ── 动物（Animals） ───────────────────────────────────────────────────────
-    EMOJI_1F436("🐶", "狗脸", "小狗的脸", Polarity.NEUTRAL),
-    EMOJI_1F431("🐱", "猫脸", "小猫的脸", Polarity.NEUTRAL),
-    EMOJI_1F430("🐰", "兔脸", "小兔子的脸", Polarity.NEUTRAL),
-    EMOJI_1F43C("🐼", "熊猫", "可爱的熊猫", Polarity.NEUTRAL),
-    EMOJI_1F437("🐷", "猪脸", "小猪的脸", Polarity.NEUTRAL),
-    EMOJI_1F438("🐸", "青蛙", "青蛙的脸", Polarity.NEUTRAL),
-    EMOJI_1F435("🐵", "猴脸", "猴子的脸", Polarity.NEUTRAL),
-    EMOJI_1F984("🦄", "独角兽", "独角兽", Polarity.NEUTRAL),
-    EMOJI_1F42F("🐯", "虎脸", "老虎的脸", Polarity.NEUTRAL),
-    EMOJI_1F98A("🦊", "狐狸", "狐狸的脸", Polarity.NEUTRAL),
-
-    // ── 植物（Plants） ────────────────────────────────────────────────────────
-    EMOJI_1F338("🌸", "樱花", "盛开的樱花", Polarity.NEUTRAL),
+    // ── 花卉与酒水（2026-09-09 业务去噪：动物/植物纯物象 + 纯食物全删，仅保留——
+    //    🌹 玫瑰：舞厅「送花/好感」唯一物象表达；🍺🍻 酒水：夜场小酌/干杯是舞厅真实场景） ──
     EMOJI_1F339("🌹", "玫瑰", "红玫瑰", Polarity.NEUTRAL),
-    EMOJI_1F33B("🌻", "向日葵", "向日葵", Polarity.NEUTRAL),
-    EMOJI_1F337("🌷", "郁金香", "郁金香", Polarity.NEUTRAL),
-    EMOJI_1F340("🍀", "四叶草", "四叶草，好运", Polarity.POSITIVE),
-    EMOJI_1F331("🌱", "幼苗", "刚发芽的幼苗", Polarity.POSITIVE),
-    EMOJI_1F333("🌳", "树", "一棵大树", Polarity.NEUTRAL),
-
-    // ── 食物（Food） ──────────────────────────────────────────────────────────
-    EMOJI_1F34E("🍎", "苹果", "红苹果", Polarity.NEUTRAL),
-    EMOJI_1F349("🍉", "西瓜", "一瓣西瓜", Polarity.NEUTRAL),
-    EMOJI_1F353("🍓", "草莓", "草莓", Polarity.NEUTRAL),
-    EMOJI_1F347("🍇", "葡萄", "一串葡萄", Polarity.NEUTRAL),
-    EMOJI_1F354("🍔", "汉堡", "汉堡包", Polarity.NEUTRAL),
-    EMOJI_1F355("🍕", "披萨", "一块披萨", Polarity.NEUTRAL),
-    EMOJI_1F32D("🌭", "热狗", "热狗", Polarity.NEUTRAL),
-    EMOJI_1F35F("🍟", "薯条", "一盒薯条", Polarity.NEUTRAL),
-    EMOJI_1F370("🍰", "蛋糕", "一块奶油蛋糕", Polarity.NEUTRAL),
-    EMOJI_1F36B("🍫", "巧克力", "巧克力", Polarity.NEUTRAL),
     EMOJI_1F37A("🍺", "啤酒", "一大杯啤酒", Polarity.NEUTRAL),
     EMOJI_1F37B("🍻", "干杯", "碰杯的啤酒", Polarity.NEUTRAL),
-    EMOJI_2615("☕", "咖啡", "一杯热咖啡", Polarity.NEUTRAL),
-    EMOJI_1F363("🍣", "寿司", "寿司", Polarity.NEUTRAL),
 
     // ── 物品（Objects） ──────────────────────────────────────────────────────
     EMOJI_1F4B0("💰", "钱袋", "装满钱的钱袋", Polarity.NEUTRAL),

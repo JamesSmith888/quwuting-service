@@ -30,7 +30,7 @@
 - 禁止在同一个 Service 类内部通过 `this` 调用被 `@Cacheable`/`@CacheEvict` 标注的方法——自调用会绕开 Spring AOP 代理，缓存注解静默失效；被缓存的方法必须拆到另一个 Bean 中
 - 禁止列表页关联统计（如标签点赞数）按场所逐条查询——批量查询整页涉及的 ID（`IN (...)`），避免 N+1
 - 禁止原生查询/JPQL 投影接口的 DATE/TIMESTAMP 列 getter 声明为 `java.sql.Date`/`java.sql.Timestamp`——Hibernate 6+ 默认映射为 `java.time.LocalDate`/`LocalDateTime`，类型不符会在运行时抛 `UnsupportedOperationException`（见「投影接口 getter 类型」章节）
-- 禁止「近 N 天」滚动窗口统计只传 `since` 不传 `until` 上界——必须显式传排他上界；`VenueHeatService` 热度统计为**实时口径**（`until = 请求时刻 now`，2026-08-13 起，见「统计口径：实时」章节），列表排序/热门标记的 SQL 镜像保持**截至昨日**（`until = 今天 0 点`，稳定比较基准）——两个消费方各自锚定，禁止混用
+- 禁止「近 N 天」滚动窗口统计只传 `since` 不传 `until` 上界——必须显式传排他上界；`VenueHeatService` 热度统计为**实时口径**（`until = 请求时刻 now`，2026-08-13 起，见「统计口径：实时」章节）；列表排序/热门标记的 SQL 镜像（`HEAT_BEHAVIOR`/`VIEW_BEHAVIOR`/`findHotVenueIds`）**2026-09-08 起同步实时含今日**（SQL 内 `CURRENT_DATE + 1 day`，与热度页同口径）——时间窗三处镜像禁止混用，满意度偏移仍只在热度页
 - 禁止用户状态上报修改 `Venue.status` 字段——上报是独立信号层，`Venue.status` 变更权属管理员/认领人（见「场所状态上报」章节）
 - 禁止在 `ActiveReportSummary`（公开响应）中返回 `note` 字段——note 仅管理端可见，审核安全要求（见「场所状态上报 → 审核安全」）
 - 禁止降低 `RequestTimingFilter` 的优先级或在其中加入业务逻辑——必须保持 `HIGHEST_PRECEDENCE` 且纯观测，否则计时漏掉前置处理或引入额外延迟（见「请求耗时日志」章节）
@@ -48,7 +48,7 @@
 - 禁止 Reaction 字典使用二元对立的点赞/倒赞图标（如 👍👎）——采用具体、中性的正负向 Reaction 共存，避免攻击性评价引发商家纠纷（见「Reaction 快速反馈系统」章节）
 - 禁止允许用户自由创建 Reaction 代码——字典由后端 `ReactionCode` 枚举唯一维护，新增/调整条目需过审核安全过滤（参照 `ReportReason` 命名规避敏感词的先例）
 - 禁止对 Reaction 做周期性清零（如"每周/每月重置计数"）——采用永久保留原始记录 + 多时间窗口（今日/7天/30天/全部）实时统计的时间衰减方案，见「Reaction 快速反馈系统 → 时效性设计」根因说明
-- 禁止 Reaction 的四个时间窗口套用热度模块「统计口径：截至昨日」的排他上界约定——Reaction 是实时众包信号，窗口锚点为真实"此刻"，与热度滚动窗口是两套独立的时间语义
+- 禁止 Reaction 的四个时间窗口套用热度模块滚动窗口的排他上界约定——Reaction 是实时众包信号，窗口锚点为真实"此刻"，与热度滚动窗口是两套独立的时间语义
 - 禁止在 JPQL/HQL（`@Query` 非 native）中写数据库表名或 snake_case 列名——根实体必须用实体名、列必须用 Java 属性名（camelCase），否则启动期 `UnknownEntityException`；nativeQuery 不受此限（见「双查询拆分 → JPQL 共享片段的 HQL 语法约束」）
 - 禁止在 JPQL/HQL 中写裸整数时间量减法（`CURRENT_DATE - 30`）——必须带单位后缀 `CURRENT_DATE - 30 day`，否则 Hibernate 7 启动期抛 `SemanticException: ... not a temporal amount`（见「双查询拆分 → JPQL 共享片段的 HQL 语法约束」）
 
@@ -75,7 +75,7 @@
 | Venue 消费字段用 `price`（人均）/ `minConsumption`（低消） | 舞厅领域无此概念；用 `tickets`（门票规则 JSON 列表）+ `partnerFees`（舞伴费用多模式 JSON 列表，unit 区分 MINUTE/SONG），共享 DTO record 在 `venue/dto/` |
 | 在登录链路获取 / 要求前端上送昵称 | 微信 jscode2session 不返回资料；昵称经 `POST /user/profile` 由用户主动提交，角色等变更经 `GET /user/me` 静默同步 |
 | 原生查询投影接口 DATE/TIMESTAMP 列声明 `java.sql.Date`/`java.sql.Timestamp` | 改用 `java.time.LocalDate`/`LocalDateTime`——Hibernate 6+ 默认映射为 java.time 类型，声明遗留类型会在首次命中该查询时运行时报错 |
-| 「近 N 天」统计只传 `since` 让窗口自然到"现在" | 同时传 `since` + `until` 排他上界：`VenueHeatService` 热度统计用实时 `until = now`（2026-08-13 起，含今日）；列表排序/热门标记 SQL 镜像用 `until = 今天 0 点`（截至昨日，稳定比较基准） |
+| 「近 N 天」统计只传 `since` 让窗口自然到"现在" | 同时传 `since` + `until` 排他上界：`VenueHeatService` 热度统计用实时 `until = now`（2026-08-13 起，含今日）；列表排序/热门标记 SQL 镜像在 SQL 内取 `CURRENT_DATE` 锚点（2026-09-08 起同为实时含今日，`+ 1 day` 上界） |
 | JPQL 数学函数传可空坐标参数（`radians(:latitude)` + null） | PG 将 null 参数推断为 bytea 直接报错；拆成带坐标 / 无坐标两个查询，Service 分流，坐标形参用原生 `double` |
 | 城市筛选用 LIKE 模糊匹配"兼容"非标准名 | 精确匹配 + 写入端统一 region picker 标准名；脏数据走一次性清洗 SQL，不在查询端容错 |
 | 单行多列聚合查询返回 `Object[]` 再下标强转 | 用 Repository 嵌套接口投影（getter 名 = SELECT alias），编译期类型安全，不受 Spring Data JPA 版本语义变更影响 |
@@ -100,7 +100,7 @@
 | 带显式 id 导入数据后不重置序列 | `setval` 到 max(id)，否则下一次插入主键冲突（修复脚本已内置；手工导入必须做） |
 | 恢复"标签点赞"功能或用 1-10 打分做实时众包体感 | 已被 Reaction 快速反馈系统替代（`venuereaction` 模块），新增此类需求一律走 Reaction toggle，不复用 taginteraction |
 | Reaction 计数做"每周/每月重置清零" | 原始记录永久保留，按今日/7天/30天/全部四个真实时间窗口实时统计（时间衰减方案），见「Reaction 快速反馈系统」 |
-| Reaction 时间窗口套用「统计口径：截至昨日」 | Reaction 窗口锚点为真实"此刻"（今天0点/7天前/30天前），与热度滚动窗口是两套独立时间语义 |
+| Reaction 时间窗口套用热度滚动窗口的上界约定 | Reaction 窗口锚点为真实"此刻"（今天0点/7天前/30天前），与热度滚动窗口是两套独立时间语义 |
 | 实体删除字段后不同步迁移脚本处理遗留列（javadoc 写"已移除"但列仍在） | `ddl-auto: update` 不删列/不取消 NOT NULL、`validate` 不校验列级 NOT NULL → 遗留 NOT NULL 列在运行期插入时才爆炸且被 DataIntegrityViolation 兜底误吞。实体删字段必须同步 `db/migrate-*.sql` 迁移，注释写真实状态（见「Schema 完整性与数据库迁移规范 → 实体字段移除 ≠ 列被删除」） |
 | `catch (DataIntegrityViolationException)` 整类吞掉当"并发幂等" | 只允许吞唯一键竞态（SQLState 23505，统一经 `DbConstraintViolations.isUniqueViolation` 判定）；NOT NULL/列约束/外键违规必须上抛，否则真实根因被静默掩盖成 200 + 业务码（2026-08-05 liked 列事故） |
 | 有唯一约束的幂等写入「先 SELECT 再 INSERT + catch 23505 吞异常」，且 catch 后继续用同一事务查/提交 | Hibernate flush 失败后持久化上下文状态未定义、事务可能已被标记 rollback-only——"幂等 200"实际会变 HTTP 500，且「扣费已执行、解锁未落库」等事务边界完全依赖 JPA 不可靠行为。确定性写法二选一：① `INSERT ... ON CONFLICT DO NOTHING/DO UPDATE`（原子 upsert，恒 1 次往返零异常，见 `DancerFavoriteRepository.upsertFavorite` / `DancerAdViewRepository.upsertAdView` / `VenueFeedbackRepository.upsertPendingWithField|upsertPendingWithoutField` / `PointsTransactionRepository.upsertEarn` / `VenueClaimRepository.upsertPending` / `VenueReactionRepository.upsertReaction` / `DancerRecognitionRepository.upsertRecognition` / `DancerRecognitionTagRepository.upsertRecognitionTag`——2026-08-20 全量落地，线上实证「报告恢复营业连点 500」）；② `pg_advisory_xact_lock` 按关键维度串行化 check-then-act（见 `PointsService.unlock` / `checkIn`、`StatusReportService.submitReport`——V34 追加式模型无 DB 唯一约束，2026-08-20 起走 `lockUserVenue` 锁内重查 + 普通 INSERT，对齐认可域 `lockDailyTicket` 先例）。禁止再用 catch+clear 表达幂等 |

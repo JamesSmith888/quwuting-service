@@ -314,7 +314,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 因马太效应反馈循环重构，语义见 {@link VenueHeatWeights} 浏览贡献注释）。
      * <p>
      * 数学形态：{@code LN(1 + Σ(source_weight × time_factor))}，30 天窗口
-     * （[CURRENT_DATE-30, CURRENT_DATE)，截至昨日，同 HEAT_BEHAVIOR 锚点）。
+     * （[CURRENT_DATE-30, CURRENT_DATE]，实时含今日，同 HEAT_BEHAVIOR 锚点）。
      * <ul>
      *   <li>source_weight：LIST 0.5 / OTHER 1.0 / SEARCH 1.5 / SHARE 2.0——列表点入
      *       是位置偏差驱动的被动流量（排序→曝光→浏览→排序的马太闭环核心），降权；
@@ -347,7 +347,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             + " " + VenueHeatWeights.VIEW_RECENCY_7D_MULTIPLIER + " " + """
                      ELSE 1 END), 0)
                 FROM VenueView vv
-                WHERE vv.venueId = v.id AND vv.viewDate >= (CURRENT_DATE - 30 day) AND vv.viewDate < CURRENT_DATE))
+                WHERE vv.venueId = v.id AND vv.viewDate >= (CURRENT_DATE - 30 day) AND vv.viewDate <= CURRENT_DATE))
             """;
 
     /**
@@ -375,9 +375,12 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * + PointsProperties，调整权重必须同步本片段与 findHotVenueIds 双处镜像，
      * 见后端 AGENTS.md「场所热度」章节）。
      * <p>
-     * 窗口统一锚定「截至昨日」（与 VenueHeatService 的 [since30d, today) 一致）：
-     * CURRENT_DATE 为今天（服务器时区 Asia/Shanghai，见 application.yaml），排他上界 =
-     * 今天 0 点。同一天内多次请求结果稳定，不随请求时刻漂移。
+     * 窗口统一为实时含今日（2026-09-08 与热度页口径对齐，三处镜像同步）：
+     * CURRENT_DATE 为今天（服务器时区 Asia/Shanghai，见 application.yaml），窗口 =
+     * [今天-30天, 今天+1天)，即「近 30 天滚动、含今日已发生数据」。当日行为（今天
+     * 有人到店/反馈/收藏）当天即反映排序——交谊舞为当日决策场景，与热度页
+     * 「数据实时更新 · 含今日」同一业务语义；代价是排序键随请求时刻漂移（行为事件
+     * 稀疏 + ln 压缩平滑，影响可控，分页漂移由 {@code v.id DESC} tie-break 兜底）。
      * <p>
      * 注意：本片段引用 {@code :positiveCodes}（正向 code 列表，来自
      * ReactionCode.positiveCodeNames()）与 {@code :pointsWeight}（积分权重，
@@ -393,7 +396,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      *   <li>HQL 时间量减法必须带单位后缀（{@code CURRENT_DATE - 30 day}）；裸整数
      *       （{@code CURRENT_DATE - 30}）会被 Hibernate 7 报 SemanticException
      *       "Operand of - is of type 'java.lang.Integer' which is not a temporal amount"。
-     *       此处窗口 = [今天-30天, 今天)，即「截至昨日」30 天。</li>
+     *       此处窗口 = [今天-30天, 今天+1天)，实时含今日（2026-09-08 同步实时化）。</li>
      *   <li>积分目标类型用<b>全限定枚举字面量</b>（HQL 标准做法，无需参数）——
      *       与 {@link org.quwuting.quwutingservice.points.entity.PointsTransaction}
      *       的 targetType 枚举字段比较。浏览来源 {@code vv.source} 同为枚举列，
@@ -405,25 +408,25 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             + VIEW_BEHAVIOR + """
              + (SELECT COUNT(*) FROM Favorite f
                 WHERE f.venueId = v.id AND f.deleted = false
-                  AND f.createdAt >= (CURRENT_DATE - 30 day) AND f.createdAt < CURRENT_DATE) * """
+                  AND f.createdAt >= (CURRENT_DATE - 30 day) AND f.createdAt < (CURRENT_DATE + 1 day)) * """
             + VenueHeatWeights.NEW_FAVORITE + """
              + (SELECT COUNT(*) FROM VenuePost p
                 WHERE p.venueId = v.id AND p.deleted = false
-                  AND p.createdAt >= (CURRENT_DATE - 30 day) AND p.createdAt < CURRENT_DATE) * """
+                  AND p.createdAt >= (CURRENT_DATE - 30 day) AND p.createdAt < (CURRENT_DATE + 1 day)) * """
             + VenueHeatWeights.POST + """
              + (SELECT COUNT(*) FROM TagInteraction ti
                 WHERE ti.venueId = v.id AND ti.deleted = false AND ti.score IS NOT NULL
-                  AND ti.createdAt >= (CURRENT_DATE - 30 day) AND ti.createdAt < CURRENT_DATE) * """
+                  AND ti.createdAt >= (CURRENT_DATE - 30 day) AND ti.createdAt < (CURRENT_DATE + 1 day)) * """
             + VenueHeatWeights.RATING + """
              + (SELECT COUNT(*) FROM VenueReaction r
                 WHERE r.venueId = v.id AND r.deleted = false
                   AND r.reactionCode IN :positiveCodes
-                  AND r.createdAt >= (CURRENT_DATE - 30 day) AND r.createdAt < CURRENT_DATE) * """
+                  AND r.createdAt >= (CURRENT_DATE - 30 day) AND r.createdAt < (CURRENT_DATE + 1 day)) * """
             + VenueHeatWeights.REACTION + """
              + (SELECT COALESCE(SUM(-pt.delta), 0) FROM PointsTransaction pt
                 WHERE pt.targetType = org.quwuting.quwutingservice.points.enums.PointsTargetType.VENUE
                   AND pt.targetId = v.id AND pt.delta < 0
-                  AND pt.createdAt >= (CURRENT_DATE - 30 day) AND pt.createdAt < CURRENT_DATE) * :pointsWeight)
+                  AND pt.createdAt >= (CURRENT_DATE - 30 day) AND pt.createdAt < (CURRENT_DATE + 1 day)) * :pointsWeight)
             """;
 
     /**
@@ -817,10 +820,10 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 标量子查询——Postgres 一次解析执行，网络开销只剩 1 次往返。各子查询均命中
      * (venue_id, ...) 复合索引，库内执行时间为毫秒级。
      * <p>
-     * 窗口语义（与 VenueHeatService 保持一致）：
+     * 窗口语义（与 VenueHeatService 保持一致，2026-08-13 实时化含今日）：
      * <ul>
-     *   <li>viewSince/viewUntil：浏览按 view_date 过滤，[30天前的日期, 今天)，即「截至昨日」</li>
-     *   <li>windowSince/windowUntil：其余滚动窗口按时间戳过滤，[30天前0点, 今天0点)，即「截至昨日」</li>
+     *   <li>viewSince/viewUntil：浏览按 view_date 过滤，[30天前的日期, 明天)，含今日</li>
+     *   <li>windowSince/windowUntil：其余滚动窗口按时间戳过滤，[30天前0点, now)，实时含今日</li>
      *   <li>now：活跃上报为实时 TTL 窗口（expires_at > now，TTL 唯一事实源 = 列，
      *       2026-08-11 由 created_at >= reportSince 迁移）</li>
      *   <li>lateststatuslogtime：当前状态的实时事实，全量 MAX，无窗口约束</li>
@@ -1091,7 +1094,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 数据规模小（每城市 5~30 家），单次全表查询无性能压力；结果由
      * VenueLookupService 缓存 5min（变化频率极低）。
      * <p>
-     * 窗口日期在 SQL 内取 CURRENT_DATE（与 {@link #HEAT_SCORE} 一致），无参数日期依赖。
+     * 窗口日期在 SQL 内取 CURRENT_DATE（与 {@link #HEAT_SCORE} 一致，2026-09-08
+     * 同步实时化含今日），无参数日期依赖。
      */
     @Query(value = """
             SELECT id FROM (
@@ -1118,27 +1122,27 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             + " " + VenueHeatWeights.VIEW_RECENCY_7D_MULTIPLIER + " " + """
                                     ELSE 1 END), 0)
                                 FROM qwt_venue_views vv
-                                WHERE vv.venue_id = v.id AND vv.view_date >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND vv.view_date < CURRENT_DATE))
+                                WHERE vv.venue_id = v.id AND vv.view_date >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND vv.view_date <= CURRENT_DATE))
                            + (SELECT COUNT(*) FROM qwt_favorites f
                               WHERE f.venue_id = v.id AND f.deleted = false
-                                AND f.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND f.created_at < CURRENT_DATE) * """
+                                AND f.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND f.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * """
             + VenueHeatWeights.NEW_FAVORITE + """
                            + (SELECT COUNT(*) FROM qwt_venue_posts p
                               WHERE p.venue_id = v.id AND p.deleted = false
-                                AND p.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND p.created_at < CURRENT_DATE) * """
+                                AND p.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND p.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * """
             + VenueHeatWeights.POST + """
                            + (SELECT COUNT(*) FROM qwt_tag_interactions ti
                               WHERE ti.venue_id = v.id AND ti.deleted = false AND ti.score IS NOT NULL
-                                AND ti.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND ti.created_at < CURRENT_DATE) * """
+                                AND ti.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND ti.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * """
             + VenueHeatWeights.RATING + """
                            + (SELECT COUNT(*) FROM qwt_venue_reactions r
                               WHERE r.venue_id = v.id AND r.deleted = false
                                 AND r.reaction_code IN :positiveCodes
-                                AND r.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND r.created_at < CURRENT_DATE) * """
+                                AND r.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND r.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * """
             + VenueHeatWeights.REACTION + """
                            + (SELECT COALESCE(SUM(-pt.delta), 0) FROM qwt_points_transactions pt
                               WHERE pt.target_type = 'VENUE' AND pt.target_id = v.id AND pt.delta < 0
-                                AND pt.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND pt.created_at < CURRENT_DATE) * :pointsWeight
+                                AND pt.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND pt.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * :pointsWeight
                            AS heat_score
                     FROM qwt_venues v
                     WHERE v.deleted = false
