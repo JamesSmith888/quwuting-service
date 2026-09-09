@@ -1789,6 +1789,70 @@
       "platform_name": "TT舞汇",
       "venue_id": 547,
       "kind": "alias"
+    },
+    {
+      "city": "南昌市",
+      "news_name": "夜辰音乐",
+      "platform_name": "夜辰音乐酒吧",
+      "venue_id": 1223,
+      "kind": "renamed",
+      "note": "9月5日玖喜俱乐部改名夜辰音乐酒吧恢复营业"
+    },
+    {
+      "city": "南昌市",
+      "news_name": "玖喜俱乐部",
+      "platform_name": "夜辰音乐酒吧",
+      "venue_id": 1223,
+      "kind": "renamed"
+    },
+    {
+      "city": "南昌市",
+      "news_name": "丽莎",
+      "platform_name": "丽莎歌舞厅",
+      "venue_id": 1224,
+      "kind": "alias"
+    },
+    {
+      "city": "青岛市",
+      "news_name": "哆哈",
+      "platform_name": "哆哈酒馆",
+      "venue_id": 1225,
+      "kind": "alias"
+    },
+    {
+      "city": "青岛市",
+      "news_name": "拾光",
+      "platform_name": "拾光酒馆",
+      "venue_id": 1226,
+      "kind": "alias"
+    },
+    {
+      "city": "青岛市",
+      "news_name": "舒心",
+      "platform_name": "舒心舞厅",
+      "venue_id": 1227,
+      "kind": "alias"
+    },
+    {
+      "city": "东莞市",
+      "news_name": "情缘清",
+      "platform_name": "情缘清吧",
+      "venue_id": 1228,
+      "kind": "alias"
+    },
+    {
+      "city": "长沙市",
+      "news_name": "梦幻音乐",
+      "platform_name": "梦幻音乐酒吧",
+      "venue_id": 1229,
+      "kind": "alias"
+    },
+    {
+      "city": "长沙市",
+      "news_name": "歌门",
+      "platform_name": "歌门舞厅",
+      "venue_id": 1230,
+      "kind": "alias"
     }
   ],
   "removed_duplicates": [
@@ -1885,9 +1949,9 @@
     {
       "city": "湖州市",
       "news_name": "梦田",
-      "status": "verified-livehouse",
-      "reason": "2026-09-07 深度调研：存在=新市梦田音乐Live House（德清县新市镇运河新天地步云路35号，17:00-06:00 正常营业，湖州首家梦田音乐品牌，kdclub/网易有报道），舞讯圈收录为湖州场子、B源标{卡座}——但业态为 LiveHouse 音乐酒吧非传统舞厅；2026-09-09 A(xianbao360 09-08)/B(百事通 09-09) 双源同日均点名「梦田{卡座}」=两源确认营业中，但 LiveHouse 业态口径仍未拍板，维持不录入、列管理员手动核实清单",
-      "next_action": "等用户拍板 LiveHouse 业态口径；拍板收录则按「梦田音乐Live House（新市古镇店）」city=湖州市 建档"
+      "status": "resolved-notfound",
+      "reason": "2026-09-07 深度调研：存在=新市梦田音乐Live House（德清县新市镇运河新天地步云路35号，17:00-06:00 正常营业，湖州首家梦田音乐品牌，kdclub/网易有报道），舞讯圈收录为湖州场子、B源标{卡座}——但业态为 LiveHouse 音乐酒吧非传统舞厅；2026-09-09 A(xianbao360 09-08)/B(百事通 09-09) 双源同日均点名「梦田{卡座}」=两源确认营业中，但 LiveHouse 业态口径仍未拍板，维持不录入、列管理员手动核实清单；2026-09-09 用户核实找不到该店，定论：不录入；2026-09-09 二次深度核实：kdclub 详情页(2026-02-26)营业状态=正常 17:00-06:00、湖州公共资源交易网 2024「梦田音乐装修项目」招投标(歌舞娱乐用房 1948.97㎡，运河新天地E7栋)、网易 2024-12-06 开业报道(湖州首店)、抖音官方号确认「梦田音乐」为全国连锁 LiveHouse 品牌(七城七店) → 店真实存在且在营，但业态=LiveHouse 音乐酒吧，无砂舞/莎莎舞经营证据；B 源「梦田{卡座}」卡座标记亦符合酒吧形态",
+      "next_action": "维持不录入（LiveHouse 业态口径用户未拍板收录）；若用户拍板收录，按 name=梦田音乐Live House（新市古镇店）/city=湖州市/district=德清县/address=湖州市德清县新市镇运河新天地步云路35号/businessHours=17:00-06:00 建档"
     },
     {
       "city": "绍兴市",
@@ -1924,6 +1988,13 @@
       "status": "unverified",
       "reason": "2026-09-09 B 源（舞厅百事通）点名营业但用户实况确认关门——舞讯与实况冲突以用户为准，维持 CEASED 未写库",
       "next_action": "下次舞讯再点名先问用户实况再决定是否恢复"
+    },
+    {
+      "city": "孝感市",
+      "news_name": "鸿尘",
+      "status": "resolved-notfound",
+      "reason": "2026-09-09 B 源单源新店候选，用户核实找不到该店，不录入；2026-09-09 深度联网核实：砂舞指南站/砂舞之家(guoping.cc 2026-06-14 孝感=晚风·海阔天空·魅舞·kk 无鸿尘)/xianbao360 历史各期/腾讯地图 POI(仅给出无关 3×3音乐酒吧)/顺企网孝感娱乐业黄页/安居客本地生活，均无「鸿尘」痕迹 → 判定舞讯误植或不存在的小场，不录入",
+      "next_action": "已定论不录入；后续舞讯再出现「鸿尘」先与用户确认（保留一假说：B 源「九九 鸿尘」中鸿尘或为九九TeaHouse 的圈内别名，未证实，勿据此建库）"
     }
   ]
 }
