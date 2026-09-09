@@ -47,5 +47,7 @@ public record AdminUserItem(
         /** 最近活跃时间（资料更新/积分流水/邀约/打卡 四源 MAX，最低回退加入时间——
          *  从未有任何行为 = 加入时间，见 AdminUserStatsService lastActive 定义） */
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
-        LocalDateTime lastActiveAt
+        LocalDateTime lastActiveAt,
+        /** 微信审核账号标记（2026-09-09 V17；true = 管理端统计口径已排除该账号） */
+        boolean wechatReview
 ) {}

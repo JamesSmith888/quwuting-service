@@ -48,5 +48,8 @@ public record AdminUserDetailResponse(
         /** 认领概览（总数 + 按状态分布） */
         ClaimSummary claims,
         /** 打卡概览（总天数 + 连续天数 + 最近打卡时间） */
-        CheckinSummary checkin
+        CheckinSummary checkin,
+        /** 微信审核账号标记（2026-09-09 V17；true = 管理端统计口径已排除该账号，
+         *  详情页提供标记/取消操作 POST /admin/users/{id}/wechat-review） */
+        boolean wechatReview
 ) {}

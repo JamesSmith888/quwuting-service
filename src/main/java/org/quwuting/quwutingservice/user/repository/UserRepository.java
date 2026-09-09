@@ -104,22 +104,30 @@ public interface UserRepository extends JpaRepository<User, Long> {
                                                   @Param("city") String city,
                                                   Pageable pageable);
 
-    /** 用户总数（未软删；管理端统计概览） */
-    long countByDeletedFalse();
+    /**
+     * 用户总数（未软删；管理端统计概览 + 公告触达分母）。
+     * <p>
+     * <b>统计口径（2026-09-09 V17）：排除微信审核账号（wechat_review=true）</b>——
+     * 审核员账号的注册/打卡/上报是平台统计噪音（打卡型噪音占比曾 60%+），不删除
+     * 账号、仅统计排除；名单见 V17 迁移，后续 admin-web 用户详情页手动标记。
+     */
+    long countByDeletedFalseAndWechatReviewFalse();
 
-    /** 指定角色用户数（未软删；管理端统计概览——管理员数） */
-    long countByDeletedFalseAndRole(UserRole role);
+    /** 指定角色用户数（未软删且非微信审核；管理端统计概览——管理员数） */
+    long countByDeletedFalseAndWechatReviewFalseAndRole(UserRole role);
 
-    /** 指定时间后注册的用户数（未软删；管理端统计概览——今日新增） */
-    long countByDeletedFalseAndCreatedAtGreaterThanEqual(LocalDateTime since);
+    /** 指定时间后注册的用户数（未软删且非微信审核；管理端统计概览——今日新增） */
+    long countByDeletedFalseAndWechatReviewFalseAndCreatedAtGreaterThanEqual(LocalDateTime since);
 
     /**
      * 近 N 日活跃用户数（2026-08-27 用户管理增强）：与
      * {@link #findPageByFiltersOrderByLastActive} 同源的四源 MAX >= 阈值。
+     * <b>2026-09-09 V17：排除微信审核账号</b>（统计口径同上，噪音去权）。
      */
     @Query(value = """
             SELECT COUNT(*) FROM qwt_users u
             WHERE u.deleted = false
+              AND u.wechat_review = false
               AND GREATEST(
                 COALESCE(u.updated_at, u.created_at),
                 COALESCE((SELECT MAX(t.created_at) FROM qwt_points_transactions t WHERE t.user_id = u.id), u.created_at),

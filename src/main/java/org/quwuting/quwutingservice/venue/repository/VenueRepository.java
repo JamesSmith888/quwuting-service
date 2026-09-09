@@ -52,6 +52,41 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     List<Venue> findByCityAndDeletedFalse(String city);
 
     /**
+     * 附近门店（2026-09-09 消费账本域门店自动关联，docs/agents/44-spend-ledger.md §13）：
+     * haversine 服务端算距（米），radius 内按距离升序取最近 limit 家。轻量行
+     * （id/name/距离）——计时器"匹配最近门店"只认这三样；不筛营业状态（用户人就在
+     * 店里，CEASED/SUSPENDED 的店也该能挂，数据准确性优先于状态过滤）。
+     * HAVING 别名过滤是 MySQL 方言（WHERE 里不能引用聚合/别名），仅此查询使用。
+     */
+    @Query(value = """
+            SELECT id AS venueId,
+                   name AS venueName,
+                   (6371000 * ACOS(LEAST(1,
+                       COS(RADIANS(:lat)) * COS(RADIANS(latitude))
+                       * COS(RADIANS(longitude) - RADIANS(:lng))
+                       + SIN(RADIANS(:lat)) * SIN(RADIANS(latitude))))) AS distanceMeters
+            FROM qwt_venues
+            WHERE deleted = 0 AND latitude IS NOT NULL AND longitude IS NOT NULL
+            HAVING distanceMeters <= :radiusM
+            ORDER BY distanceMeters ASC
+            LIMIT :limit
+            """, nativeQuery = true)
+    List<NearbyVenueRow> findNearby(@Param("lat") double lat,
+                                    @Param("lng") double lng,
+                                    @Param("radiusM") int radiusM,
+                                    @Param("limit") int limit);
+
+    /** 投影接口：附近门店轻量行 */
+    interface NearbyVenueRow {
+        Long getVenueId();
+
+        String getVenueName();
+
+        double getDistanceMeters();
+    }
+
+
+    /**
      * 离线快照全量基线（2026-09-08 弱网离线韧性，GET /venues/snapshot 首次同步）：
      * 全部活跃门店。当前量级约 1000 行 / 约 1MB JSON，一次性下发可接受；
      * 快照条目为静态子集（轻量组装，无徽标/热度/照片批量查询），见 VenueSnapshotItem。

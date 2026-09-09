@@ -24,6 +24,7 @@ import org.quwuting.quwutingservice.venue.dto.response.VenuePhotoResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueSnapshotResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueSuggestResponse;
+import org.quwuting.quwutingservice.venue.dto.response.NearbyVenueResponse;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.entity.VenueAlias;
 import org.quwuting.quwutingservice.venue.entity.VenuePhoto;
@@ -1085,6 +1086,31 @@ public class VenueService {
      * 数据规模数百级、前缀命中通常唯一，无需检索服务/热词聚合设施。
      */
     @Transactional(readOnly = true)
+    /**
+     * 附近门店（2026-09-09 消费账本域门店自动关联，docs/agents/44-spend-ledger.md §13）：
+     * GET /venues/nearby?latitude=&longitude=&radiusM=&limit=。计时器开始计时/回溯时
+     * 调用——radius 内取最近 limit 家，客户端取第一个自动预关联（可见可改防密集店区
+     * 误挂）。radius 缺省 300m（舞厅室内 GPS 漂移 50-150m + 街区尺度的折中，可调）、
+     * 上限 2000m；limit 缺省 5、上限 20。不筛营业状态（人在店里，CEASED/SUSPENDED
+     * 也该能挂——数据准确性优先）。公开读（计时主链路在弱网/未登录也可用，匹配结果
+     * 只进本地账目，不产生服务端写入）。
+     */
+    public List<NearbyVenueResponse> listNearby(Double latitude, Double longitude,
+                                                Integer radiusM, Integer limit) {
+        if (latitude == null || longitude == null) {
+            throw new BusinessException(1032, "缺少定位参数");
+        }
+        int radius = radiusM == null || radiusM <= 0 ? 300 : Math.min(radiusM, 2000);
+        int size = limit == null || limit <= 0 ? 5 : Math.min(limit, 20);
+        List<NearbyVenueResponse> result = new ArrayList<>();
+        for (VenueRepository.NearbyVenueRow row
+                : venueRepository.findNearby(latitude, longitude, radius, size)) {
+            result.add(new NearbyVenueResponse(
+                    row.getVenueId(), row.getVenueName(), row.getDistanceMeters()));
+        }
+        return result;
+    }
+
     public List<VenueSuggestResponse> listVenueSuggestions(String keyword, int limit) {
         if (!StringUtils.hasText(keyword)) return List.of();
         String trimmed = keyword.trim();

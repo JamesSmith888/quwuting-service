@@ -33,6 +33,12 @@ import java.util.List;
  *       占比骤升 60%+，深夜均匀注册等特征见 35 号文档），前端以「噪音占比」呈现。</li>
  * </ul>
  * <p>
+ * <b>2026-09-09 V17 口径收紧</b>：全部四序列排除微信审核账号（qwt_users.
+ * wechat_review=true，V17 存量名单 + admin-web 用户详情页手动标记）——注册/噪音
+ * 在用户表子查询直接过滤；打开/互动在行为子查询外层
+ * {@code user_id NOT IN (SELECT id FROM qwt_users WHERE wechat_review = true)}
+ * 过滤（行为表无用户标记冗余，统一回查用户表）。
+ * <p>
  * MySQL 8 方言（生产 RDS 已切 MySQL，2026-08-30；WITH RECURSIVE 骨架补零 +
  * DATE_SUB/INTERVAL 语法与 application-mysql.yaml 同族；<b>勿在 PG 环境执行</b>）。
  * 骨架 = [today-(days-1), today]（含今日，实时），各源 LEFT JOIN 天然补零。
@@ -80,11 +86,13 @@ public interface UserDailyStatsRepository extends Repository<User, Long> {
                        FROM qwt_users
                        WHERE deleted = false AND role = 'USER'
                          AND open_id NOT LIKE 'test\\_%'
+                         AND wechat_review = false
                          AND created_at >= CAST(:sinceDay AS DATETIME)
                        GROUP BY day) r ON r.day = d.day
-            LEFT JOIN (SELECT checkin_date AS day, COUNT(DISTINCT user_id) AS cnt
-                       FROM qwt_daily_checkins
-                       WHERE checkin_date >= CAST(:sinceDay AS DATE)
+            LEFT JOIN (SELECT checkin_date AS day, COUNT(DISTINCT c.user_id) AS cnt
+                       FROM qwt_daily_checkins c
+                       WHERE c.checkin_date >= CAST(:sinceDay AS DATE)
+                         AND c.user_id NOT IN (SELECT id FROM qwt_users WHERE wechat_review = true)
                        GROUP BY day) o ON o.day = d.day
             LEFT JOIN (SELECT t.day AS day, COUNT(DISTINCT t.user_id) AS cnt
                        FROM (
@@ -101,11 +109,13 @@ public interface UserDailyStatsRepository extends Repository<User, Long> {
                            UNION ALL SELECT user_id, DATE(created_at) AS day FROM qwt_venue_feedbacks WHERE user_id IS NOT NULL AND deleted = false AND created_at >= CAST(:sinceDay AS DATETIME)
                            UNION ALL SELECT user_id, DATE(created_at) AS day FROM qwt_tag_interactions WHERE user_id IS NOT NULL AND deleted = false AND created_at >= CAST(:sinceDay AS DATETIME)
                        ) t
+                       WHERE t.user_id NOT IN (SELECT id FROM qwt_users WHERE wechat_review = true)
                        GROUP BY t.day) i ON i.day = d.day
             LEFT JOIN (SELECT DATE(u.created_at) AS day, COUNT(*) AS cnt
                        FROM qwt_users u
                        WHERE u.deleted = false AND u.role = 'USER'
                          AND u.open_id NOT LIKE 'test\\_%'
+                         AND u.wechat_review = false
                          AND u.created_at >= CAST(:sinceDay AS DATETIME)
                          AND NOT EXISTS (SELECT 1 FROM (
                                SELECT user_id FROM qwt_venue_views WHERE user_id IS NOT NULL

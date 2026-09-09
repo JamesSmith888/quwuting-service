@@ -79,6 +79,7 @@ agent_created: true
 
 | 原子 | 字段 | 说明 |
 |---|---|---|
+| `venue_row` | name*、status*、statusTone?(open/closed/suspended/renovating/ceased)、location?、distance?、changed?、signal?、favorite? | **门店列表项 1:1 复刻**（2026-09-09 新增）。唯一交互 = 店名右边的收藏星，点一下翻本地态并自动推进；永不真收藏 |
 | `toggle_row` | label*、desc?、on?(初始开=true) | 开关行；打开后自动推进下一幕 |
 | `explain_card` | lines*(1~6 行)、title?、tag? | 说明卡（如额度语义） |
 | `mock_push` | title*、desc*、meta?、tone?(accent/success/warning) | 模拟微信服务通知推送卡 |
@@ -89,20 +90,40 @@ agent_created: true
 （组件头栏已常驻「模拟操作 · 不会真的发送或改动数据」）；③每幕可带 `note`（≤120 字）
 做操作引导。
 
-**微信自动提醒示例剧本**（场景一公告 #22 同款语义）：
+**怎么引导用户动手**：演示的第一步必须让用户知道点哪里——剧本文案用 `note`
+（≤120 字）写明具体位置（如「先点店名右边的星星，把它收藏」），并在正文演示块
+**之前**用一句加粗引导（「先点门店名右边的**星星**把它收藏」）。第 1 幕优先用
+`venue_row` 复刻真实列表项，别用抽象开关——用户在公告里认得出"列表里那张卡"，
+演示可信度才成立。
+
+**微信自动提醒示例剧本**（2026-09-09 公告 #22 实发版本，直接改字段复用）：
+
+- `mock_push.desc` 支持 `\n` 分行（组件 `.ad-push-desc` 已声明 `white-space: pre-line`），
+  服务通知按「内容行 + 时间行」两段写，两条信息挤一行会黏连。
+- `cta.target.url` 里的门店 id **必须核实存在**（`GET /venues/{id}` 返回 200；2026-09-09
+  实测生产库 id 12/31 均「场所不存在」）——拿不准就**不写 target**，只留 toast，
+  跳转失败虽只回落 toast，但假 id 是脏数据。
 
 ````markdown
 ```qw-demo
-{"v":1,"title":"微信自动提醒","scenes":[
-  {"atom":"toggle_row","label":"营业状态变化提醒我","desc":"仅演示","note":"把它打开试试"},
-  {"atom":"explain_card","tag":"说明","lines":["一次性订阅 · 按次扣减 · 不区分门店","当前还可模拟提醒 3 次"]},
-  {"atom":"mock_push","title":"寻梦缘 已恢复营业","desc":"点击可查看门店详情","tone":"accent"},
-  {"atom":"cta","text":"去真实开启","toast":"门店详情页 → 收藏后点「微信提醒」","note":"以上均为模拟，不会真的发送微信"}]}
+{"v":1,"title":"微信自动提醒 · 可点击演示","scenes":[{"atom":"venue_row","name":"寻梦缘","status":"营业中","statusTone":"open","location":"成都·武侯区 · 人民南路四段","distance":"1.2km","signal":"15:20 · 6人报过 · 舞友上报","favorite":false,"note":"先点店名右边的星星，把它收藏（仅演示，不会真的收藏）"},{"atom":"explain_card","tag":"状态变化","title":"这家店从「营业中」变为「暂停营业」","lines":["舞厅营业时间常临时变动，每次变化我们都会记下来。","变化那一刻，已收藏的你会收到微信服务通知。","在微信里就能看到，不用反复打开小程序刷。"]},{"atom":"mock_push","meta":"服务通知 · 去舞厅","title":"营业变更","desc":"寻梦缘 · 暂停营业\n2026年9月9日 15:40","tone":"warning","note":"↑ 这就是你在微信里收到的样子"},{"atom":"cta","text":"去真实开启","toast":"门店详情页 → 收藏后点「微信提醒」","note":"以上均为模拟，不会真的发送微信"}]}
 ```
 ````
 
 **发布前自查**：JSON 合法（python json.load 过一遍）；`"v":1`；scenes 1~12 幕；
 字段全在白名单内；演示块在正文叙述后；cta 不要真跳才发布——跳转失败只回落 toast。
+**🚨 红线：演示块是内部 DSL，绝不能让用户看到源码。** 客户端任一步解析失败（非法 JSON /
+未知原子 / v≠1 / 超长 / 双块）以及**老版本客户端不认识新原子**，都会走"静默丢弃演示块"，
+正文保持完整可读——这是刻意设计。所以：**带演示块的公告必须先确认演示能力已在已发布的
+客户端版本里**，否则老版本用户只看到"没演示的干净正文"（不会看到 JSON，但演示白做）。
+**改 `.ts` 后必须回拷 `.js`**（小程序跑 `.js`，`utils/*.js` 入库为运行时真相）：
+`npx tsc -p tsconfig.json --noEmit false --outDir /tmp/tscAll` 后只 cp 本次涉及的文件；
+`npx tsc --noEmit` 有既存错误会让开发者工具编译不出最新产物 → 先清干净再验。
+**本地零依赖验证（推荐，比自查靠谱）**：用项目已编译抽取器跑一遍正文——
+`cd quwuting/miniprogram/utils && node -e "const m=require('./announcementDemo.js');const r=m.extractAnnouncementDemo(require('fs').readFileSync('/tmp/xxx.md','utf8'));console.log(r.spec?'OK '+r.spec.scenes.length:'FAIL null')"`，
+`spec=null` 说明剧本不会被渲染（多半是字段越界/未知原子/v≠1）→ 演示块被静默丢弃，改到 OK 再发。
+**预览给用户看效果**：`quwuting/docs/previews/announcement-demo-wx-notify.html`
+（单文件、token 1:1 还原 + 微信服务通知真实外壳，用户点开即可体验，改剧本时同步它）。
 
 ## 📋 数据更新公告固定模板（每次写库后发 DATA_UPDATE 一律用此模板）
 

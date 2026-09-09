@@ -116,7 +116,8 @@ public class AdminUserService {
                 demand,
                 reports,
                 claims,
-                checkin);
+                checkin,
+                Boolean.TRUE.equals(user.getWechatReview()));
     }
 
     /** 统计概览（GET /admin/users/stats）：总用户 / 今日新增 / 管理员 / 近 7 日活跃 */
@@ -126,9 +127,9 @@ public class AdminUserService {
         LocalDateTime todayStart = now.toLocalDate().atStartOfDay();
         LocalDateTime activeSince = now.minusDays(7);
         return new AdminUserStatsResponse(
-                userRepository.countByDeletedFalse(),
-                userRepository.countByDeletedFalseAndCreatedAtGreaterThanEqual(todayStart),
-                userRepository.countByDeletedFalseAndRole(UserRole.ADMIN),
+                userRepository.countByDeletedFalseAndWechatReviewFalse(),
+                userRepository.countByDeletedFalseAndWechatReviewFalseAndCreatedAtGreaterThanEqual(todayStart),
+                userRepository.countByDeletedFalseAndWechatReviewFalseAndRole(UserRole.ADMIN),
                 userRepository.countActiveSince(activeSince));
     }
 
@@ -150,7 +151,22 @@ public class AdminUserService {
                 agg != null ? agg.levelName() : "新晋舞友",
                 demand != null ? demand.total() : 0,
                 demand != null ? demand.fulfilled() : 0,
-                lastActiveAt);
+                lastActiveAt,
+                Boolean.TRUE.equals(user.getWechatReview()));
+    }
+
+    /**
+     * 标记/取消微信审核账号（2026-09-09 V17，POST /admin/users/{id}/wechat-review，
+     * 仅 ADMIN）：幂等写 wechat_review；只影响管理端统计口径（用户统计条/大盘
+     * 按日趋势/公告触达分母），不删除账号、不影响小程序端任何功能。用户不存在/
+     * 已软删 → 1004。
+     */
+    @Transactional
+    public void setWechatReview(Long id, boolean marked) {
+        User user = userRepository.findByIdAndDeletedFalse(id)
+                .orElseThrow(() -> new BusinessException(1004, "用户不存在"));
+        user.setWechatReview(marked);
+        userRepository.save(user);
     }
 
     /** 最近活跃四源之一的「资料更新」源：updated_at 兜底 createdAt（无任何更新记录） */

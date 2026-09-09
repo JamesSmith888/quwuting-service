@@ -3,6 +3,7 @@ package org.quwuting.quwutingservice.user.controller;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.user.dto.request.MarkWechatReviewRequest;
 import org.quwuting.quwutingservice.user.dto.response.AdminDailyStatItem;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserDetailResponse;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserItem;
@@ -17,6 +18,8 @@ import org.quwuting.quwutingservice.user.service.AdminUserStatsDetailService;
 import org.springframework.data.domain.Page;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -117,5 +120,21 @@ public class AdminUserController {
             @RequestParam(required = false) String mode) {
         UserContext.requireAdmin();
         return ApiResponse.ok(statsDetailService.detail(id, type, status, mode));
+    }
+
+    /**
+     * 微信审核账号标记（POST /admin/users/{id}/wechat-review，仅 ADMIN；
+     * 2026-09-09 V17）：body = {"marked": true|false}，幂等写 qwt_users.
+     * wechat_review。语义 = <b>统计去噪不是处罚</b>——只把账号从管理端统计口径
+     * （用户统计条/大盘按日趋势/公告触达分母）排除，不删除账号、不影响小程序端
+     * 任何功能；存量名单（TO / last night's stars / 上报&gt;2 的审核号）由 V17
+     * 迁移预标记，日常增减在本端点操作。
+     */
+    @PostMapping("/{id}/wechat-review")
+    public ApiResponse<Void> markWechatReview(@PathVariable Long id,
+                                              @RequestBody MarkWechatReviewRequest request) {
+        UserContext.requireAdmin();
+        adminUserService.setWechatReview(id, request.marked());
+        return ApiResponse.ok(null);
     }
 }

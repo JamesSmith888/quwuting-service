@@ -268,7 +268,7 @@ public class AnnouncementService {
     public AnnouncementStatsResponse stats(Long id) {
         findAny(id); // 存在性校验
         long readCount = readRepository.countByAnnouncementId(id);
-        long totalUsers = userRepository.countByDeletedFalse();
+        long totalUsers = userRepository.countByDeletedFalseAndWechatReviewFalse();
         double readRate = totalUsers == 0 ? 0 : (double) readCount / totalUsers;
         return new AnnouncementStatsResponse(readCount, totalUsers, readRate);
     }

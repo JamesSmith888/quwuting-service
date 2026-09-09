@@ -75,6 +75,25 @@
 - 早期流量主靠 uid2（last night's stars）自分享卡片（share_from=2 占分享打开绝对多数），
   真实裂变少；8-31 后游客浏览骤降（<22/日）。
 
+## 微信审核账号标记（2026-09-09 V17，统计去噪落地）
+
+上节「噪音号进用户管理标记」规划的落地实现。**语义 = 统计去噪不是处罚**：
+不删除账号、不影响小程序端任何功能，只从管理端统计口径排除。
+
+- **标记载体**：`qwt_users.wechat_review BOOLEAN NOT NULL DEFAULT FALSE`
+  （V17 迁移，含存量名单预标记：id 2/4/6/10/13/14 = 用户点名的
+  TO / last night's stars + 生产审计「上报>2」的审核号（34/17/13/3/3 条，
+  「照片有误」型为主）；id=51 可爱大宝经用户确认豁免）。
+- **管理端操作**：`POST /admin/users/{id}/wechat-review`，body `{"marked": true|false}`，
+  幂等（AdminUserService.setWechatReview）；admin-web 用户详情页「运营标记」卡
+  切换 + 用户列表行「微信审核」warning tag。
+- **统计口径排除范围**（全部走 `wechat_review=false` 过滤）：
+  1. 用户统计条（`/admin/users/stats` 四项：总数/今日新增/管理员/近7日活跃）；
+  2. 大盘按日趋势四序列（注册/打开/互动在子查询过滤；打卡 NOT IN 回查用户表）；
+  3. 公告触达分母（AnnouncementService.stats 的 totalUsers/readRate）。
+  用户列表/详情本身**不排除**（保留可见性才能手动管理标记）。
+- **上报明细列表**（/admin/reports 等）保留原样——历史留痕，只动聚合统计。
+
 ## 后续规划（P1/P2，未实施）
 
 - 漏斗图：注册→打开→互动；游客→注册转化（NULL user 浏览 vs 注册量）监控分享引流。

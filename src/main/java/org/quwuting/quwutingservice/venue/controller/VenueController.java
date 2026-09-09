@@ -14,6 +14,7 @@ import org.quwuting.quwutingservice.venue.dto.response.VenuePhotoResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueSnapshotResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueSuggestResponse;
+import org.quwuting.quwutingservice.venue.dto.response.NearbyVenueResponse;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.enums.ViewSource;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
@@ -164,6 +165,23 @@ public class VenueController {
             @RequestParam(required = false) String keyword,
             @RequestParam(defaultValue = "6") int limit) {
         return ApiResponse.ok(venueService.listVenueSuggestions(keyword, limit));
+    }
+
+    /**
+     * 附近门店（2026-09-09 消费账本域门店自动关联，docs/agents/44-spend-ledger.md §13）
+     * GET /venues/nearby?latitude=&longitude=&radiusM=&limit=
+     * <p>
+     * 计时器开始计时/回溯时调用：radiusM（米，缺省 300、上限 2000）内按距离升序取
+     * 最近 limit 家（缺省 5、上限 20）。公开读（匿名可用——匹配结果只进本地账目，
+     * 服务端零写入）。路由字面量优先于 /{id}（与 /snapshot、/suggest 同模式）。
+     */
+    @GetMapping("/nearby")
+    public ApiResponse<List<NearbyVenueResponse>> listNearby(
+            @RequestParam Double latitude,
+            @RequestParam Double longitude,
+            @RequestParam(required = false) Integer radiusM,
+            @RequestParam(required = false) Integer limit) {
+        return ApiResponse.ok(venueService.listNearby(latitude, longitude, radiusM, limit));
     }
 
     /**

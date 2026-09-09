@@ -41,6 +41,19 @@ public class User extends BaseEntity {
     private UserRole role = UserRole.USER;
 
     /**
+     * 微信审核账号标记（2026-09-09 V17）：管理端一切用户量统计口径排除该账号
+     * ——不删除账号、不影响小程序端任何功能，仅统计去噪。
+     * <p>
+     * 背景：微信提审期间审核员以真实账号进入产生注册/上报/打卡（2026-09-06 起
+     * 打卡型噪音占比 60%+；单账号 34 条「照片有误」上报全被忽略），污染 admin
+     * 平台统计图与统计条。存量名单见 V17 迁移注释（审计依据 + 用户点名）；
+     * 后续由管理员在 admin-web 用户详情页手动标记/取消
+     * （POST /admin/users/{id}/wechat-review）。
+     */
+    @Column(nullable = false)
+    private Boolean wechatReview = Boolean.FALSE;
+
+    /**
      * 突发窗口内最多下发的微信订阅通知条数（2026-09-08 新增，V13，
      * docs/agents/41-wx-subscribe-notify.md）。
      * <p>
