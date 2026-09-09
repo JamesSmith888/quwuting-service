@@ -46,21 +46,31 @@ public class User extends BaseEntity {
      * <p>
      * 语义：<b>限制的是「我们一次能打断用户几次」，不是限制用户授权额度</b>——
      * 微信一次性订阅额度可无限累加（每次 accept +1，勾「总是保持 + 允许」后静默
-     * 累加），但发送侧必须自缚：批量状态更新时关注 N 家的用户若一次收到 N 条服务
-     * 通知，会直接去设置里关闭订阅（微信侧永久且不可逆），唯一被动触达通道报废。
+     * 累加），发送侧保留自缚能力以防批量状态更新时轰炸用户。
      * <p>
      * 档位：{@value #BATCH_LIMIT_UNLIMITED}（0）= 不限，接收全部门店变动；
-     * 3 = 默认档；5 = 重度用户档。窗口时长是技术参数（识别「一批」用），走配置
+     * {@value #BATCH_LIMIT_CONSERVATIVE} = 保守档；{@value #BATCH_LIMIT_HEAVY} =
+     * 重度档。窗口时长是技术参数（识别「一批」用），走配置
      * {@code wechat.subscribe.burst-window-minutes}，见 {@code WxSubscribeBurstLimiter}。
+     * <p>
+     * <b>2026-09-09 默认档反转（V15）</b>：默认 3 → 0（不限）。根因 = 原默认档防的
+     * 是「用户同时收藏很多门店、批量变更同分钟轰炸」的假想场景，而业务现实是用户
+     * 不会同时收藏很多门店——防御机制让全体用户为低概率场景买单；且该参数曾以
+     * 「通知上限」设置项暴露给用户，把发送侧内部参数泄漏进了用户心智（用户只关心
+     * 「想不想被提醒」，不关心「一批最多几条」）。本字段自此降级为<b>运维安全阀</b>：
+     * 字段与设置接口保留（可按用户显式调档），无用户侧 UI，日常恒为不限。
      */
     @Column(nullable = false)
     private Integer wxNotifyBatchLimit = DEFAULT_WX_NOTIFY_BATCH_LIMIT;
 
-    /** 「不限」档位值（0 = 不限制突发窗口内的通知条数） */
+    /** 「不限」档位值（0 = 不限制突发窗口内的通知条数），2026-09-09 起为默认档 */
     public static final int BATCH_LIMIT_UNLIMITED = 0;
 
-    /** 默认档位（3 条）——新用户建号即生效，与 V13/V14 DDL 的 DEFAULT 3 保持一致 */
-    public static final int DEFAULT_WX_NOTIFY_BATCH_LIMIT = 3;
+    /** 默认档位 = 不限（2026-09-09 V15 反转，原 3；与 DDL DEFAULT 0 保持一致） */
+    public static final int DEFAULT_WX_NOTIFY_BATCH_LIMIT = BATCH_LIMIT_UNLIMITED;
+
+    /** 保守档位（3 条）——原默认档，现仅作显式选择的低打扰档 */
+    public static final int BATCH_LIMIT_CONSERVATIVE = 3;
 
     /** 重度用户档位（5 条） */
     public static final int BATCH_LIMIT_HEAVY = 5;

@@ -48,8 +48,9 @@ public class WxSubscribeService {
      * 当前用户订阅额度状态（GET /user/wx-subscribe-status 数据源）：无记录 = 从未
      * 授权（granted/available 均 0，前端「微信提醒」子项未开启态）。
      * <p>
-     * batchLimit 随额度一起下发（2026-09-08 V13）：前端说明卡需要同时展示
-     * 「剩余次数」与「一次最多提醒几家」，合并到一个响应避免第二个请求。
+     * batchLimit 随额度一起下发（2026-09-08 V13）。2026-09-09 起前端不再消费该
+     * 字段（「通知上限」设置项已隐藏、默认不限），保留仅为响应形状稳定，供
+     * 管理工具/联调读取实际档位。
      */
     @Transactional(readOnly = true)
     public WxSubscribeStatusResponse queryStatus(Long userId, String templateId) {
@@ -75,16 +76,19 @@ public class WxSubscribeService {
      * 合法档位仅 {@value User#BATCH_LIMIT_UNLIMITED}（不限）/ 3 / 5——其余值一律
      * 拒绝（1021）：档位是限流上界，放任任意值等于把防护交出去（配成 100 与不限
      * 无异，配成 1 又会让用户以为功能坏了）。
+     * <p>
+     * 2026-09-09 起该接口<b>降级为运维安全阀</b>（默认档 = 不限，前端「通知上限」
+     * 设置项已隐藏）：无用户侧 UI，仅供管理工具/运维按用户显式调档，能力不删。
      *
-     * @return 生效后的档位（前端直接回写本地状态，无需再查一次）
+     * @return 生效后的档位（调用方直接回写本地状态，无需再查一次）
      */
     @Transactional
     public int updateBatchLimit(Long userId, int batchLimit) {
         boolean legal = batchLimit == User.BATCH_LIMIT_UNLIMITED
-                || batchLimit == User.DEFAULT_WX_NOTIFY_BATCH_LIMIT
+                || batchLimit == User.BATCH_LIMIT_CONSERVATIVE
                 || batchLimit == User.BATCH_LIMIT_HEAVY;
         if (!legal) {
-            throw new BusinessException(1021, "通知档位不合法（可选 3 / 5 / 0=不限）");
+            throw new BusinessException(1021, "通知档位不合法（可选 0=不限 / 3 / 5）");
         }
         User user = userRepository.findByIdAndDeletedFalse(userId)
                 .orElseThrow(() -> new BusinessException(1001, "用户不存在"));

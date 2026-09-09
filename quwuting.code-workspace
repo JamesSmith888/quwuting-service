@@ -8,6 +8,12 @@
 		},
 		{
 			"path": "../quwuting-admin-web"
+		},
+		{
+			"path": "../../IdeaProjects/ledger-server"
+		},
+		{
+			"path": "../../IdeaProjects/LedgerAIClient"
 		}
 	],
 	"settings": {}
