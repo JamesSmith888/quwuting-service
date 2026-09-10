@@ -5,7 +5,9 @@ import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.venue.dailyopening.dto.request.ApplyDailyOpeningBatchRequest;
+import org.quwuting.quwutingservice.venue.dailyopening.dto.request.ApplyVenueSuspendBatchRequest;
 import org.quwuting.quwutingservice.venue.dailyopening.dto.response.BatchApplyResult;
+import org.quwuting.quwutingservice.venue.dailyopening.dto.response.BatchSuspendResult;
 import org.quwuting.quwutingservice.venue.dailyopening.service.DailyOpeningService;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -23,6 +25,9 @@ import org.springframework.web.bind.annotation.RestController;
  *       平台 CEASED/SUSPENDED 且来源可信（EXACT/ALIAS 自动 / forceReversal 人工
  *       放行）→ 反转为 OPEN（单向，不会把营业中的门店标停业）；不再落每日快照，
  *       返回统计与反转明细（审计/回滚依据）。</li>
+ *   <li>POST /admin/venue-daily-openings/batch-suspend — 批量置「暂停营业」
+ *       （2026-09-10 白名单口径）：被舞讯点名覆盖的城市内、未上榜门店 OPEN →
+ *       SUSPENDED；非 OPEN 状态静默跳过，不发数据更新公告。</li>
  * </ul>
  */
 @RestController
@@ -37,5 +42,18 @@ public class AdminDailyOpeningController {
             @Valid @RequestBody ApplyDailyOpeningBatchRequest request) {
         UserContext.requireAdmin();
         return ApiResponse.ok(dailyOpeningService.applyBatch(request));
+    }
+
+    /**
+     * 批量置「暂停营业」（白名单口径反向通道，2026-09-10）。
+     * <p>
+     * 调用方 = 舞讯采集 Skill（Agent）：当日舞讯点名覆盖的城市内、未上榜门店。
+     * 仅 OPEN → SUSPENDED，非 OPEN 静默跳过；城市范围由调用方保证（服务端不推断）。
+     */
+    @PostMapping("/batch-suspend")
+    public ApiResponse<BatchSuspendResult> applyBatchSuspend(
+            @Valid @RequestBody ApplyVenueSuspendBatchRequest request) {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(dailyOpeningService.applyBatchSuspend(request));
     }
 }

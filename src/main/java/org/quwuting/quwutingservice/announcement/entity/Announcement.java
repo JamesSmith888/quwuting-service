@@ -90,4 +90,20 @@ public class Announcement extends BaseEntity {
 
     /** 操作管理员 ID（SYSTEM 来源恒 null = 系统/Agent 生成，对齐审计先例） */
     private Long operatorId;
+
+    // ── 快讯域专属字段（2026-09-10 扩，docs/agents/47-bulletins.md；公告条目恒为 null） ──
+
+    /** 城市标签（category=FLASH 使用；一期仅列表卡片展示，不做筛选/定向） */
+    @Column(length = 32)
+    private String city;
+
+    /** 关联门店 ID（category=FLASH 可选；列表卡片锚点；详情正文仍走 markdown venue:// 链接） */
+    private Long venueId;
+
+    /**
+     * Agent 幂等去重键（category=FLASH 且非空时由 V18 生成列唯一索引约束）：
+     * 同键重跑返回已存在条目而非重复投放；管理端人工发布可不传（不参与约束）。
+     */
+    @Column(length = 64)
+    private String dedupKey;
 }

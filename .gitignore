@@ -49,6 +49,10 @@ nohup.out
 ### OS ###
 .DS_Store
 
+### Python（skill 脚本运行缓存，勿入库） ###
+__pycache__/
+*.pyc
+
 ### Server external config (敏感值 gitignored yml，本地/生产双份维护) ###
 # 生产：jar 同目录 config/application-{profile}.yaml（Spring Boot 外部化配置，优先级高于 classpath）
 # 本地：如需外部化同样放 config/ 下；classpath 的 application-dev/mysql.yaml 已由上方规则忽略

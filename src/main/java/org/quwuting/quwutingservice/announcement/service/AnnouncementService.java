@@ -86,8 +86,11 @@ public class AnnouncementService {
         // 排序由 findVisiblePage JPQL 内 ORDER BY 承担（pinned DESC, publishAt DESC, id DESC），
         // Pageable 不带 Sort——避免与 JPQL 排序重复拼接
         Pageable pageable = PageRequest.of(page, Math.min(size, 50));
+        // category=null + excludeCategory=FLASH：公告域只取 NOTICE/DATA_UPDATE，
+        // 快讯（FLASH）走独立接口，绝不混入公告中心/首页公告条（docs/agents/47 互斥契约）
         Page<Announcement> result = announcementRepository.findVisiblePage(
-                AnnouncementStatus.PUBLISHED, LocalDateTime.now(), pinned, pageable);
+                null, AnnouncementCategory.FLASH, AnnouncementStatus.PUBLISHED,
+                LocalDateTime.now(), pinned, pageable);
         Set<Long> readIds = result.isEmpty()
                 ? Set.of()
                 : announcementRepository.findReadAnnouncementIds(
@@ -97,10 +100,11 @@ public class AnnouncementService {
                 a.isPinned(), a.getPublishAt(), readIds.contains(a.getId()), a.getCreatedAt()));
     }
 
-    /** 未读公告数（首页公告条 / 我的页入口红点数据源） */
+    /** 未读公告数（首页公告条 / 我的页入口红点数据源）；excludeCategory=FLASH——快讯无已读回执，不得计入 */
     @Transactional(readOnly = true)
     public long unreadCount(Long userId) {
-        return announcementRepository.countUnread(AnnouncementStatus.PUBLISHED, LocalDateTime.now(), userId);
+        return announcementRepository.countUnread(
+                AnnouncementCategory.FLASH, AnnouncementStatus.PUBLISHED, LocalDateTime.now(), userId);
     }
 
     /** 公告详情（已下线/已软删 → 404；不自动标已读，由前端调 markRead） */
@@ -133,14 +137,14 @@ public class AnnouncementService {
 
     // ── 管理端 ────────────────────────────────────────────────
 
-    /** 管理端列表（状态/分类/来源筛选，id 倒序） */
+    /** 管理端列表（状态/分类/来源筛选，id 倒序）；excludeCategory=FLASH——快讯走独立管理菜单 */
     @Transactional(readOnly = true)
     public Page<AdminAnnouncementResponse> adminList(AnnouncementStatus status,
                                                      AnnouncementCategory category,
                                                      AnnouncementSource source,
                                                      int page, int size) {
         Pageable pageable = PageRequest.of(page, Math.min(size, 100));
-        return announcementRepository.findPageByFilters(status, category, source, pageable)
+        return announcementRepository.findPageByFilters(status, category, AnnouncementCategory.FLASH, source, pageable)
                 .map(this::toAdminResponse);
     }
 
@@ -154,6 +158,7 @@ public class AnnouncementService {
     @Transactional
     public AdminAnnouncementResponse create(CreateAnnouncementRequest request, Long adminId) {
         validateContent(request.content());
+        rejectFlashCategory(request.category());
         validateSchedule(request.publishAt(), request.offlineAt());
         Announcement a = new Announcement();
         applyFields(a, request.title(), request.content(), request.category(),
@@ -185,6 +190,7 @@ public class AnnouncementService {
             throw new BusinessException(1001, "已下线公告不可编辑，如需变更请重新发布");
         }
         validateContent(request.content());
+        rejectFlashCategory(request.category());
         if (a.getStatus() == AnnouncementStatus.PUBLISHED) {
             // 发布中：publishAt 既不校验也不落库（已生效时间，逻辑上不可改）
             validateSchedule(null, request.offlineAt());
@@ -429,6 +435,17 @@ public class AnnouncementService {
         String lower = content.toLowerCase();
         if (lower.contains("<script") || lower.contains("<iframe")) {
             throw new BusinessException(400, "公告内容包含不允许的标签");
+        }
+    }
+
+    /**
+     * 公告域拒绝 FLASH（docs/agents/47 互斥契约）：快讯只能走 bulletin 域接口创建，
+     * 公告管理端若放行 FLASH，会造出「无已读回执、却因公告列表放行而计入未读数」
+     * 的脏条目（未读红点永不收敛）。分类选择在前端已过滤，此处为服务端兜底防御。
+     */
+    private void rejectFlashCategory(AnnouncementCategory category) {
+        if (category == AnnouncementCategory.FLASH) {
+            throw new BusinessException(400, "快讯请走「快讯管理」，公告分类仅支持运营公告与数据更新");
         }
     }
 

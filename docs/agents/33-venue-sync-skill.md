@@ -1,4 +1,4 @@
-# 33 — 舞讯采集 Skill 数据接口（2026-09-01）
+# 33 — 舞讯采集 Skill 数据接口（2026-09-01；2026-09-10 增「白名单置暂停」通道）
 
 > ⚠️ 维护警告：本文档记录「去舞厅每日舞讯采集 Skill」（WorkBuddy 技能，Agent 对话式维护门店）
 > 配套的后端能力。新增/修改细节先更新本文档；AGENTS.md 索引表保持一行摘要。
@@ -65,15 +65,42 @@ Skill 比对的数据底座。**为什么新增**：现有 GET /admin/venue-sync
 - 返回：`{total, created, existed, failed, items: [{index, name, city, result
   [CREATED/EXISTED/FAILED], venueId, message}]}`，index 对齐请求 items。
 
-### 状态更新 —— 不新增，Skill 直接复用
+### 状态更新 —— 复用既有，2026-09-10 新增反向通道
 
-`POST /admin/venue-daily-openings/batch`（DailyOpeningService.applyBatch，2026-08-31）：
-- 语义：仅「资讯 OPEN + 平台 CEASED/SUSPENDED → OPEN」反转（单向保守，未上榜 ≠ 停业）；
+**开门方向（复用，2026-08-31）**：`POST /admin/venue-daily-openings/batch`
+（DailyOpeningService.applyBatch）：
+- 语义：仅「资讯 OPEN + 平台 CEASED/SUSPENDED → OPEN」反转（**2026-09-10 前**的解释是
+  「未上榜 ≠ 停业」的单向保守；该解释已被下方白名单口径取代，但本接口语义不变）；
   EXACT/ALIAS 自动可反转，CONTAINED/FUZZY 需 forceReversal=true（用户确认放行）。
-- 审计链完整：VenueStatusLog（changedBy=null）+ 关注者站内信 + 热度/详情/列表缓存失效。
+- 审计链完整：VenueStatusLog（changedBy=null）+ 关注者站内信 + 热度/详情/列表缓存失效 +
+  数据更新公告（`createDataUpdateAnnouncement`）。
 - Skill 构造 items：`{venueId, reportDate(舞讯报告日期), sourceId(默认 xianbao360),
   status: "OPEN", confidence, forceReversal?}`。
-- **避免再造一套**：状态写库逻辑唯一权威 = DailyOpeningService。
+
+**关门方向（2026-09-10 新增）**：`POST /admin/venue-daily-openings/batch-suspend`
+（DailyOpeningService.applyBatchSuspend）——**白名单口径反向写库**。
+- **为什么新增**：平台此前只有「开门」数据，无法表达「今天没开」——舞讯是当日营业白名单，
+  某城被覆盖而某店未上榜 = 今日未营业。用户 2026-09-10 拍板补上关门维度
+  （有界推翻旧的「未上榜 ≠ 停业」单向保守语义）。
+- 请求：`{items: [{venueId, reportDate, sourceId, source?}]}`，1~500 条
+  （`ApplyVenueSuspendBatchRequest` + `VenueSuspendItemRequest`）。**不带 status/confidence**
+  ——城市级覆盖是精确事实，非匹配猜测。
+- 语义：**仅 OPEN → SUSPENDED**；CEASED/CLOSED/RENOVATING 静默跳过（防把已停业/装修中的店
+  「降级」成暂停营业）；门店不存在/已删计入 `venueNotFound`；已 SUSPENDED 幂等跳过。
+- 🔒 **城市范围由调用方保证**：服务端只按 venueId 执行，**不做城市推断**（服务端无法区分
+  「未上榜」与「该城压根没被舞讯覆盖」，越权推断会误伤全平台）。Skill 侧只提交
+  `coveredCities`（确有门店名单的城市）内的门店。
+- **不产生数据更新公告**（与 applyBatch 的关键差异）：公告口径是「新增/恢复」的正向信息，
+  数百家转暂停对外发布是纯噪音。
+- 审计链完整：VenueStatusLog（changedBy=null + changeSource=AGENT_BATCH）+ 关注者站内信/
+  订阅消息（VenueStatusChangedEvent）+ 热度/详情/列表缓存失效，与
+  `VenueService.markSuspendedByReport`（举报采纳路径）同权。
+- 返回：`BatchSuspendResult{total, suspended, venueNotFound, details[{venueId, venueName,
+  fromStatus, toStatus, sourceId, source}]}`（**刻意独立于 BatchApplyResult**，避免 confidence
+  语义混淆、不扰动管理后台「可直接更新」链路）。
+- Skill 侧：`python3 scripts/qw_api.py status-suspend --items '[...]' --report-date YYYY-MM-DD`。
+
+**避免再造一套**：两个方向的状态写库逻辑唯一权威 = DailyOpeningService。
 
 ## Skill 与管线的分工
 
@@ -88,19 +115,21 @@ Skill 比对的数据底座。**为什么新增**：现有 GET /admin/venue-sync
 
 两者写库语义一致（都走 applyBatch / 同源审计），重复执行无锁冲突，以最后执行为准。
 
-## 表格化差异清单（Step 4 确认规范，2026-09-01 优化）
+## 表格化差异清单（Step 4 执行规范，2026-09-01 优化；2026-09-10 增表⑤）
 
-比对结果按「写库动作」分类为四张对比表格，用户浏览确认后直接执行：
+比对结果按「写库动作」分类为**五张**对比表格。执行分级（2026-09-10）：表①/③/⑤ 为
+「全源一致」确定数据，**直接执行**；表② 需用户逐条放行。
 
-| # | 分类 | 内容 | 确认交互 |
+| # | 分类 | 内容 | 执行 |
 |---|---|---|---|
-| ① | 可直接更新（100% 确定） | EXACT/ALIAS + would_reverse | 回复「执行」全部反转，不逐项确认 |
-| ② | 需用户确认（低置信） | CONTAINED + would_reverse（需 forceReversal） | 逐条确认/剔除，确认的 forceReversal=true |
-| ③ | 平台未维护（新店候选） | UNMATCHED + keyword 交叉验证无命中 | 回复「录入」一键 batch-create，可剔除个别 |
-| ④ | 参考信息（无需动作） | 命中但平台已 OPEN / CONTAINED 非反转 / 平台未覆盖城市 | 仅展示不写库 |
+| ① | 可直接更新 · 开门 | 全源点名（M==S）+ EXACT/ALIAS + 平台 CEASED/SUSPENDED | 直接反转 + 直发公告 |
+| ② | 需用户核实 | 源间冲突（0<\|M\|<\|S\|）/ 单源覆盖（\|S\|<2）/ CONTAINED 低置信 | 列「管理员手动核实」清单，逐条放行 |
+| ③ | 平台未维护（新店候选） | 全源点名 + UNMATCHED + keyword 交叉验证无命中 | 全源一致直接 batch-create；单源进人工清单 |
+| ④ | 参考信息（无需动作） | 命中但平台已 OPEN / 未覆盖城市零星点名 | 仅展示不写库 |
+| ⑤ | 可直接暂停 · 关门（白名单） | `coveredCities` 内 + 全源未点名（M==∅）+ 平台 OPEN | 直接 status-suspend（**不发公告**） |
 
-规范：每表 ≤5 列、空表不渲染；分类主键 = would_reverse 与置信度（高置信+反转→①、
-低置信+反转→②、UNMATCHED→③、其余→④）。写库命令与 items 结构见 SKILL.md Step 4。
+规范：每表 ≤5 列、空表不渲染；分类主键 = 全源一致度 × 方向 × 置信度。写库命令与 items
+结构见 SKILL.md Step 4。
 
 ### 批量更新标识（2026-09-01，V8）
 
@@ -130,7 +159,11 @@ Agent+Skill 通过 `POST /admin/venue-daily-openings/batch` 落库时，`ApplyDa
 - 后端：`./mvnw -s settings-central.xml clean test-compile` 通过（新增 6 文件无编译错误）。
 - Skill 脚本：`python3 -m py_compile scripts/qw_api.py` 通过。
 - 端到端（本地 mysql profile 起服务后）：login → export（city=成都市）→ batch-create
-  （含已存在门店验证 EXISTED）→ status-reverse（验证反转/静默跳过）。
+  （含已存在门店验证 EXISTED）→ status-reverse（验证反转/静默跳过）→ status-suspend
+  （验证 OPEN→暂停 / 非 OPEN 静默跳过）。
+- 2026-09-10 新增 batch-suspend：`./mvnw -q -s settings-central.xml clean test-compile`
+  通过；`python3 -m py_compile scripts/qw_api.py` 通过（**仅静态编译层面**——按用户红线，
+  行为/数据/交互交用户真机验证，不做连真库的冒烟与端到端矩阵）。
 
 ## 风险与遗留
 
@@ -145,5 +178,6 @@ Agent+Skill 通过 `POST /admin/venue-daily-openings/batch` 落库时，`ApplyDa
   （POST /admin/venues/geocode/backfill 可一键补齐坐标）。
 - export 按 city 精确匹配——舞讯城市名必须映射到平台标准词表（GET /venues/cities），
   简称（蓉/渝/杭）先在 Skill 侧归一化。
-- 状态更新仍受「只反转 OPEN 方向」约束：舞讯报 CLOSED（今日休息）不落任何动作
-  （快照缺失 ≠ 停业），长期停业确认走管理端人工通道——与管线语义一致。
+- **状态更新语义（2026-09-10 起双向）**：开门方向仍受「只反转 OPEN」约束——舞讯报 CLOSED
+  （今日休息）不落任何动作；**关门方向**改为白名单口径：`coveredCities` 内未上榜门店
+  OPEN → SUSPENDED（batch-suspend）。**未覆盖城市一律不动**，是硬边界不是优化项。

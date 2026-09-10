@@ -20,6 +20,10 @@
   # 自动注入 "source":"AGENT_BATCH"（变更来源标识：Agent+Skill 批量更新，审计/管理后台展示用）
   python3 qw_api.py status-reverse --base-url http://localhost:8080 --items '[...]'
 
+  # 批量置「暂停营业」（白名单口径，2026-09-10；仅 OPEN→SUSPENDED，非 OPEN 静默跳过）
+  # items 元素只需 {"venueId":123}——reportDate/sourceId/source 由脚本统一注入
+  python3 qw_api.py status-suspend --base-url http://localhost:8080 --items '[...]' --report-date 2026-09-10
+
 token 获取顺序：--token 参数 > ADMIN_TOKEN 环境变量 > 报错（提示先 login）。
 """
 
@@ -72,7 +76,7 @@ def _load_items(raw: str) -> list:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="去舞厅舞讯 Skill API 封装")
-    parser.add_argument("command", choices=["login", "export", "cities", "batch-create", "status-reverse"])
+    parser.add_argument("command", choices=["login", "export", "cities", "batch-create", "status-reverse", "status-suspend"])
     parser.add_argument("--base-url", default="http://localhost:8080")
     parser.add_argument("--token", default=os.environ.get("ADMIN_TOKEN", ""))
     parser.add_argument("--password")
@@ -136,6 +140,22 @@ def main() -> int:
             it.setdefault("sourceId", args.source_id)
             it.setdefault("source", args.change_source)  # 批量更新标识（审计/管理后台展示）
         data = _request(args.base_url, "POST", "/admin/venue-daily-openings/batch",
+                        token, {"items": items})
+        print(json.dumps(data, ensure_ascii=False))
+        return 0
+
+    if args.command == "status-suspend":
+        # 白名单口径反向通道（2026-09-10）：被舞讯覆盖城市内、未上榜门店 OPEN → SUSPENDED。
+        # ⚠️ 城市范围由调用方（Agent）保证：只提交「点名覆盖城市」内的门店，未覆盖城市不动。
+        if not args.report_date:
+            print("[error] status-suspend 需要 --report-date YYYY-MM-DD", file=sys.stderr)
+            return 1
+        items = _load_items(args.items or "[]")
+        for it in items:
+            it.setdefault("reportDate", args.report_date)
+            it.setdefault("sourceId", args.source_id)
+            it.setdefault("source", args.change_source)
+        data = _request(args.base_url, "POST", "/admin/venue-daily-openings/batch-suspend",
                         token, {"items": items})
         print(json.dumps(data, ensure_ascii=False))
         return 0
