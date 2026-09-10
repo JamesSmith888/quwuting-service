@@ -146,6 +146,24 @@ public class VenueResponseMapper {
     public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot, long viewCount,
                                     List<String> photos, String crowdBadgeText, String crowdLatestText,
                                     boolean statusChanged, String statusLatestText) {
+        return toResponse(v, topReactions, isHot, viewCount, photos, crowdBadgeText, crowdLatestText,
+                statusChanged, statusLatestText, null);
+    }
+
+    /**
+     * 十参重载（2026-09-10 门店别名域「命中即解释」契约）：matchedAlias = 本次 keyword
+     * 命中的门店别名，仅列表搜索场景由 {@code VenueService#loadMatchedAliases} 批量装配
+     * 传入，驱动列表卡片名称正下方的「别名 · X」命中解释行——用户用别名搜到店时，
+     * 卡片必须复现他输入的那个词，否则匹配不可自证（详见 {@link VenueResponse#matchedAlias()}）。
+     * <p>
+     * 注入边界同 isHot / crowdBadgeText 先例：仅列表搜索场景传真实值；无 keyword 或
+     * 命中来自 name·地址·标签等其他载体的场景走九参重载（恒 null）——非命中门店
+     * 零带宽、零布局变化。禁止在收藏列表/详情/编辑回显场景传非 null（那些场景无
+     * keyword 上下文，传值即语义错误）。
+     */
+    public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot, long viewCount,
+                                    List<String> photos, String crowdBadgeText, String crowdLatestText,
+                                    boolean statusChanged, String statusLatestText, String matchedAlias) {
         List<String> customTags = deserializeStringList(v.getTags(), "tags");
         List<String> effectiveTags = defaultsConfig.merge(customTags);
         List<String> defaultTags = defaultsConfig.tags();
@@ -179,7 +197,8 @@ public class VenueResponseMapper {
                 v.getCreatedAt(),
                 v.getUpdatedAt(),
                 statusChanged,
-                statusLatestText
+                statusLatestText,
+                matchedAlias
         );
     }
 

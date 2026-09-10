@@ -102,7 +102,11 @@ class FavoriteServiceTest {
         return v;
     }
 
-    /** 按映射器入参回显构造响应（isHot/statusChanged 九参重载契约的观测点） */
+    /**
+     * 按映射器入参回显构造响应（isHot/statusChanged 九参重载契约的观测点）。
+     * 末位 matchedAlias 恒 null——收藏列表无 keyword 上下文，不做「别名命中解释」
+     * （该字段仅列表搜索场景注入，见 VenueResponse#matchedAlias 语义边界）。
+     */
     private static VenueResponse response(Long id, boolean isHot, boolean statusChanged) {
         return new VenueResponse(
                 id, "舞厅" + id, VenueStatus.OPEN, "营业中", null,
@@ -110,7 +114,7 @@ class FavoriteServiceTest {
                 null, null, Collections.emptyList(), Collections.emptyList(),
                 Collections.emptyList(), null, null, Collections.emptyList(),
                 Collections.emptyList(), Collections.emptyList(), 0,
-                0L, isHot, null, null, null, null, statusChanged, null);
+                0L, isHot, null, null, null, null, statusChanged, null, null);
     }
 
     /**

@@ -13,7 +13,8 @@ import org.quwuting.quwutingservice.bulletin.dto.request.PublishBulletinRequest;
 import org.quwuting.quwutingservice.bulletin.dto.request.UpdateBulletinRequest;
 import org.quwuting.quwutingservice.bulletin.dto.response.AdminBulletinResponse;
 import org.quwuting.quwutingservice.bulletin.dto.response.BulletinDetailResponse;
-import org.quwuting.quwutingservice.bulletin.dto.response.BulletinSummaryResponse;
+import org.quwuting.quwutingservice.bulletin.dto.response.BulletinFeedItemResponse;
+import org.quwuting.quwutingservice.bulletin.dto.response.BulletinReactionBadge;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -24,7 +25,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * 行业快讯服务（2026-09-10，docs/agents/47-bulletins.md 设计定稿）。
@@ -32,6 +37,12 @@ import java.util.Optional;
  * <b>领域定位</b>：快讯 = 平台单向发布的行业情报（停业 / 开闭店 / 时段调整），
  * 与公告（平台权威、强触达、平台背书）严格分离——弱触达（独立入口 + 列表，
  * 无红点无已读）、标注来源、平台不背书。
+ * <p>
+ * <b>信息架构（2026-09-10 二次定稿）</b>：快讯是<b>信息流</b>而非"列表 + 详情"——
+ * 内容在列表内<b>完整内联呈现</b>（每条的气泡即全部内容，含 markdown/图片/视频），
+ * 详情页退化为"长文深读 + 分享落地"通道。根因见 47 号文档「一、领域定位与信息架构」
+ * （把公告的列表-详情结构套到内容模态完全不同的快讯上，读一句话要走两次请求）。
+ * 因此 {@link #listVisible} 下发 content 全文，并附带该条的表态徽标。
  * <p>
  * <b>实现策略</b>：复用 {@code qwt_announcements} 实体与
  * {@link AnnouncementRepository}（同表 + category='FLASH' 区分），复用状态机
@@ -46,6 +57,8 @@ import java.util.Optional;
  *   <li><b>source 恒定</b>：管理端创建 = MANUAL，Agent 通道 = AGENT（均服务端固定）；</li>
  *   <li><b>无已读回执</b>：不进公告未读数（公告侧 excludeCategory=FLASH 已隔离）；</li>
  *   <li><b>无置顶语义</b>：纯时间流，排序恒为 publishAt DESC；</li>
+ *   <li><b>可见性单一事实源</b>：FLASH + PUBLISHED + 已生效，读/写两侧统一走
+ *       {@link BulletinLookupService}（表态域复用同一判据）；</li>
  *   <li><b>Agent 幂等</b>：dedupKey 命中返回已存在条目（不改写字段）+
  *       V18 生成列唯一索引兜底并发撞键。</li>
  * </ul>
@@ -55,11 +68,8 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class BulletinService {
 
-    /**
-     * 快讯固定分类：接口不接受调用方指定 category——避免从快讯域写入公告内容
-     * 或反向操作（公告域同样拒绝 FLASH，见 AnnouncementService#rejectFlashCategory）。
-     */
-    private static final AnnouncementCategory CATEGORY = AnnouncementCategory.FLASH;
+    /** 快讯固定分类：唯一事实源在 {@link BulletinLookupService#CATEGORY}（读写两侧共用） */
+    private static final AnnouncementCategory CATEGORY = BulletinLookupService.CATEGORY;
 
     /** 用户端列表分页上限（同公告域 findVisiblePage 的 Math.min(size, 50) 口径） */
     private static final int MAX_PAGE_SIZE = 50;
@@ -69,32 +79,43 @@ public class BulletinService {
 
     private final AnnouncementRepository announcementRepository;
     private final VenueRepository venueRepository;
+    private final BulletinLookupService bulletinLookupService;
+    private final BulletinReactionService bulletinReactionService;
 
     // ── 用户端 ────────────────────────────────────────────────
 
     /**
-     * 可见快讯列表（PUBLISHED + 已生效，时间倒序）。
+     * 可见快讯流（PUBLISHED + 已生效，时间倒序）。
      * <p>
      * pinned 恒传 null：快讯是纯时间流，无置顶语义（公告域「置顶进首页」的机制
      * 不适用于快讯——首页公告条只服务平台权威内容）。一期不做城市筛选，
-     * city 仅随条目返回给列表卡片作展示标签。
+     * city 仅随条目返回给列表气泡作展示标签。
+     * <p>
+     * <b>每项携带 content 全文与 reactions 徽标</b>（2026-09-10 信息流改造）：
+     * 列表页内联渲染全文，故正文必须随列表下发；表态按整页 id 一次批量聚合
+     * （两条 IN 查询，无 N+1、无缓存）。
      */
     @Transactional(readOnly = true)
-    public Page<BulletinSummaryResponse> listVisible(int page, int size) {
+    public Page<BulletinFeedItemResponse> listVisible(int page, int size, Long currentUserId) {
         Pageable pageable = PageRequest.of(page, Math.min(size, MAX_PAGE_SIZE));
-        return announcementRepository.findVisiblePage(
-                        CATEGORY, null, AnnouncementStatus.PUBLISHED,
-                        LocalDateTime.now(), null, pageable)
-                .map(this::toSummary);
+        Page<Announcement> found = announcementRepository.findVisiblePage(
+                CATEGORY, null, AnnouncementStatus.PUBLISHED,
+                LocalDateTime.now(), null, pageable);
+        List<Long> ids = found.getContent().stream().map(Announcement::getId).collect(Collectors.toList());
+        Map<Long, List<BulletinReactionBadge>> reactions =
+                bulletinReactionService.batchBadges(ids, currentUserId);
+        return found.map(a -> toFeedItem(a,
+                reactions.getOrDefault(a.getId(), Collections.emptyList())));
     }
 
-    /** 快讯详情（未发布/已下线/已软删/非 FLASH → 404） */
+    /** 快讯详情（未发布/已下线/已软删/非 FLASH → 404）；表态徽标与列表同口径 */
     @Transactional(readOnly = true)
-    public BulletinDetailResponse detail(Long id) {
-        Announcement a = findPublished(id);
+    public BulletinDetailResponse detail(Long id, Long currentUserId) {
+        Announcement a = bulletinLookupService.requirePublished(id);
         return new BulletinDetailResponse(
                 a.getId(), a.getTitle(), a.getContent(), a.getCity(), a.getVenueId(),
-                a.getPublishAt(), a.getPublishedAt(), a.getCreatedAt());
+                a.getPublishAt(), a.getPublishedAt(), a.getCreatedAt(),
+                bulletinReactionService.badges(a.getId(), currentUserId));
     }
 
     // ── 管理端 ────────────────────────────────────────────────
@@ -293,26 +314,17 @@ public class BulletinService {
 
     // ── 内部工具 ──────────────────────────────────────────────
 
-    /** 用户端可见性校验：FLASH + PUBLISHED + 已生效 + 未软删，否则 404 */
+    /**
+     * 用户端可见性校验：委托 {@link BulletinLookupService#requirePublished}（规则唯一事实源，
+     * 表态域共用同一判据，避免"详情可见但不可表态"这类口径分叉）。
+     */
     private Announcement findPublished(Long id) {
-        Announcement a = announcementRepository.findByIdAndDeletedFalse(id)
-                .orElseThrow(() -> new BusinessException(404, "快讯不存在或已下线"));
-        if (a.getCategory() != CATEGORY
-                || a.getStatus() != AnnouncementStatus.PUBLISHED
-                || (a.getPublishAt() != null && a.getPublishAt().isAfter(LocalDateTime.now()))) {
-            throw new BusinessException(404, "快讯不存在或已下线");
-        }
-        return a;
+        return bulletinLookupService.requirePublished(id);
     }
 
-    /** 管理端存在性校验：FLASH + 未软删（任意状态），否则 404（防跨域读写公告条目） */
+    /** 管理端存在性校验：委托 {@link BulletinLookupService#requireAny}（防跨域读写公告条目） */
     private Announcement findAny(Long id) {
-        Announcement a = announcementRepository.findByIdAndDeletedFalse(id)
-                .orElseThrow(() -> new BusinessException(404, "快讯不存在"));
-        if (a.getCategory() != CATEGORY) {
-            throw new BusinessException(404, "快讯不存在");
-        }
-        return a;
+        return bulletinLookupService.requireAny(id);
     }
 
     /**
@@ -374,10 +386,11 @@ public class BulletinService {
         return venueId;
     }
 
-    private BulletinSummaryResponse toSummary(Announcement a) {
-        return new BulletinSummaryResponse(
-                a.getId(), a.getTitle(), a.getCity(), a.getVenueId(),
-                a.getPublishAt(), a.getCreatedAt());
+    /** 列表项映射：内容全文 + 该条的表态徽标（列表页内联渲染所需的最小完整集合） */
+    private BulletinFeedItemResponse toFeedItem(Announcement a, List<BulletinReactionBadge> reactions) {
+        return new BulletinFeedItemResponse(
+                a.getId(), a.getTitle(), a.getContent(), a.getCity(), a.getVenueId(),
+                a.getPublishAt(), a.getCreatedAt(), reactions);
     }
 
     private AdminBulletinResponse toAdminResponse(Announcement a) {

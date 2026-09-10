@@ -226,6 +226,13 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      *       （key 含 city、导出 aliases.json 给 matcher），本载体是用户可见的
      *       门店身份属性（详情页展示）。</li>
      * </ul>
+     * <b>2026-09-10 补漏</b>：本片段此前只有 7 个分支——2026-09-07 门店别名域落地时
+     * 只改了本 javadoc（写成"双别名载体"）与 RELEVANCE_KEYS / suggestByName 两处，
+     * <b>漏了谓词本体</b>，导致别名门店永远进不了结果集（RELEVANCE_KEYS 的别名档位
+     * 沦为死代码），而唯一能命中别名的 /venues/suggest 联想浮层已下线 = 用户侧零路径。
+     * 三处（KW_MATCH / RELEVANCE_KEYS / suggestByName）是<b>同一契约的镜像</b>，
+     * 增删命中载体必须三处同改——本片段是唯一<b>结果集</b>决定方，另两处只管排序/联想。
+     * <p>
      * 匹配语义：单串子串（与 v 相关字段逐个 OR）；多词 AND 在 Service 层拆词后逐词
      * 行集探测求交集 → {@code :filterIds} 白名单叠加（见 listVenues 注释）。
      * 所有 LIKE 显式 {@code ESCAPE '!'}（<b>避开反斜杠</b>——HQL 语义层要求 escape
@@ -241,9 +248,12 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
              OR v.city LIKE :keyword ESCAPE '!'
              OR v.district LIKE :keyword ESCAPE '!'
              OR v.tags LIKE :keyword ESCAPE '!'
-             OR EXISTS (SELECT 1 FROM VenueSyncAlias sa
-                        WHERE sa.venueId = v.id AND sa.deleted = false
-                          AND sa.sourceName LIKE :keyword ESCAPE '!'))
+            OR EXISTS (SELECT 1 FROM VenueSyncAlias sa
+                       WHERE sa.venueId = v.id AND sa.deleted = false
+                         AND sa.sourceName LIKE :keyword ESCAPE '!')
+            OR EXISTS (SELECT 1 FROM VenueAlias va
+                       WHERE va.venueId = v.id AND va.deleted = false
+                         AND va.alias LIKE :keyword ESCAPE '!'))
             """;
 
     /**
@@ -725,7 +735,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     /**
      * 关键词行集探测（2026-09-02 多词 AND 的 Service 层实现载体）：keyword（%xx%
      * pattern，调用方包装）命中的门店 id 全集——命中口径 = {@link #KW_MATCH} 六字段 +
-     * 同步别名。Service 对拆出的每个词各调一次，交集 = 多词 AND 结果（数据规模数百级，
+     * 双别名载体（同步别名 + 门店别名，2026-09-10 与 KW_MATCH 补漏同步）。Service 对
+     * 拆出的每个词各调一次，交集 = 多词 AND 结果（数据规模数百级，
      * 单次 LIKE 全扫毫秒级，无需索引/全文检索设施）；随后以 :filterIds 白名单回灌
      * LIST_FILTERS 主查询（保持排序与分页在同一查询内完成）。
      */

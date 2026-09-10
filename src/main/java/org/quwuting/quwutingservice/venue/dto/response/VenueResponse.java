@@ -98,5 +98,31 @@ public record VenueResponse(
          * 「中性角标 reportBadgeText」方案）。无公示中报告 / 无展示语义场景
          * （详情/编辑/创建回显）为 null。
          */
-        String statusLatestText
+        String statusLatestText,
+        /**
+         * 本次搜索命中的门店别名（2026-09-10 门店别名域「命中即解释」契约，
+         * docs/agents/38-venue-aliases.md §4.1）——用户用别名搜到店后，卡片必须在
+         * <b>名称正下方</b>复现他输入的那个词，否则「匹配不可自证」：搜不到用户以为
+         * 平台没收录，搜到了却在卡片上找不到自己输的词，用户会认为平台数据错了。
+         * <p>
+         * 语义边界（严禁扩散）：
+         * <ul>
+         *   <li><b>单值 + 条件下发</b>：仅当本次 keyword 确实命中该店某条
+         *       {@link org.quwuting.quwutingservice.venue.entity.VenueAlias} 时非 null，
+         *       取录入顺序（id ASC，与详情页 aliases 同口径）第一条命中者；无 keyword /
+         *       命中来自 name·地址·标签等其他载体时为 null——非命中门店<b>零带宽、
+         *       零布局变化</b>（前端条件渲染，条件行同信号行不占骨架屏）；</li>
+         *   <li><b>只来自 qwt_venue_aliases</b>：绝不允许回退到同步映射别名
+         *       {@link org.quwuting.quwutingservice.venue.entity.VenueSyncAlias} 的
+         *       sourceName——那是管线匹配配置（信息源原始店名，可能带城市前缀/渠道
+         *       后缀的脏数据），在用户可见红线之外；</li>
+         *   <li><b>与详情页 aliases 严格分离</b>：详情下发全量数组（身份核验），列表
+         *       只下发命中的那一条（匹配解释）——列表<b>不下发</b> aliases 数组，
+         *       守住 38 §5「列表零带宽」口径；</li>
+         *   <li><b>只补展示、不改结果集</b>：命中集由 KW_MATCH 决定，本字段由
+         *       Service 层对当页门店内存二次判定装配（见 VenueService#loadMatchedAliases）
+         *       ——判定不中的最坏后果仅为「该店少一行别名解释」，绝不漏店。</li>
+         * </ul>
+         */
+        String matchedAlias
 ) {}

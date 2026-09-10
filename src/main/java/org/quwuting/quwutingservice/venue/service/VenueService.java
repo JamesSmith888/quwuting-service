@@ -69,8 +69,11 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -955,6 +958,12 @@ public class VenueService {
         // 用户拍板推翻同日「中性角标」方案；活跃口径与详情页公告条同源——列表行有文案 ⇔
         // 详情页有公告条，见 StatusReportLatestService#latestTextsByVenue）
         Map<Long, String> statusLatestTexts = statusReportLatestService.latestTextsByVenue(venueIds);
+        // 批量命中别名（2026-09-10 门店别名域「命中即解释」契约，见 VenueResponse#matchedAlias）：
+        // 只补展示、不改结果集——命中集由 KW_MATCH 决定，本步只在当页门店里找出「用户输的
+        // 那个词落在哪条别名上」，供卡片在名称正下方复现（否则匹配不可自证）。无 keyword
+        // 时 searchTerms 为空 → 空 Map，全页恒 null，零额外查询（同 photos 等批量装配模式，
+        // 一次 IN 覆盖整页规避 N+1；别名表规模极小，单次 IN 毫秒级）。
+        Map<Long, String> matchedAliases = loadMatchedAliases(venueIds, searchTerms);
         return result.map(v -> venueResponseMapper.toResponse(
                 v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
                 hotVenueIds.contains(v.getId()),
@@ -963,7 +972,46 @@ public class VenueService {
                 crowdBadges.get(v.getId()),
                 crowdLatestTexts.get(v.getId()),
                 false,
-                statusLatestTexts.get(v.getId())));
+                statusLatestTexts.get(v.getId()),
+                matchedAliases.get(v.getId())));
+    }
+
+    /**
+     * 整页「命中别名」批量装配（2026-09-10 门店别名域「命中即解释」契约，见
+     * {@link VenueResponse#matchedAlias}）。一次 IN 取回本页全部门店的有效别名，
+     * 在内存里按 {@code searchTerms} 逐词做<b>字面包含</b>判定，每店取录入顺序
+     * （id ASC，与详情页 aliases 同口径）第一条命中者。
+     * <p>
+     * <b>口径一致性（关键）</b>：{@code searchTerms} 已由 {@link #escapeLikeLiteral}
+     * 转义（{@code ! → !!}、{@code % → !%}、{@code _ → !_}），故本方法必须把候选别名用
+     * <b>同一个</b> {@code escapeLikeLiteral} 转义后再比较，才能与 KW_MATCH 的
+     * {@code LIKE ... ESCAPE '!'} 语义对齐（否则别名含 {@code %} / {@code _} 时展示层
+     * 与结果集口径分叉）。转义后 contains = SQL 的「字面子串」。
+     * <p>
+     * 大小写不敏感（与 MySQL 默认 ci 排序规则、前端 highlightSegments 同口径）——
+     * 中文无影响，含英文的别名（如 "MIX"）搜 "mix" 同样命中且同样高亮。
+     * <p>
+     * <b>只补展示</b>：本方法不参与过滤/排序——判定不中的最坏后果仅为「该店少一行
+     * 别名解释」，绝不会让本该出现的门店消失（结果集唯一决定方 = KW_MATCH）。
+     */
+    private Map<Long, String> loadMatchedAliases(List<Long> venueIds, List<String> searchTerms) {
+        if (venueIds.isEmpty() || searchTerms.isEmpty()) return Collections.emptyMap();
+        List<VenueAlias> aliases = new ArrayList<>(venueAliasRepository.findByVenueIdInAndDeletedFalse(venueIds));
+        aliases.sort(Comparator.comparing(VenueAlias::getId));
+        Map<Long, String> matched = new HashMap<>();
+        for (VenueAlias alias : aliases) {
+            String raw = alias.getAlias();
+            if (raw == null || raw.isEmpty()) continue;
+            if (matched.containsKey(alias.getVenueId())) continue;
+            String haystack = escapeLikeLiteral(raw).toLowerCase(Locale.ROOT);
+            for (String term : searchTerms) {
+                if (haystack.contains(term.toLowerCase(Locale.ROOT))) {
+                    matched.put(alias.getVenueId(), raw);
+                    break;
+                }
+            }
+        }
+        return matched;
     }
 
     /**
