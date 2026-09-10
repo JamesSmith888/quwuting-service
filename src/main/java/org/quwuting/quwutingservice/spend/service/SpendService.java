@@ -12,6 +12,7 @@ import org.quwuting.quwutingservice.spend.dto.SpendSyncResponse;
 import org.quwuting.quwutingservice.spend.entity.SpendEntryEntity;
 import org.quwuting.quwutingservice.spend.enums.SpendCategory;
 import org.quwuting.quwutingservice.spend.enums.SpendSource;
+import org.quwuting.quwutingservice.spend.enums.WireEnums;
 import org.quwuting.quwutingservice.spend.repository.SpendEntryRepository;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
@@ -44,6 +45,9 @@ public class SpendService {
     /** 单次同步条目上限（客户端 FIFO 分批上报；防御异常超大批次） */
     private static final int SYNC_BATCH_LIMIT = 200;
 
+    /** 拒绝日志里展示的 id 条数上限（全量明细随响应返回客户端，日志只留够定位的） */
+    private static final int REJECT_LOG_ID_LIMIT = 5;
+
     /** 增量拉取单页上限（单人账目量级下 500 足够，翻页走游标） */
     private static final int INCREMENTAL_PAGE_SIZE = 500;
 
@@ -65,6 +69,10 @@ public class SpendService {
      * 重放仍幂等，合法条目已收敛重放无副作用）；同 (userId, clientEntryId) 存在
      * 即整体更新（last-write-wins，客户端本地为最新事实源），不存在则插入。
      * 软删同步恢复同路径：deleted=false 的重放会把此前误删的行恢复。
+     * <p>
+     * 返回值带 {@code rejectedIds} 明细（2026-09-11 §21）：客户端必须能逐条归因，
+     * 否则"部分被拒"只能被它整批当成功处理（事故实现原因见 DTO 注释）。
+     * 同时按 WARN 留痕——服务端全量拒绝而无人知晓正是本次事故能存活一天的原因。
      */
     @Transactional
     public SpendSyncResponse sync(Long userId, SpendSyncRequest request) {
@@ -76,35 +84,56 @@ public class SpendService {
                     "单次同步最多 " + SYNC_BATCH_LIMIT + " 条");
         }
         int accepted = 0;
-        int rejected = 0;
+        List<String> rejectedIds = new ArrayList<>();
         for (SpendEntryItem item : items) {
-            if (!validate(item)) {
-                rejected++;
+            NormalizedEntry normalized = normalize(item);
+            if (normalized == null) {
+                rejectedIds.add(item == null || item.clientEntryId() == null ? "" : item.clientEntryId());
                 continue;
             }
-            upsert(userId, item);
+            upsert(userId, item, normalized);
             accepted++;
         }
-        return new SpendSyncResponse(accepted, rejected);
+        if (!rejectedIds.isEmpty()) {
+            log.warn("spend sync rejected {}/{} entries, userId={}, ids={}",
+                    rejectedIds.size(), items.size(), userId, summarizeIds(rejectedIds));
+        }
+        return new SpendSyncResponse(accepted, rejectedIds.size(), rejectedIds);
     }
 
-    private boolean validate(SpendEntryItem item) {
+    /** 拒绝日志的 id 明细（截断展示，防大批量刷屏；全量已随响应返回客户端） */
+    private List<String> summarizeIds(List<String> rejectedIds) {
+        int limit = Math.min(rejectedIds.size(), REJECT_LOG_ID_LIMIT);
+        return rejectedIds.subList(0, limit);
+    }
+
+    /** 校验通过后的枚举取值（避免"校验一遍、落库再解析一遍"的两处口径） */
+    private record NormalizedEntry(SpendCategory category, SpendSource source) {
+    }
+
+    /**
+     * 逐条校验 + 归一化：返回 {@code null} = 该条目非法（跳过并计数）。
+     * <p>
+     * 枚举取值一律经 {@link WireEnums#parse}（宽容大小写）——旧实现在这里直接
+     * {@code valueOf}，把小写字面量判成非法，是"账目从未上云"的真根因（44 号 §21）。
+     */
+    private NormalizedEntry normalize(SpendEntryItem item) {
         if (item == null
                 || item.clientEntryId() == null || item.clientEntryId().isBlank()
                 || item.clientEntryId().length() > 32
-                || item.amount() == null || item.amount().compareTo(BigDecimal.ZERO) <= 0) {
-            return false;
+                || item.amount() == null || item.amount().compareTo(BigDecimal.ZERO) <= 0
+                || item.ts() <= 0) {
+            return null;
         }
-        try {
-            SpendCategory.valueOf(item.category());
-            SpendSource.valueOf(item.source());
-        } catch (IllegalArgumentException e) {
-            return false;
+        SpendCategory category = WireEnums.parse(SpendCategory.class, item.category());
+        SpendSource source = WireEnums.parse(SpendSource.class, item.source());
+        if (category == null || source == null) {
+            return null;
         }
-        return item.ts() > 0;
+        return new NormalizedEntry(category, source);
     }
 
-    private void upsert(Long userId, SpendEntryItem item) {
+    private void upsert(Long userId, SpendEntryItem item, NormalizedEntry normalized) {
         SpendEntryEntity entity = spendEntryRepository
                 .findByUserIdAndClientEntryId(userId, item.clientEntryId())
                 .orElseGet(() -> {
@@ -115,8 +144,8 @@ public class SpendService {
                 });
         entity.setTs(toLocalDateTime(item.ts()));
         entity.setAmount(item.amount());
-        entity.setCategory(SpendCategory.valueOf(item.category()));
-        entity.setSource(SpendSource.valueOf(item.source()));
+        entity.setCategory(normalized.category());
+        entity.setSource(normalized.source());
         entity.setSourceRefId(item.sourceRefId());
         entity.setVenueId(item.venueId());
         entity.setVenueName(item.venueName());
