@@ -56,7 +56,8 @@ import java.util.stream.Collectors;
  *       category / excludeCategory 参数与公告互斥（读公告详情不返回快讯，反之亦然）；</li>
  *   <li><b>source 恒定</b>：管理端创建 = MANUAL，Agent 通道 = AGENT（均服务端固定）；</li>
  *   <li><b>无已读回执</b>：不进公告未读数（公告侧 excludeCategory=FLASH 已隔离）；</li>
- *   <li><b>无置顶语义</b>：纯时间流，排序恒为 publishAt DESC；</li>
+ *   <li><b>无置顶语义</b>：纯时间流，排序恒为 publishAt ASC（旧 → 新，最新在底部，
+ *       2026-09-11 用户拍板，见 {@code findBulletinFeedPage}）；</li>
  *   <li><b>可见性单一事实源</b>：FLASH + PUBLISHED + 已生效，读/写两侧统一走
  *       {@link BulletinLookupService}（表态域复用同一判据）；</li>
  *   <li><b>Agent 幂等</b>：dedupKey 命中返回已存在条目（不改写字段）+
@@ -86,7 +87,8 @@ public class BulletinService {
     // ── 用户端 ────────────────────────────────────────────────
 
     /**
-     * 可见快讯流（PUBLISHED + 已生效，时间倒序）。
+     * 可见快讯流（PUBLISHED + 已生效，**时间正序：旧 → 新，最新一条在底部**——
+     * 2026-09-11 用户拍板，聊天式信息流；见 {@code findBulletinFeedPage} 判据）。
      * <p>
      * pinned 恒传 null：快讯是纯时间流，无置顶语义（公告域「置顶进首页」的机制
      * 不适用于快讯——首页公告条只服务平台权威内容）。一期不做城市筛选，
@@ -99,9 +101,8 @@ public class BulletinService {
     @Transactional(readOnly = true)
     public Page<BulletinFeedItemResponse> listVisible(int page, int size, Long currentUserId) {
         Pageable pageable = PageRequest.of(page, Math.min(size, MAX_PAGE_SIZE));
-        Page<Announcement> found = announcementRepository.findVisiblePage(
-                CATEGORY, null, AnnouncementStatus.PUBLISHED,
-                LocalDateTime.now(), null, pageable);
+        Page<Announcement> found = announcementRepository.findBulletinFeedPage(
+                CATEGORY, AnnouncementStatus.PUBLISHED, LocalDateTime.now(), pageable);
         List<Long> ids = found.getContent().stream().map(Announcement::getId).collect(Collectors.toList());
         Map<Long, List<BulletinReactionBadge>> reactions =
                 bulletinReactionService.batchBadges(ids, currentUserId);

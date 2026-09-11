@@ -18,7 +18,6 @@ import java.time.LocalDateTime;
  * 快讯无置顶语义（纯时间流），故不含 pinned 字段。
  */
 public record UpdateBulletinRequest(
-        @NotBlank(message = "标题不能为空")
         @Size(max = 50, message = "标题不能超过 50 字")
         String title,
 

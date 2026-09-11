@@ -1,7 +1,7 @@
 {
   "source": "xianbao360",
   "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-09-10",
+  "updated": "2026-09-11",
   "entries": [
     {
       "city": "西安市",
@@ -1869,6 +1869,46 @@
       "venue_id": 1173,
       "kind": "typo",
       "note": "2026-09-10 A源滁州「阑夜」= B源/平台「澜夜酒吧」（阑/澜同音误植）；平台别名已回写"
+    },
+    {
+      "city": "成都市",
+      "news_name": "梦幻",
+      "platform_name": "梦幻世界娱乐汇",
+      "venue_id": 442,
+      "kind": "alias",
+      "note": "2026-09-11 双源点名「梦幻」；金牛区 #442 消歧命中（#500 星梦幻club 为崇州县级 CEASED 非金牛，勿混）；平台别名「梦幻」已回写"
+    },
+    {
+      "city": "孝感市",
+      "news_name": "晚风转角",
+      "platform_name": "晚风音乐酒吧",
+      "venue_id": 1061,
+      "kind": "alias",
+      "note": "2026-09-11 A源「晚风转角」首二字规则归位 #1061（OPEN 无动作）；映射待用户复核，暂未回写平台别名"
+    },
+    {
+      "city": "无锡市",
+      "news_name": "323",
+      "platform_name": "323",
+      "venue_id": 1231,
+      "kind": "resolved",
+      "note": "2026-09-11 A/B 双源【江阴】323，keyword 全库无同名 → 建档 #1231（江阴市，OPEN）"
+    },
+    {
+      "city": "南通市",
+      "news_name": "海尚壹号",
+      "platform_name": "海尚壹号",
+      "venue_id": 1232,
+      "kind": "resolved",
+      "note": "2026-09-11 A/B 双源点名，keyword 仅昆山海尚茶吧 #1114（不同店）→ 建档 #1232（OPEN）"
+    },
+    {
+      "city": "绍兴市",
+      "news_name": "沙皇酒楼",
+      "platform_name": "沙皇酒楼",
+      "venue_id": 1233,
+      "kind": "resolved",
+      "note": "2026-09-11 A/B 双源点名，keyword 0 命中 → 建档 #1233（OPEN）"
     }
   ],
   "removed_duplicates": [

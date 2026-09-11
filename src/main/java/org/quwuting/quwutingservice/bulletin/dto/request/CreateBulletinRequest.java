@@ -15,7 +15,6 @@ import java.time.LocalDateTime;
  * 与公告同款：publishAt 未来时刻 = 计划发布时间；缺省 = 存草稿不发布。
  */
 public record CreateBulletinRequest(
-        @NotBlank(message = "标题不能为空")
         @Size(max = 50, message = "标题不能超过 50 字")
         String title,
 

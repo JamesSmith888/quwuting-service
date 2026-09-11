@@ -55,12 +55,13 @@ class BulletinReactionCodeTest {
     /**
      * 集合规模断言：既是产品契约（TG 式信息流的表态集合刻意收窄，不随目录膨胀——
      * 快讯的 Picker 没有「展开全部」承载长列表），也是"误删一项"的哨兵。
+     * 2026-09-11 用户"表情太少" → 10 → 16 → 同日再提"还是太少" → 32（4 列 × 8 行满格）。
      * 变更集合时同步改本断言 + 前端字典 + 47 号文档，属预期维护成本。
      */
     @Test
     void dictionarySizeIsPinned() {
-        assertEquals(10, BulletinReactionCode.allCodes().size(),
-                "快讯表态字典为 10 项（4×2 + 末行 2 居中的 Picker 网格）；"
+        assertEquals(32, BulletinReactionCode.allCodes().size(),
+                "快讯表态字典为 32 项（4 列 × 8 行满格）；"
                         + "增删请同步前端 constants/bulletin-reactions.ts 与 docs/agents/47-bulletins.md");
     }
 

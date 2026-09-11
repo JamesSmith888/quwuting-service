@@ -55,6 +55,28 @@ public interface AnnouncementRepository extends JpaRepository<Announcement, Long
                                        Pageable pageable);
 
     /**
+     * 快讯信息流页（2026-09-11，时间<b>正序</b>：旧 → 新，最新一条在底部——聊天式
+     * 信息流）。与 {@link #findVisiblePage}（公告/快讯共用、倒序新在前）刻意不同：
+     * <b>公告域契约冻结</b>，快讯要倒排不能改公共查询，故本方法为快讯独有、只服务
+     * 行业快讯信息流。
+     * <p>
+     * 判据（2026-09-11 用户拍板）：快讯是<b>按发布时间一根时间轴的流</b>——从最早
+     * 发的开始顺着读、最新一条钉在底部（对齐群聊消息排序），与公告"新发布的置顶
+     * 强触达"语义相反。publishAt 同刻用 id 兜底（确定性，防 null 抖动）。
+     */
+    @Query("""
+            SELECT a FROM Announcement a
+            WHERE a.deleted = false AND a.status = :status
+              AND a.category = :category
+              AND (a.publishAt IS NULL OR a.publishAt <= :now)
+            ORDER BY a.publishAt ASC, a.id ASC
+            """)
+    Page<Announcement> findBulletinFeedPage(@Param("category") AnnouncementCategory category,
+                                            @Param("status") AnnouncementStatus status,
+                                            @Param("now") LocalDateTime now,
+                                            Pageable pageable);
+
+    /**
      * 未读公告数：可见公告 − 该用户已读（NOT EXISTS 派生，对齐站内信 unread-count 模式）。
      * <p>
      * excludeCategory 由公告侧传 FLASH（快讯无已读回执，<b>绝不能计入公告未读数</b>——

@@ -6,6 +6,10 @@
 > **2026-09-11 三次迭代：浏览统计**——每条快讯底部展示「查看人数」，口径 = **信息流展示即计**
 > （列表/详情每成功加载即批量上报，服务端按 用户×快讯×天 去重），见「九、快讯浏览统计」。
 >
+> **2026-09-11 四次迭代：信息流倒排 + 表态字典扩容**——最新内容沉底（时间正序，聊天式信息流，
+> 见 §4.1 与 §三），表态字典由 10 枚扩到 **32 枚**（正向 18 / 中性 8 / 负向 6，4×8 满格，
+> 见 §6.2）。
+>
 > ⚠️ **本文件在两仓各存一份**（`quwuting/docs/agents/` 与 `quwuting-service/docs/agents/`），
 > 内容保持完全一致，改动须双向同步（同 skill 双位置约定的理由：两仓是独立 Git 仓库）。
 >
@@ -165,6 +169,7 @@ CREATE INDEX qwt_idx_br_bulletin ON qwt_bulletin_reactions (bulletin_id, deleted
 | `findVisiblePage` | `category=null, excludeCategory=FLASH` | `category=FLASH, excludeCategory=null` |
 | `findPageByFilters` | 同上 | 同上 |
 | `countUnread` | `excludeCategory=FLASH`（**快讯无已读回执，绝不能计入公告未读数**，否则红点永不收敛） | 不使用 |
+| `findBulletinFeedPage`（2026-09-11 新增） | 不使用 | **快讯信息流专属，时间正序** `ORDER BY publishAt ASC, id ASC`（旧 → 新，最新一条钉在底部——聊天式信息流）。**公告域契约冻结，不能改公共 `findVisiblePage` 的倒序**（公告"新发布的置顶强触达"语义不动），故快讯倒排用独立方法，只服务信息流 |
 
 服务端还有一道防御：`AnnouncementService#rejectFlashCategory` —— 公告管理端
 `create`/`update` 若收到 `category=FLASH` 直接 400。反向同理：
@@ -188,7 +193,7 @@ CREATE INDEX qwt_idx_br_bulletin ON qwt_bulletin_reactions (bulletin_id, deleted
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/bulletins?page=&size=` | 信息流（PUBLISHED + 已生效，`publishAt DESC, id DESC`）；**每项含 `content` 全文 + `reactions` + `viewCount`** |
+| GET | `/bulletins?page=&size=` | 信息流（PUBLISHED + 已生效，**时间正序 `publishAt ASC, id ASC`——最新一条在底部**，2026-09-11 用户拍板；分页游标 = 页码）；**每项含 `content` 全文 + `reactions` + `viewCount`** |
 | GET | `/bulletins/{id}` | 详情（markdown 原文 + `reactions` + `viewCount`；未发布/已下线/已删/非 FLASH → 404） |
 | POST | `/bulletins/{id}/reactions/{code}` | **表态 toggle**（参与 / 取消 / 换票） |
 | POST | `/bulletins/views` | **浏览上报**（2026-09-11，body = `{ids: [..]}`；信息流展示即计，fire-and-forget，按 用户×快讯×天 去重，见「九、快讯浏览统计」） |
@@ -201,6 +206,9 @@ CREATE INDEX qwt_idx_br_bulletin ON qwt_bulletin_reactions (bulletin_id, deleted
 - 表态路由形状与门店域 `/venues/{venueId}/reactions/{code}` 一致（code 走路径、无请求体）。
 - **一期不支持城市筛选**：`city` 仍随条目返回（筛选/定向字段就绪），但 **2026-09-11 起
   前端不再渲染城市标签**——消息尾行只保留「查看人数 · 时间」。
+- **正序分页语义（2026-09-11）**：第 0 页 = 最早发布的 10 条，翻页向后 = 更新的内容，
+  触底加载直至最新一条。首屏即从最旧开始（对齐"顺时间轴读"的聊天式消费），
+  最新内容始终在流底部、不被截断。
 
 ### 4.2 管理端（需 ADMIN）
 
@@ -275,13 +283,13 @@ DRAFT --publish(立即/定时)--> PUBLISHED --offline / offlineAt 到点--> OFFL
   最后一人取消后该 chip 从行中消失，与门店 Reaction "至少一人参与才显示"同一不变量。
 - 排序：人数降序，**并列按字典声明序**（确定性——同样的数据每次返回同一顺序，前端不抖动）。
 
-### 6.2 字典：快讯专属 10 枚通用情绪（**不是门店字典的子集**）
+### 6.2 字典：快讯专属 32 枚通用情绪（**不是门店字典的子集**；2026-09-11 两次扩容 10 → 16 → 32）
 
 | 极性 | 表情 |
 |---|---|
-| 正向 6 | 👍 赞 / ❤️ 红心 / 🔥 火 / 🎉 派对彩带 / 👏 鼓掌 / 🙏 双手合十 |
-| 中性 2 | 😮 吃惊 / 🤔 思考 |
-| 负向 2 | 😢 大哭 / 😡 发怒 |
+| 正向 18 | 👍 赞 / ❤️ 红心 / 🔥 火 / 🎉 派对彩带 / 👏 鼓掌 / 🙏 双手合十 / 😂 笑哭 / 🤣 笑死 / 😍 花痴 / 🤩 星星眼 / 😊 微笑 / 😁 露齿笑 / 🥰 爱慕 / 😘 飞吻 / 🥳 庆祝 / 🙌 举手欢呼 / 💪 肌肉 / ✨ 闪亮 |
+| 中性 8 | 😮 吃惊 / 🤔 思考 / 🤯 头爆炸 / 🥺 委屈 / 😲 震惊 / 🤨 挑眉 / 😳 脸红 / 🤫 嘘声 |
+| 负向 6 | 😢 大哭 / 😡 发怒 / 😭 嚎啕大哭 / 😠 生气 / 😱 吓死 / 💔 心碎 |
 
 - **为什么不用门店字典**：门店字典 = legacy 业务信号（机车 / 龙女 / 极品 / 收费偏高 /
   场内禁烟…）+ 常见表情目录，语义全部锚在"**这家店**怎么样"；快讯是行业情报，
@@ -291,11 +299,15 @@ DRAFT --publish(立即/定时)--> PUBLISHED --offline / offlineAt 到点--> OFFL
   `EmojiCatalog`（`emojiOf/labelOf` 直接取目录值），**不复制条目、不自造 emoji**
   （同舞伴域 DancerTagCode 先例）；前端 `constants/bulletin-reactions.ts` 从
   `EMOJI_CATALOG` 派生条目——两端各只有**一份 code 列表**需要手工同步。
-- **为什么是小集合**：门店 Picker 有「展开全部」承载 100+ 项；快讯是**信息流**，
-  表态行紧贴内容、要一瞥可辨（TG 频道的 reaction 同样是固定小集合），故不做展开。
-  10 项 = Picker 4×2 + 末行 2 居中。
+- **为什么是收窄集合而非全目录 100 项**：门店 Picker 有「展开全部」承载 100+ 项；
+  快讯是**信息流**，表态行紧贴内容、要一瞥可辨（TG 频道的 reaction 同样是固定小集合），
+  故不做展开。**2026-09-11 用户"表情太少"两次反馈**：10 → 16（+😂 笑哭 / 🤣 笑死 /
+  😍 花痴 / 🤩 星星眼 / 🤯 头爆炸 / 🥺 委屈）；用户再提"还是太少" → **32**（+😊 微笑 /
+  😁 露齿笑 / 🥰 爱慕 / 😘 飞吻 / 🥳 庆祝 / 🙌 举手欢呼 / 💪 肌肉 / ✨ 闪亮 / 😲 震惊 /
+  🤨 挑眉 / 😳 脸红 / 🤫 嘘声 / 😭 嚎啕大哭 / 😠 生气 / 😱 吓死 / 💔 心碎），
+  32 项 = Picker 4 列 × 8 行满格（无末行居中特例）。
 - **单调性护栏**：零依赖测试 `BulletinReactionCodeTest` 断言"每个 code 必须存在于
-  `EmojiCatalog` 且 emoji/label 非空 + 无重复 + 规模锁定 10"——目录项被删时**测试红**，
+  `EmojiCatalog` 且 emoji/label 非空 + 无重复 + 规模锁定 32"——目录项被删时**测试红**，
   而不是运行时下发 `emoji: null` 让前端渲染空白格。
 
 ### 6.3 前端链路
@@ -509,30 +521,35 @@ DRAFT --publish(立即/定时)--> PUBLISHED --offline / offlineAt 到点--> OFFL
 7. **Agent 必带 `dedupKey`**：重跑保护；改内容必须换 key 或走 update。
 8. **迁移只在 `db/migration-mysql/`**（V18 内容 / **V19 表态** / **V20 浏览统计**），PG 目录冻结。
 9. **一人一票的唯一不变量载体是 DB 唯一键**；若改为软删，必须同步改键（§2.2）。
+10. **信息流时间正序**（2026-09-11）：最新内容在底部，这是消费形态（聊天式时间轴）
+    而非公告"新发布置顶"的强触达——改回倒序必须重新过用户拍板。
 
 ## 十一、验证状态与遗留
 
 **已完成（静态层面，按验证深度红线止步于此）**：
 
-- 后端 `./mvnw -q clean test-compile` 通过；`BulletinReactionCodeTest` 4/4 通过（零依赖字典镜像断言）；
-- 小程序 `npx tsc --noEmit` 0 错误；`npm run check` 全绿（tokens 76 / positioning 24 /
+- 后端 `./mvnw -q clean test-compile` 通过；`BulletinReactionCodeTest` 4/4 通过（零依赖字典镜像断言，含规模锁定 32）；
+- 小程序 `npx tsc --noEmit` 0 错误；`npm run check` 全绿（tokens / positioning /
   detailparams / surface 34 页 / protocol）；
   `.ts → .js` 产物按"临时 outDir + 只回拷改动文件"回拷（本页 `bulletins.js` 为唯一改动产物）；
 - wxml 标签栈配对校验通过；
 - `towxml` 解析耗时基准（§7.5 决策依据）：短/中/长帖 0.23 / 0.41 / 0.28 ms，首屏 10 条 ≈ 2ms；
 - 管理端 `vue-tsc --noEmit` 0 错误（本稿未改管理端）。
 
-**三稿（2026-09-10，形态 + 性能）**：
+**四次迭代（2026-09-11，倒排 + 字典两轮扩容）**：
 
-- [x] 三稿文件：`bulletins.wxml` / `.wxss` / `.ts`（+ `.js` 产物）/ `.json`（注册 `offline-banner`）
-- [x] 过期引用扫描：`bul-head` / `bul-city` / `bul-time` / `bul-more` / `bul-title` / `onTapMore`
-      在 wxml/wxss/ts/js 无残留
-- [x] 门禁：`check:tokens`（76 token）/ `check:surface`（34 页）/ `positioning` / `detailparams` /
-      `protocol` 全通过；`tsc --noEmit` 0 错误
+- [x] 后端：`findBulletinFeedPage`（时间正序 `publishAt ASC, id ASC`）新增且仅服务信息流；
+      公告域 `findVisiblePage` 契约零改动（互斥契约 §三 新增行）
+- [x] `BulletinService#listVisible` 切换正序查询；`BulletinReactionCode` 10 → 16 → 32 枚 +
+      `BulletinReactionCodeTest` 规模断言同步（16 → 32）
+- [x] 前端：`constants/bulletin-reactions.ts`（+ `.js` 镜像）扩到 32 枚（第二轮 +16 枚）；
+      排序由服务端下发（前端无排序逻辑，无改动）
+- [x] 门禁：后端 `mvnw compile` + `BulletinReactionCodeTest` 通过；
+      前端 `mirror:js` 回拷 + `npm run verify` 全绿
 
 **待用户真机验证**：
 
-- [ ] 迁移 V18/V19 在本地库执行成功（Flyway 启动时应用）
+- [ ] 迁移 V18/V19/V20 在本地库执行成功（Flyway 启动时应用）
 - [ ] 信息流：markdown 段落/图片（点击预览）/视频（内联播放）/`venue://` 跳转
 - [ ] 深色主题下 towxml 正文与白带底色
 - [ ] **闪屏（三稿主诉）**：首次进入（骨架 → 内容）与再次进入（无任何加载态、内容不动）各看一次
@@ -541,8 +558,10 @@ DRAFT --publish(立即/定时)--> PUBLISHED --offline / offlineAt 到点--> OFFL
 - [ ] 白带形态：左右撑满屏幕、相邻消息灰缝可辨（浅色 + 深色）
 - [ ] 消息式尾部（2026-09-11 调整）：表态行在消息尾行之前；尾部 = 查看人数 · 时间居右
   （查看人数沉时间左侧）；长文案不挤压
+- [ ] **最新沉底（2026-09-11）**：新发布一条快讯 → 信息流底部出现（而非顶部）；触底翻页
+  从最早内容开始向后读到最新
 - [ ] 表态：参与 → 换票 → 取消；`count>0` 消失行为；跨页（列表 ↔ 详情，经分享卡片进入）计数一致
-- [ ] Picker `variant="bulletin"`：10 枚网格、无「展开全部」、无「表情说明」入口
+- [ ] Picker `variant="bulletin"`：**32 枚网格（4 列 × 8 行满格）**、无「展开全部」、无「表情说明」入口
 - [ ] 长按 chip 说明弹层锚定位置
 - [ ] 离线横幅：飞行模式下进页 → 快照渲染 + 「离线数据 · 更新于 X 前」
 - [ ] 管理端新建 → 发布 → 小程序可见全链路；Agent 幂等（同 key 连发只生一条）
