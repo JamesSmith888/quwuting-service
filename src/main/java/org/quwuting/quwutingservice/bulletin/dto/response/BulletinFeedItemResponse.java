@@ -24,7 +24,7 @@ import java.util.List;
  * 仍<b>不含 read 字段</b>：快讯域有意不做已读回执（不进红点，新鲜度由时间戳表达）。
  *
  * @param id        快讯 id
- * @param title     标题（列表气泡的第一行，事实性陈述）
+ * @param excerpt   内容摘要（**派生只读**：本域无标题字段，见 BulletinExcerpt；仅供分享卡片标题 / aria 上下文）
  * @param content   Markdown 原文（前端 towxml 渲染；图片/视频走 markdown 原生语法）
  * @param city      城市标签（可空）
  * @param venueId   关联门店 id（可空）
@@ -35,7 +35,7 @@ import java.util.List;
  */
 public record BulletinFeedItemResponse(
         Long id,
-        String title,
+        String excerpt,
         String content,
         String city,
         Long venueId,

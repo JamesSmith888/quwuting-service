@@ -7,6 +7,7 @@ import org.quwuting.quwutingservice.announcement.enums.AnnouncementCategory;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementSource;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementStatus;
 import org.quwuting.quwutingservice.announcement.repository.AnnouncementRepository;
+import org.quwuting.quwutingservice.bulletin.BulletinExcerpt;
 import org.quwuting.quwutingservice.bulletin.dto.request.AgentPublishBulletinRequest;
 import org.quwuting.quwutingservice.bulletin.dto.request.CreateBulletinRequest;
 import org.quwuting.quwutingservice.bulletin.dto.request.PublishBulletinRequest;
@@ -117,7 +118,7 @@ public class BulletinService {
     public BulletinDetailResponse detail(Long id, Long currentUserId) {
         Announcement a = bulletinLookupService.requirePublished(id);
         return new BulletinDetailResponse(
-                a.getId(), a.getTitle(), a.getContent(), a.getCity(), a.getVenueId(),
+                a.getId(), BulletinExcerpt.of(a.getContent()), a.getContent(), a.getCity(), a.getVenueId(),
                 a.getPublishAt(), a.getPublishedAt(), a.getCreatedAt(),
                 bulletinReactionService.badges(a.getId(), currentUserId),
                 bulletinViewService.countByBulletinId(a.getId()));
@@ -147,7 +148,7 @@ public class BulletinService {
         validateContent(request.content());
         validateSchedule(request.publishAt(), request.offlineAt());
         Announcement a = new Announcement();
-        a.setTitle(request.title());
+        a.setTitle(BulletinExcerpt.of(request.content()));
         a.setContent(request.content());
         a.setCategory(CATEGORY);
         a.setSource(AnnouncementSource.MANUAL);
@@ -180,12 +181,12 @@ public class BulletinService {
         if (a.getStatus() == AnnouncementStatus.PUBLISHED) {
             // 发布中：publishAt 已生效不可改（既不校验也不落库）
             validateSchedule(null, request.offlineAt());
-            a.setTitle(request.title());
+            a.setTitle(BulletinExcerpt.of(request.content()));
             a.setContent(request.content());
             a.setOfflineAt(request.offlineAt());
         } else {
             validateSchedule(request.publishAt(), request.offlineAt());
-            a.setTitle(request.title());
+            a.setTitle(BulletinExcerpt.of(request.content()));
             a.setContent(request.content());
             a.setPublishAt(request.publishAt());
             a.setOfflineAt(request.offlineAt());
@@ -278,7 +279,7 @@ public class BulletinService {
         validateSchedule(request.publishAt(), request.offlineAt());
         LocalDateTime now = LocalDateTime.now();
         Announcement a = new Announcement();
-        a.setTitle(request.title());
+        a.setTitle(BulletinExcerpt.of(request.content()));
         a.setContent(request.content());
         a.setCategory(CATEGORY);
         a.setSource(AnnouncementSource.AGENT);
@@ -395,13 +396,13 @@ public class BulletinService {
     private BulletinFeedItemResponse toFeedItem(Announcement a, List<BulletinReactionBadge> reactions,
                                                 Long viewCount) {
         return new BulletinFeedItemResponse(
-                a.getId(), a.getTitle(), a.getContent(), a.getCity(), a.getVenueId(),
+                a.getId(), BulletinExcerpt.of(a.getContent()), a.getContent(), a.getCity(), a.getVenueId(),
                 a.getPublishAt(), a.getCreatedAt(), reactions, viewCount);
     }
 
     private AdminBulletinResponse toAdminResponse(Announcement a) {
         return new AdminBulletinResponse(
-                a.getId(), a.getTitle(), a.getContent(), a.getCity(), a.getVenueId(),
+                a.getId(), BulletinExcerpt.of(a.getContent()), a.getContent(), a.getCity(), a.getVenueId(),
                 a.getDedupKey(), a.getSource(), a.getStatus(),
                 a.getPublishAt(), a.getOfflineAt(), a.getPublishedAt(), a.getOfflinedAt(),
                 a.getOperatorId(), a.getCreatedAt(), a.getUpdatedAt());

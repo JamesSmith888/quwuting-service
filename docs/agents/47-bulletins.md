@@ -228,7 +228,9 @@ CREATE INDEX qwt_idx_br_bulletin ON qwt_bulletin_reactions (bulletin_id, deleted
 |---|---|---|
 | POST | `/admin/bulletins/agent-publish` | **一步 create + publish**（agent 场景不需要草稿态），source 固定 AGENT，`dedupKey` 幂等 |
 
-请求体：`{title, content, city?, venueId?, dedupKey?, publishAt?, offlineAt?}`
+请求体：`{content, city?, venueId?, dedupKey?, publishAt?, offlineAt?}`
+
+- ⚠️ **无 `title`**（2026-09-11 五稿删除，用户拍板"快讯完全不需要标题"；小程序侧见 quwuting/docs/agents/47-bulletins.md §7.7）：三个请求 DTO 删 `title`，三个响应 DTO 把 `title` 换成服务端派生的只读 `excerpt`（`bulletin/BulletinExcerpt`，去 markdown 标记取前 30 字）。共享表 `qwt_announcements.title` 列因公告域必须保留 ⇒ 快讯写入时写派生摘要作兼容位，**读取侧一律从 content 现算**（历史行旧标题自然不可见，零迁移）。老调用方仍带 `title` 会被忽略（Jackson 未知属性默认忽略），不 400。
 
 - `content` = markdown（**含媒体语法，见 §六**）；
 - `publishAt` 未来时刻 → 定时（状态 DRAFT，由既有 `@Scheduled` 30s 调度强转 PUBLISHED）；
@@ -365,7 +367,7 @@ DRAFT --publish(立即/定时)--> PUBLISHED --offline / offlineAt 到点--> OFFL
 
 | 类型 | 写法 | 小程序侧实现 |
 |---|---|---|
-| 文本 / 标题 / 列表 / 表格 / 代码 | markdown | towxml（与公告详情同一管线） |
+| 文本 / 列表 / 表格 / 代码 | markdown | towxml（与公告详情同一管线） |
 | 图片 | `![说明](图片地址)` | towxml `img` 组件（点击可预览大图） |
 | 视频 | `<video src="地址" poster="地址"></video>` | towxml `wxml` 白名单直通原生 `<video>` |
 | 门店锚点 | `[店名](venue://门店ID)` | `normalizeAnnouncementLinks` → 门店详情页（外链降级纯文本） |

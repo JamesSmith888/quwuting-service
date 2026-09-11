@@ -23,10 +23,6 @@ import java.time.LocalDateTime;
  * @param offlineAt 可选自动下线时间（须晚于当前时间）
  */
 public record AgentPublishBulletinRequest(
-        @NotBlank(message = "标题不能为空")
-        @Size(max = 50, message = "标题不能超过 50 字")
-        String title,
-
         @NotBlank(message = "快讯内容不能为空")
         @Size(max = 50000, message = "快讯内容不能超过 50KB")
         String content,

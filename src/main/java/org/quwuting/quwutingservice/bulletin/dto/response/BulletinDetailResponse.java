@@ -16,7 +16,7 @@ import java.util.List;
  */
 public record BulletinDetailResponse(
         Long id,
-        String title,
+        String excerpt,
         String content,
         String city,
         Long venueId,

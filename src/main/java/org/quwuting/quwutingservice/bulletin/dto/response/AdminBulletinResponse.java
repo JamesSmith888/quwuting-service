@@ -14,7 +14,7 @@ import java.time.LocalDateTime;
  */
 public record AdminBulletinResponse(
         Long id,
-        String title,
+        String excerpt,
         String content,
         String city,
         Long venueId,
