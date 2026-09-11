@@ -81,6 +81,7 @@ public class BulletinService {
     private final VenueRepository venueRepository;
     private final BulletinLookupService bulletinLookupService;
     private final BulletinReactionService bulletinReactionService;
+    private final BulletinViewService bulletinViewService;
 
     // ── 用户端 ────────────────────────────────────────────────
 
@@ -104,8 +105,10 @@ public class BulletinService {
         List<Long> ids = found.getContent().stream().map(Announcement::getId).collect(Collectors.toList());
         Map<Long, List<BulletinReactionBadge>> reactions =
                 bulletinReactionService.batchBadges(ids, currentUserId);
+        Map<Long, Long> viewCounts = bulletinViewService.countByBulletinIds(ids);
         return found.map(a -> toFeedItem(a,
-                reactions.getOrDefault(a.getId(), Collections.emptyList())));
+                reactions.getOrDefault(a.getId(), Collections.emptyList()),
+                viewCounts.getOrDefault(a.getId(), 0L)));
     }
 
     /** 快讯详情（未发布/已下线/已软删/非 FLASH → 404）；表态徽标与列表同口径 */
@@ -115,7 +118,8 @@ public class BulletinService {
         return new BulletinDetailResponse(
                 a.getId(), a.getTitle(), a.getContent(), a.getCity(), a.getVenueId(),
                 a.getPublishAt(), a.getPublishedAt(), a.getCreatedAt(),
-                bulletinReactionService.badges(a.getId(), currentUserId));
+                bulletinReactionService.badges(a.getId(), currentUserId),
+                bulletinViewService.countByBulletinId(a.getId()));
     }
 
     // ── 管理端 ────────────────────────────────────────────────
@@ -386,11 +390,12 @@ public class BulletinService {
         return venueId;
     }
 
-    /** 列表项映射：内容全文 + 该条的表态徽标（列表页内联渲染所需的最小完整集合） */
-    private BulletinFeedItemResponse toFeedItem(Announcement a, List<BulletinReactionBadge> reactions) {
+    /** 列表项映射：内容全文 + 该条的表态徽标 + 累计查看人数（列表页内联渲染所需的最小完整集合） */
+    private BulletinFeedItemResponse toFeedItem(Announcement a, List<BulletinReactionBadge> reactions,
+                                                Long viewCount) {
         return new BulletinFeedItemResponse(
                 a.getId(), a.getTitle(), a.getContent(), a.getCity(), a.getVenueId(),
-                a.getPublishAt(), a.getCreatedAt(), reactions);
+                a.getPublishAt(), a.getCreatedAt(), reactions, viewCount);
     }
 
     private AdminBulletinResponse toAdminResponse(Announcement a) {

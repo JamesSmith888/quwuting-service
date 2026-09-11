@@ -1,17 +1,20 @@
 package org.quwuting.quwutingservice.bulletin.controller;
 
 import lombok.RequiredArgsConstructor;
+import org.quwuting.quwutingservice.bulletin.dto.request.BulletinViewsRequest;
 import org.quwuting.quwutingservice.bulletin.dto.response.BulletinDetailResponse;
 import org.quwuting.quwutingservice.bulletin.dto.response.BulletinFeedItemResponse;
 import org.quwuting.quwutingservice.bulletin.dto.response.BulletinReactionToggleResult;
 import org.quwuting.quwutingservice.bulletin.service.BulletinReactionService;
 import org.quwuting.quwutingservice.bulletin.service.BulletinService;
+import org.quwuting.quwutingservice.bulletin.service.BulletinViewService;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.springframework.data.domain.Page;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -39,6 +42,7 @@ public class BulletinController {
 
     private final BulletinService bulletinService;
     private final BulletinReactionService bulletinReactionService;
+    private final BulletinViewService bulletinViewService;
 
     /**
      * 可见快讯流（分页，时间倒序；一期不支持城市筛选）。
@@ -74,5 +78,21 @@ public class BulletinController {
                                                                    @PathVariable String code) {
         Long userId = UserContext.requireAuth();
         return ApiResponse.ok(bulletinReactionService.toggle(userId, id, code));
+    }
+
+    /**
+     * 批量上报信息流展示浏览（fire-and-forget 计数埋点，2026-09-11）。
+     * POST /bulletins/views  body = {ids: [..]}
+     * <p>
+     * 口径 = <b>信息流展示即计</b>（docs/agents/47「九、浏览统计」）：信息流每成功加载
+     * 一页即把该页条目 id 一次性上报，服务端按 (bulletin_id, user_id, view_date) 去重
+     * （同一用户同一条同一天只计 1 次），前端失败静默不重试——计数埋点不阻塞内容展示。
+     * 需登录（快讯接口全部登录门禁，userId 恒非空）。空集合/重复 id 由服务端去重收敛。
+     */
+    @PostMapping("/views")
+    public ApiResponse<Void> recordViews(@RequestBody(required = false) BulletinViewsRequest request) {
+        Long userId = UserContext.requireAuth();
+        bulletinViewService.recordViews(request != null ? request.ids() : null, userId);
+        return ApiResponse.ok(null);
     }
 }

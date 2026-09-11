@@ -11,7 +11,8 @@ import java.util.List;
  * <p>
  * content = markdown 原文，小程序侧复用公告详情页的 towxml 渲染链路与
  * {@code venue://} 链接归一化（外链降级纯文本）；reactions 与列表口径一致
- * （同一 DTO、同一聚合函数），保证两处展示绝不漂移。
+ * （同一 DTO、同一聚合函数），保证两处展示绝不漂移；
+ * viewCount 与列表口径一致（信息流展示即计），详情打开也会计一次浏览。
  */
 public record BulletinDetailResponse(
         Long id,
@@ -22,5 +23,6 @@ public record BulletinDetailResponse(
         LocalDateTime publishAt,
         LocalDateTime publishedAt,
         LocalDateTime createdAt,
-        List<BulletinReactionBadge> reactions
+        List<BulletinReactionBadge> reactions,
+        Long viewCount
 ) {}

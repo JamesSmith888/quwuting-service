@@ -18,6 +18,9 @@ import java.util.List;
  * reactions = 表态徽标（只含 count&gt;0，一人一票），列表页每次请求按整页 id 批量聚合，
  * 无 N+1、无缓存（见 BulletinReactionRepository 注释）。
  * <p>
+ * viewCount = 累计查看人数（信息流展示即计口径，见 BulletinViewService；按整页 id
+ * 一次 IN + GROUP BY 聚合，无 N+1、无缓存）。
+ * <p>
  * 仍<b>不含 read 字段</b>：快讯域有意不做已读回执（不进红点，新鲜度由时间戳表达）。
  *
  * @param id        快讯 id
@@ -28,6 +31,7 @@ import java.util.List;
  * @param publishAt 生效时间（定时发布 = 计划生效时刻；列表节奏锚点）
  * @param createdAt 创建时间（publishAt 缺失时的展示兜底）
  * @param reactions 表态徽标（count&gt;0，按人数降序；无表态时为空列表，非 null）
+ * @param viewCount 累计查看人数（信息流展示即计，无展示时 0）
  */
 public record BulletinFeedItemResponse(
         Long id,
@@ -37,5 +41,6 @@ public record BulletinFeedItemResponse(
         Long venueId,
         LocalDateTime publishAt,
         LocalDateTime createdAt,
-        List<BulletinReactionBadge> reactions
+        List<BulletinReactionBadge> reactions,
+        Long viewCount
 ) {}
