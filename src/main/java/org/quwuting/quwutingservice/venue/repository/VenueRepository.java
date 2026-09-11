@@ -143,14 +143,18 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     long countMissingCoordinates();
 
     /**
-     * 缺图场所（2026-08-21 高德图片同步用，2026-08-22 口径升级）：
+     * 缺图场所（2026-08-21 高德图片同步用，2026-08-22 口径升级，
+     * 2026-09-11 排除 photoSyncExcluded 标记门店）：
      * deleted=false 且 <b>主图为空（imageUrl NULL/空串）或无公开相册</b>
      * （qwt_venue_photos 无 PUBLIC 记录）——幂等口径：已有主图的存量门店
      * 重跑本轮时只补相册（syncOne 内处理），保证全量同步把主图 + 相册都补齐。
+     * <b>2026-09-11 排除标记</b>：photoSyncExcluded=false（V66）——用户主动清除
+     * 照片 / 存量缺图门店统一带标，批量同步不再触碰。
      */
     @Query("""
             SELECT v FROM Venue v
             WHERE v.deleted = false
+              AND v.photoSyncExcluded = false
               AND (v.imageUrl IS NULL OR v.imageUrl = ''
                    OR NOT EXISTS (SELECT 1 FROM VenuePhoto p
                                   WHERE p.venueId = v.id
@@ -163,6 +167,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     @Query("""
             SELECT COUNT(v) FROM Venue v
             WHERE v.deleted = false
+              AND v.photoSyncExcluded = false
               AND (v.imageUrl IS NULL OR v.imageUrl = ''
                    OR NOT EXISTS (SELECT 1 FROM VenuePhoto p
                                   WHERE p.venueId = v.id
@@ -179,12 +184,14 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 最新门店优先；id 兜底保证同刻稳定序）。
      * 数据源 = DB 现状（非同步内存快照）——服务重启不丢、与真实数据一致、可筛选分页，
      * 同时作为「成功项纠错」入口（成功 ≠ 100% 正确，人工复核后重匹配/清除）。
-     * 返回 Object[]{id, name, city, address, image_url, photo_count}。
+     * 返回 Object[]{id, name, city, address, image_url, photo_count, photo_sync_excluded}
+     * （2026-09-11 追加最后一列：批量同步排除标记，前端展示「已标记」态）。
      */
     @Query(value = """
             SELECT v.id, v.name, v.city, v.address, v.image_url,
                    (SELECT COUNT(*) FROM qwt_venue_photos p
-                    WHERE p.venue_id = v.id AND p.status = 'PUBLIC' AND p.deleted = false) AS photo_count
+                    WHERE p.venue_id = v.id AND p.status = 'PUBLIC' AND p.deleted = false) AS photo_count,
+                   v.photo_sync_excluded
             FROM qwt_venues v
             WHERE v.deleted = false
               AND (:hasImage IS NULL

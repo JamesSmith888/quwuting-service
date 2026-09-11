@@ -10,6 +10,7 @@ import org.quwuting.quwutingservice.spend.dto.SpendSyncRequest;
 import org.quwuting.quwutingservice.spend.dto.SpendSyncResponse;
 import org.quwuting.quwutingservice.spend.entity.SpendEntryEntity;
 import org.quwuting.quwutingservice.spend.enums.SpendCategory;
+import org.quwuting.quwutingservice.spend.enums.SpendDirection;
 import org.quwuting.quwutingservice.spend.enums.SpendSource;
 import org.quwuting.quwutingservice.spend.repository.SpendEntryRepository;
 
@@ -56,10 +57,10 @@ class SpendServiceTest {
         return new SpendService(spendEntryRepository);
     }
 
-    /** 合法条目（大写协议值；特殊字段由各用例覆盖） */
+    /** 合法条目（大写协议值；特殊字段由各用例覆盖；direction 缺省 = 老客户端不带该字段） */
     private SpendEntryItem entry(String clientEntryId, String source, String category) {
         return new SpendEntryItem(clientEntryId, TS, new BigDecimal("88.00"),
-                category, source, "", null, null, null, Boolean.FALSE);
+                category, source, "", null, null, null, Boolean.FALSE, null);
     }
 
     private SpendSyncRequest request(SpendEntryItem... items) {
@@ -125,11 +126,11 @@ class SpendServiceTest {
     @Test
     void testNonPositiveAmountAndInvalidTsRejected() {
         SpendEntryItem zeroAmount = new SpendEntryItem("led-g", TS, BigDecimal.ZERO,
-                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE);
+                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, null);
         SpendEntryItem negativeAmount = new SpendEntryItem("led-h", TS, new BigDecimal("-1.00"),
-                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE);
+                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, null);
         SpendEntryItem zeroTs = new SpendEntryItem("led-i", 0L, new BigDecimal("10.00"),
-                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE);
+                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, null);
 
         SpendSyncResponse res = service().sync(1L, request(zeroAmount, negativeAmount, zeroTs));
 
@@ -206,7 +207,7 @@ class SpendServiceTest {
 
         // 软删载荷（deleted=true 携带原始 ts/amount）与恢复（deleted=false）走同一路径
         service().sync(1L, request(new SpendEntryItem("led-x", TS, new BigDecimal("66.00"),
-                "PARTNER", "DANCE", "rec-1", 9L, "测试门店", 1800, Boolean.TRUE)));
+                "PARTNER", "DANCE", "rec-1", 9L, "测试门店", 1800, Boolean.TRUE, null)));
 
         ArgumentCaptor<SpendEntryEntity> captor = ArgumentCaptor.forClass(SpendEntryEntity.class);
         verify(spendEntryRepository).save(captor.capture());
@@ -218,5 +219,50 @@ class SpendServiceTest {
         assertNotNull(saved.getTs());
         assertEquals(0, saved.getTs().compareTo(LocalDateTime.ofInstant(
                 java.time.Instant.ofEpochMilli(TS), java.time.ZoneId.systemDefault())));
+    }
+
+    // ── 方向字段（2026-09-11，44 号 §24：客人=支出 / 舞伴=收入） ──────────────
+
+    @Test
+    void testDirectionDefaultsToExpenseForLegacyAndAbsentPayload() {
+        stubFreshInsert();
+
+        // 老客户端载荷不带 direction ⇒ 缺省 EXPENSE（存量语义，兼容收敛）
+        SpendSyncResponse res = service().sync(1L, request(
+                entry("led-dir-a", "dance", "PARTNER")));
+
+        assertEquals(1, res.accepted());
+        ArgumentCaptor<SpendEntryEntity> captor = ArgumentCaptor.forClass(SpendEntryEntity.class);
+        verify(spendEntryRepository).save(captor.capture());
+        assertEquals(SpendDirection.EXPENSE, captor.getValue().getDirection());
+    }
+
+    @Test
+    void testIncomeDirectionAcceptedWithRelaxedCase() {
+        stubFreshInsert();
+
+        // 舞伴身份结算：小写 income（宽容读，与 source 同判据）→ 落库 INCOME
+        SpendEntryItem income = new SpendEntryItem("led-dir-b", TS, new BigDecimal("60.00"),
+                "PARTNER", "DANCE", "rec-2", 9L, "测试门店", 2400, Boolean.FALSE, "income");
+
+        SpendSyncResponse res = service().sync(1L, request(income));
+
+        assertEquals(1, res.accepted());
+        assertEquals(0, res.rejected());
+        ArgumentCaptor<SpendEntryEntity> captor = ArgumentCaptor.forClass(SpendEntryEntity.class);
+        verify(spendEntryRepository).save(captor.capture());
+        assertEquals(SpendDirection.INCOME, captor.getValue().getDirection());
+    }
+
+    @Test
+    void testUnknownDirectionRejectedWithoutFallback() {
+        SpendSyncResponse res = service().sync(1L, request(
+                new SpendEntryItem("led-dir-c", TS, new BigDecimal("60.00"),
+                        "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, "REWARD")));
+
+        assertEquals(0, res.accepted());
+        assertEquals(1, res.rejected());
+        assertEquals(List.of("led-dir-c"), res.rejectedIds());
+        verify(spendEntryRepository, never()).save(any(SpendEntryEntity.class));
     }
 }

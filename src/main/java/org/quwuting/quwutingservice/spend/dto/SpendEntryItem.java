@@ -8,6 +8,8 @@ import java.math.BigDecimal;
  * 协议约定（44 号文档 §12.1）：客户端为源，重放安全——同 clientEntryId 重复上报
  * 幂等收敛为更新；删除经 deleted=true 承载（软删），无独立删除接口高频往返。
  * ts 为业务发生时刻 epoch 毫秒（结算=停止时刻；手动=记账时刻）。
+ * direction 为可空方向（EXPENSE/INCOME，宽容大小写）——缺省 = EXPENSE
+ * （存量/老客户端语义；非空但不可识别判该条非法，禁猜默认值，见 §24）。
  */
 public record SpendEntryItem(
         String clientEntryId,
@@ -19,6 +21,7 @@ public record SpendEntryItem(
         Long venueId,
         String venueName,
         Integer durationSeconds,
-        Boolean deleted
+        Boolean deleted,
+        String direction
 ) {
 }

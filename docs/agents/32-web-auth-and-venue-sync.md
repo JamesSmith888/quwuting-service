@@ -42,6 +42,11 @@ admin.starseek.online ──DNS A 记录──> ECS(114.55.0.14) ──nginx─�
 
 ## 门店同步报告（venuesync 包）
 
+> **⚠️ 2026-09-11 管理后台「门店同步」入口下架**：用户明确从 Web 管理后台删除「门店同步」
+> 模块（底部 tab 与设置页均不展示，前端 `SyncReportView.vue` 已删除）。**后端 venue-sync
+> 报告/别名/管线接口全部保留**——舞讯采集 Skill（33 号文档）、管线一键拉取仍依赖，
+> 仅管理后台 UI 不再提供入口；`qwt_venue_sync_reports` / `qwt_venue_sync_aliases` 表照常使用。
+
 管线 `quwuting-ops/venue-opening/main.py --report --upload-report` 跑完后把报告 JSON 上报存档，Web 页读取/确认写库。
 
 - `POST /admin/venue-sync/reports`：幂等 upsert（同 `source_id` 同 `report_date` 覆盖，生成列部分唯一索引）；summary 剔除 `_` 开头内部聚合键。

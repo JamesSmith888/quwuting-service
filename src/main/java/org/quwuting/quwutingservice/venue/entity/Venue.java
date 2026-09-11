@@ -111,4 +111,21 @@ public class Venue extends BaseEntity {
     /** 认领人用户 ID（qwt_users.id），null 表示未被认领。
      *  认领后该用户获得门店管理权（发布动态等），与平台管理员共享管理入口可见性。 */
     private Long claimedBy;
+
+    // ===== 门店照片同步（2026-09-11，V66） =====
+
+    /**
+     * 已标记不参与高德图片<b>批量</b>同步（2026-09-11 新增）：
+     * <ul>
+     *   <li>置位来源：① 用户主动清除门店照片（photo-sync/clear，人工判定错配拒绝高德图）；
+     *       ② V66 存量回填——迁移时刻所有缺图门店（原批量同步候选）统一带标；</li>
+     *   <li>生效范围：批量同步候选查询（findMissingImages / countMissingImages）排除，
+     *       管理端「缺图待同步」计数与一键同步不再触碰；单店人工重匹配（retrySync，
+     *       显式操作）不受限，成功后门店自然离开缺图口径；</li>
+     *   <li>default false：新建门店不阻塞首次批量同步。</li>
+     * </ul>
+     */
+    @Column(nullable = false)
+    @ColumnDefault("false")
+    private boolean photoSyncExcluded = false;
 }

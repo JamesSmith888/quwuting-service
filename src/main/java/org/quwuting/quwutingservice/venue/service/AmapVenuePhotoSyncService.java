@@ -128,9 +128,10 @@ public class AmapVenuePhotoSyncService {
     /**
      * 门店图片状态列表项（2026-08-22 新增，工作台列表/纠错入口）。
      * 数据源 = DB 现状（qwt_venues + qwt_venue_photos 聚合）。
+     * photoSyncExcluded（2026-09-11 新增）：批量同步排除标记，前端展示「已标记」态。
      */
     public record VenuePhotoStatusItem(long venueId, String name, String city, String address,
-                                       String imageUrl, int photoCount) {
+                                       String imageUrl, int photoCount, boolean photoSyncExcluded) {
     }
 
     /** 同步进度快照（前端轮询展示：统计 + 逐条结果） */
@@ -179,7 +180,8 @@ public class AmapVenuePhotoSyncService {
         return venueRepository.findPhotoStatusPage(hasImage, cityFilter, kw, pageable)
                 .map(r -> new VenuePhotoStatusItem(
                         ((Number) r[0]).longValue(), (String) r[1], (String) r[2],
-                        (String) r[3], (String) r[4], ((Number) r[5]).intValue()));
+                        (String) r[3], (String) r[4], ((Number) r[5]).intValue(),
+                        Boolean.TRUE.equals(r[6])));
     }
 
     /** 当前同步进度（无任务时返回最近一次结果快照）。 */
@@ -247,14 +249,19 @@ public class AmapVenuePhotoSyncService {
     /**
      * 清除门店图片（2026-08-22 新增，纠错入口：人工判定当前图错配后回退）。
      * 主图 image_url 置空 + 物理删除高德导入相册（created_by=0）+ 缓存失效，
-     * 门店回到「无图」状态可重新同步。幂等：门店本就无图时同样安全。
+     * 门店回到「无图」状态。<b>2026-09-11：清除同时置位 photoSyncExcluded=true</b>
+     * （用户主动删除的照片 = 明确拒绝高德图，批量同步不再触碰；见 V66）。幂等：
+     * 门店本就无图时同样安全。
      */
     public void clearPhotos(long venueId) {
         Venue venue = venueRepository.findByIdAndDeletedFalse(venueId)
                 .orElseThrow(() -> new org.quwuting.quwutingservice.exception.BusinessException(
                         1001, "门店不存在"));
         venueService.clearImportedPhotos(venueId);
-        log.info("[amap-photo-sync] clear photos: venue={} ({})", venueId, venue.getName());
+        venue.setPhotoSyncExcluded(true);
+        venueRepository.save(venue);
+        log.info("[amap-photo-sync] clear photos: venue={} ({}), marked photoSyncExcluded",
+                venueId, venue.getName());
     }
 
     /** 全量同步主流程：遍历缺图门店逐条同步（单店失败不影响其他项）。 */

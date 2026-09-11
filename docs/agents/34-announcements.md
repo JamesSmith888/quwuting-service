@@ -150,12 +150,13 @@ SQL 用 NOT EXISTS 子查询派生（对齐站内信 unread-count 模式）。
 明确要求底部导航栏 + 功能菜单**，已实现 `src/layouts/AppLayout.vue`：
 
 - 顶部 van-nav-bar（标题随路由 meta.title，退出登录全局收口）；
-- 底部 van-tabbar（`门店同步` / `公告管理` / `更多`，tab 由路由派生 watch 同步，
-  「更多」为弹层入口不占用高亮）；
-- 「更多」= van-popup 底部弹层 + van-grid 功能菜单（`MENUS` 数组登记全部功能，
-  **未来新模块只加 MENUS 数组，不进 tabbar 挤占**）；
-- 路由重构为嵌套结构：`/` → AppLayout → `/sync`、`/announcements`；
-  登录后默认跳 `/sync`（原 `home` 路由名废弃为 `sync`）。
+- 底部 van-tabbar（`数据看板` / `公告管理` / `更多`，tab 由路由派生 watch 同步；
+  **2026-09-11 撤「门店同步」</b>，「更多」改为**设置页**（`/more`，MoreView.vue），
+  不再是占用抽屉弹层）；
+- 「更多」= 设置页 van-cell-group 功能清单（`MoreView.vue#MODULES` 数组登记全部功能，
+  **未来新模块只加 MODULES 数组，不进 tabbar 挤占**）；
+- 路由重构为嵌套结构：`/` → AppLayout → `/dashboard`、`/announcements`、`/more`；
+  登录后默认跳 `/dashboard`。
 
 #### ⚠️ Vant fixed+placeholder 布局约定（2026-09-01 根因修复，长期有效）
 

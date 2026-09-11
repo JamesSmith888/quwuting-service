@@ -8,8 +8,10 @@ import jakarta.persistence.Index;
 import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.Setter;
+import org.hibernate.annotations.ColumnDefault;
 import org.quwuting.quwutingservice.base.BaseEntity;
 import org.quwuting.quwutingservice.spend.enums.SpendCategory;
+import org.quwuting.quwutingservice.spend.enums.SpendDirection;
 import org.quwuting.quwutingservice.spend.enums.SpendSource;
 
 import java.math.BigDecimal;
@@ -58,6 +60,13 @@ public class SpendEntryEntity extends BaseEntity {
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 8)
     private SpendSource source;
+
+    /** 方向（EXPENSE 缺省 = 存量语义；INCOME = 舞伴身份计时结算，44 号 §24）。
+     *  金额恒为正，方向只决定展示与「收入/结余」口径。 */
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 8)
+    @ColumnDefault("'EXPENSE'")
+    private SpendDirection direction;
 
     /** 来源关联 id（source=DANCE 时指向客户端 DanceRecord.id，明细↔账目追溯） */
     @Column(name = "source_ref_id", length = 32)

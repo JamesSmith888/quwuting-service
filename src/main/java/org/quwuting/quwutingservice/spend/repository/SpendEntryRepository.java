@@ -32,10 +32,11 @@ public interface SpendEntryRepository extends JpaRepository<SpendEntryEntity, Lo
 
     // ── overview 聚合（全部服务端 SQL 算，禁拉明细前端算，44 号文档 §14.3） ──
 
-    /** 月度汇总：总额 / 条目数 / 场次（DANCE 条目数——口径与客户端 summarizeMonth 一致，禁漂移） */
+    /** 月度汇总：总额/条目数只计支出（EXPENSE——统计口径=消费分析），场次 = 全部
+     *  DANCE 条目（含收入场次："这个月跳了几场"对客人/舞伴两类身份都成立，44 号 §24） */
     @Query(value = """
-            SELECT COALESCE(SUM(amount), 0) AS total,
-                   COUNT(*) AS entryCount,
+            SELECT COALESCE(SUM(CASE WHEN direction = 'EXPENSE' THEN amount ELSE 0 END), 0) AS total,
+                   COALESCE(SUM(CASE WHEN direction = 'EXPENSE' THEN 1 ELSE 0 END), 0) AS entryCount,
                    COALESCE(SUM(source = 'DANCE'), 0) AS sessionCount
             FROM qwt_spend_entries
             WHERE user_id = :userId AND deleted = 0 AND ts >= :start AND ts < :end
@@ -50,7 +51,7 @@ public interface SpendEntryRepository extends JpaRepository<SpendEntryEntity, Lo
                    COALESCE(SUM(amount), 0) AS total,
                    COUNT(*) AS entryCount
             FROM qwt_spend_entries
-            WHERE user_id = :userId AND deleted = 0 AND ts >= :start AND ts < :end
+            WHERE user_id = :userId AND deleted = 0 AND direction = 'EXPENSE' AND ts >= :start AND ts < :end
             GROUP BY category
             ORDER BY total DESC
             """, nativeQuery = true)
@@ -64,7 +65,7 @@ public interface SpendEntryRepository extends JpaRepository<SpendEntryEntity, Lo
                    venue_name AS venueName,
                    COALESCE(SUM(amount), 0) AS total
             FROM qwt_spend_entries
-            WHERE user_id = :userId AND deleted = 0 AND ts >= :start AND ts < :end
+            WHERE user_id = :userId AND deleted = 0 AND direction = 'EXPENSE' AND ts >= :start AND ts < :end
               AND venue_id IS NOT NULL
             GROUP BY venue_id, venue_name
             ORDER BY total DESC
@@ -79,7 +80,7 @@ public interface SpendEntryRepository extends JpaRepository<SpendEntryEntity, Lo
     @Query(value = """
             SELECT COALESCE(SUM(amount), 0) AS total
             FROM qwt_spend_entries
-            WHERE user_id = :userId AND deleted = 0 AND ts >= :start AND ts < :end
+            WHERE user_id = :userId AND deleted = 0 AND direction = 'EXPENSE' AND ts >= :start AND ts < :end
               AND venue_id IS NULL
             """, nativeQuery = true)
     BigDecimal sumUnlinked(@Param("userId") Long userId,
@@ -91,7 +92,7 @@ public interface SpendEntryRepository extends JpaRepository<SpendEntryEntity, Lo
             SELECT DATE_FORMAT(ts, '%Y-%m') AS month,
                    COALESCE(SUM(amount), 0) AS total
             FROM qwt_spend_entries
-            WHERE user_id = :userId AND deleted = 0 AND ts >= :start AND ts < :end
+            WHERE user_id = :userId AND deleted = 0 AND direction = 'EXPENSE' AND ts >= :start AND ts < :end
             GROUP BY month
             ORDER BY month ASC
             """, nativeQuery = true)

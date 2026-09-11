@@ -11,6 +11,7 @@ import org.quwuting.quwutingservice.spend.dto.SpendSyncRequest;
 import org.quwuting.quwutingservice.spend.dto.SpendSyncResponse;
 import org.quwuting.quwutingservice.spend.entity.SpendEntryEntity;
 import org.quwuting.quwutingservice.spend.enums.SpendCategory;
+import org.quwuting.quwutingservice.spend.enums.SpendDirection;
 import org.quwuting.quwutingservice.spend.enums.SpendSource;
 import org.quwuting.quwutingservice.spend.enums.WireEnums;
 import org.quwuting.quwutingservice.spend.repository.SpendEntryRepository;
@@ -108,7 +109,8 @@ public class SpendService {
     }
 
     /** 校验通过后的枚举取值（避免"校验一遍、落库再解析一遍"的两处口径） */
-    private record NormalizedEntry(SpendCategory category, SpendSource source) {
+    private record NormalizedEntry(SpendCategory category, SpendSource source,
+                                   SpendDirection direction) {
     }
 
     /**
@@ -130,7 +132,14 @@ public class SpendService {
         if (category == null || source == null) {
             return null;
         }
-        return new NormalizedEntry(category, source);
+        // 方向缺省 = EXPENSE（存量/老客户端语义，兼容收敛）；非空但不可识别 → 整条判非法
+        SpendDirection direction = item.direction() == null
+                ? SpendDirection.EXPENSE
+                : WireEnums.parse(SpendDirection.class, item.direction());
+        if (direction == null) {
+            return null;
+        }
+        return new NormalizedEntry(category, source, direction);
     }
 
     private void upsert(Long userId, SpendEntryItem item, NormalizedEntry normalized) {
@@ -146,6 +155,7 @@ public class SpendService {
         entity.setAmount(item.amount());
         entity.setCategory(normalized.category());
         entity.setSource(normalized.source());
+        entity.setDirection(normalized.direction());
         entity.setSourceRefId(item.sourceRefId());
         entity.setVenueId(item.venueId());
         entity.setVenueName(item.venueName());
@@ -277,7 +287,8 @@ public class SpendService {
                     e.getVenueName(),
                     e.getDurationSeconds(),
                     e.isDeleted(),
-                    updatedAtMillis));
+                    updatedAtMillis,
+                    e.getDirection() == null ? null : e.getDirection().name()));
         }
         return new SpendEntriesResponse(items, maxUpdated);
     }

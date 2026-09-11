@@ -37,12 +37,14 @@
 **名称匹配防错配（2026-08-22 修复「梦幻酒馆」混入「梦幻网咖」图）**：全量同步（名称模式）**只取目标 POI 的照片**，不再收集高德返回全部候选——`searchPoi` 遍历 pois 按名称归一化打分（`normalize` 全角转半角 + 去空白；`nameScore`：完全相等 100、互为子串且短串 ≥2 字按长度占比（下限 60）、其余 0），最高分 ≥ `NAME_MATCH_THRESHOLD`(60) 才采纳；低于阈值记失败「名称未匹配（最近候选：xx）」，管理员可补精确地址重试。**重试 = 地址模式**（overwrite=true）：用户已核实地址，跳过名称校验直接取高德结果第一个 POI。真实案例：搜索「梦幻酒馆」返回 34 个相似名 POI，仅「梦幻酒馆(暂停营业)」得分 60 被采纳，其余（梦幻网咖/梦幻宾馆/梦幻电竞馆…）全部 0 分拒绝。
 
 **接口**（仅 ADMIN，`AdminVenuePhotoSyncController` / `AmapVenuePhotoSyncService`）：
-- `GET /admin/venues/photo-sync/missing-count` — 缺图数量（`findMissingImages` 口径：deleted=false 且 imageUrl NULL/空串 OR 无公开相册）
+- `GET /admin/venues/photo-sync/missing-count` — 缺图待同步数量（`findMissingImages` 口径：deleted=false 且 imageUrl NULL/空串 OR 无公开相册，**2026-09-11 起再排除 `photo_sync_excluded` 标记门店**）
 - `POST /admin/venues/photo-sync/run` — **异步**触发全量同步，返回 `{started:bool}`（false = 已有同步进行中，防并发重复触发）
 - `GET /admin/venues/photo-sync/progress` — 实时进度轮询（`SyncProgress`：running/total/processed/updated/failed/skipped/currentName/items 逐条结果）
 - `POST /admin/venues/photo-sync/retry` — 单店重匹配（body `{venueId, address?}`，同步返回单条 `SyncItem`；**address 可选**：空 = 名称模式强制重匹配（成功项复核后重取），非空 = 地址模式（完整地址检索取第一个 POI，覆盖「店名与高德登记不一致/搜不到」场景））
-- `POST /admin/venues/photo-sync/clear` — 清除门店图片（body `{venueId}`；主图 image_url 置空 + 物理删高德导入相册 + 缓存失效，回到无图态可重新同步——人工判定错配后回退）
-- `GET /admin/venues/photo-sync/list` — 门店图片状态分页（`hasImage` 主图有无 / `city` / `keyword` 名称模糊筛选；**默认按录入时间倒序** `created_at DESC, id DESC`（2026-09-03，新店批量录入场景最新优先）；数据源 = **DB 现状**（qwt_venues + qwt_venue_photos 子查询聚合，`VenueRepository#findPhotoStatusPage`）非同步内存快照——服务重启不丢、可筛选分页，兼作成功项纠错入口）
+- `POST /admin/venues/photo-sync/clear` — 清除门店图片（body `{venueId}`；主图 image_url 置空 + 物理删高德导入相册 + 缓存失效，回到无图态——**2026-09-11：清除同时置位 `photo_sync_excluded=true`，标记不参与批量同步**）
+- `GET /admin/venues/photo-sync/list` — 门店图片状态分页（`hasImage` 主图有无 / `city` / `keyword` 名称模糊筛选；**默认按录入时间倒序** `created_at DESC, id DESC`（2026-09-03，新店批量录入场景最新优先）；数据源 = **DB 现状**（qwt_venues + qwt_venue_photos 子查询聚合，`VenueRepository#findPhotoStatusPage`）非同步内存快照——服务重启不丢、可筛选分页，兼作成功项纠错入口；**2026-09-11 每行追加 `photo_sync_excluded`**，前端展示「已标记」态）
+
+**批量同步排除标记（2026-09-11，V66 `qwt_venues.photo_sync_excluded`）**：用户主动清除照片的门店 + 存量库中所有没有门店照片的门店统一带标，`findMissingImages`/`countMissingImages` 一律排除——「一键同步」与缺图计数不再触碰；存量回填 = V66 迁移按缺图口径 (`image_url NULL/空串 OR 无 PUBLIC 相册`) 一次性置位，迁移后批量同步候选归零，仅后续新建/未被标记门店进入候选池。**单店人工重匹配（retrySync）不受限**（显式操作，成功后门店自然离开缺图口径）；清除图片（clear）置位标记。
 
 **工作台与纠错生命周期（2026-08-22 拆独立页；2026-09-03 入口迁移 Web 管理后台，小程序端页面已下架删除）**：
 - 管理端入口 = **quwuting-admin-web「更多 → 照片同步」**（`src/views/VenuePhotoSyncView.vue`；原小程序 `pages/admin-photo-sync` 四件套 + services/venuePhotoSync + 上报管理页入口条已全部移除）；页面 = 同步控制（缺图数/一键同步/进度轮询/完成 toast 含近似匹配复核提示）+ 状态筛选（全部/有图/无图）+ 城市/名称筛选 + 分页列表（**卡片级「一键录入」**：单店调 retry 并传门店现有 address，地址模式；无地址退化店名模式，成功就地更新卡片）+ 详情弹层（主图+相册预览 / 重新匹配（可带地址）/ 清除图片）；

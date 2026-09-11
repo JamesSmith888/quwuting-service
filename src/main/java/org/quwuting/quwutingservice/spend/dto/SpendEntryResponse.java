@@ -5,7 +5,8 @@ import java.math.BigDecimal;
 /**
  * 增量拉取条目（GET /spend/entries?cursor=，跨设备/换机恢复）。
  * deleted=true 行同步下发——客户端据此删除本地副本（游标语义与 venues/snapshot
- * 同模式：含软删行，客户端单向收敛）。
+ * 同模式：含软删行，客户端单向收敛）。direction 恒有值（EXPENSE/INCOME），
+ * 恢复行据此还原本地方向。
  */
 public record SpendEntryResponse(
         String clientEntryId,
@@ -18,6 +19,7 @@ public record SpendEntryResponse(
         String venueName,
         Integer durationSeconds,
         boolean deleted,
-        long updatedAt
+        long updatedAt,
+        String direction
 ) {
 }

@@ -25,6 +25,11 @@
   'sort': 'newest'})`（2026-09-01 实测「缤达→宾达舞厅」即靠此法验证）。
 - **同城同名判重兜底**：batch-create 服务端归一化判重，返回 EXISTED 属预期（Step 3 漏判或归一化
   差异），不视为错误，如实汇报即可。
+- **⚠️ 判门店「还在不在」勿用单查接口（2026-09-11 实测）**：`GET /venues/{id}` **不过滤软删**
+  （已删行仍 200），会被误导成「未删除」；判存亡/判重口径 = 列表与同城加载
+  （`GET /venues?city=` / `findByCityAndDeletedFalse`）或 `GET /venues?keyword=`——列表里消失
+  即已软删。batch-create 判重同样按 deleted=false 过滤：同名旧档被软删后，重建会拿到新 ID
+  （属正确行为，字典 venue_id 记得跟着改）。
 
 ## 状态写库
 
