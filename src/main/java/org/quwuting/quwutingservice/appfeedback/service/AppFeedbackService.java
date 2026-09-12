@@ -19,7 +19,6 @@ import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.points.service.PointsService;
 import org.quwuting.quwutingservice.security.UserContext;
-import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
 import org.quwuting.quwutingservice.venuefeedback.dto.request.HandleReportRequest;
 import org.quwuting.quwutingservice.venuefeedback.enums.ReportStatus;
@@ -34,7 +33,6 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
 /**
  * 平台级意见反馈服务（2026-08-28 新增，用户需求：提供一个极其便捷好用的
@@ -150,9 +148,11 @@ public class AppFeedbackService {
 
         List<Long> userIds = result.getContent().stream()
                 .map(AppFeedback::getUserId).filter(java.util.Objects::nonNull).distinct().toList();
-        Map<Long, String> nameMap = userIds.isEmpty() ? Map.of()
-                : userRepository.findByIdInAndDeletedFalse(userIds).stream()
-                        .collect(Collectors.toMap(User::getId, User::getNickname, (a, b) -> a));
+        // 2026-09-12 根因修复：与门店上报列表同源缺陷——原 Map.of()/Collectors.toMap
+        // 组合在「整页匿名」或「用户未设昵称」时抛 NPE 使整接口 500，统一走
+        // UserRepository.findNicknameMapByIds（HashMap 承接 + 跳过空昵称），
+        // 缺失值按 ANONYMOUS_NAME 兜底（详见 UserRepository 该方法 javadoc）。
+        Map<Long, String> nameMap = userRepository.findNicknameMapByIds(userIds);
 
         return result.map(f -> toAdminResponse(f,
                 f.getUserId() == null ? ANONYMOUS_NAME

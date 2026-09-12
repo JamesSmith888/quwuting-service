@@ -12,7 +12,9 @@ import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 public interface UserRepository extends JpaRepository<User, Long> {
@@ -33,6 +35,40 @@ public interface UserRepository extends JpaRepository<User, Long> {
      * VenueRepository.findByIdInAndDeletedFalse 同模式）。
      */
     List<User> findByIdInAndDeletedFalse(Collection<Long> ids);
+
+    /**
+     * 批量取「用户 ID → 昵称」映射（管理端列表批量回填昵称统一入口，消除 N+1）。
+     * <p>
+     * <b>2026-09-12 根因修复</b>：调用方原先各自写
+     * {@code ids.isEmpty() ? Map.of() : ...Collectors.toMap(User::getId, User::getNickname, (a,b) -> a)}，
+     * 内含两个确定性 NPE 陷阱，且都在「列表有数据」时才触发：
+     * <ol>
+     *   <li>{@code Map.of()} 是不可变集合，<b>查询 null key 直接抛 NPE</b>
+     *       （{@code ImmutableCollections.MapN.get} 对空表走 {@code Objects.requireNonNull}）。
+     *       上报列表里存在匿名记录（{@code user_id} 为 null）时，只要当前页<b>整页皆匿名</b>，
+     *       映射即为 {@code Map.of()}，回填 {@code map.get(null)} 必然 500——
+     *       现象是管理端上报列表「只要有（匿名）数据就打不开」，且整页有无实名数据决定
+     *       是否复现（故表现为时好时坏、疑似玄学）。</li>
+     *   <li>{@code Collectors.toMap} 底层走 {@code HashMap.merge}，<b>拒绝 null value</b>：
+     *       昵称字段可空（用户未授权昵称 {@code nickname} 为 null），只要列表里出现一个
+     *       未设昵称的上报者，同样整接口 500。</li>
+     * </ol>
+     * 本方法统一用 {@link HashMap} 承接（允许 null key 查询，安全返回 null），
+     * 并跳过空昵称——调用方对缺失值自行兜底展示文案（「匿名」/「舞友」）。
+     */
+    default Map<Long, String> findNicknameMapByIds(Collection<Long> ids) {
+        Map<Long, String> nicknameMap = new HashMap<>();
+        if (ids == null || ids.isEmpty()) {
+            return nicknameMap;
+        }
+        findByIdInAndDeletedFalse(ids).forEach(user -> {
+            String nickname = user.getNickname();
+            if (nickname != null && !nickname.isBlank()) {
+                nicknameMap.put(user.getId(), nickname);
+            }
+        });
+        return nicknameMap;
+    }
 
     /**
      * 管理端用户分页列表（2026-08-27 用户管理增强，docs/agents/23；仅 ADMIN）：

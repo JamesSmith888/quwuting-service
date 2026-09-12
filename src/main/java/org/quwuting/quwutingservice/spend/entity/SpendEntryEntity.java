@@ -51,7 +51,7 @@ public class SpendEntryEntity extends BaseEntity {
     @Column(nullable = false, precision = 10, scale = 2)
     private BigDecimal amount;
 
-    /** 消费分类（固定 6 类禁自定义） */
+    /** 消费分类（固定 7 类禁自定义；第 7 类 GUEST=客人 为收入向，见 SpendCategory） */
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 16)
     private SpendCategory category;

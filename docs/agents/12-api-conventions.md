@@ -80,6 +80,9 @@ public record ApiResponse<T>(int code, String message, T data) {
 | 1008 | 上报不存在 |
 | 1009 | 无效的排序方式（VenueSortMode.from） |
 | 1010 | 招工内容含风险词，需管理员确认发布（PublishRecruitmentRequest.confirmed） |
+| 1030 | 账目同步载荷非法（枚举/金额/ts 校验不过，spend 域逐条归因 rejected） |
+| 1031 | 月度参数非法（month 不是 yyyy-MM） |
+| 1040 | 计价规则快照载荷非法（空 / 超过 32KB，结构校验归客户端） |
 | 5000 | 未知服务器错误（兜底），HTTP 500 |
 | 5001 | 微信接口响应异常（无响应 / 解析失败） |
 | 5002 | 文件保存失败（IO 异常） |

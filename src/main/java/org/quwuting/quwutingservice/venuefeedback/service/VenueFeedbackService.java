@@ -11,7 +11,6 @@ import org.quwuting.quwutingservice.config.ReportsProperties;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.security.UserContext;
-import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuefeedback.dto.request.CreateFeedbackRequest;
@@ -262,17 +261,20 @@ public class VenueFeedbackService {
                 : venueRepository.findByIdInAndDeletedFalse(venueIds).stream()
                         .collect(Collectors.toMap(Venue::getId, Venue::getName, (a, b) -> a));
 
-        // 批量查上报者昵称（消除 N+1，2026-08-28 补上报者信息——管理端点击直达用户详情）
+        // 批量查上报者昵称（消除 N+1，2026-08-28 补上报者信息——管理端识别上报者）。
+        // 2026-09-12 根因修复：原 Map.of()/Collectors.toMap 组合在两个场景抛 NPE
+        // （整页匿名上报 → Map.of().get(null)；有用户未设昵称 → toMap 拒绝 null value），
+        // 使待处理列表「只要有（匿名）数据就打不开」——统一走 UserRepository
+        // .findNicknameMapByIds（HashMap 承接 + 跳过空昵称），缺失值由 toAdminResponse
+        // 兜底「匿名」，列表接口不再受单个脏字段影响（详见该方法 javadoc）。
         List<Long> userIds = result.getContent().stream()
                 .map(VenueFeedback::getUserId).filter(java.util.Objects::nonNull)
                 .distinct().toList();
-        Map<Long, String> nicknameMap = userIds.isEmpty() ? Map.of()
-                : userRepository.findByIdInAndDeletedFalse(userIds).stream()
-                        .collect(Collectors.toMap(User::getId, User::getNickname, (a, b) -> a));
+        Map<Long, String> nicknameMap = userRepository.findNicknameMapByIds(userIds);
 
         return result.map(f -> toAdminResponse(f,
                 nameMap.getOrDefault(f.getVenueId(), VENUE_GONE_NAME),
-                nicknameMap.get(f.getUserId())));
+                f.getUserId() == null ? null : nicknameMap.get(f.getUserId())));
     }
 
     /**

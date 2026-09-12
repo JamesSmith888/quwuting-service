@@ -70,6 +70,13 @@
 
 管理端列表场所名称批量查询（`VenueRepository.findByIdInAndDeletedFalse`）消除 N+1；已逻辑删除的场所回退"已下架场所"占位。**2026-08-28 上报者昵称同模式批量回填**（`UserRepository.findByIdInAndDeletedFalse`，userId 为 null 的匿名上报昵称回退「匿名」）。「我的上报」记录同样批量回填场所名（同一模式），但**不过滤场所删除**——用户历史记录真实性不因场所下架而消失（与 status-reports/mine 的 JOIN 策略一致）。
 
+**昵称回填根因修复（2026-09-12，线上实证：管理端上报列表「只要有数据就打不开」）**：昵称回填原先各写 `userIds.isEmpty() ? Map.of() : ...Collectors.toMap(User::getId, User::getNickname, (a,b) -> a)`，内含两个**仅在列表有数据时才触发**的 NPE 陷阱，双 tab 全中：
+
+- `Map.of()` 是不可变集合，**查询 null key 直接抛 NPE**（`ImmutableCollections.MapN.get` 对空表走 `Objects.requireNonNull`）——当前页**整页皆匿名上报**（`user_id` 为 null，如未登录提交的「照片有误」）时映射恒为 `Map.of()`，`nicknameMap.get(null)` 必然 500。**复现条件因此是「该页有无实名数据」，与数据量无关**，表现为时好时坏、疑似玄学（09-11 深夜两条匿名上报构成整页待办时 100% 触发）。
+- `Collectors.toMap` 底层走 `HashMap.merge`，**拒绝 null value**：`nickname` 字段可空（用户未授权昵称即为 null），列表里只要出现一个未设昵称的上报者，同样整接口 500。
+
+修复统一收敛到 `UserRepository.findNicknameMapByIds(Collection<Long>)`（`HashMap` 承接 → null key 查询安全返回 null；跳过空昵称 → 无 null value），调用方对缺失值兜底展示文案（门店上报「匿名」/ 意见反馈 `ANONYMOUS_NAME`）。**长期规则**：批量「id → 可空字段」映射禁止用 `Map.of()` 承接再查 key，也禁止 `Collectors.toMap` 直接映射可空字段；同类校验口径见 15-governance。
+
 ### 用户侧 read path（2026-08-06 补全，根因）
 
 2026-08-05 泛化时只建设了 write path（提交）与 admin path（列表/处理），**用户侧 read path 从未设计**；"我的上报记录"一度被错误嫁接在 status-report 的跨场所 mine 接口上（详情页弹窗展示与所在门店无关、feedback 记录用户侧完全不可见——见[前端 AGENTS.md](../../quwuting/AGENTS.md) · 「我的上报记录」根因）。本次补全：
