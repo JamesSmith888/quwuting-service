@@ -6,6 +6,7 @@ import lombok.Setter;
 import org.hibernate.annotations.ColumnDefault;
 import org.quwuting.quwutingservice.base.BaseEntity;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
+import org.quwuting.quwutingservice.venue.enums.VenueType;
 
 @Getter
 @Setter
@@ -27,6 +28,19 @@ public class Venue extends BaseEntity {
     @Column(length = 20, nullable = false)
     @ColumnDefault("'OPEN'")
     private VenueStatus status = VenueStatus.OPEN;
+
+    /**
+     * 门店类型（2026-09-13 新增，V24 迁移）。列默认值唯一声明通道 = @ColumnDefault。
+     * <p>
+     * 与 {@link VenueStatus} 正交：状态管"现在开不开"，类型管"它是什么"。
+     * <b>地址可见性由本字段派生</b>——{@code cityOnlyAddress} 的类型（歌友会）不落
+     * 精确地址、公开响应只到城市级，详见 {@link VenueType} 类注释与
+     * {@code VenueResponseMapper} 脱敏闸门。默认 HALL（存量门店全量回退值）。
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(length = 20, nullable = false)
+    @ColumnDefault("'HALL'")
+    private VenueType venueType = VenueType.HALL;
 
     /** 封面图片 URL */
     @Column(length = 500)

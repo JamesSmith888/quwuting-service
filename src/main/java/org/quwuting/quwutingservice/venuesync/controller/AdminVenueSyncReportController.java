@@ -123,8 +123,11 @@ public class AdminVenueSyncReportController {
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "8") int size) {
         UserContext.requireAdmin();
+        // 参数位：city, district, status, venueType, keyword, lat, lng, window, sort,
+        //        radiusKm, hot, tag, page, size —— venueType 传 null = 不过滤类型
+        //        （本选择器是管理端「平台门店」映射用，跨类型搜索是其本义）
         return ApiResponse.ok(venueService.listVenues(
-                null, null, null, keyword, null, null, null, null, null, null, null, page, size));
+                null, null, null, null, keyword, null, null, null, null, null, null, null, page, size));
     }
 
     /** 门店实时状态批量查询（条目对比条用：报告快照会过时，需平台当前状态；单次往返） */

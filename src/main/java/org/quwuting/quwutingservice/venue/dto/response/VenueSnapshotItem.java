@@ -5,6 +5,7 @@ import org.quwuting.quwutingservice.venue.dto.BusinessHoursEntry;
 import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
+import org.quwuting.quwutingservice.venue.enums.VenueType;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -30,6 +31,12 @@ public record VenueSnapshotItem(
         VenueStatus status,
         /** 状态展示文案（服务端权威，前端零拼接——对齐 VenueResponse.statusDisplay 契约） */
         String statusDisplay,
+        /**
+         * 门店类型（2026-09-13 新增）：离线快照同样必须携带——弱网下客户端要靠它
+         * 判断该店地址是否只到城市级（歌友会），否则离线渲染会退回"完整地址"分支
+         * 而露出本不该公开的字段（与 {@link VenueResponse#venueType()} 同语义同脱敏）。
+         */
+        VenueType venueType,
         String imageUrl,
         String description,
         String city,

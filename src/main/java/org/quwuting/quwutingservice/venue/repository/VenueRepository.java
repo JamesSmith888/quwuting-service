@@ -3,12 +3,14 @@ package org.quwuting.quwutingservice.venue.repository;
 import jakarta.persistence.LockModeType;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
+import org.quwuting.quwutingservice.venue.enums.VenueType;
 import org.quwuting.quwutingservice.config.VenueHeatWeights;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -177,6 +179,29 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     long countMissingImages();
 
     /**
+     * 主图置空（2026-09-13 P0 修复，清除门店图片专用）：单列 @Modifying UPDATE。
+     * <b>禁走实体 setImageUrl + save</b>——双重事故面（2026-09-13 清除封面复活根因）：
+     * ① 同事务内 {@code deleteImportedByVenue} 的 clearAutomatically=true 会清空
+     * 持久化上下文，<b>未 flush 的实体脏变更被静默丢弃</b>（JPA clear 语义：
+     * 未刷盘变更不持久化）；② 外层无事务调用方持有的游离实体再 save = merge
+     * 全字段写回，旧 image_url 覆盖回来。批量 DML 绕开两级缓存语义，与
+     * {@code deleteImportedByVenue} 的「禁派生删除」同哲学。必须在事务内调用。
+     */
+    @Modifying
+    @Query("UPDATE Venue v SET v.imageUrl = null WHERE v.id = :venueId")
+    void clearCoverImage(@Param("venueId") Long venueId);
+
+    /**
+     * 批量同步排除标记置位（2026-09-13 P0 修复，清除门店图片专用）：单列
+     * @Modifying UPDATE，理由同 {@link #clearCoverImage}——禁走实体
+     * setPhotoSyncExcluded + save（游离实体 merge 全字段写回事故面）。
+     * 必须在事务内调用。
+     */
+    @Modifying
+    @Query("UPDATE Venue v SET v.photoSyncExcluded = true WHERE v.id = :venueId")
+    void markPhotoSyncExcluded(@Param("venueId") Long venueId);
+
+    /**
      * 门店图片状态分页（2026-08-22 新增，管理端图片同步工作台列表）：
      * 每行 = 门店基本信息 + 主图 URL + 公开相册数（qwt_venue_photos 子查询聚合）。
      * 筛选：hasImage（主图有无，null = 全部）、city（精确）、keyword（名称模糊，
@@ -315,6 +340,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
               AND (:city IS NULL OR v.city = :city)
               AND (:district IS NULL OR v.district = :district)
               AND (:status IS NULL OR v.status = :status)
+              AND (:venueType IS NULL OR v.venueType = :venueType)
               AND (:keyword IS NULL OR
               """
             + " " + KW_MATCH + " " + """
@@ -339,6 +365,19 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             """;
 
     /**
+     * 城市级地址类型的半径放行谓词（2026-09-13 歌友会品类）。
+     * <p>
+     * 由 {@link VenueType#CITY_ONLY_HQL_IN_LIST} 拼接——该常量是<b>字面量</b>（注解元素值
+     * 必须是编译期常量表达式，故不能在此运行时派生），新增城市级类型时须同步枚举里的
+     * 该常量，杜绝"加了类型却忘了放行、被默认 300km 可达圈静默过滤"的回归。
+     * HQL 比较枚举字段必须用全限定字面量（同 VIEW_BEHAVIOR 先例）。
+     * <p>
+     * <b>声明位置约束</b>：必须位于 {@link #RADIUS_PREDICATE} 之前——接口字段按声明顺序
+     * 初始化，Java 禁止初始化器中的向前引用（放后面会编译失败）。
+     */
+    String CITY_ONLY_TYPE_PREDICATE = "v.venueType IN (" + VenueType.CITY_ONLY_HQL_IN_LIST + ")";
+
+    /**
      * 距离半径筛选（可选，叠加在筛选条件上，与排序方式正交）。
      * <p>
      * radiusKm 为 null（不限）时谓词恒真；有值时仅保留距离 ≤ 半径的场所。
@@ -351,11 +390,20 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 有值半径下无坐标场所被排除（"未知距离的场所不承诺在半径内"——附近视角不应
      * 混入全国无坐标门店）。
      * <p>
+     * <p>
+     * <b>城市级类型放行（2026-09-13 歌友会品类，用户拍板「300km 内永远包含歌友会」）</b>：
+     * 歌友会刻意不落精确地址、无坐标，距离表达式为 NULL——若不放行，默认 300km 可达圈
+     * 会把整批歌友会静默过滤（用户选了城市看得到、不选城市就消失，体验断裂）。
+     * 故谓词追加 {@link #CITY_ONLY_TYPE_PREDICATE}：城市级类型无条件放行。
+     * 语义自洽：歌友会本就"联系获取"，距离的精确性对它无意义，跨城前往是题中之义。
+     * <p>
      * 含本片段的查询必须同时携带 :latitude/:longitude（见 {@link #DISTANCE_KM} 约束）
      * 与 :city（放行开关，Service 层 blankToNull 后传 null/非空）。
      */
     String RADIUS_PREDICATE = """
             AND (:radiusKm IS NULL OR :city IS NOT NULL OR
+            """ + CITY_ONLY_TYPE_PREDICATE + """
+             OR
             """ + DISTANCE_KM + """
              <= :radiusKm)
             """;
@@ -571,6 +619,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     Page<Venue> searchRanked(@Param("city") String city,
                              @Param("district") String district,
                              @Param("status") VenueStatus status,
+                             @Param("venueType") VenueType venueType,
                              @Param("keyword") String keyword,
                              @Param("kwPrefix") String kwPrefix,
                              @Param("filterIds") Set<Long> filterIds,
@@ -606,6 +655,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     Page<Venue> searchRankedNoLocation(@Param("city") String city,
                                        @Param("district") String district,
                                        @Param("status") VenueStatus status,
+                                       @Param("venueType") VenueType venueType,
                                        @Param("keyword") String keyword,
                                        @Param("kwPrefix") String kwPrefix,
                                        @Param("filterIds") Set<Long> filterIds,
@@ -637,6 +687,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     Page<Venue> searchNearest(@Param("city") String city,
                               @Param("district") String district,
                               @Param("status") VenueStatus status,
+                              @Param("venueType") VenueType venueType,
                               @Param("keyword") String keyword,
                               @Param("filterIds") Set<Long> filterIds,
                               @Param("tag") String tag,
@@ -661,6 +712,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     Page<Venue> searchHeat(@Param("city") String city,
                            @Param("district") String district,
                            @Param("status") VenueStatus status,
+                           @Param("venueType") VenueType venueType,
                            @Param("keyword") String keyword,
                            @Param("filterIds") Set<Long> filterIds,
                            @Param("tag") String tag,
@@ -685,6 +737,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     Page<Venue> searchHeatWithinRadius(@Param("city") String city,
                                        @Param("district") String district,
                                        @Param("status") VenueStatus status,
+                                       @Param("venueType") VenueType venueType,
                                        @Param("keyword") String keyword,
                                        @Param("filterIds") Set<Long> filterIds,
                                        @Param("tag") String tag,
@@ -709,6 +762,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     Page<Venue> searchNewest(@Param("city") String city,
                              @Param("district") String district,
                              @Param("status") VenueStatus status,
+                             @Param("venueType") VenueType venueType,
                              @Param("keyword") String keyword,
                              @Param("filterIds") Set<Long> filterIds,
                              @Param("tag") String tag,
@@ -729,6 +783,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     Page<Venue> searchNewestWithinRadius(@Param("city") String city,
                                          @Param("district") String district,
                                          @Param("status") VenueStatus status,
+                                         @Param("venueType") VenueType venueType,
                                          @Param("keyword") String keyword,
                                          @Param("filterIds") Set<Long> filterIds,
                                          @Param("tag") String tag,

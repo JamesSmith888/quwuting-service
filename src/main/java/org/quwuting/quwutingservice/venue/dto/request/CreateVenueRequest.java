@@ -7,6 +7,7 @@ import org.quwuting.quwutingservice.venue.dto.BusinessHoursEntry;
 import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
+import org.quwuting.quwutingservice.venue.enums.VenueType;
 
 import java.util.List;
 
@@ -17,6 +18,15 @@ public record CreateVenueRequest(
         String name,
 
         VenueStatus status,
+
+        /**
+         * 门店类型（2026-09-13 新增，V24）：舞厅 / KTV / 歌友会。
+         * <p>
+         * 空值语义与 {@code status} / {@code sortWeight} 对齐——<b>null = 保留原值不覆盖</b>
+         * （编辑场景），新建时由 Service 回退默认 HALL。本接口恒 {@code requireAdmin}
+         * （平台代发），类型不向普通用户开放自助选择，避免名录被随意扩充品类。
+         */
+        VenueType venueType,
 
         @Size(max = 500)
         String imageUrl,

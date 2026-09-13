@@ -16,6 +16,7 @@ import org.quwuting.quwutingservice.venue.dto.response.VenueSnapshotResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueSuggestResponse;
 import org.quwuting.quwutingservice.venue.dto.response.NearbyVenueResponse;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
+import org.quwuting.quwutingservice.venue.enums.VenueType;
 import org.quwuting.quwutingservice.venue.enums.ViewSource;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueService;
@@ -105,12 +106,15 @@ public class VenueController {
      *   的集合（见 VenueLookupService#getHotVenueIds）；与城市/状态/距离筛选正交可叠加
      * tag 可选（2026-08-12 新增「龙女」快捷筛选）：仅返回 tags 含该标签子串的场所
      *   （如 tag=龙女 命中"龙女可进"/"龙女"标签门店，不命中"禁龙"反向标签）；与城市/状态/热门正交
+     * venueType 可选（2026-09-13 新增，HALL/KTV/SONG_CLUB）：仅返回该类型门店，
+     *   驱动首页「门店类型」快捷筛选；不传 = 不过滤（默认口径不做隐式过滤，同 hot/tag）。
      */
     @GetMapping
     public ApiResponse<Page<VenueResponse>> listVenues(
             @RequestParam(required = false) String city,
             @RequestParam(required = false) String district,
             @RequestParam(required = false) VenueStatus status,
+            @RequestParam(required = false) VenueType venueType,
             @RequestParam(required = false) String keyword,
             @RequestParam(required = false) Double latitude,
             @RequestParam(required = false) Double longitude,
@@ -123,7 +127,7 @@ public class VenueController {
             @RequestParam(defaultValue = "20") int size
     ) {
         return ApiResponse.ok(
-                venueService.listVenues(city, district, status, keyword, latitude, longitude,
+                venueService.listVenues(city, district, status, venueType, keyword, latitude, longitude,
                         window, sort, radiusKm, hot, tag, page, size));
     }
 

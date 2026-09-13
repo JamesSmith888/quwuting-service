@@ -109,7 +109,7 @@ class FavoriteServiceTest {
      */
     private static VenueResponse response(Long id, boolean isHot, boolean statusChanged) {
         return new VenueResponse(
-                id, "舞厅" + id, VenueStatus.OPEN, "营业中", null,
+                id, "舞厅" + id, VenueStatus.OPEN, "营业中", null, null,
                 Collections.emptyList(), null, "绍兴市", null, null,
                 null, null, Collections.emptyList(), Collections.emptyList(),
                 Collections.emptyList(), null, null, Collections.emptyList(),

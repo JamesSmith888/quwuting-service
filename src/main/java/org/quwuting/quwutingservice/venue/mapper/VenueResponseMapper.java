@@ -8,6 +8,7 @@ import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueSnapshotItem;
+import org.quwuting.quwutingservice.venue.enums.VenueType;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.springframework.stereotype.Component;
@@ -173,14 +174,23 @@ public class VenueResponseMapper {
                 v.getName(),
                 v.getStatus(),
                 v.getStatus().getDisplayName(),
+                v.getVenueType(),
                 v.getImageUrl(),
                 effectivePhotos,
                 v.getDescription(),
                 v.getCity(),
-                v.getDistrict(),
-                v.getAddress(),
-                v.getLongitude(),
-                v.getLatitude(),
+                /**
+                 * 地址脱敏闸门（2026-09-13 歌友会品类）：城市级类型只下发到城市。
+                 * <p>
+                 * <b>本类是全仓唯一的实体→响应映射点</b>，脱敏写在此处即覆盖列表/详情/
+                 * 收藏/快照等全部公开出口——且 {@code venueDetailPublicCache} 缓存的
+                 * 正是本方法产物，缓存里存的就是脱敏后副本，不存在"缓存漏出全地址"。
+                 * 禁止在 Controller / Service / 前端另行隐藏（同一事实多处表达必漏）。
+                 */
+                cityOnlyAddress(v) ? null : v.getDistrict(),
+                cityOnlyAddress(v) ? null : v.getAddress(),
+                cityOnlyAddress(v) ? null : v.getLongitude(),
+                cityOnlyAddress(v) ? null : v.getLatitude(),
                 deserializeList(v.getBusinessHours(), BUSINESS_HOURS_LIST, "businessHours"),
                 deserializeList(v.getTickets(), TICKET_LIST, "tickets"),
                 deserializeList(v.getPartnerFees(), PARTNER_FEE_LIST, "partnerFees"),
@@ -208,6 +218,17 @@ public class VenueResponseMapper {
     }
 
     /**
+     * 是否只公开到城市级地址（当前仅歌友会）。
+     * <p>
+     * 单一判定点：地址可见性由 {@link VenueType#isCityOnlyAddress()} 派生，本方法只加
+     * 空值防御（未持久化实体 / 历史脏行）——类型为空按"完整地址"处理，与列
+     * {@code NOT NULL DEFAULT 'HALL'} 语义一致（HALL 非城市级，不会误脱敏存量舞厅）。
+     */
+    private boolean cityOnlyAddress(Venue v) {
+        return v.getVenueType() != null && v.getVenueType().isCityOnlyAddress();
+    }
+
+    /**
      * Venue 实体 → 离线快照静态子集条目（2026-09-08 弱网离线韧性，GET /venues/snapshot）。
      *
      * <p>复用本类的 JSON 反序列化与系统标签合并基础设施（tags/businessHours/tickets/
@@ -223,13 +244,14 @@ public class VenueResponseMapper {
                 v.getName(),
                 v.getStatus(),
                 v.getStatus().getDisplayName(),
+                v.getVenueType(),
                 v.getImageUrl(),
                 v.getDescription(),
                 v.getCity(),
-                v.getDistrict(),
-                v.getAddress(),
-                v.getLongitude(),
-                v.getLatitude(),
+                cityOnlyAddress(v) ? null : v.getDistrict(),
+                cityOnlyAddress(v) ? null : v.getAddress(),
+                cityOnlyAddress(v) ? null : v.getLongitude(),
+                cityOnlyAddress(v) ? null : v.getLatitude(),
                 deserializeList(v.getBusinessHours(), BUSINESS_HOURS_LIST, "businessHours"),
                 deserializeList(v.getTickets(), TICKET_LIST, "tickets"),
                 deserializeList(v.getPartnerFees(), PARTNER_FEE_LIST, "partnerFees"),

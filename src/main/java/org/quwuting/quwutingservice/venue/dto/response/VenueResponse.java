@@ -5,6 +5,7 @@ import org.quwuting.quwutingservice.venue.dto.BusinessHoursEntry;
 import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
+import org.quwuting.quwutingservice.venue.enums.VenueType;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 
 import java.time.LocalDateTime;
@@ -15,6 +16,13 @@ public record VenueResponse(
         String name,
         VenueStatus status,
         String statusDisplay,
+        /**
+         * 门店类型（2026-09-13 新增，V24）：舞厅 / KTV / 歌友会，驱动列表快捷筛选与
+         * 详情页地址展示粒度。前端据此分支渲染：<b>城市级类型（歌友会）只展示城市</b>，
+         * 不渲染地址行与导航，改为「联系获取具体地址」入口——本字段是前端判断
+         * "该店地址是否公开"的唯一依据（禁止前端硬编码类型名做判断）。
+         */
+        VenueType venueType,
         String imageUrl,
         /** 相册图片 URL 列表，无数据时为空列表 */
         List<String> photos,

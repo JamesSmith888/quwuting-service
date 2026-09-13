@@ -6,6 +6,7 @@ import org.quwuting.quwutingservice.config.AmapProperties;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -252,14 +253,22 @@ public class AmapVenuePhotoSyncService {
      * 门店回到「无图」状态。<b>2026-09-11：清除同时置位 photoSyncExcluded=true</b>
      * （用户主动删除的照片 = 明确拒绝高德图，批量同步不再触碰；见 V66）。幂等：
      * 门店本就无图时同样安全。
+     * <p>
+     * <b>2026-09-13 P0 修复（清除封面复活）</b>：原实现无事务——预加载的实体是
+     * 游离副本，clearImportedPhotos 提交「image_url=null」后本方法再 save 该副本
+     * = merge 全字段写回，旧主图覆盖回去（根因②；根因①是同事务内
+     * deleteImportedByVenue 的 clearAutomatically 丢弃未 flush 脏变更，见
+     * {@link VenueRepository#clearCoverImage}）。修复：整体 @Transactional +
+     * 排除标记走 {@link VenueRepository#markPhotoSyncExcluded} 专用 UPDATE，
+     * 不再 save 实体；findById 仅保留存在性校验与日志取名。
      */
+    @Transactional
     public void clearPhotos(long venueId) {
         Venue venue = venueRepository.findByIdAndDeletedFalse(venueId)
                 .orElseThrow(() -> new org.quwuting.quwutingservice.exception.BusinessException(
                         1001, "门店不存在"));
         venueService.clearImportedPhotos(venueId);
-        venue.setPhotoSyncExcluded(true);
-        venueRepository.save(venue);
+        venueRepository.markPhotoSyncExcluded(venueId);
         log.info("[amap-photo-sync] clear photos: venue={} ({}), marked photoSyncExcluded",
                 venueId, venue.getName());
     }

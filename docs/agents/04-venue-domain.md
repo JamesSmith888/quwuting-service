@@ -11,6 +11,17 @@
 
 `qwt_venues` 承载场所基础信息：名称、营业状态（`status`，`VenueStatus` 枚举）、城市/区县（标准行政区划名，与列表筛选共用同一词表精确匹配）、地址、坐标（`longitude`/`latitude`，导航用）、相册（`photos` JSON 数组字符串列）、简介、联系方式、标签（`tags` JSON 数组字符串列，仅存管理员自定义标签，`VenueDefaultsConfig` 合并系统默认标签）。
 
+### 门店类型与地址可见性（2026-09-13 新增，V24）
+
+`venue_type`（`VenueType` 枚举：`HALL` 舞厅 / `KTV` / `SONG_CLUB` 歌友会，`NOT NULL DEFAULT 'HALL'`）是名录的分类维度，与营业状态正交（状态管"开不开"，类型管"是什么"）。**地址可见性由类型派生**（`VenueType#isCityOnlyAddress`，当前仅歌友会 true），不另设开关——新增类型必须显式回答"藏不藏地址"：
+
+- **城市级类型（歌友会）**：私密聚拢型场所不公开门牌，**写侧根本不落精确地址**（`VenueService#applyCityOnlyAddressPolicy` 置空 district/address/经纬度——"存了再藏"不如"不存"）；读侧 `VenueResponseMapper` 再剥离一次（纵深防御）。**脱敏闸门唯一** = mapper（列表/详情/收藏/离线快照全部出口），`venueDetailPublicCache` 缓存的即脱敏后副本。用户前往方式 = 联系获取（话术红线：到店/自行前往，禁 上门/接送）。
+- **常规类型**：完整地址 + 导航 + 距离排序照旧。
+
+**半径放行**：`RADIUS_PREDICATE` 追加 `CITY_ONLY_TYPE_PREDICATE`——歌友会无坐标，不放行会被默认 300km 可达圈静默过滤（用户拍板：300km 内永远包含歌友会）。⚠️ **该常量必须是字面量**（`VenueType#CITY_ONLY_HQL_IN_LIST`）：`@Query` 注解值要求编译期常量，运行时方法派生会直接编译失败（"element value must be a constant expression"）；**新增城市级类型须手动同步该常量**（注释即契约，编译期无法强制）。
+
+**筛选**：列表接口 `venueType` 参数进 `LIST_FILTERS`（7 个查询方法），**必须同步入 `VenueListKey` 缓存键**（漏入键 = "筛选歌友会"命中全国推荐缓存页的串味）；详情页/列表卡按响应 `venueType` 分支渲染（前端单一判定 `isCityOnlyAddress`，禁止散落枚举硬编码）。
+
 ### 坐标采集与批量补全（2026-08-11 新增）
 
 **坐标系约定**：全链路 gcj02（火星坐标）——`wx.chooseLocation` 采集、`wx.openLocation` 展示、后端地理编码回写均为 gcj02，混用 wgs84/bd09 会产生数百米偏移（前端见 `utils/geo.ts` 注释）。腾讯位置服务/高德地理编码输出即 gcj02；百度输出 bd09 需转换，故服务商限定腾讯/高德。
@@ -41,7 +52,7 @@
 - `POST /admin/venues/photo-sync/run` — **异步**触发全量同步，返回 `{started:bool}`（false = 已有同步进行中，防并发重复触发）
 - `GET /admin/venues/photo-sync/progress` — 实时进度轮询（`SyncProgress`：running/total/processed/updated/failed/skipped/currentName/items 逐条结果）
 - `POST /admin/venues/photo-sync/retry` — 单店重匹配（body `{venueId, address?}`，同步返回单条 `SyncItem`；**address 可选**：空 = 名称模式强制重匹配（成功项复核后重取），非空 = 地址模式（完整地址检索取第一个 POI，覆盖「店名与高德登记不一致/搜不到」场景））
-- `POST /admin/venues/photo-sync/clear` — 清除门店图片（body `{venueId}`；主图 image_url 置空 + 物理删高德导入相册 + 缓存失效，回到无图态——**2026-09-11：清除同时置位 `photo_sync_excluded=true`，标记不参与批量同步**）
+- `POST /admin/venues/photo-sync/clear` — 清除门店图片（body `{venueId}`；主图 image_url 置空 + 物理删高德导入相册 + 缓存失效，回到无图态——**2026-09-11：清除同时置位 `photo_sync_excluded=true`，标记不参与批量同步**。**2026-09-13 P0 修复「清除封面复活」**：原实现主图置空走实体 save，同事务 `deleteImportedByVenue` 的 clearAutomatically 丢弃未 flush 脏变更（根因①），外层 `clearPhotos` 无事务持有的游离实体再 save = merge 全字段写回旧主图（根因②）——修复后主图置空/排除标记均走 `VenueRepository#clearCoverImage`/`#markPhotoSyncExcluded` 单列 @Modifying UPDATE，`clearPhotos` 整体 @Transactional，禁实体 save）
 - `GET /admin/venues/photo-sync/list` — 门店图片状态分页（`hasImage` 主图有无 / `city` / `keyword` 名称模糊筛选；**默认按录入时间倒序** `created_at DESC, id DESC`（2026-09-03，新店批量录入场景最新优先）；数据源 = **DB 现状**（qwt_venues + qwt_venue_photos 子查询聚合，`VenueRepository#findPhotoStatusPage`）非同步内存快照——服务重启不丢、可筛选分页，兼作成功项纠错入口；**2026-09-11 每行追加 `photo_sync_excluded`**，前端展示「已标记」态）
 
 **批量同步排除标记（2026-09-11，V66 `qwt_venues.photo_sync_excluded`）**：用户主动清除照片的门店 + 存量库中所有没有门店照片的门店统一带标，`findMissingImages`/`countMissingImages` 一律排除——「一键同步」与缺图计数不再触碰；存量回填 = V66 迁移按缺图口径 (`image_url NULL/空串 OR 无 PUBLIC 相册`) 一次性置位，迁移后批量同步候选归零，仅后续新建/未被标记门店进入候选池。**单店人工重匹配（retrySync）不受限**（显式操作，成功后门店自然离开缺图口径）；清除图片（clear）置位标记。

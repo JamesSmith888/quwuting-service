@@ -34,6 +34,7 @@ import org.quwuting.quwutingservice.venue.enums.TicketType;
 import org.quwuting.quwutingservice.venue.enums.VenuePhotoStatus;
 import org.quwuting.quwutingservice.venue.enums.VenueSortMode;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
+import org.quwuting.quwutingservice.venue.enums.VenueType;
 import org.quwuting.quwutingservice.venue.mapper.VenueResponseMapper;
 import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportService;
 import org.quwuting.quwutingservice.venue.repository.VenueAliasRepository;
@@ -215,6 +216,12 @@ public class VenueService {
             String city,
             String district,
             VenueStatus status,
+            /**
+             * 门店类型（2026-09-13 新增）：<b>必须入缓存键</b>——它进 LIST_FILTERS 参与
+             * 结果集构成，漏入键会让「筛选歌友会」命中「全国推荐」的缓存页（同参数
+             * 不同结果集 = 串味）。与 status / city 等筛选维度同等待遇。
+             */
+            VenueType venueType,
             String keywordPattern,
             String kwPrefixPattern,
             String tagPattern,
@@ -222,6 +229,26 @@ public class VenueService {
             int page,
             int size
     ) {}
+
+    /**
+     * 城市级类型地址落库策略（2026-09-13 歌友会品类）：写路径主动清除精确地址。
+     * <p>
+     * <b>为什么写侧也要清</b>：读侧 {@code VenueResponseMapper} 已做脱敏，但只要库里存着
+     * 就有泄漏面——未来任何一个原生查询 / 运维导出 / 日志打印都可能把它带出去。
+     * 「存了再藏」永远不如「根本不存」，故城市级类型（歌友会）在写路径直接把
+     * district / address / 经纬度 置空，精确地址只留在经营方手里（用户联系获取）。
+     * <p>
+     * 读侧脱敏不因此冗余：存量脏数据 / 直接改库 / 迁移回填都可能绕过本方法，
+     * 两道闸门是纵深防御而非重复劳动（判据同「同一事实一份真值」——这里守的是
+     * 「精确地址对歌友会根本不成立」这一条事实）。
+     */
+    private void applyCityOnlyAddressPolicy(Venue venue) {
+        if (venue.getVenueType() == null || !venue.getVenueType().isCityOnlyAddress()) return;
+        venue.setDistrict(null);
+        venue.setAddress(null);
+        venue.setLongitude(null);
+        venue.setLatitude(null);
+    }
 
     /**
      * 新增场所（仅管理员）。
@@ -243,6 +270,8 @@ public class VenueService {
         Venue venue = new Venue();
         venue.setName(req.name());
         venue.setStatus(req.status() != null ? req.status() : VenueStatus.OPEN);
+        // 门店类型：未指定回退 HALL（存量管理端表单/脚本零改动即可继续建舞厅）
+        venue.setVenueType(req.venueType() != null ? req.venueType() : VenueType.HALL);
         venue.setImageUrl(req.imageUrl());
         venue.setDescription(req.description());
         // 城市必填、区县选填（2026-08-08 放宽：行政区非业务必填），须来自前端 region
@@ -252,6 +281,7 @@ public class VenueService {
         venue.setAddress(req.address());
         venue.setLongitude(req.longitude());
         venue.setLatitude(req.latitude());
+        applyCityOnlyAddressPolicy(venue);
         venue.setBusinessHours(serializeList(req.businessHours()));
         venue.setTickets(serializeList(req.tickets()));
         venue.setPartnerFees(serializeList(normalizePartnerFees(req.partnerFees())));
@@ -328,6 +358,9 @@ public class VenueService {
                     venue.getId(), venue.getStatus(), newStatus);
         }
         venue.setStatus(newStatus);
+        // 门店类型：null = 保留原值不覆盖（与 status / sortWeight 空值语义一致，
+        // 避免不带该字段的编辑表单把歌友会静默降级成舞厅）
+        venue.setVenueType(req.venueType() != null ? req.venueType() : venue.getVenueType());
         venue.setImageUrl(req.imageUrl());
         venue.setDescription(req.description());
         venue.setCity(req.city().trim());
@@ -335,6 +368,7 @@ public class VenueService {
         venue.setAddress(req.address());
         venue.setLongitude(req.longitude());
         venue.setLatitude(req.latitude());
+        applyCityOnlyAddressPolicy(venue);
         venue.setBusinessHours(serializeList(req.businessHours()));
         venue.setTickets(serializeList(req.tickets()));
         venue.setPartnerFees(serializeList(normalizePartnerFees(req.partnerFees())));
@@ -440,13 +474,15 @@ public class VenueService {
      * 清除门店全部图片（2026-08-22 新增，图片同步纠错入口：人工判定错配后回退）。
      * 主图 image_url 置空 + 物理删除高德导入相册（created_by=0）+ 详情/列表缓存失效，
      * 门店回到「无图」状态可重新同步。幂等：门店本就无图时同样安全（delete 0 行）。
+     * <p>
+     * <b>2026-09-13 P0 修复</b>：主图置空改走 {@link VenueRepository#clearCoverImage}
+     * 专用 UPDATE，禁走实体 setImageUrl + save——同事务内 deleteImportedByVenue 的
+     * clearAutomatically=true 会丢弃未 flush 的实体脏变更（封面清了又复活根因①），
+     * 外层调用方的游离实体 merge 全字段写回（根因②）。全方法批量 DML，无实体脏变更。
      */
     @Transactional
     public void clearImportedPhotos(Long venueId) {
-        venueRepository.findByIdAndDeletedFalse(venueId).ifPresent(v -> {
-            v.setImageUrl(null);
-            venueRepository.save(v);
-        });
+        venueRepository.clearCoverImage(venueId);
         venuePhotoRepository.deleteImportedByVenue(venueId);
         evictVenueEntityCache(venueId);
         invalidateDetailPublic(venueId);
@@ -885,7 +921,7 @@ public class VenueService {
      */
     @Transactional(readOnly = true)
     public Page<VenueResponse> listVenues(String city, String district,
-                                          VenueStatus status, String keyword,
+                                          VenueStatus status, VenueType venueType, String keyword,
                                           Double latitude, Double longitude,
                                           String window, String sort, Double radiusKm,
                                           Boolean hot, String tag,
@@ -927,7 +963,7 @@ public class VenueService {
         Set<Long> hotVenueIds = venueLookupService.getHotVenueIds();
         boolean hotOnly = Boolean.TRUE.equals(hot);
         Page<Venue> result = dispatchListQuery(sortMode, blankToNull(city), blankToNull(district),
-                status, keywordPattern, kwPrefixPattern, filterIds, tagPattern,
+                status, venueType, keywordPattern, kwPrefixPattern, filterIds, tagPattern,
                 hasCoords, latitude, longitude, radius,
                 POSITIVE_REACTION_CODES, pointsProperties.heatWeight(),
                 hotOnly, hotVenueIds, pageable);
@@ -1025,7 +1061,8 @@ public class VenueService {
      * 筛选约束，与请求者位置相关）恒实时查询。
      */
     private Page<Venue> dispatchListQuery(VenueSortMode sortMode, String city, String district,
-                                          VenueStatus status, String keywordPattern, String kwPrefixPattern,
+                                          VenueStatus status, VenueType venueType, String keywordPattern,
+                                          String kwPrefixPattern,
                                           Set<Long> filterIds, String tagPattern,
                                           boolean hasCoords, Double latitude, Double longitude,
                                           Double radius, List<String> positiveCodes, int pointsWeight,
@@ -1034,7 +1071,7 @@ public class VenueService {
         // 与请求参数强耦合（无法收敛进 VenueListKey），且为精确意图的窄结果，恒实时查询。
         if (!hasCoords && filterIds == null) {
             return venueListCache.get(new VenueListKey(
-                    sortMode, city, district, status, keywordPattern, kwPrefixPattern, tagPattern,
+                    sortMode, city, district, status, venueType, keywordPattern, kwPrefixPattern, tagPattern,
                     hotOnly, pageable.getPageNumber(), pageable.getPageSize()));
         }
         // 多词 AND 无坐标（filterIds != null 且 !hasCoords）：不走缓存（见上），直接实时
@@ -1045,32 +1082,35 @@ public class VenueService {
         if (!hasCoords) {
             return switch (sortMode) {
                 case RECOMMENDED, DISTANCE -> venueRepository.searchRankedNoLocation(
-                        city, district, status, keywordPattern, kwPrefixPattern, filterIds, tagPattern,
+                        city, district, status, venueType, keywordPattern, kwPrefixPattern, filterIds, tagPattern,
                         positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
                 case HEAT -> venueRepository.searchHeat(
-                        city, district, status, keywordPattern, filterIds, tagPattern,
+                        city, district, status, venueType, keywordPattern, filterIds, tagPattern,
                         positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
                 case NEWEST -> venueRepository.searchNewest(
-                        city, district, status, keywordPattern, filterIds, tagPattern,
+                        city, district, status, venueType, keywordPattern, filterIds, tagPattern,
                         hotOnly, hotIds, pageable);
             };
         }
         return switch (sortMode) {
-            case RECOMMENDED -> venueRepository.searchRanked(city, district, status, keywordPattern, kwPrefixPattern,
-                    filterIds, tagPattern,
+            case RECOMMENDED -> venueRepository.searchRanked(city, district, status, venueType, keywordPattern,
+                    kwPrefixPattern, filterIds, tagPattern,
                     latitude, longitude, radius, positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
-            case DISTANCE -> venueRepository.searchNearest(city, district, status, keywordPattern, filterIds, tagPattern,
+            case DISTANCE -> venueRepository.searchNearest(city, district, status, venueType, keywordPattern,
+                    filterIds, tagPattern,
                     latitude, longitude, radius, hotOnly, hotIds, pageable);
             case HEAT -> hasCoords && radius != null
-                    ? venueRepository.searchHeatWithinRadius(city, district, status, keywordPattern, filterIds, tagPattern,
+                    ? venueRepository.searchHeatWithinRadius(city, district, status, venueType, keywordPattern,
+                            filterIds, tagPattern,
                             latitude, longitude, radius, positiveCodes, pointsWeight, hotOnly, hotIds, pageable)
-                    : venueRepository.searchHeat(city, district, status, keywordPattern, filterIds, tagPattern,
+                    : venueRepository.searchHeat(city, district, status, venueType, keywordPattern, filterIds, tagPattern,
                             positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
             case NEWEST -> hasCoords && radius != null
-                    ? venueRepository.searchNewestWithinRadius(city, district, status, keywordPattern, filterIds, tagPattern,
+                    ? venueRepository.searchNewestWithinRadius(city, district, status, venueType, keywordPattern,
+                            filterIds, tagPattern,
                             latitude, longitude, radius, hotOnly, hotIds, pageable)
-                    : venueRepository.searchNewest(city, district, status, keywordPattern, filterIds, tagPattern,
-                            hotOnly, hotIds, pageable);
+                    : venueRepository.searchNewest(city, district, status, venueType, keywordPattern, filterIds,
+                            tagPattern, hotOnly, hotIds, pageable);
         };
     }
 
@@ -1087,15 +1127,15 @@ public class VenueService {
         Set<Long> hotIds = venueLookupService.getHotVenueIds();
         return switch (key.sortMode()) {
             case RECOMMENDED, DISTANCE -> venueRepository.searchRankedNoLocation(
-                    key.city(), key.district(), key.status(), key.keywordPattern(), key.kwPrefixPattern(),
-                    null, key.tagPattern(),
+                    key.city(), key.district(), key.status(), key.venueType(), key.keywordPattern(),
+                    key.kwPrefixPattern(), null, key.tagPattern(),
                     POSITIVE_REACTION_CODES, pointsProperties.heatWeight(), key.hotOnly(), hotIds, pageable);
             case HEAT -> venueRepository.searchHeat(
-                    key.city(), key.district(), key.status(), key.keywordPattern(),
+                    key.city(), key.district(), key.status(), key.venueType(), key.keywordPattern(),
                     null, key.tagPattern(),
                     POSITIVE_REACTION_CODES, pointsProperties.heatWeight(), key.hotOnly(), hotIds, pageable);
             case NEWEST -> venueRepository.searchNewest(
-                    key.city(), key.district(), key.status(), key.keywordPattern(),
+                    key.city(), key.district(), key.status(), key.venueType(), key.keywordPattern(),
                     null, key.tagPattern(),
                     key.hotOnly(), hotIds, pageable);
         };
