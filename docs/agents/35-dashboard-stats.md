@@ -94,6 +94,47 @@
   用户列表/详情本身**不排除**（保留可见性才能手动管理标记）。
 - **上报明细列表**（/admin/reports 等）保留原样——历史留痕，只动聚合统计。
 
+## 计时器 & 计时账本使用统计（2026-09-14）
+
+新功能使用盘子的管理面落地。**设计判断：计时器的云端痕迹唯一 = 结算自动入账**
+（`qwt_spend_entries.source='DANCE'`，计时明细本体只落客户端 storage，
+qwt_dance_records_v1），账目表即使用事实表——**禁为统计新建第二套数据源/上报通道**。
+
+- **接口**：`GET /admin/spend/usage-stats?days=30`（钳制 7~90，仅 ADMIN，
+  `UserContext.requireAdmin()`；挂在 `/admin/**` 白名单前缀下，零反代改动）。
+  一次往返返回 summary + daily + byCategory + byVenue 四块。
+- **口径（与大盘完全同族）**：全部聚合 `JOIN qwt_users` 过滤
+  `deleted=false AND role='USER' AND open_id NOT LIKE 'test\_%' AND wechat_review=false`
+  ——剔除 ADMIN 运营号 / test_ 开发联调号 / 微信审核账号；软删账目不入任何计数。
+  支出分类分布走 `direction='EXPENSE'`（同小程序统计页「消费分析」口径，
+  GUEST 收入向不入图，收入在汇总行体现）；门店 TOP = `venue_id IS NOT NULL`
+  按账目笔数降序（金额进 tooltip），venue_name 快照取 MAX 规避多快照分裂。
+- **MySQL 8 方言**（WITH RECURSIVE 骨架补零，PG 环境勿执行，同上节）。
+- **后端文件**：`spend/repository/SpendStatsRepository.java`（口径唯一权威，
+  独立只读仓库，参考 UserDailyStatsRepository 先例）+
+  `spend/service/AdminSpendStatsService.java` + `spend/controller/AdminSpendStatsController.java`
+  + `spend/dto/response/AdminSpendUsageStatsResponse.java`。
+- **前端文件（admin-web）**：`services/spendStats.ts`（零派生只搬运）+
+  `components/SpendUsagePanel.vue`（自包含面板：顶卡 4 枚 = 记账用户/近7日活跃/
+  计时场次/计时用户 + 趋势图「计时结算 vs 手动补记堆叠柱 + 活跃记账用户线」+
+  支出分类分布 + 门店 TOP；echarts 按需注册同 Dashboard），
+  挂载于 `DashboardView.vue`——**独立加载、不挂在大盘 v-else 内**
+  （大盘自身加载失败不影响本面板）。
+- **顶卡派生口径**：渗透率 = 记账用户/累计注册（前端派生，注册数 prop 传入，
+  做除法前判零）；计时场次占比 = danceEntries/totalEntries；计时用户占比 =
+  timerUsers/totalUsers。金额注记「累计支出/收入」只在有账目时显示。
+- **用户下钻（2026-09-14 二轮）**：面板头「记账用户 →」+ 用户详情「计时 · 账本」卡。
+  - `GET /admin/spend/usage-users`：有账目的真实用户按最近记账降序 + 逐用户聚合
+    （昵称/头像随行），行点击**复用资料协作 user-detail 路由**（/users/{id}）。
+    admin-web 新页 `views/SpendUsersView.vue`（router `/spend-users`）。
+  - `GET /admin/spend/users/{userId}/entries?limit=50`（钳制 10~200）：用户详情
+    「计时 · 账本」卡数据源——summary 全量汇总 + 最近流水（**只回未软删**，与
+    统计口径一致）。`UserDetailView.vue` 卡片：meta 行（笔数/计时场次/收支）+
+    流水行（分类 + 来源 tag 计时/手动 + 门店/时长/时间 + 金额，收入绿 `+` 前缀），
+    非阻塞加载失败静默（同资料协作卡口径）。
+  - **明细端点不做用户表口径过滤**（指定用户读取，入口列表已过滤；
+    用户详情本身保留可见性——与 2026-09-09「列表不排除」判据同族）。
+
 ## 后续规划（P1/P2，未实施）
 
 - 漏斗图：注册→打开→互动；游客→注册转化（NULL user 浏览 vs 注册量）监控分享引流。

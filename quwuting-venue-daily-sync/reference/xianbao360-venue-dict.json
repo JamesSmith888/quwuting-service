@@ -2084,7 +2084,7 @@
       "platform_name": "天涯酒馆二店",
       "venue_id": 1295,
       "kind": "exact",
-      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）；09-14 地址修正：竞秀区乐凯北大街1869号（原三丰中路为 OCR 误识），时段 17:00-03:00"
     },
     {
       "city": "保定市",
@@ -2169,26 +2169,26 @@
     {
       "city": "保定市",
       "news_name": "黑先生秘密酒馆",
-      "platform_name": "黑先生秘密酒馆",
+      "platform_name": "猫先生维密酒馆",
       "venue_id": 1306,
-      "kind": "exact",
-      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+      "kind": "typo",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）；09-14 用户核实 OCR 误识，正名=猫先生维密酒馆"
     },
     {
       "city": "保定市",
       "news_name": "黑先生普拉酒馆",
-      "platform_name": "黑先生普拉酒馆",
+      "platform_name": "猫先生富昌酒馆",
       "venue_id": 1307,
-      "kind": "exact",
-      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+      "kind": "typo",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）；09-14 用户核实 OCR 误识，正名=猫先生富昌酒馆"
     },
     {
       "city": "保定市",
       "news_name": "杙酒馆",
-      "platform_name": "杙酒馆",
+      "platform_name": "和酒馆",
       "venue_id": 1308,
-      "kind": "exact",
-      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+      "kind": "typo",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）；09-14 用户核实 OCR 误识，正名=和酒馆"
     },
     {
       "city": "保定市",
@@ -2201,18 +2201,18 @@
     {
       "city": "保定市",
       "news_name": "可能吧",
-      "platform_name": "可能吧",
+      "platform_name": "可耐吧",
       "venue_id": 1310,
-      "kind": "exact",
-      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+      "kind": "typo",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）；09-14 用户核实 OCR 误识，正名=可耐吧"
     },
     {
       "city": "保定市",
       "news_name": "乐航酒馆",
-      "platform_name": "乐航酒馆",
+      "platform_name": "乐凯酒馆",
       "venue_id": 1311,
-      "kind": "exact",
-      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+      "kind": "typo",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）；09-14 用户核实 OCR 误识，正名=乐凯酒馆"
     },
     {
       "city": "保定市",
@@ -2220,15 +2220,15 @@
       "platform_name": "暮汐酒馆",
       "venue_id": 1312,
       "kind": "exact",
-      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）；09-14 地址修正：高碑店市迎宾路宜家旺商业大厦二楼（原莲池地址为 OCR 误识）"
     },
     {
       "city": "保定市",
       "news_name": "3.35音乐酒馆",
-      "platform_name": "3.35音乐酒馆",
+      "platform_name": "335音乐酒馆",
       "venue_id": 1313,
-      "kind": "exact",
-      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+      "kind": "typo",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）；09-14 用户核实 OCR 误识，正名=335音乐酒馆"
     },
     {
       "city": "保定市",
@@ -2293,6 +2293,198 @@
       "venue_id": 1321,
       "kind": "exact",
       "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "天涯酒馆",
+      "platform_name": "天涯酒馆",
+      "venue_id": 1322,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档；同名裁决：定州店=天涯酒馆本店，竞秀乐凯北大街行=天涯酒馆二店(#1295)的重复点名未建"
+    },
+    {
+      "city": "张家口市",
+      "news_name": "暮色酒吧",
+      "platform_name": "暮色酒吧",
+      "venue_id": 1323,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（张家口首覆 9 家）"
+    },
+    {
+      "city": "张家口市",
+      "news_name": "野马娱乐舞厅KTV",
+      "platform_name": "野马娱乐舞厅KTV",
+      "venue_id": 1324,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（张家口首覆 9 家）"
+    },
+    {
+      "city": "张家口市",
+      "news_name": "OF跳舞CLUB",
+      "platform_name": "OF跳舞CLUB",
+      "venue_id": 1325,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（张家口首覆 9 家）"
+    },
+    {
+      "city": "张家口市",
+      "news_name": "地标舞吧",
+      "platform_name": "地标舞吧",
+      "venue_id": 1326,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（张家口首覆 9 家）"
+    },
+    {
+      "city": "张家口市",
+      "news_name": "晚安音乐舞厅",
+      "platform_name": "晚安音乐舞厅",
+      "venue_id": 1327,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（张家口首覆 9 家）"
+    },
+    {
+      "city": "张家口市",
+      "news_name": "夜肆音乐酒吧",
+      "platform_name": "夜肆音乐酒吧",
+      "venue_id": 1328,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（张家口首覆 9 家）"
+    },
+    {
+      "city": "张家口市",
+      "news_name": "思夜音乐舞厅",
+      "platform_name": "思夜音乐舞厅",
+      "venue_id": 1329,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（张家口首覆 9 家）"
+    },
+    {
+      "city": "张家口市",
+      "news_name": "29酒吧",
+      "platform_name": "29酒吧",
+      "venue_id": 1330,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（张家口首覆 9 家）"
+    },
+    {
+      "city": "张家口市",
+      "news_name": "北辰音乐酒吧",
+      "platform_name": "北辰音乐酒吧",
+      "venue_id": 1331,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（张家口首覆 9 家）"
+    },
+    {
+      "city": "秦皇岛市",
+      "news_name": "漠河舞厅酒吧",
+      "platform_name": "漠河舞厅酒吧",
+      "venue_id": 1332,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（秦皇岛/承德/邢台/邯郸首覆）"
+    },
+    {
+      "city": "秦皇岛市",
+      "news_name": "月陌酒吧",
+      "platform_name": "月陌酒吧",
+      "venue_id": 1333,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（秦皇岛/承德/邢台/邯郸首覆）"
+    },
+    {
+      "city": "承德市",
+      "news_name": "银都会莎莎舞酒吧",
+      "platform_name": "银都会莎莎舞酒吧",
+      "venue_id": 1334,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（秦皇岛/承德/邢台/邯郸首覆）"
+    },
+    {
+      "city": "承德市",
+      "news_name": "思夜舞厅",
+      "platform_name": "思夜舞厅",
+      "venue_id": 1335,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（秦皇岛/承德/邢台/邯郸首覆）"
+    },
+    {
+      "city": "邢台市",
+      "news_name": "夜焰酒吧",
+      "platform_name": "夜焰酒吧",
+      "venue_id": 1336,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（秦皇岛/承德/邢台/邯郸首覆）"
+    },
+    {
+      "city": "邢台市",
+      "news_name": "211音乐空间",
+      "platform_name": "211音乐空间",
+      "venue_id": 1337,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（秦皇岛/承德/邢台/邯郸首覆）"
+    },
+    {
+      "city": "邯郸市",
+      "news_name": "月食酒馆",
+      "platform_name": "月食酒馆",
+      "venue_id": 1338,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（秦皇岛/承德/邢台/邯郸首覆）"
+    },
+    {
+      "city": "秦皇岛市",
+      "news_name": "秦皇岛莎莎舞",
+      "platform_name": "月陌酒吧",
+      "venue_id": 1333,
+      "kind": "alias",
+      "note": "2026-09-14 主名括号禁令拆分：表格原名「月陌酒吧（秦皇岛莎莎舞）」"
+    },
+    {
+      "city": "保定市",
+      "news_name": "猫先生维密酒馆",
+      "platform_name": "猫先生维密酒馆",
+      "venue_id": 1306,
+      "kind": "exact",
+      "note": "2026-09-14 OCR 修正后正名建档映射"
+    },
+    {
+      "city": "保定市",
+      "news_name": "猫先生富昌酒馆",
+      "platform_name": "猫先生富昌酒馆",
+      "venue_id": 1307,
+      "kind": "exact",
+      "note": "2026-09-14 OCR 修正后正名建档映射"
+    },
+    {
+      "city": "保定市",
+      "news_name": "和酒馆",
+      "platform_name": "和酒馆",
+      "venue_id": 1308,
+      "kind": "exact",
+      "note": "2026-09-14 OCR 修正后正名建档映射"
+    },
+    {
+      "city": "保定市",
+      "news_name": "可耐吧",
+      "platform_name": "可耐吧",
+      "venue_id": 1310,
+      "kind": "exact",
+      "note": "2026-09-14 OCR 修正后正名建档映射"
+    },
+    {
+      "city": "保定市",
+      "news_name": "乐凯酒馆",
+      "platform_name": "乐凯酒馆",
+      "venue_id": 1311,
+      "kind": "exact",
+      "note": "2026-09-14 OCR 修正后正名建档映射"
+    },
+    {
+      "city": "保定市",
+      "news_name": "335音乐酒馆",
+      "platform_name": "335音乐酒馆",
+      "venue_id": 1313,
+      "kind": "exact",
+      "note": "2026-09-14 OCR 修正后正名建档映射"
     }
   ],
   "removed_duplicates": [
