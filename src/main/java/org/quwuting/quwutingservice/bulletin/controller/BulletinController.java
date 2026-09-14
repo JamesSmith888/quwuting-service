@@ -45,17 +45,35 @@ public class BulletinController {
     private final BulletinViewService bulletinViewService;
 
     /**
-     * 可见快讯流（分页，时间倒序；一期不支持城市筛选）。
+     * 可见快讯流（2026-09-14 起<b>双模式</b>：页码分页（旧客户端兼容）+ 游标窗口）。
      * <p>
-     * 每项含 content 全文与 reactions 徽标——列表页内联渲染全文（TG 频道式气泡流），
-     * 不再需要"点进详情才看到内容"。个人表态（reactedByMe）随列表下发，避免前端
-     * 二次请求。
+     * <b>游标模式</b>（任一游标参数出现即触发，两参数互斥、before 优先）：
+     * <ul>
+     *   <li>{@code beforeId=0}：哨兵 = 无上界 ⇒ <b>最新一屏</b>（2026-09-14 首屏默认——
+     *       信息流最新沉底 + 「记住已读位置自动定位到未读」，要求首屏直达最新窗口）；</li>
+     *   <li>{@code beforeId&gt;0}：严格早于该条的最后 size 条（正序）——向上加载更早；</li>
+     *   <li>{@code fromId&gt;0}：不早于该条的前 size 条（含锚点）——分享落地定位与
+     *       静默收敛/触底增量（末条重复由前端按 id 去重）。</li>
+     * </ul>
+     * 游标模式的 hasMore 由前端按「返回条数 &lt; size」判定（keyset 判据，
+     * 不依赖 totalElements——游标模式下它只填本页条数）。
+     * <p>
+     * <b>页码模式</b>（不传游标参数）：维持 2026-09-11 既有语义（时间正序第 page 页），
+     * <b>线上旧版本小程序仍在使用，契约不可变</b>。
+     * <p>
+     * 每项含 content 全文与 reactions 徽标——列表页内联渲染全文（TG 频道式气泡流）。
+     * 个人表态（reactedByMe）随列表下发，避免前端二次请求。
      */
     @GetMapping
     public ApiResponse<Page<BulletinFeedItemResponse>> list(
             @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size) {
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false) Long beforeId,
+            @RequestParam(required = false) Long fromId) {
         Long userId = UserContext.requireAuth();
+        if (beforeId != null || fromId != null) {
+            return ApiResponse.ok(bulletinService.listByCursor(beforeId, fromId, size, userId));
+        }
         return ApiResponse.ok(bulletinService.listVisible(page, size, userId));
     }
 

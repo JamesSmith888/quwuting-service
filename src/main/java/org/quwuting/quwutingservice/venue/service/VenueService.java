@@ -136,6 +136,11 @@ public class VenueService {
     private final VenueClaimRepository venueClaimRepository;
     /** 关注门店营业状态（状态变更挂点：向关注者发 VENUE_STATUS_CHANGED 站内信） */
     private final VenueStatusWatcherService venueStatusWatcherService;
+    /**
+     * 状态权威层级门禁（2026-09-14，V25；方案见 docs/agents/48）。
+     * 人工改状态（本类三条通道）负责**打锁**；外部舞讯通道（DailyOpeningService）受锁约束。
+     */
+    private final VenueStatusGuardService venueStatusGuardService;
     /** 图片内容校验（2026-08-12 恶意文件防线：业务提交时对图片 URL 做内容级校验） */
     private final ImageContentValidator imageValidator;
     /** 门店相册照片（2026-08-20 门店照片域：独立表 + PENDING 先审后发，见 AGENTS.md「门店照片域」） */
@@ -346,18 +351,44 @@ public class VenueService {
         // 状态变更检测：写入变迁日志（热度统计"暂停营业次数"的数据源）
         VenueStatus newStatus = req.status() != null ? req.status() : venue.getStatus();
         if (newStatus != venue.getStatus()) {
-            VenueStatusLog statusLog = new VenueStatusLog();
-            statusLog.setVenueId(venue.getId());
-            statusLog.setFromStatus(venue.getStatus());
-            statusLog.setToStatus(newStatus);
-            statusLog.setChangedBy(UserContext.getCurrentUserId());
-            venueStatusLogRepository.save(statusLog);
-            // 关注者通知（2026-08-12 新增，见 AGENTS.md「关注门店营业状态通知」）：
-            // 营业状态实际变更时同事务发站内信（幂等——状态未变不进本分支，不发）
-            venueStatusWatcherService.notifyStatusChanged(
-                    venue.getId(), venue.getStatus(), newStatus);
+            // 权威层级门禁（2026-09-14，V25；方案见 docs/agents/48）：
+            // 本接口是「人工编辑门店资料」通道（管理端表单 / 门店认领人）——在这里改状态
+            // = 人工判断，写库后打「人工锁」，锁内外部舞讯通道不得覆盖。
+            // 但 Agent/Skill 也会经此接口做程序化写库（如 CLOSED → OPEN 恢复营业、批量回填），
+            // 那属于外部通道，必须同样受门禁约束，否则本接口就成了绕过人工锁的后门。
+            // 判别 = 调用方显式声明 changeSource=AGENT_BATCH；未声明一律按人工处理
+            //（默认落在更保守的一侧，前端编辑表单不传该字段 → 天然走人工通道）。
+            boolean statusBlocked = false;
+            if (venueStatusGuardService.isExternalChangeSource(req.changeSource())) {
+                VenueStatusGuardService.Decision decision = venueStatusGuardService
+                        .decideExternalWrite(venue, LocalDateTime.now());
+                if (decision.allowed()) {
+                    venueStatusGuardService.takeOverByExternalWrite(venue);
+                } else {
+                    // 门禁拦截：**资料照改，状态不动**——本接口是整表提交，不能因状态被挡
+                    // 就让整单失败（否则 Agent 的营业时段回填等正常写入会连带报错）
+                    statusBlocked = true;
+                    log.warn("[venue/{}/update] 程序化改状态被门禁跳过（{}，锁至 {}）：{} → {} 未生效",
+                            venue.getId(), decision.reason(), decision.lockedUntil(),
+                            venue.getStatus(), newStatus);
+                }
+            } else {
+                venueStatusGuardService.lockOnManualChange(venue, newStatus, LocalDateTime.now());
+            }
+            if (!statusBlocked) {
+                VenueStatusLog statusLog = new VenueStatusLog();
+                statusLog.setVenueId(venue.getId());
+                statusLog.setFromStatus(venue.getStatus());
+                statusLog.setToStatus(newStatus);
+                statusLog.setChangedBy(UserContext.getCurrentUserId());
+                venueStatusLogRepository.save(statusLog);
+                // 关注者通知（2026-08-12 新增，见 AGENTS.md「关注门店营业状态通知」）：
+                // 营业状态实际变更时同事务发站内信（幂等——状态未变不进本分支，不发）
+                venueStatusWatcherService.notifyStatusChanged(
+                        venue.getId(), venue.getStatus(), newStatus);
+                venue.setStatus(newStatus);
+            }
         }
-        venue.setStatus(newStatus);
         // 门店类型：null = 保留原值不覆盖（与 status / sortWeight 空值语义一致，
         // 避免不带该字段的编辑表单把歌友会静默降级成舞厅）
         venue.setVenueType(req.venueType() != null ? req.venueType() : venue.getVenueType());
@@ -682,6 +713,9 @@ public class VenueService {
         statusLog.setChangedBy(changedBy);
         venueStatusLogRepository.save(statusLog);
         venue.setStatus(VenueStatus.SUSPENDED);
+        // 人工锁（2026-09-14，V25）：采纳上报 = 管理员核实后的人工判断，锁内外部舞讯通道
+        // 不得覆盖（否则「管理员今天刚确认这家关了，明天舞讯漏报/误报就把它翻回营业」）。
+        venueStatusGuardService.lockOnManualChange(venue, VenueStatus.SUSPENDED, LocalDateTime.now());
         venueRepository.save(venue);
         // 关注者通知（同事务；幂等早退已拦截"已是 SUSPENDED"场景，此处必为实际变更）
         venueStatusWatcherService.notifyStatusChanged(
@@ -726,6 +760,9 @@ public class VenueService {
         statusLog.setChangedBy(changedBy);
         venueStatusLogRepository.save(statusLog);
         venue.setStatus(VenueStatus.OPEN);
+        // 人工锁（2026-09-14，V25）：与 markSuspendedByReport 对称——管理员核实「恢复营业」
+        // 后，当日舞讯的未上榜推断不得立刻把它再推回暂停（走 OPEN 档短窗口，理由见 V25 注释）。
+        venueStatusGuardService.lockOnManualChange(venue, VenueStatus.OPEN, LocalDateTime.now());
         venueRepository.save(venue);
         // 关注者通知（同事务；幂等早退已拦截"已是 OPEN"场景，此处必为实际变更）
         venueStatusWatcherService.notifyStatusChanged(

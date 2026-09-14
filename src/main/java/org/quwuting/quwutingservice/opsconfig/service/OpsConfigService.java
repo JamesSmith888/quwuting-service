@@ -123,6 +123,22 @@ public class OpsConfigService {
     }
 
     /**
+     * 整数配置语义读取（2026-09-14 新增，供人工锁时长等数值型开关使用）：
+     * 值可解析为整数即返回；不可解析（空/非数字）或键不存在 → 返回调用方提供的默认值。
+     * 非法值不抛异常——运营手滑写错不该让写库主流程 500，退回代码侧默认更安全。
+     */
+    public int getInt(String key, int defaultValue) {
+        String v = getValue(key).orElse(null);
+        if (v == null) return defaultValue;
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            log.warn("ops config {} 值非整数（{}），退回默认 {}", key, v, defaultValue);
+            return defaultValue;
+        }
+    }
+
+    /**
      * 公开读取全部配置（前端 feature flag 初始化；值为非敏感的开关字符串，无需鉴权）。
      * 缓存优先（60s TTL + 单飞）；管理端 setValue 写路径显式失效，新值即时生效。
      */

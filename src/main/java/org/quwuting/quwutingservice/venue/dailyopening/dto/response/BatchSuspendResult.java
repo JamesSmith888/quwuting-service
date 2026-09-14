@@ -12,12 +12,18 @@ import java.util.List;
  * @param total         提交评估总数
  * @param suspended     实际置为暂停营业的门店数（仅 OPEN 参与，其余静默跳过）
  * @param venueNotFound 门店不存在/已删除被跳过的条数
+ * @param skippedLocked 因「人工锁未过期」跳过数（2026-09-14，V25；人工优先，不写库）
+ * @param skippedExempt 因「已豁免舞讯推断」跳过数（2026-09-14，V25）
+ * @param skipped       跳过明细（按原因可读；调用方须显式汇报，见 {@link SkippedByGuardDetail}）
  * @param details       暂停明细（审计/回滚用）
  */
 public record BatchSuspendResult(
         int total,
         int suspended,
         int venueNotFound,
+        int skippedLocked,
+        int skippedExempt,
+        List<SkippedByGuardDetail> skipped,
         List<SuspendDetail> details
 ) {
     /** 暂停明细：门店 + 变更前后状态 + 来源标识（回滚依据） */

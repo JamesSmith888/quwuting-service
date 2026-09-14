@@ -1,14 +1,17 @@
 package org.quwuting.quwutingservice.venue.dailyopening.service;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.venue.dailyopening.dto.request.ApplyDailyOpeningBatchRequest;
 import org.quwuting.quwutingservice.venue.dailyopening.dto.request.ApplyDailyOpeningRequest;
 import org.quwuting.quwutingservice.venue.dailyopening.dto.request.ApplyVenueSuspendBatchRequest;
 import org.quwuting.quwutingservice.venue.dailyopening.dto.request.VenueSuspendItemRequest;
 import org.quwuting.quwutingservice.venue.dailyopening.dto.response.BatchApplyResult;
 import org.quwuting.quwutingservice.venue.dailyopening.dto.response.BatchSuspendResult;
+import org.quwuting.quwutingservice.venue.dailyopening.dto.response.SkippedByGuardDetail;
 import org.quwuting.quwutingservice.venue.dailyopening.enums.DailyOpeningConfidence;
 import org.quwuting.quwutingservice.venue.dailyopening.enums.DailyOpeningStatus;
+import org.quwuting.quwutingservice.venue.dailyopening.enums.GuardSkipReason;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.entity.VenueStatusLog;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
@@ -16,10 +19,12 @@ import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueService;
+import org.quwuting.quwutingservice.venue.service.VenueStatusGuardService;
 import org.quwuting.quwutingservice.venuestatuswatcher.service.VenueStatusWatcherService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -51,7 +56,20 @@ import java.util.Set;
  * 事实成立时才推断（城市级覆盖精确、非匹配猜测），未被覆盖的城市一律不动。
  * 两个方向各自独立入口，互不覆盖：{@link #applyBatch} 只做恢复、
  * {@link #applyBatchSuspend} 只做暂停——同一批次内不会互相打架（只 OPEN↔SUSPENDED 互转）。
+ * <p>
+ * <b>2026-09-14 叠加入口门禁（V25，方案见 docs/agents/48）</b>：两个通道在真正改状态前，
+ * 都必须先问 {@link VenueStatusGuardService} —— 舞讯是第三方整理、并不 100% 可靠，而管理员
+ * 手工修正过的状态是更权威的判断。逐店判定：
+ * <ul>
+ *   <li>已永久豁免 / 人工锁未过期 ⇒ **跳过**（不写库、不通知、不发公告），计入返回体
+ *       {@code skippedLocked} / {@code skippedExempt} 与 {@code skipped} 明细；</li>
+ *   <li>其余 ⇒ 允许覆盖，成功后由 Guard 接管所有权（statusSource=SYNC）并清除人工锁。</li>
+ * </ul>
+ * 例外：{@code source="ADMIN"}（管理端在同步报告里<b>勾选应用</b>）属人工背书，可越过人工锁
+ * ——「人类明确的动作永远能推翻前一个人类判断」；但同样清锁并把所有权交回自动同步。
+ * 门禁判定唯一实现在 {@link VenueStatusGuardService}，本类只负责按结果跳过与统计。
  */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class DailyOpeningService {
@@ -61,15 +79,23 @@ public class DailyOpeningService {
     private final VenueStatusWatcherService venueStatusWatcherService;
     private final VenueHeatService venueHeatService;
     private final VenueService venueService;
+    private final VenueStatusGuardService venueStatusGuardService;
     private final org.quwuting.quwutingservice.announcement.service.AnnouncementService announcementService;
+
+    /** 管理端「同步报告勾选应用」的来源标签：人工背书，可越过人工锁（语义见类注释）。 */
+    private static final String SOURCE_ADMIN = "ADMIN";
 
     @Transactional
     public BatchApplyResult applyBatch(ApplyDailyOpeningBatchRequest request) {
         List<ApplyDailyOpeningRequest> items = request.items();
 
         int notFound = 0;
+        int skippedLocked = 0;
+        int skippedExempt = 0;
+        List<SkippedByGuardDetail> skipped = new ArrayList<>();
         List<BatchApplyResult.ReversalDetail> reversals = new ArrayList<>();
         Set<Long> reversedVenueIds = new LinkedHashSet<>();
+        LocalDateTime now = LocalDateTime.now();
 
         for (ApplyDailyOpeningRequest item : items) {
             // 快照机制已退出：仅 OPEN + 来源可信的条目评估反转，资讯休息不落任何记录
@@ -89,6 +115,29 @@ public class DailyOpeningService {
             VenueStatus current = venue.getStatus();
             if (current != VenueStatus.CEASED && current != VenueStatus.SUSPENDED) {
                 continue; // 已营业/装修/休息：无需反转（快照缺失不反向改状态）
+            }
+
+            // 入口门禁（V25）：人工判断优先于外部舞讯推断。放在「确需动作」之后判定——
+            // 已 OPEN 的店本来就不需要动作，不该被算成「门禁跳过」（会污染汇报口径）。
+            // source="ADMIN" = 管理端勾选应用（人工背书），可越过人工锁。
+            boolean humanConfirmed = SOURCE_ADMIN.equalsIgnoreCase(item.source());
+            if (humanConfirmed) {
+                // 人工确认放行：不改写来源标签（审计仍显示 ADMIN），但会把所有权交回自动同步
+                venueStatusGuardService.takeOverByExternalWrite(venue);
+            } else {
+                VenueStatusGuardService.Decision decision =
+                        venueStatusGuardService.decideExternalWrite(venue, now);
+                if (!decision.allowed()) {
+                    if (decision.reason() == GuardSkipReason.EXEMPT) {
+                        skippedExempt++;
+                    } else {
+                        skippedLocked++;
+                    }
+                    skipped.add(new SkippedByGuardDetail(venue.getId(), venue.getName(),
+                            decision.reason().name(), decision.lockedUntil()));
+                    continue;
+                }
+                venueStatusGuardService.takeOverByExternalWrite(venue);
             }
 
             // 反转 + 完整审计链（与人工编辑同权）
@@ -120,8 +169,13 @@ public class DailyOpeningService {
             // SYSTEM 公告；开关关闭/同日已存在 → 内部幂等跳过，不干扰写库主流程
             announcementService.createDataUpdateAnnouncement(0, reversals.size());
         }
+        if (!skipped.isEmpty()) {
+            log.info("[venue-daily-openings/batch] 门禁跳过 {} 条（锁内 {} / 豁免 {}）",
+                    skipped.size(), skippedLocked, skippedExempt);
+        }
 
-        return new BatchApplyResult(items.size(), reversals.size(), notFound, reversals);
+        return new BatchApplyResult(items.size(), reversals.size(), notFound,
+                skippedLocked, skippedExempt, skipped, reversals);
     }
 
     /** 自动可反转 = EXACT/ALIAS（高置信；低置信需管理员确认 forceReversal） */
@@ -144,7 +198,11 @@ public class DailyOpeningService {
      *       公告口径是「新增/恢复」的正向信息，数百家暂停公告是纯噪音；</li>
      *   <li>审计链完整：VenueStatusLog（changedBy=null + changeSource）+ 关注者站内信/
      *       订阅消息 + 热度/详情/列表缓存失效，与人工改状态（markSuspendedByReport）同权；
-     *       已有 SUSPENDED 逐条目幂等跳过（无冗余日志）。</li>
+     *       已有 SUSPENDED 逐条目幂等跳过（无冗余日志）；</li>
+     *   <li><b>入口门禁（2026-09-14，V25）</b>：与 {@link #applyBatch} 同规律——人工锁未过期
+     *       或已豁免的门店跳过，计入 {@code skippedLocked} / {@code skippedExempt}。
+     *       这一方向最需要保护：本通道一次会暂停几十上百家，管理员手工纠错后若被批量冲回，
+     *       用户看到「暂停营业」会直接白跑。</li>
      * </ul>
      *
      * @param request 待暂停门店条目（调用方已按「同城 + 未上榜」筛出，≤500 条）
@@ -155,8 +213,12 @@ public class DailyOpeningService {
         List<VenueSuspendItemRequest> items = request.items();
 
         int notFound = 0;
+        int skippedLocked = 0;
+        int skippedExempt = 0;
+        List<SkippedByGuardDetail> skipped = new ArrayList<>();
         List<BatchSuspendResult.SuspendDetail> details = new ArrayList<>();
         Set<Long> suspendedVenueIds = new LinkedHashSet<>();
+        LocalDateTime now = LocalDateTime.now();
 
         for (VenueSuspendItemRequest item : items) {
             Venue venue = venueRepository.findById(item.venueId()).orElse(null);
@@ -167,6 +229,26 @@ public class DailyOpeningService {
             VenueStatus current = venue.getStatus();
             if (current != VenueStatus.OPEN) {
                 continue; // 非营业中：不做暂停（已停业/休息/装修保持原状，幂等跳过）
+            }
+
+            // 入口门禁（V25）：同 applyBatch（先判「确需动作」再判门禁，语义见该方法注释）
+            boolean humanConfirmed = SOURCE_ADMIN.equalsIgnoreCase(item.source());
+            if (humanConfirmed) {
+                venueStatusGuardService.takeOverByExternalWrite(venue);
+            } else {
+                VenueStatusGuardService.Decision decision =
+                        venueStatusGuardService.decideExternalWrite(venue, now);
+                if (!decision.allowed()) {
+                    if (decision.reason() == GuardSkipReason.EXEMPT) {
+                        skippedExempt++;
+                    } else {
+                        skippedLocked++;
+                    }
+                    skipped.add(new SkippedByGuardDetail(venue.getId(), venue.getName(),
+                            decision.reason().name(), decision.lockedUntil()));
+                    continue;
+                }
+                venueStatusGuardService.takeOverByExternalWrite(venue);
             }
 
             venue.setStatus(VenueStatus.SUSPENDED);
@@ -194,7 +276,12 @@ public class DailyOpeningService {
             venueService.invalidateVenueListCache();
             // 刻意不触发数据更新公告：暂停方向无正向信息量（见方法注释）
         }
+        if (!skipped.isEmpty()) {
+            log.info("[venue-daily-openings/batch-suspend] 门禁跳过 {} 条（锁内 {} / 豁免 {}）",
+                    skipped.size(), skippedLocked, skippedExempt);
+        }
 
-        return new BatchSuspendResult(items.size(), details.size(), notFound, details);
+        return new BatchSuspendResult(items.size(), details.size(), notFound,
+                skippedLocked, skippedExempt, skipped, details);
     }
 }

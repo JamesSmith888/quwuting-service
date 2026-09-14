@@ -222,7 +222,7 @@ public class VenueSyncReportService {
         }
 
         if (applyItems.isEmpty()) {
-            return new BatchApplyResult(0, 0, 0, List.of());
+            return new BatchApplyResult(0, 0, 0, 0, 0, List.of(), List.of());
         }
         log.info("[venue-sync] apply report id={} date={} items={}",
                 id, report.getReportDate(), applyItems.size());

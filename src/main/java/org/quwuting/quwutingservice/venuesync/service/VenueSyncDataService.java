@@ -72,6 +72,11 @@ public class VenueSyncDataService {
      * <p>
      * 2026-09-08 装配 aliases（qwt_venue_aliases 有效别名）：舞讯名命中别名即高置信
      * EXACT 级——一页门店一次 IN 查询按店分组，避免逐店往返。
+     * <p>
+     * 2026-09-14 装配权威层级三字段（V25）：statusSource / statusLockedUntil /
+     * dailySyncExempt，供 Skill 在差异表里**标注**「有人工状态、本轮会被门禁跳过」。
+     * ⚠️ 仅用于展示与汇报——门禁判定唯一实现在 {@code VenueStatusGuardService}，
+     * Skill 侧不得据此自己再判一遍（两处逻辑必然漂移）。
      */
     @Transactional(readOnly = true)
     public Page<VenueExportItem> exportVenues(String city, VenueStatus status, int page, int size) {
@@ -86,7 +91,9 @@ public class VenueSyncDataService {
         return venues.map(v -> new VenueExportItem(
                 v.getId(), v.getName(), v.getCity(), v.getDistrict(),
                 v.getAddress(), v.getStatus().name(),
-                aliasMap.getOrDefault(v.getId(), List.of())));
+                aliasMap.getOrDefault(v.getId(), List.of()),
+                v.getStatusSource() == null ? null : v.getStatusSource().name(),
+                v.getStatusLockedUntil(), v.isDailySyncExempt(), v.getSyncNote()));
     }
 
     // ===== 批量新增（POST /admin/venue-sync/venues/batch-create） =====

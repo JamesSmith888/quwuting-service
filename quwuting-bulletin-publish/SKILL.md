@@ -12,6 +12,16 @@ agent_created: true
 > `pages/bulletin-detail` 仅作长文深读 / 分享落地）。
 > ⚠️ 2026-09-10 二次定稿起：**用户不点开就能看到全文**——正文的每一句都直接影响观感（2026-09-11 五稿起本域**无标题字段**）。
 
+## ⓪ 运行前必做 · Skill 双副本同步（2026-09-14 用户要求：每次跑 Skill 前都先同步）
+
+```bash
+bash /Users/xin.y/WeChatProjects/quwuting-service/scripts/sync-skills.sh
+```
+
+权威方向 = **项目路径**（`quwuting-service/quwuting-*`，Git 可回溯）→ 运行时镜像
+`~/.workbuddy/skills/`；脚本单向镜像 + 覆盖前自动备份，只读检查加 `--check`。
+**只改项目侧 = 本轮跑的还是旧契约**——本 Skill 正是漂移受害者（详见脚本头部注释）。
+
 ## 🚫 红线（最高优先，违反即事故）
 
 1. **内容边界（比技术实现更重要）**：快讯**只描述「服务可得性」**——哪家店 / 哪个时段

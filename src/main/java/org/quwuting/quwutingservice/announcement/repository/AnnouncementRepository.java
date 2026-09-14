@@ -77,6 +77,62 @@ public interface AnnouncementRepository extends JpaRepository<Announcement, Long
                                             Pageable pageable);
 
     /**
+     * 快讯信息流·游标窗口（2026-09-14「尾部优先」改造，docs/agents/47 §4.1）：
+     * 取<b>严格早于</b>游标 {@code (cursorAt, cursorId)} 的<b>最后</b> {@code size} 条
+     * ——按时间<b>倒序</b>取前 size 条，由调用方反转为正序返回。
+     * <p>
+     * 游标排序键与 {@link #findBulletinFeedPage} 完全同源（{@code publishAt, id}，
+     * 同刻用 id 兜底）——判据：<b>游标必须用与排序相同的键</b>，否则窗口边界会随
+     * 回填历史 publishAt 的条目漂移（id 顺序 ≠ 时间顺序）。{@code hasCursor=false}
+     * 表示无上界（= 首屏「最近一屏」：最新的 size 条）。
+     * <p>
+     * 返回 List（非 Page）：keyset 分页的 hasMore 由调用方按「返回条数 &lt; size」判定，
+     * 不需要 count 查询。⚠️ 游标条件假定 publishAt 非空（快讯发布路径恒写入；
+     * publishAt 为 NULL 的理论残留在 SQL 三值逻辑下不命中任一比较，不参与游标窗口，
+     * 只影响防御性分支，可接受）。
+     */
+    @Query("""
+            SELECT a FROM Announcement a
+            WHERE a.deleted = false AND a.status = :status
+              AND a.category = :category
+              AND (a.publishAt IS NULL OR a.publishAt <= :now)
+              AND (:hasCursor = false OR a.publishAt < :cursorAt
+                   OR (a.publishAt = :cursorAt AND a.id < :cursorId))
+            ORDER BY a.publishAt DESC, a.id DESC
+            """)
+    List<Announcement> findBulletinFeedBefore(@Param("category") AnnouncementCategory category,
+                                              @Param("status") AnnouncementStatus status,
+                                              @Param("now") LocalDateTime now,
+                                              @Param("hasCursor") boolean hasCursor,
+                                              @Param("cursorAt") LocalDateTime cursorAt,
+                                              @Param("cursorId") Long cursorId,
+                                              Pageable pageable);
+
+    /**
+     * 快讯信息流·游标窗口（从锚点向新，2026-09-14）：取<b>不早于</b>锚点
+     * {@code (anchorAt, anchorId)} 的前 {@code size} 条，时间正序。两个消费方：
+     * 分享落地（锚点 = 目标条目，使其出现在窗口首位）与静默收敛/触底（锚点 =
+     * 当前末条，增量拉取新内容，末条重复由前端按 id 去重）。
+     * <p>
+     * 与 {@link #findBulletinFeedBefore} 同一套排序键与 List 返回口径；publishAt 为
+     * NULL 的理论残留同样不参与窗口（见上）。
+     */
+    @Query("""
+            SELECT a FROM Announcement a
+            WHERE a.deleted = false AND a.status = :status
+              AND a.category = :category
+              AND (a.publishAt IS NULL OR a.publishAt <= :now)
+              AND (a.publishAt > :anchorAt OR (a.publishAt = :anchorAt AND a.id >= :anchorId))
+            ORDER BY a.publishAt ASC, a.id ASC
+            """)
+    List<Announcement> findBulletinFeedFrom(@Param("category") AnnouncementCategory category,
+                                            @Param("status") AnnouncementStatus status,
+                                            @Param("now") LocalDateTime now,
+                                            @Param("anchorAt") LocalDateTime anchorAt,
+                                            @Param("anchorId") Long anchorId,
+                                            Pageable pageable);
+
+    /**
      * 未读公告数：可见公告 − 该用户已读（NOT EXISTS 派生，对齐站内信 unread-count 模式）。
      * <p>
      * excludeCategory 由公告侧传 FLASH（快讯无已读回执，<b>绝不能计入公告未读数</b>——

@@ -72,5 +72,19 @@ public record CreateVenueRequest(
         @Size(max = 10)
         List<@Size(max = 20) String> tags,
 
-        Integer sortWeight
+        Integer sortWeight,
+
+        /**
+         * 变更来源声明（2026-09-14 新增，V25；方案见 docs/agents/48）。
+         * <p>
+         * 本接口（{@code POST /venues/{id}/update}）默认是<b>人工编辑通道</b>：状态变更视为
+         * 人工判断，会打「人工锁」（锁内外部舞讯通道不得覆盖）。
+         * 但 Agent/Skill 也会经此接口做程序化写库（CLOSED → OPEN 恢复营业、营业时段回填），
+         * 那属于外部通道，必须受门禁约束，否则本接口就是绕过人工锁的后门。
+         * <p>
+         * 取值：{@code "AGENT_BATCH"} = 程序化外部写库（受门禁约束，被拦时**资料照改、状态不动**）；
+         * {@code null} / 其他 = 人工编辑（默认，前端编辑表单不传即走此路）。
+         */
+        @Size(max = 20)
+        String changeSource
 ) {}

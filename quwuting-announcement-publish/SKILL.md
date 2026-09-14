@@ -11,6 +11,16 @@ agent_created: true
 > 后端 `announcement/` 包（AnnouncementService 状态机）。数据更新公告固定模板的维护以
 > `quwuting-venue-daily-sync` 为准，两处改动须双向同步。
 
+## ⓪ 运行前必做 · Skill 双副本同步（2026-09-14 用户要求：每次跑 Skill 前都先同步）
+
+```bash
+bash /Users/xin.y/WeChatProjects/quwuting-service/scripts/sync-skills.sh
+```
+
+权威方向 = **项目路径**（`quwuting-service/quwuting-*`，Git 可回溯）→ 运行时镜像
+`~/.workbuddy/skills/`；脚本单向镜像 + 覆盖前自动备份，只读检查加 `--check`。
+**只改项目侧 = 本轮跑的还是旧契约**（本项目 Skill 一律双副本），故先同步再动手。
+
 ## 🚫 红线（最高优先，违反即事故）
 
 1. **公告是面向全体用户的对外动作**：发布前必须用户明确确认（用户本轮指令明说

@@ -14,8 +14,18 @@
 > toggle）+ 消息菜单呼出范围扩到**整行**，服务端接口 / 数据模型**零改动**；前端细节与判据
 > 以 `quwuting/docs/agents/47-bulletins.md` §7.4.4 为权威。
 >
-> ⚠️ **本文件在两仓各存一份**（`quwuting/docs/agents/` 与 `quwuting-service/docs/agents/`），
-> 内容保持完全一致，改动须双向同步（同 skill 双位置约定的理由：两仓是独立 Git 仓库）。
+> **2026-09-14 六次迭代：游标窗口 + 详情页退役（跨端契约变更，§4.1）**——用户需求：
+> ①「记住已读位置、下次进入在未读/已读之间显示未读分割并自动定位」；②「分享卡片不进
+> 详情页、直接定位到消息列表的位置」。服务端改动 = `GET /bulletins` 增加**游标模式**
+> （`beforeId`/`fromId`，Repository 新增 `findBulletinFeedBefore` / `findBulletinFeedFrom`，
+> Service 新增 `listByCursor`；**页码模式保留**——线上旧版小程序契约不可变）；**无迁移**。
+> 前端改动 = 首屏改「最新一屏」+ 未读分割自动定位 + 顶部向上加载更早 + 分享落地中转页
+> `pages/bulletin-landing`；**快讯详情页退役**（用户端 `GET /bulletins/{id}` 前端无消费方，
+> 接口保留）。判据与前端细节以 `quwuting/docs/agents/47-bulletins.md` §7.10/§7.11 为权威。
+>
+> ⚠️ **本文件在两仓各存一份**（`quwuting/docs/agents/` 与 `quwuting-service/docs/agents/`）：
+> **跨端契约（接口形状 / 枚举 / 数据模型 / 迁移）的改动必须双向同步**；前端页内细节以
+> `quwuting/docs/agents/47-bulletins.md` 为权威（两仓是独立 Git 仓库，漏同步不会报错）。
 >
 > 后端实现：`org.quwuting.quwutingservice.bulletin` 包；数据结构复用公告表
 > （`qwt_announcements` + `category='FLASH'`）；迁移 `V18__bulletins.sql`（内容字段）
@@ -174,6 +184,7 @@ CREATE INDEX qwt_idx_br_bulletin ON qwt_bulletin_reactions (bulletin_id, deleted
 | `findPageByFilters` | 同上 | 同上 |
 | `countUnread` | `excludeCategory=FLASH`（**快讯无已读回执，绝不能计入公告未读数**，否则红点永不收敛） | 不使用 |
 | `findBulletinFeedPage`（2026-09-11 新增） | 不使用 | **快讯信息流专属，时间正序** `ORDER BY publishAt ASC, id ASC`（旧 → 新，最新一条钉在底部——聊天式信息流）。**公告域契约冻结，不能改公共 `findVisiblePage` 的倒序**（公告"新发布的置顶强触达"语义不动），故快讯倒排用独立方法，只服务信息流 |
+| `findBulletinFeedBefore` / `findBulletinFeedFrom`（2026-09-14 新增，游标窗口） | 不使用 | **快讯游标窗口**（尾部优先改造）：Before = 严格早于 `(publishAt, id)` 游标的最后 size 条（倒序取、调用方反转；`hasCursor=false` = 无上界即最新一屏）；From = 不早于锚点的前 size 条（含锚点）。游标键与排序键同源，判据见 §4.1 实现速查 |
 
 服务端还有一道防御：`AnnouncementService#rejectFlashCategory` —— 公告管理端
 `create`/`update` 若收到 `category=FLASH` 直接 400。反向同理：
@@ -197,10 +208,18 @@ CREATE INDEX qwt_idx_br_bulletin ON qwt_bulletin_reactions (bulletin_id, deleted
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/bulletins?page=&size=` | 信息流（PUBLISHED + 已生效，**时间正序 `publishAt ASC, id ASC`——最新一条在底部**，2026-09-11 用户拍板；分页游标 = 页码）；**每项含 `content` 全文 + `reactions` + `viewCount`** |
-| GET | `/bulletins/{id}` | 详情（markdown 原文 + `reactions` + `viewCount`；未发布/已下线/已删/非 FLASH → 404） |
+| GET | `/bulletins?page=&size=&beforeId=&fromId=` | 信息流（PUBLISHED + 已生效，时间正序 `publishAt ASC, id ASC`）。**2026-09-14 起双模式**：<b>游标模式</b>（任一游标参数出现即触发，before 优先）：`beforeId=0` 哨兵 = **最新一屏**（首屏默认）；`beforeId>0` = 严格早于该条的最后 size 条（正序返回，向上加载更早）；`fromId>0` = 不早于该条的前 size 条（含锚点——分享落地定位与静默收敛/触底增量，末条重复由前端按 id 去重）。<b>页码模式</b>（不传游标）：维持 2026-09-11 既有语义，<b>线上旧版本小程序仍在用，契约不可变</b>。游标模式 hasMore 由前端按「返回条数 &lt; size」判定（keyset 判据，`totalElements` 只填本页条数）；**每项含 `content` 全文 + `reactions` + `viewCount`** |
+| GET | `/bulletins/{id}` | 详情（markdown 原文 + `reactions` + `viewCount`；未发布/已下线/已删/非 FLASH → 404）。⚠️ **2026-09-14 起前端无消费方**（快讯详情页退役），接口保留（管理端/AI 调试可直取） |
 | POST | `/bulletins/{id}/reactions/{code}` | **表态 toggle**（参与 / 取消 / 换票） |
 | POST | `/bulletins/views` | **浏览上报**（2026-09-11，body = `{ids: [..]}`；信息流展示即计，fire-and-forget，按 用户×快讯×天 去重，见「九、快讯浏览统计」） |
+
+**游标实现速查（2026-09-14）**：Repository `findBulletinFeedBefore`（`ORDER BY
+publishAt DESC, id DESC` 取 size 条，调用方反转；`hasCursor=false` = 无上界）/
+`findBulletinFeedFrom`（正序含锚点）——**游标排序键与 feed 排序同源 `(publishAt, id)`**，
+裸 id 比较会在"回填历史 publishAt"的条目上漂移（补录旧事 id 大但时间早）；Service
+`listByCursor`：锚点条目被删/下线时**回退最新一屏**（不报错）；游标条件假定
+publishAt 非空（快讯发布路径恒写入，NULL 理论残留不参与窗口）。返回形状仍是
+`Page`（与页码模式同型，前端共用解析类型）。
 
 - 列表项 DTO = `BulletinFeedItemResponse`（**原 `BulletinSummaryResponse` 已删除**：
   它是"只带标题的摘要"，在信息流里语义已不成立）；与详情 DTO 的差别只剩

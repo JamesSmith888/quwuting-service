@@ -1,6 +1,6 @@
 ---
 name: quwuting-venue-daily-sync
-description: 去舞厅（quwuting）每日舞讯采集与门店维护工作流。当需要从舞讯源（默认砂舞线报网 xianbao360）或用户提供的非结构化文本中提取「当日营业门店」信息，与平台门店比对，列出未录入新店（待放行清单，须用户确认后才录入）与可更新状态门店（状态反转 / 白名单口径置暂停）时使用。核心四步：采集舞讯（含覆盖城市集合）→ 按量拉取平台门店候选 → 城市+名称+地址比对（开门/关门双方向）→ 差异五表 + 全源一致数据直接写库（新店建档须用户放行）、冲突/单源数据人工核实。
+description: 去舞厅（quwuting）每日舞讯采集与门店维护工作流。当需要从舞讯源（默认砂舞线报网 xianbao360）或用户提供的非结构化文本中提取「当日营业门店」信息，与平台门店比对，列出未录入新店（待放行清单，须用户确认后才录入）与可更新状态门店（状态反转 / 白名单口径置暂停）时使用。核心四步：采集舞讯（含覆盖城市集合）→ 按量拉取平台门店候选 → 城市+名称+地址比对（开门/关门双方向）→ 差异五表 + 全源一致数据直接写库（新店建档须用户放行）、冲突/单源数据人工核实。**尊重人工权威层级**（V25）：管理员手工改过的状态有人工锁、结构性例外门店有永久豁免，这两类由服务端门禁自动跳过，采集侧只如实汇报、不得绕过。
 agent_created: true
 ---
 
@@ -9,6 +9,22 @@ agent_created: true
 > **本文件 = 红线 + 当前口径 + 操作步骤**（2026-09-10 拆分瘦身）。
 > 历轮实证细节、踩坑复盘、沿革全部下沉到 `reference/`——需要「为什么会这么做」时按下表查，
 > **不要**把实证细节再写回本文件（主文件保持可一眼扫完）。
+
+## ⓪ 运行前必做 · Skill 双副本同步（2026-09-14 用户要求：每次跑 Skill 前都先同步）
+
+```bash
+bash /Users/xin.y/WeChatProjects/quwuting-service/scripts/sync-skills.sh
+```
+
+- **权威方向 = 项目路径**（`quwuting-service/quwuting-*`，Git 可回溯）→ 运行时镜像
+  `~/.workbuddy/skills/`。脚本只做**单向镜像**（不做双向合并，避免静默吞掉一侧改动），
+  覆盖前自动备份到 `~/.workbuddy/skills/.sync-backup/<时间戳>/`。
+- 只想知道有没有漂移：加 `--check`（只读，有差异退出码 1）。
+- **为什么必须有这一步**：运行时加载的是 `~/.workbuddy/skills/` 那一份 —— 只改项目侧 =
+  本轮跑的还是**旧契约**（2026-09-14 实证：bulletin 项目侧五稿已删 `title` 字段，
+  运行时侧仍是二稿口径，照着写会带出被服务端忽略的字段）。
+- 脚本会顺带报「无项目源、未纳入版本管理」的 Skill（当前：`quwuting-backend-deploy` /
+  `quwuting-miniprogram-change`）。
 
 ## 📚 参考文档索引（按需查，不是必读）
 
@@ -42,8 +58,15 @@ CEASED 而平台已 OPEN，用户投诉「明明营业却显示停业」，详�
 2. **时效性**：舞讯优先用**当天**发布的文章；无当天才放宽到最近日期，并在汇报中注明实际
    报告日期（防把旧舞讯当新数据写库）。
 3. **状态双向 · 白名单口径（2026-09-10 拍板，推翻旧「单向保守」）**——舞讯 = 当日营业白名单：
+   - 🗣 **一句话口径（2026-09-14 用户复述确认，最高优先的直觉版）**：
+     **舞讯点到的城市里，列出来的店 = 正常营业；没列出来、且平台已收录的店 = 关门（置暂停营业）。**
+     **舞讯压根没提的城市（例：报了西安/成都、没提上海）→ 整城忽略，一家都不动。**
+     判别顺序永远是「先看城市有没有被覆盖，再看店里有没有上榜」——**城市覆盖是硬边界，
+     没被覆盖的城市连推断资格都没有**（「未上榜」只有在「该城确实被点名」时才等于「关门」）。
    - **开门方向**：舞讯点名营业、平台为 CEASED/SUSPENDED → 反转为 OPEN。
    - **关门方向**：**舞讯点名覆盖的城市**内、**未上榜**且平台为 **OPEN** 的门店 → 置 **SUSPENDED**。
+     ⚠️ 本方向**仍受「多来源确认门」约束**（下方 Step 4）：城市被**单一源**覆盖时**不自动写库**、
+     进人工清单；「未提及即关门」是**语义**，不是「跳过确认门」的授权。
    - 🔒 **城市边界是硬约束**：只对「该城确有门店名单」的城市做关门推断，**未覆盖城市一律不动**；
      舞讯里只有城市名却无名单的（「未有待更新」「待定」「无商家信息」）**视同未覆盖**。
      服务端不做城市推断（分不清「未上榜」与「该城没被覆盖」），**范围一律由 Skill 侧算好再提交**。
@@ -60,27 +83,40 @@ CEASED 而平台已 OPEN，用户投诉「明明营业却显示停业」，详�
    ⚠️ 建档内容口径不变：默认只建 name+city（+已知 district），不编造地址/电话/时段/照片。
 5. **幂等不重复**：新增（**经用户放行后**）必查「同城同名不存在」；写库后如实汇报 CREATED/EXISTED/FAILED 明细。
 
-## 🔄 双位置同步约定（2026-09-07 用户要求，最高优先）
+## 🔄 双位置同步约定（2026-09-07 建立，2026-09-14 收敛为脚本，最高优先）
 
-本 Skill 存在**两份副本**，任何改动都必须保持同步，**Git 侧以项目路径为准**：
+本 Skill 存在**两份副本**，任何改动都必须保持同步，**项目路径 = 权威源**：
 
 - **项目路径（源文件，可提交）**：`/Users/xin.y/WeChatProjects/quwuting-service/quwuting-venue-daily-sync/`
 - **用户路径（运行时加载）**：`~/.workbuddy/skills/quwuting-venue-daily-sync/`
 
-**同步规则**：
-1. 会话开始：`diff` 两边全部文件（SKILL.md / scripts/ / reference/），以**较新一方**覆盖另一方
-   （应包含 `reference/` 下所有文档，不只是三件套）。
-2. 改动后：**先写项目路径，再整体 `cp -R` 到用户路径**（排除 `.DS_Store` / `__pycache__`），
-   保证 Git 侧始终是权威版本。
-3. 判别新旧：比对字典 JSON 的 `updated` 字段 + 文件 mtime；无法判断时问用户。
+**同步规则（一律走脚本，别手抄 diff/cp）**：
+
+1. **会话开始 / 每次运行本 Skill 前**：跑 `bash /Users/xin.y/WeChatProjects/quwuting-service/scripts/sync-skills.sh`
+   （覆盖 `SKILL.md` + `scripts/` + `reference/` 全部文件；只读检查加 `--check`）。
+2. 改动后：**先写项目路径，再跑同一个脚本**落地到用户路径 —— 保证 Git 侧始终是权威版本。
+3. **方向恒为「项目 → 运行时」单向镜像**（2026-09-14 修正旧「较新一方覆盖另一方」）：
+   双向判新旧会在两侧都有改动时静默吞掉一侧；脚本覆盖前自动备份原镜像，
+   万一运行时侧才是新的，从 `~/.workbuddy/skills/.sync-backup/<时间戳>/` 取回即可。
 
 ## 前置条件
 
 - 后端地址 `BASE_URL`（本地 http://localhost:8080；切生产前必须问用户）。
 - 管理凭据：`WEB_ADMIN_PASSWORD` 对应的账号密码（后端 `web-auth.username` 默认 admin），走
   `POST /web-auth/password-login` 换 JWT，再以 Bearer 调 `/admin/**`。
+  📍 **本地 develop 密码落点（别再翻仓库找）**：`quwuting-service/src/main/resources/application-mysql.yaml`
+  → `web-auth.password`（当前 `qwt-admin-dev-2026`）；生产走环境变量 `WEB_ADMIN_PASSWORD`，**不读文件**。
+  登录一次即写 `/tmp/qw_token.json`，后续命令自动复用 —— 不必每条命令手拼 `export ADMIN_TOKEN`。
 - 辅助脚本 `scripts/qw_api.py`（Python3 标准库，零依赖）：`login` / `export` / `cities` /
   `batch-create` / `status-reverse` / `status-suspend`。
+- 比对脚本 `scripts/qw_match.py`（2026-09-14 新增，同为零依赖）：**Step 2+3 的整套比对引擎**
+  ——吃 `mentions JSON`（Step 1 产出）+ 自带全量 export 拉取，走「别名域 → 字典 → 规则层 → 三道兜底
+  （含 keyword 交叉验证）」，落盘命中 JSON + 摘要。**别再每轮手写 matcher**（手写极易漏兜底、
+  漏字典脚本化查表）。用法见脚本头部 docstring。
+- 分析脚本 `scripts/qw_analyze.py`（2026-09-14 新增）：**Step 3B + Step 4 五表分级的 analyze 段**
+  ——吃命中 JSON + 平台全量，算「表①/② 反转候选、表③ 新店候选、表⑤ 暂停候选（白名单差集 +
+  范围细化 + 守卫剔除）」，并打印**提交前自检**（覆盖城市、仅有城市名无名单的 header、县级回挂、
+  暂停家数与城市分布）。范围细化第三条规则由平台 district 数据驱动，**不再手抄县级→母城映射**。
 
 ## 工作流（采集 → 比对 → 五表 → 分级执行）
 
@@ -91,17 +127,29 @@ CEASED 而平台已 OPEN，用户投诉「明明营业却显示停业」，详�
    的文章（标题形如「全国砂舞厅开门营业最新消息-2026.09.01」）；无当天才取最近一篇并记录实际报告日期。
 2. WebFetch 抓正文（按「城市词 + 门店名列表」行式组织；`{晚}/{早午}` = 场次标记、`*` = 近期调整大、
    `（中）（西）` = 城市内分区）。页脚/JS/统计脚本混入时只取正文。
-3. 提取为 `[{city, name, note}]`：city = 平台标准城市名；name 保留粘连 token 原样（比对阶段再拆）；
-   note = 场次/标记。
-4. **额外产出「覆盖城市集合」`coveredCities`（关门方向的唯一依据）**：只把**确有门店名单**
-   （城市名下至少 1 个门店名）的城市计入；城市名出现但内容为「未有待更新/待定/无商家信息/空白」
-   的**一律不计入**。多源取各源覆盖的**并集**。
-   ⚠️ **城市名必须先归一（去「市」）再比较**——A 源「成都」/ B 源「成都市」不归一会让同一城
-   变成两个 key、集合求交为 ∅，把**双源误判成单源**（静默失败、不报错）。细则见
-   `matching-playbook.md § 城市名归一`。
+3. 提取为 **`mentions JSON`**（Step 1 的唯一交付物，也是 `qw_match.py` 的入参契约）：
+   ```json
+   {
+     "reportDate": "2026-09-14",
+     "sources": ["xianbao360"],           // ⚠️ 按「正文是否独立」计，转述同源 ≠ 两源
+     "noListHeaders": ["扬中", "泰州"],    // 只出现城市名、未列门店的 header（视同未覆盖）
+     "mentions": [{"city": "成都", "name": "天涯", "note": ""}]
+   }
+   ```
+   - `city` 保留舞讯原写法（简称/县级 header 原样），**归一与回挂母城交给脚本**（不要在这儿手改）；
+   - `name` 保留粘连 token 原样（拆分交给比对阶段）；`note` = 场次/分区标记（`[晚]`/`（中）`）；
+   - `noListHeaders` **必须人工填**——「只有城市名没名单」的 header 不产生 mention，脚本无从发现，
+     漏填会让该城被误判为「没被覆盖」以外的景象（实际影响：该城不进 covered，效果等同未覆盖，**安全**；
+     填了的价值在汇报时能显式说明「这些城市整城未动」）。
+4. **覆盖城市集合 `coveredCities` 不再手工维护**：由 `qw_analyze.py` 从 `mentions` 反推
+   （只认确有门店名单的 header），并在自检行打印。手工那份容易与 mentions 漂移。
 
 **方式 B · 用户提供非结构化数据**：LLM 提取同样的 `[{city, name, note}]`，逐条标注来源
 （用户原话/哪个群/哪张截图），存疑条目单独列出问用户。
+⚠️ **来源计数按「正文是否独立」判，不按「谁来转述」判**（2026-09-14 实证）：用户粘贴的名单
+若与某源站正文**逐条一致** ⇒ 属**同一来源**，**不得计为两源**（否则全源一致门被空转绕过）。
+单源日的正确行为 = 两个方向都只列「待放行清单」，用户点到哪条才执行哪条
+（用户说「发公告」**不等于**放行暂停方向——公告只承载恢复/新增正向内容）。
 
 > 🚫 **不依赖 quwuting-ops 的 Python 管线脚本**（2026-09-01 用户明确）：采集/解析/提取一律用
 > Agent 自身能力（WebFetch + LLM），**禁止**调用 `quwuting-ops/venue-opening` 的 `main.py` /
@@ -109,29 +157,42 @@ CEASED 而平台已 OPEN，用户投诉「明明营业却显示停业」，详�
 
 ### Step 2 拉取平台门店候选
 
-1. **登录**：token 顺序 = `--token` / `ADMIN_TOKEN` 环境变量 / `/tmp/qw_token.json` 缓存。
-   ⚠️ `qw_api.py` **不自动读缓存**，且变量名必须是 `ADMIN_TOKEN`（写 `TOKEN=` 无效）。401 再 login。
+> 🔧 **2026-09-14 起本步 + Step 3 + 3B 由脚本承担**：`python3 scripts/qw_match.py --mentions <m.json>
+> --out <match.json> --base-url <BASE_URL>` —— 自带登录态、全量翻页、建索引、比对、落盘。
+> 下列文字是**契约与原理**（脚本行为不符合预期时按它排查、改脚本时按它对齐），
+> 不是「每次手工执行一遍」的操作清单。
+
+1. **登录**：token 顺序 = `--token` / `ADMIN_TOKEN` 环境变量 / `/tmp/qw_token.json` 缓存
+   （2026-09-14 起 `qw_api.py` **login 成功自动写缓存、后续命令自动读缓存**，闭环了）。
+   变量名必须是 `ADMIN_TOKEN`（写 `TOKEN=` 无效）。401 再 login。
    有效性一句话验证：`curl -H "Authorization: Bearer $TOKEN" $BASE_URL/admin/venue-sync/reversals?limit=1`。
 2. **拉取候选，两档路径**：
    - 覆盖城市 **≤5**：逐城 `--city 成都市`；
    - 覆盖城市 **>5**（全国级舞讯常态）：**不带 city 全量翻页**（`size=500`，page 递增；平台现量
-     ~1000 家两页完事，export 自带 `id ASC` 稳定排序）。⚠️ 全量拉后用 `GET /venues/cities`
-     核对词表，**平台未覆盖城市的舞讯条目直接剔出比对集**（归表④），切勿混入邻近城市。
-3. 建索引 `city → [(venueId, name, district, address, status, aliases)]`——**export 自带 `aliases`**，
-   是舞讯名归位的权威运行时数据，必须带上。
+     ~1000 家三页完事，export 自带 `id ASC` 稳定排序；分页字段在 `data.content`，
+     终止判据 `data.last`）。⚠️ 全量拉后用 `GET /venues/cities` 核对词表，
+     **平台未覆盖城市的舞讯条目直接剔出比对集**（归表④），切勿混入邻近城市。
+3. 建索引 `city → [(venueId, name, district, address, status, aliases, statusSource, statusLockedUntil, dailySyncExempt, syncNote)]`
+   ——**export 自带 `aliases`**，是舞讯名归位的权威运行时数据，必须带上；
+   后 4 个字段是 2026-09-14 新增的**人工权威层级**（V25，见下方 Step 3B 末「人工权威门禁」）：
+   **只用于「标注 + 汇报」，不要拿它们自己再判一遍门禁**（判定唯一实现在服务端）。
+   ⚠️ 后 3 个是引用类型、**null 时 key 直接不出现**（Jackson NON_NULL），别误判成「字段没实现」。
 
 > 为什么必须稳定排序、翻页漂移事故、keyword 编码坑 → `troubleshooting.md`。
 
 ### Step 3 比对（城市 + 名称 + 地址 + 别名，规则 + 语义）
 
-对每条舞讯记录在**同城候选**内比对（同名不同城 = 两家店，必须同城过滤）。判定优先级：
+对每条舞讯记录在**同城候选**内比对（同名不同城 = 两家店，必须同城过滤）。判定优先级
+（**这条优先级链已固化在 `scripts/qw_match.py`，改判据改脚本，别在会话里即兴发挥**）：
 
 1. **平台别名域最高优先**：舞讯名 ∈ 同城候选 `aliases` → 直接判高置信 EXACT 级。
 2. **数据源匹配字典**：查 `reference/<数据源>-venue-dict.json`（**脚本化 `json.load` 查表，禁止手抄**），
    命中即按 kind 定置信度。
 3. **规则层**（下表）+ **LLM 语义兜底**（错别字/谐音/简称/方言；低置信一律归 CONTAINED）。
-4. **UNMATCHED 兜底**（两道，见 `matching-playbook.md`）：首二字子串 + 长度差 ≤6；
-   **形近字规则**（同城 + 等长 + 末字同 + 候选唯一）——漏判代价是该店被误当新店建档。
+4. **UNMATCHED 兜底**（三道，见 `matching-playbook.md`）：首二字子串 + 长度差 ≤6；
+   **形近字规则**（同城 + 等长 + 末字同 + 候选唯一）；**keyword 交叉验证前置**（2026-09-14 新增：
+   每条 UNMATCHED 进表③前必做一次 `GET /venues?keyword=`，兜住「短名点名长名店」这类两道都漏的情况）
+   ——漏判代价是该店被误当新店建档 / 或正本落进表⑤被误暂停。
 
 | 置信度 | 判定规则 | 动作 |
 |---|---|---|
@@ -148,6 +209,9 @@ CEASED 而平台已 OPEN，用户投诉「明明营业却显示停业」，详�
   按 `next_action` 复核，不重复误判。
 
 ### Step 3B 关门方向比对（白名单差集）
+
+> 🔧 **2026-09-14 起由 `python3 scripts/qw_analyze.py --match <match.json> --export <export.json>`
+> 承担**：输出 `suspend_items`（已过闸门、已剔守卫）+ 自检行。下列是契约与原理。
 
 算「谁没上榜」——**只对 `coveredCities` 内的城市做**，未覆盖城市完全不处理（硬边界）：
 
@@ -174,6 +238,27 @@ CEASED 而平台已 OPEN，用户投诉「明明营业却显示停业」，详�
 9. **口径修正后可直接重跑整批**：`batch-suspend` 与 `status-reverse` 都幂等（非目标状态静默跳过），
    两方向互不干扰、可放心重跑；想让汇报口径干净再自行 diff 上一批 ID。
 
+> 🔒 **人工权威门禁（V25，2026-09-14 起，必须理解再动手）**
+>
+> **背景**：舞讯是第三方整理，**会漏报/误报**；管理员手工修正过的状态是更权威的判断。
+> 服务端已把「人工直改 > 外部舞讯推断」落成**领域不变量**：
+> - 人工改状态 ⇒ 打**人工锁**（置 OPEN 锁 3 天、置停业类锁 7 天，运营可配）；
+> - 外部舞讯通道（`batch` / `batch-suspend`）写库前逐店过门禁：**已豁免 → 跳过（EXEMPT）**、
+>   **锁未过期 → 跳过（LOCKED）**；跳过**不写库、不通知、不发公告**，只在返回体如实列出；
+> - 锁到期自动失效、回归自动同步；反复冲突的店应升级为**永久豁免**（`daily_sync_exempt`），
+>   而不是继续加长锁——问题是结构性的（该店不在舞讯覆盖范围 / 被系统性漏报），不是时间性的。
+>
+> **对本 Skill 的要求（三件事，别多做）**：
+> 1. **不要自己判门禁**。门禁唯一实现在服务端；export 里的三个字段只用来在差异表里
+>    **标注**「这家有人工状态，本轮预计被跳过」，以及交叉核对服务端返回的 `skipped`。
+> 2. **必须如实汇报跳过**。两个通道返回体都带 `skippedLocked` / `skippedExempt` / `skipped[]`
+>    （含 venueId、门店名、原因、锁到期时刻）。**汇报时必须单列**，否则用户看到「该暂停的没暂停」
+>    会以为是漏跑 —— 这是门禁在工作，不是失败。
+> 3. **禁止经 `POST /venues/{id}/update` 改状态**（详见 Step 4 结尾的提醒）。
+>
+> ⚠️ **关门方向的「≥2 源覆盖才自动写库」不变**（2026-09-14 用户确认保留）：「未提及即关门」是
+> **语义**，不是跳过确认门的授权。单源覆盖城市照旧不自动写库、进人工清单。
+
 ### Step 3.5 存疑门店联网核实（UNMATCHED 录入前防「假新店」）
 
 UNMATCHED 标记为「新店候选」前，若存疑先联网核实。数据源优先级：
@@ -188,11 +273,11 @@ UNMATCHED 标记为「新店候选」前，若存疑先联网核实。数据源�
 
 | # | 分类 | 判定 | 执行 |
 |---|---|---|---|
-| ① | **可直接更新 · 开门** | `M == S` + EXACT/ALIAS + 平台 CEASED/SUSPENDED | **直接执行**反转，写库后直发公告 |
+| ① | **可直接更新 · 开门** | `M == S` + EXACT/ALIAS + 平台 CEASED/SUSPENDED | **直接执行**反转，写库后直发公告（人工锁/豁免门店由服务端跳过） |
 | ② | **需用户核实**（冲突/单源/低置信，**且需动作**） | 冲突 / 单源 / CONTAINED **且平台为 CEASED/SUSPENDED** | 列「管理员手动核实」清单，逐条放行后才写 |
 | ③ | **平台未维护**（新店候选） | `M == S` + UNMATCHED + keyword 交叉验证同城确无同名 | **不自动建档**（09-11 起）：全源一致也只进「待放行清单」，用户放行后才 batch-create |
-| ④ | **参考信息**（无需动作） | 命中但平台已 OPEN；未覆盖城市的零星点名 | 仅展示不写库 |
-| ⑤ | **可直接暂停 · 关门** | `coveredCities` 内 + `M == ∅` + 平台 OPEN（守卫/冲突已剔除） | **直接执行** status-suspend（**不发公告**） |
+| ④ | **参考信息**（无需动作） | 命中但平台已 OPEN；未覆盖城市的零星点名；人工锁/豁免门店 | 仅展示不写库（人工锁/豁免的在差异表**标注**原因） |
+| ⑤ | **可直接暂停 · 关门** | `coveredCities` 内 + `M == ∅` + 平台 OPEN（守卫/冲突已剔除） | **直接执行** status-suspend（**不发公告**；人工锁/豁免门店由服务端跳过） |
 
 > 🔑 **表② 必须加「需要动作」闸门（2026-09-10 实证）**：只有平台为 CEASED/SUSPENDED 的
 > 冲突/单源/低置信条目才进人工清单；**平台已 OPEN 的一律归表④**——列进去只是噪音
@@ -224,6 +309,7 @@ UNMATCHED 标记为「新店候选」前，若存疑先联网核实。数据源�
   items = `{"venueId","reportDate","sourceId","status":"OPEN","confidence"}`。
   自动注入 `"source":"AGENT_BATCH"`（V8 `change_source` 列，后台「更新记录」展示「批量更新」标签，
   与人工 ADMIN 区分），可 `--change-source` 覆盖。后端仅反转 CEASED/SUSPENDED → OPEN，其余静默跳过。
+  ⚠️ 返回体新增 `skippedLocked` / `skippedExempt` / `skipped[]`（V25 门禁）——**必须逐类汇报**。
 - **表② 反转**：同上，条目追加 `"forceReversal":true`。
 - **表⑤ 关门暂停**：`python3 scripts/qw_api.py status-suspend --items 'JSON数组' --report-date YYYY-MM-DD --base-url <BASE_URL>`
   items 只需 `{"venueId"}`（脚本补 reportDate/sourceId/source）。
@@ -231,6 +317,8 @@ UNMATCHED 标记为「新店候选」前，若存疑先联网核实。数据源�
   静默跳过；审计 changedBy=null + changeSource=AGENT_BATCH；关注者收站内信/订阅消息（大批量时
   消息量较大，属既有语义不是 bug）；**刻意不产生数据更新公告**。返回 `{total, suspended, venueNotFound, details}`。
   ⚠️ **城市范围必须由 Skill 侧算好**再提交，混入未覆盖城市会误伤。
+  ⚠️ 返回体新增 `skippedLocked` / `skippedExempt` / `skipped[]`（V25 门禁）——**必须逐类汇报**
+  （暂停方向一次几十上百家，用户最需要知道「有几家因为人工状态被保护住了」）。
 - **表③ 新店录入（⚠️ 仅限用户放行后执行，红线 4）**：`python3 scripts/qw_api.py batch-create --items 'JSON数组' --base-url <BASE_URL>`
   items = `{"name","city","district?","address?","status?"}`。同城同名返回 EXISTED 属正常。
   ⚠️ 请求体是 `{"items":[...]}` 包装（裸数组会 5000 报错）；batch-create **不落营业时段/经纬度**，
@@ -274,10 +362,24 @@ POST /admin/venue-aliases/batch-import
 
 - 汇总：各源实际报告日期、**`coveredCities`**、舞讯条目数、EXACT/ALIAS/CONTAINED/UNMATCHED 分布、
   反转 N 家、新增 M 家、**暂停 K 家（含城市分布）**、跳过 X（EXISTED/FAILED 明细）。
+- 🔍 **写库后必做「全量 export 逐店 diff」核验（2026-09-14 定为固定动作）**：写库前后各拉一份
+  全量 export，逐店比对 status。**diff 条数必须等于应变更条数**，且「无名单 header 城市」零变更。
+  09-14 实证：diff = 59（56 暂停 + 3 恢复），门店总数恒 1099，泰州/宁波零变更 —— 一条命令同时
+  证明「该做的做了、不该做的没做」。只报接口返回的 `total/suspended` 不够：**接口成功 ≠ 范围正确**。
 - 遗留：表② 人工核实清单、FAILED 原因、数据存疑点——列给用户，不静默吞掉。
 - **单源覆盖未写库的城市数必须显式说明**（否则用户以为漏跑）。
 - 暂停方向单列一行：「本批暂停 K 家（覆盖城市 A/B/C…），未覆盖城市未做任何推断」，
   让用户一眼核对城市边界。
+- 🔒 **门禁跳过必须单列一行**（V25）：「本轮 L 家因人工锁跳过 / E 家因已豁免跳过」+
+  可点的门店名（锁内还标出锁到期日）。⛔ **不要**把跳过混进「暂停 K 家」或「跳过 X」里，
+  也**不要**用「跳过」这个词笼统带过——用户需要区分「门禁保护住了人工判断」与「程序漏跑」。
+- **人工锁即将到期的门店可顺带提醒**：`statusLockedUntil` 在 7 天内的，值得问用户
+  「这家要不要设为永久豁免 / 要不要提前恢复自动同步」——尤其同一家店反复出现在跳过名单里时，
+  说明它是**结构性例外**（不在舞讯覆盖范围 / 被系统性漏报），继续靠锁是打补丁。
+- 📝 **收尾必须补 `reference/run-history.md` 跑批实录**（2026-09-14 补立）：一条一段，至少含
+  「输入来源与条数 / 覆盖城市数 / 五表结果与家数 / before-after diff 数字 / 门禁跳过数 /
+  公告编号 / 字典与别名回写 / 本轮新踩的坑」。**漏写这一条 = 下一轮无法回溯口径**
+  （09-13 那轮就因为没有实录，只能靠接口记录反推）。
 
 ### Step 6 公告发布
 
@@ -320,8 +422,11 @@ POST /admin/venue-aliases/batch-import
 |---|---|---|
 | POST | /web-auth/password-login | 登录换 JWT（body: {username, password}） |
 | GET | /venues/cities | 平台城市词表（公开） |
-| GET | /admin/venue-sync/venues/export?city=&status=&page=&size= | 候选门店按量加载（size≤500，轻量字段 + aliases） |
+| GET | /admin/venue-sync/venues/export?city=&status=&page=&size= | 候选门店按量加载（size≤500，轻量字段 + aliases + 人工权威层级四字段） |
 | POST | /admin/venue-sync/venues/batch-create | 批量新增门店（同城同名幂等） |
+| POST | /admin/venue-sync/guard/query | 读人工权威层级状态（MANUAL/SYNC + 锁到期 + 豁免），body `{venueIds:[…]}` |
+| POST | /admin/venue-sync/guard/unlock | 恢复自动同步（释放人工锁，幂等） |
+| POST | /admin/venue-sync/guard/exempt | 设/撤「不参与舞讯推断」永久豁免，body `{venueIds, exempt, note}` |
 | POST | /admin/venue-daily-openings/batch | 批量状态反转（停业/暂停 → 营业） |
 | POST | /admin/venue-daily-openings/batch-suspend | 批量置暂停营业（白名单口径，仅 OPEN→SUSPENDED） |
 | POST | /admin/venue-aliases/batch-import | 别名批量导入（幂等，单条失败不拖整批） |
@@ -336,10 +441,14 @@ POST /admin/venue-aliases/batch-import
 
 - **城市名对不上 / 该城整城没写库**：舞讯常用简称，先映射到平台标准词表；**多源比较前必须去「市」归一**。
 - **反转/暂停没生效**：后端只处理 `CEASED/SUSPENDED → OPEN` 与 `OPEN → SUSPENDED`，其余静默跳过
-  （正确行为）。若「该暂停的没暂停」，先查它是否被误算进 mentionedSet（别名没归位）或该城不在 `coveredCities`。
+  （正确行为）。若「该暂停的没暂停」，**先看返回体的 `skippedLocked` / `skippedExempt`**——
+  这家店多半有人工锁或已豁免（V25 门禁，属正常保护，不是漏跑）；再查它是否被误算进
+  mentionedSet（别名没归位）或该城不在 `coveredCities`。
 - **怀疑「假新店」**：`GET /venues?keyword=<店名>` 交叉验证一次；⚠️ kwyword 参数必须 URL 编码
   （中文直接拼会 400），推荐 `urllib.parse.urlencode(...)`。
-- **CLOSED 门店恢复营业**：CLOSED 不在批量反转范围，须 `POST /venues/{id}/update` 全量回填
-  （字段来源 = 公开 `GET /venues/{id}`，`status` 换 OPEN 后原样回填，防字段被清 null）。
+- **CLOSED 门店恢复营业**：CLOSED 不在批量反转范围。走 `POST /venues/{id}/update` 全量回填时
+  **必须带 `"changeSource":"AGENT_BATCH"`**——不带会被当成「人工编辑」而给这店打上人工锁
+  （下次舞讯就动不了它了，且用户会以为平台卡住）；带了则受门禁约束，被拦时**资料照改、状态不动**
+  （属正常保护）。CLOSED/RENOVATING 本身不在两个舞讯通道的作用域内，天然不受影响。
 - **门店删除/清理重复**：后端**无门店删除接口**（项目禁 PUT/DELETE）——Agent 识别到同名同址重复
   条目时**不代删、不自动反转**，呈「疑似重复」交用户决策；字典 `removed_duplicates` 仅登记用户已删确认的店。

@@ -1,5 +1,6 @@
 package org.quwuting.quwutingservice.venuesync.dto.response;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -13,14 +14,25 @@ import java.util.List;
  * 2026-09-08 增补 aliases：门店别名字段（{@code qwt_venue_aliases}）是舞讯名归位的
  * 权威运行时数据——Skill 比对时舞讯名命中别名即高置信 EXACT 级（曾用名/错别字
  * 均已在库），无需再走字典猜测。
+ * <p>
+ * 2026-09-14 增补三个「权威层级」字段（V25，方案见 docs/agents/48）：
+ * {@code statusSource} / {@code statusLockedUntil} / {@code dailySyncExempt}。用途是
+ * <b>展示与汇报</b>，不是让 Skill 自己再实现一遍门禁——门禁判定唯一实现在服务端
+ * （{@code VenueStatusGuardService}），Skill 拿这三个字段只是为了在差异表里标注
+ * 「这家店有人工状态，本轮会被门禁跳过」，以及把跳过条目如实汇报给用户。
+ * 两处各写一份判定逻辑必然漂移，故这里只读不判。
  *
- * @param venueId 平台门店 ID
- * @param name    门店名称
- * @param city    城市（标准行政区划名）
- * @param district 区县（可空）
- * @param address 地址（可空）
- * @param status  营业状态枚举名（OPEN/RENOVATING/CLOSED/SUSPENDED/CEASED）
- * @param aliases 有效别名列表（无别名时为空列表，2026-09-08 增补）
+ * @param venueId          平台门店 ID
+ * @param name             门店名称
+ * @param city             城市（标准行政区划名）
+ * @param district         区县（可空）
+ * @param address          地址（可空）
+ * @param status           营业状态枚举名（OPEN/RENOVATING/CLOSED/SUSPENDED/CEASED）
+ * @param aliases          有效别名列表（无别名时为空列表，2026-09-08 增补）
+ * @param statusSource     状态来源（MANUAL 人工直改 / SYNC 自动 / null 旧数据，2026-09-14 增补）
+ * @param statusLockedUntil 人工锁到期时刻（null = 无锁或已过期，2026-09-14 增补）
+ * @param dailySyncExempt  是否永久豁免舞讯推断（2026-09-14 增补）
+ * @param syncNote         人工备注：改状态 / 设豁免的原因（可空，2026-09-14 增补）
  */
 public record VenueExportItem(
         Long venueId,
@@ -29,5 +41,9 @@ public record VenueExportItem(
         String district,
         String address,
         String status,
-        List<String> aliases
+        List<String> aliases,
+        String statusSource,
+        LocalDateTime statusLockedUntil,
+        boolean dailySyncExempt,
+        String syncNote
 ) {}

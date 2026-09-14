@@ -20,12 +20,14 @@ import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -111,6 +113,80 @@ public class BulletinService {
         return found.map(a -> toFeedItem(a,
                 reactions.getOrDefault(a.getId(), Collections.emptyList()),
                 viewCounts.getOrDefault(a.getId(), 0L)));
+    }
+
+    /**
+     * 游标取页（2026-09-14「尾部优先」改造，docs/agents/47 §4.1；需登录）。
+     * <p>
+     * <b>为什么快讯要游标而不是页码</b>：信息流是时间正序、最新沉底，而「记住已读位置 +
+     * 自动定位到未读」要求首屏直接拿到<b>最新的</b>一屏——页码模型下"最新一页"必须先
+     * 探总数再按页码倒推（两次请求且分页边界随删改漂移）；游标模型下三个动作
+     * （首屏最近一屏 / 向上加载更早 / 从某条向新）各是一个 keyset 窗口，一次请求直达。
+     * <p>
+     * 参数语义（{@code beforeId} 与 {@code fromId} 互斥，同时出现时 before 优先）：
+     * <ul>
+     *   <li>{@code beforeId=0}：哨兵 = 无上界 ⇒ 返回<b>最新一屏</b>（首屏默认）；</li>
+     *   <li>{@code beforeId&gt;0}：取<b>严格早于</b>该条的最后 size 条（正序返回）——
+     *       向上加载更早；锚点条目已被删/下线时回退最新一屏（不报错，宁可多给内容）；</li>
+     *   <li>{@code fromId&gt;0}：取<b>不早于</b>该条的前 size 条（含锚点，正序）——
+     *       分享落地（目标条在窗口首位）与静默收敛/触底增量（锚点 = 当前末条，
+     *       末条重复由前端按 id 去重）；锚点已删/下线时回退最新一屏。</li>
+     * </ul>
+     * 返回形状仍是 {@link Page}（与旧接口同型，前端共用一个解析类型），但
+     * totalElements 仅填本页条数——游标模式的 hasMore 由前端按「返回条数 &lt; size」
+     * 判定，不依赖它（keyset 判据，见 Repository 注释）。
+     */
+    @Transactional(readOnly = true)
+    public Page<BulletinFeedItemResponse> listByCursor(Long beforeId, Long fromId,
+                                                       int size, Long currentUserId) {
+        int pageSize = Math.min(size, MAX_PAGE_SIZE);
+        LocalDateTime now = LocalDateTime.now();
+        List<Announcement> items;
+        if (beforeId != null && beforeId > 0) {
+            LocalDateTime cursorAt = announcementRepository.findById(beforeId)
+                    .map(Announcement::getPublishAt).orElse(null);
+            if (cursorAt != null) {
+                // 倒序取「早于上界的最近 size 条」→ 反转回正序（keyset 上界窗口的标准取法）
+                items = new ArrayList<>(announcementRepository.findBulletinFeedBefore(
+                        CATEGORY, AnnouncementStatus.PUBLISHED, now, true, cursorAt, beforeId,
+                        PageRequest.of(0, pageSize)));
+                Collections.reverse(items);
+            } else {
+                items = findLatestWindow(pageSize, now); // 锚点已删/下线 → 回退最新一屏
+            }
+        } else if (fromId != null && fromId > 0) {
+            LocalDateTime anchorAt = announcementRepository.findById(fromId)
+                    .map(Announcement::getPublishAt).orElse(null);
+            if (anchorAt != null) {
+                items = announcementRepository.findBulletinFeedFrom(
+                        CATEGORY, AnnouncementStatus.PUBLISHED, now, anchorAt, fromId,
+                        PageRequest.of(0, pageSize));
+            } else {
+                items = findLatestWindow(pageSize, now); // 锚点已删/下线 → 回退最新一屏
+            }
+        } else {
+            // beforeId=0 哨兵（无上界）或两游标都缺省（防御）→ 最新一屏
+            items = findLatestWindow(pageSize, now);
+        }
+        List<Long> ids = items.stream().map(Announcement::getId).collect(Collectors.toList());
+        Map<Long, List<BulletinReactionBadge>> reactions =
+                bulletinReactionService.batchBadges(ids, currentUserId);
+        Map<Long, Long> viewCounts = bulletinViewService.countByBulletinIds(ids);
+        List<BulletinFeedItemResponse> mapped = items.stream()
+                .map(a -> toFeedItem(a,
+                        reactions.getOrDefault(a.getId(), Collections.emptyList()),
+                        viewCounts.getOrDefault(a.getId(), 0L)))
+                .collect(Collectors.toList());
+        return new PageImpl<>(mapped, PageRequest.of(0, pageSize), mapped.size());
+    }
+
+    /** 最新一屏（无上界游标窗口；findBulletinFeedBefore 倒序取回后反转） */
+    private List<Announcement> findLatestWindow(int pageSize, LocalDateTime now) {
+        List<Announcement> items = new ArrayList<>(announcementRepository.findBulletinFeedBefore(
+                CATEGORY, AnnouncementStatus.PUBLISHED, now, false, LocalDateTime.now(), 0L,
+                PageRequest.of(0, pageSize)));
+        Collections.reverse(items);
+        return items;
     }
 
     /** 快讯详情（未发布/已下线/已软删/非 FLASH → 404）；表态徽标与列表同口径 */

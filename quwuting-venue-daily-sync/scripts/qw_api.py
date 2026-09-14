@@ -24,7 +24,8 @@
   # items 元素只需 {"venueId":123}——reportDate/sourceId/source 由脚本统一注入
   python3 qw_api.py status-suspend --base-url http://localhost:8080 --items '[...]' --report-date 2026-09-10
 
-token 获取顺序：--token 参数 > ADMIN_TOKEN 环境变量 > 报错（提示先 login）。
+token 获取顺序：--token 参数 > ADMIN_TOKEN 环境变量 > 缓存文件（默认 /tmp/qw_token.json，
+可用 QW_TOKEN_CACHE 覆盖）。`login` 成功即自动写缓存（0600）——**登录一次，后续命令免手工拼 token**。
 """
 
 from __future__ import annotations
@@ -39,6 +40,30 @@ import urllib.parse
 import urllib.request
 
 UA = "quwuting-venue-daily-sync/1.0"
+TOKEN_CACHE = os.environ.get("QW_TOKEN_CACHE", "/tmp/qw_token.json")
+
+
+def _write_token_cache(base_url: str, token: str) -> None:
+    """登录成功即落盘（0600）；失败不打断主流程。"""
+    try:
+        fd = os.open(TOKEN_CACHE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"token": token, "baseUrl": base_url.rstrip("/")}, f)
+        os.chmod(TOKEN_CACHE, 0o600)   # 已存在的文件 O_CREAT 不改 mode，必须显式收紧
+    except Exception:
+        pass
+
+
+def _read_token_cache(base_url: str) -> str:
+    """缓存命中条件：同 base_url（防把本地 token 打到生产）。"""
+    try:
+        with open(TOKEN_CACHE, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return ""
+    if d.get("baseUrl") and d["baseUrl"] != base_url.rstrip("/"):
+        return ""
+    return d.get("token") or ""
 
 
 def _request(base_url: str, method: str, path: str, token: str | None,
@@ -96,8 +121,10 @@ def main() -> int:
         data = _request(args.base_url, "POST", "/web-auth/password-login",
                         None, {"username": os.environ.get("WEB_ADMIN_USERNAME", "admin"),
                                "password": password})
-        print(json.dumps({"token": data.get("token")}, ensure_ascii=False))
-        print("# 后续命令请带上 --token <上值> 或 export ADMIN_TOKEN=<上值>", file=sys.stderr)
+        token = data.get("token") or ""
+        _write_token_cache(args.base_url, token)
+        print(json.dumps({"token": token}, ensure_ascii=False))
+        print(f"# 已自动缓存到 {TOKEN_CACHE}（同 base_url 的后续命令无需再传 token）", file=sys.stderr)
         return 0
 
     if args.command == "cities":
@@ -105,9 +132,10 @@ def main() -> int:
         print(json.dumps(data, ensure_ascii=False))
         return 0
 
-    token = args.token or os.environ.get("ADMIN_TOKEN", "")
+    token = args.token or os.environ.get("ADMIN_TOKEN", "") or _read_token_cache(args.base_url)
     if not token:
-        print("[error] 需要 ADMIN token：先 login 或用 --token / ADMIN_TOKEN 环境变量", file=sys.stderr)
+        print("[error] 需要 ADMIN token：先 login（会自动缓存），或用 --token / ADMIN_TOKEN 环境变量",
+              file=sys.stderr)
         return 1
 
     if args.command == "export":

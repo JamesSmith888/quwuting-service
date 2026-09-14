@@ -1,7 +1,7 @@
 {
   "source": "xianbao360",
   "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-09-11",
+  "updated": "2026-09-14",
   "entries": [
     {
       "city": "西安市",
@@ -1909,6 +1909,390 @@
       "venue_id": 1236,
       "kind": "alias",
       "note": "2026-09-11 舞讯用名「沙皇酒楼」实为「神秘酒楼」（柯桥区齐贤街道步锦路286号，14:00-02:00 跨天）；当日早先误建「沙皇酒楼」#1233 用户已软删；平台别名「沙皇酒楼」→#1236"
+    },
+    {
+      "city": "上海市",
+      "news_name": "宝山国潮",
+      "platform_name": "国潮酒吧",
+      "venue_id": 1053,
+      "kind": "alias",
+      "note": "2026-09-14 舞讯「上海·宝山国潮[晚]」= 宝山区唯一含「国潮」门店；用户确认营业中 → forceReversal 反转 CEASED→OPEN；别名已双写（宝山国潮→1053）"
+    },
+    {
+      "city": "无锡市",
+      "news_name": "猴子",
+      "platform_name": "超级猴子酒吧",
+      "venue_id": 757,
+      "kind": "alias",
+      "note": "2026-09-14 舞讯「江阴·猴子」= 江阴唯一含「猴子」门店；用户确认营业中 → forceReversal 反转 CEASED→OPEN；别名已双写（猴子→757）"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "音缘酒馆",
+      "platform_name": "音缘酒馆",
+      "venue_id": 1277,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "Aiko酒吧",
+      "platform_name": "Aiko酒吧",
+      "venue_id": 1278,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "夜宴舞厅",
+      "platform_name": "夜宴舞厅",
+      "venue_id": 1279,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "花倾城莎莎舞厅",
+      "platform_name": "花倾城莎莎舞厅",
+      "venue_id": 1280,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "派对酒吧",
+      "platform_name": "派对酒吧",
+      "venue_id": 1281,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "夜来香俱乐部",
+      "platform_name": "夜来香俱乐部",
+      "venue_id": 1282,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "莎莎舞吧K歌酒馆",
+      "platform_name": "莎莎舞吧K歌酒馆",
+      "venue_id": 1283,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "保定市",
+      "news_name": "妙度酒馆",
+      "platform_name": "妙度酒馆",
+      "venue_id": 1284,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "晚风莎莎小酒馆",
+      "platform_name": "晚风莎莎小酒馆",
+      "venue_id": 1285,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "大漠酒馆",
+      "platform_name": "大漠酒馆",
+      "venue_id": 1286,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "澜花酒馆",
+      "platform_name": "澜花酒馆",
+      "venue_id": 1287,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "壹玖酒舞",
+      "platform_name": "壹玖酒舞",
+      "venue_id": 1288,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "燕遇舞厅酒吧",
+      "platform_name": "燕遇舞厅酒吧",
+      "venue_id": 1289,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "海阔天空酒馆",
+      "platform_name": "海阔天空酒馆",
+      "venue_id": 1290,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "燕都舞厅",
+      "platform_name": "燕都舞厅",
+      "venue_id": 1291,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "天汇酒馆",
+      "platform_name": "天汇酒馆",
+      "venue_id": 1292,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "鼎拓酒馆舞厅",
+      "platform_name": "鼎拓酒馆舞厅",
+      "venue_id": 1293,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（河北首覆：廊坊市/保定市），17 家 CREATED"
+    },
+    {
+      "city": "廊坊市",
+      "news_name": "金旺角",
+      "platform_name": "海阔天空酒馆",
+      "venue_id": 1290,
+      "kind": "alias",
+      "note": "2026-09-14 建档拆分：主名括号禁令，「金旺角」为位置别名（步行街37号金旺角）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "酒点半",
+      "platform_name": "酒点半",
+      "venue_id": 1294,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "天涯酒馆二店",
+      "platform_name": "天涯酒馆二店",
+      "venue_id": 1295,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "老船吧",
+      "platform_name": "老船吧",
+      "venue_id": 1296,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "天禄大众舞厅",
+      "platform_name": "天禄大众舞厅",
+      "venue_id": 1297,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "空瓶酒馆",
+      "platform_name": "空瓶酒馆",
+      "venue_id": 1298,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "星期八酒馆",
+      "platform_name": "星期八酒馆",
+      "venue_id": 1299,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "妃子笑歌舞俱乐部",
+      "platform_name": "妃子笑歌舞俱乐部",
+      "venue_id": 1300,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "古里西街歌舞俱乐部",
+      "platform_name": "古里西街歌舞俱乐部",
+      "venue_id": 1301,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "BOB酒馆",
+      "platform_name": "BOB酒馆",
+      "venue_id": 1302,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "国色舞吧",
+      "platform_name": "国色舞吧",
+      "venue_id": 1303,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "春天里小酒馆",
+      "platform_name": "春天里小酒馆",
+      "venue_id": 1304,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "朝阳酒馆",
+      "platform_name": "朝阳酒馆",
+      "venue_id": 1305,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "黑先生秘密酒馆",
+      "platform_name": "黑先生秘密酒馆",
+      "venue_id": 1306,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "黑先生普拉酒馆",
+      "platform_name": "黑先生普拉酒馆",
+      "venue_id": 1307,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "杙酒馆",
+      "platform_name": "杙酒馆",
+      "venue_id": 1308,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "霓虹酒馆",
+      "platform_name": "霓虹酒馆",
+      "venue_id": 1309,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "可能吧",
+      "platform_name": "可能吧",
+      "venue_id": 1310,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "乐航酒馆",
+      "platform_name": "乐航酒馆",
+      "venue_id": 1311,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "暮汐酒馆",
+      "platform_name": "暮汐酒馆",
+      "venue_id": 1312,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "3.35音乐酒馆",
+      "platform_name": "3.35音乐酒馆",
+      "venue_id": 1313,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "晚遇音乐汇",
+      "platform_name": "晚遇音乐汇",
+      "venue_id": 1314,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "后海酒吧",
+      "platform_name": "后海酒吧",
+      "venue_id": 1315,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "楼兰酒吧",
+      "platform_name": "楼兰酒吧",
+      "venue_id": 1316,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "醉梦酒馆",
+      "platform_name": "醉梦酒馆",
+      "venue_id": 1317,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "梦幻酒馆",
+      "platform_name": "梦幻酒馆",
+      "venue_id": 1318,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "捌酒与拾",
+      "platform_name": "捌酒与拾",
+      "venue_id": 1319,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "时光音乐餐厅",
+      "platform_name": "时光音乐餐厅",
+      "venue_id": 1320,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
+    },
+    {
+      "city": "保定市",
+      "news_name": "暴雨小酒馆",
+      "platform_name": "暴雨小酒馆",
+      "venue_id": 1321,
+      "kind": "exact",
+      "note": "2026-09-14 用户贴表建档（保定市第二批 28 家，动态列→desc）"
     }
   ],
   "removed_duplicates": [

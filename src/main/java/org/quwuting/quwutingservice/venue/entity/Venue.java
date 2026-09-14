@@ -6,7 +6,10 @@ import lombok.Setter;
 import org.hibernate.annotations.ColumnDefault;
 import org.quwuting.quwutingservice.base.BaseEntity;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
+import org.quwuting.quwutingservice.venue.enums.VenueStatusSource;
 import org.quwuting.quwutingservice.venue.enums.VenueType;
+
+import java.time.LocalDateTime;
 
 @Getter
 @Setter
@@ -142,4 +145,43 @@ public class Venue extends BaseEntity {
     @Column(nullable = false)
     @ColumnDefault("false")
     private boolean photoSyncExcluded = false;
+
+    // ===== 状态权威层级（2026-09-14，V25；方案见 docs/agents/48） =====
+    //
+    // 解决「管理员手工修正的状态隔天被每日舞讯冲掉」：status 原先没有所有权模型，
+    // 任何写入方都是 last-write-wins。本组字段把「人工 > 外部舞讯推断」的层级
+    // 落成可判定的数据，门禁判定唯一实现 = VenueStatusGuardService。
+
+    /**
+     * 状态值归谁所有：MANUAL 人工直改 / SYNC 外部舞讯推断 / null = 旧数据或系统默认。
+     * <p>
+     * 仅表达「这个值代表谁的判断」（权威层级依据），与 {@code VenueStatusLog.changeSource}
+     * （表达「谁写的」通道标签）分工不重叠，切勿混用。
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(length = 20)
+    private VenueStatusSource statusSource;
+
+    /**
+     * 人工锁到期时刻（null = 无锁）。非空且在将来 ⇒ 外部舞讯通道（{@code applyBatch} /
+     * {@code applyBatchSuspend}）禁止覆盖本店状态，逐店跳过并计入返回体 skippedLocked。
+     * <p>
+     * 到期即自动失效，无需清理任务——「人工优先」是有时限的优先权，不是永久黑名单。
+     * 时长按人工设定的目标状态不对称（3 天 / 7 天，运营配置可改），理由见 V25 迁移注释。
+     */
+    private LocalDateTime statusLockedUntil;
+
+    /**
+     * 永久豁免：不参与舞讯白名单 / 未上榜差集推断（人工声明的**结构性**例外）。
+     * <p>
+     * 适用「该店不在舞讯覆盖范围」「被舞讯系统性漏报」——这类问题不在时间维度上，
+     * 靠反复加长人工锁是打补丁；改由人工一次性声明豁免，直到人工撤销。
+     */
+    @Column(nullable = false)
+    @ColumnDefault("false")
+    private boolean dailySyncExempt = false;
+
+    /** 人工备注：改状态 / 设豁免的原因（后台可读，可空）。 */
+    @Column(length = 200)
+    private String syncNote;
 }

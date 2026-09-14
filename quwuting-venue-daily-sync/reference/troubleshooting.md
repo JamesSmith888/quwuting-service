@@ -4,11 +4,18 @@
 
 ## 拉取与登录
 
+- **分页响应结构（2026-09-14 补齐，别猜字段名）**：export / announcements 分页返回 Spring `Page`，
+  列表在 **`data.content`**，另有 `data.last`（终止判据）/ `data.totalElements` / `data.number`。
+  ⚠️ 不是 `items` / `list` / `records`——猜错会静默拿到 0 条（09-14 实测踩过）。
 - **export 一页装不下**：size 上限 500，按 page 递增拉完；Skill 场景一城一页足够。
-- **token 相关**：`qw_api.py` **不自动读缓存**，须显式注入；变量名必须是 `ADMIN_TOKEN`
-  （写 `TOKEN=` 无效，2026-09-06 实测）。缓存位置 `/tmp/qw_token.json`（跨会话有效），
-  401 才重新 login。有效性一句话验证：
+- **token 相关（2026-09-14 起闭环）**：`login` 成功**自动写缓存** `/tmp/qw_token.json`（0600，含
+  baseUrl），后续命令**自动读缓存**（`--token` > `ADMIN_TOKEN` > 缓存）；写 `TOKEN=` 无效，
+  变量名必须是 `ADMIN_TOKEN`。⚠️ 缓存带 baseUrl 校验：**本地 token 不会被打到生产**
+  （换环境要重新 login）。401 = token 过期，重新 login 即可。缓存路径可用 `QW_TOKEN_CACHE` 覆盖。
+  有效性一句话验证：
   `curl -H "Authorization: Bearer $TOKEN" $BASE_URL/admin/venue-sync/reversals?limit=1`。
+- **管理密码落点**：本地 develop = `quwuting-service/src/main/resources/application-mysql.yaml` 的
+  `web-auth.password`（勿写进 SKILL，随仓库变）；生产 = 环境变量 `WEB_ADMIN_PASSWORD`。
 - **翻页漏门店**：候选拉取必须稳定排序——export 自带 `id ASC`；降级用公开 `GET /venues` 时
   **必须带 `sort=newest`**（默认 recommended 无 id tie-break，热度分全 0 时漂移漏店）。
 
@@ -60,6 +67,13 @@
   返回 **code=5000（不是 400，具有迷惑性）**（2026-09-07 实测）——优先走 `qw_api.py` 封装。
 - **详情 GET 响应嵌套**：`GET /venues/{id}` 的字段在 `data.venue` 子对象，不在 data 顶层
   （2026-09-06 首轮 15 家全 FAIL「name/city 不能为空」即因此）。正确：`cur = data["venue"]`。
+- **export 的 V25 三字段 null 时不出现在 JSON（2026-09-14 实测）**：`VenueExportItem` 声明了
+  `statusSource` / `statusLockedUntil` / `syncNote`，但序列化配了 NON_NULL ⇒ 无人工改动/无锁/无备注
+  时**整个 key 消失**（只有原始类型 `dailySyncExempt` 恒出现）。差异表标注时**不要**把「key 不存在」
+  误判成「后端没实现这三个字段」；判据 = 有取值时才出现（`dailySyncExempt=true` 或 `statusLockedUntil` 非空）。
+- **单源日的写库边界（2026-09-14 确立）**：用户转述的名单若与源站正文逐条一致 = **同一来源**，
+  不计两源 ⇒ 全源一致门不满足 ⇒ 两个方向都只列清单。用户口头放行**只覆盖他明确点到的那几条**
+  （例：只确认两家门店「营业中」+ 要求发公告 ≠ 同时放行暂停方向）。
 - 统一响应包 `{code, message, data}`，`code=0` 成功；401 = token 过期，重新登录。
 
 ## 数据治理
