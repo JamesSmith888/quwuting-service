@@ -40,11 +40,16 @@ import java.util.stream.Collectors;
  * 性能：全部走<b>批量 GROUP BY</b>（一次查询覆盖一页用户，IN :userIds），
  * 结果集 = 用户数级别，内存合并无压力；单用户详情复用同一方法（集合 = 1）。
  * <p>
- * 最近活跃口径（<b>单一定义</b>，列表排序 / 列表行展示 / 详情展示 / 统计概览
- * 四端一致）：MAX(用户资料更新 updated_at、积分流水、邀约、打卡 的 created_at)——
- * 覆盖高频行为（打卡/解锁/赠送/采纳走流水）、中频行为（邀约）与资料维护；
- * 最低回退 = 加入时间（createdAt，资料维护兜底——从未有任何行为的用户
- * 「最近活跃」= 加入时间，列表行展示与排序、统计概览四端口径一致）。
+ * <b>命名契约（2026-09-15 起，强制）</b>：本服务的「露面」口径（四源 MAX，含登录
+ * 自动打卡）<b>不是</b>「活跃」。管理端一切「活跃」指标专指
+ * {@code UserStatsSql.ACTIVE_FACT_UNION}（用户主动行为）口径，见
+ * {@code AdminUserService#stats} 与 docs/agents/35；两个概念字面与语义都不得混用。
+ * <p>
+ * 最近露面口径（<b>单一定义</b>，列表排序 / 列表行展示 / 详情展示三端一致）：
+ * MAX(用户资料更新 updated_at、积分流水、邀约、打卡 的 created_at)——覆盖高频行为
+ * （打卡/解锁/赠送/采纳走流水）、中频行为（邀约）与资料维护；最低回退 = 加入时间
+ * （createdAt，资料维护兜底——从未有任何行为的用户「最近露面」= 加入时间，
+ * 列表行展示与排序、详情三端口径一致）。
  */
 @Service
 @RequiredArgsConstructor
@@ -213,17 +218,19 @@ public class AdminUserStatsService {
         return streak;
     }
 
-    // ── 最近活跃（四源 MAX；单一定义，见类注释） ──────────────────────────────
+    // ── 最近露面（四源 MAX；单一定义，见类注释） ──────────────────────────────
 
     /**
-     * 批量最近活跃时间：MAX(资料更新 updatedAt、积分流水、邀约、打卡 created_at)，
+     * 批量最近露面时间：MAX(资料更新 updatedAt、积分流水、邀约、打卡 created_at)，
      * 任一源为空（null）时其余源兜底；<b>最低回退 = 加入时间（createdAt）</b>——
-     * 从未有任何行为的用户「最近活跃」= 加入时间（资料维护兜底，四端口径一致）。
+     * 从未有任何行为的用户「最近露面」= 加入时间（资料维护兜底，三端口径一致）。
      * 返回 userId → LocalDateTime；用户集合空 → 空 Map。
+     * <p>
+     * <b>勿与「活跃」混用</b>：含登录自动打卡，只回答「这个账号最后一次出现」。
      */
     @Transactional(readOnly = true)
-    public Map<Long, LocalDateTime> lastActiveFor(Collection<Long> userIds,
-                                                  Map<Long, LocalDateTime> profileUpdatedAt) {
+    public Map<Long, LocalDateTime> lastSeenFor(Collection<Long> userIds,
+                                                Map<Long, LocalDateTime> profileUpdatedAt) {
         if (userIds.isEmpty()) {
             return Map.of();
         }

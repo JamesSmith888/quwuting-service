@@ -1,14 +1,12 @@
 package org.quwuting.quwutingservice.user.service;
 
 import lombok.RequiredArgsConstructor;
-import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.entity.DancerFavorite;
 import org.quwuting.quwutingservice.dancer.entity.DancerRecognition;
 import org.quwuting.quwutingservice.dancer.entity.DemandRecord;
 import org.quwuting.quwutingservice.dancer.enums.DemandStatus;
 import org.quwuting.quwutingservice.dancer.repository.DancerFavoriteRepository;
 import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionRepository;
-import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.dancer.repository.DemandRecordRepository;
 import org.quwuting.quwutingservice.dancershare.entity.DancerShare;
 import org.quwuting.quwutingservice.dancershare.repository.DancerShareRepository;
@@ -20,14 +18,12 @@ import org.quwuting.quwutingservice.points.repository.DailyCheckinRepository;
 import org.quwuting.quwutingservice.points.repository.PointsTransactionRepository;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserStatsRow;
 import org.quwuting.quwutingservice.user.enums.AdminUserStatsType;
+import org.quwuting.quwutingservice.user.repository.UserBehaviorEvent;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
-import org.quwuting.quwutingservice.venue.entity.Venue;
-import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venueclaim.entity.VenueClaim;
 import org.quwuting.quwutingservice.venueclaim.enums.ClaimStatus;
 import org.quwuting.quwutingservice.venueclaim.repository.VenueClaimRepository;
 import org.quwuting.quwutingservice.venuefeedback.entity.VenueFeedback;
-import org.quwuting.quwutingservice.venuefeedback.enums.FeedbackType;
 import org.quwuting.quwutingservice.venuefeedback.enums.ReportStatus;
 import org.quwuting.quwutingservice.venuefeedback.repository.VenueFeedbackRepository;
 import org.quwuting.quwutingservice.venueshare.entity.VenueShare;
@@ -35,7 +31,6 @@ import org.quwuting.quwutingservice.venueshare.enums.ShareEventType;
 import org.quwuting.quwutingservice.venueshare.repository.VenueShareRepository;
 import org.quwuting.quwutingservice.venuestatusreport.entity.VenueStatusReport;
 import org.quwuting.quwutingservice.venuestatusreport.enums.AdminAction;
-import org.quwuting.quwutingservice.venuestatusreport.enums.ReportType;
 import org.quwuting.quwutingservice.venuestatusreport.repository.StatusReportRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -45,7 +40,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 
 /**
  * 管理端用户统计明细服务（2026-08-28，GET /admin/users/{id}/stats-detail，docs/agents/23；
@@ -61,7 +55,10 @@ import java.util.stream.Collectors;
  * 零分支渲染；徽标配色镜像前端 buildDemandStatusBadge / CLAIM_STATUS_LABELS 字典
  * （badge--warning/success/muted 全局类）。openId 绝不下发。
  * <p>
- * 性能：单用户低频查询，各类型一次查询；名称（舞伴/门店）批量 IN 取回，规避 N+1。
+ * 性能：单用户低频查询，各类型一次查询；名称（舞伴/门店）与明细字典
+ * （分享渠道 / 上报类型）统一走 {@link BehaviorRefNameResolver}——
+ * <b>2026-09-15 起这里是它们在本仓的唯一实现</b>（此前本类与行为轨迹各写一份，
+ * 同一份数据在两页可能给出不同文案；见 {@code UserBehaviorEvent} 类注释「根因」）。
  */
 @Service
 @RequiredArgsConstructor
@@ -78,11 +75,7 @@ public class AdminUserStatsDetailService {
     private final DemandRecordRepository demandRecordRepository;
     private final VenueFeedbackRepository feedbackRepository;
     private final StatusReportRepository statusReportRepository;
-    private final DancerRepository dancerRepository;
-    private final VenueRepository venueRepository;
-
-    /** 无昵称舞伴占位（与舞伴列表 NICKNAME_FALLBACK 同口径） */
-    private static final String DANCER_FALLBACK = "舞伴";
+    private final BehaviorRefNameResolver refNames;
 
     /**
      * 用户统计明细（GET /admin/users/{id}/stats-detail，仅 ADMIN）：按 type 分派查询
@@ -155,12 +148,12 @@ public class AdminUserStatsDetailService {
         if (recs.isEmpty()) {
             return List.of();
         }
-        Map<Long, String> names = dancerNames(recs.stream()
+        Map<Long, String> names = refNames.names(UserBehaviorEvent.RefKind.DANCER, recs.stream()
                 .map(DancerRecognition::getDancerId).toList());
         return recs.stream()
                 .map(r -> new AdminUserStatsRow(
                         r.getId(),
-                        "认可「" + names.getOrDefault(r.getDancerId(), DANCER_FALLBACK) + "」",
+                        "认可「" + names.getOrDefault(r.getDancerId(), BehaviorRefNameResolver.DANCER_FALLBACK) + "」",
                         "每日认可",
                         r.getCreatedAt(), "", ""))
                 .toList();
@@ -176,7 +169,7 @@ public class AdminUserStatsDetailService {
         if (claims.isEmpty()) {
             return List.of();
         }
-        Map<Long, String> names = venueNames(claims.stream()
+        Map<Long, String> names = refNames.names(UserBehaviorEvent.RefKind.VENUE, claims.stream()
                 .map(VenueClaim::getVenueId).toList());
         return claims.stream()
                 .map(c -> {
@@ -197,20 +190,20 @@ public class AdminUserStatsDetailService {
         List<VenueShare> venueShares = venueShareRepository
                 .findByUserIdAndEventTypeOrderByCreatedAtDesc(userId, ShareEventType.SHARE);
         if (!venueShares.isEmpty()) {
-            Map<Long, String> names = venueNames(venueShares.stream()
+            Map<Long, String> names = refNames.names(UserBehaviorEvent.RefKind.VENUE, venueShares.stream()
                     .map(VenueShare::getVenueId).toList());
             venueShares.forEach(s -> rows.add(new AdminUserStatsRow(
                     s.getId(), "分享门店「" + names.getOrDefault(s.getVenueId(), "门店") + "」",
-                    channelText(s.getChannel()), s.getCreatedAt(), "", "")));
+                    refNames.dictionary(UserBehaviorEvent.DetailDict.SHARE_CHANNEL, s.getChannel()), s.getCreatedAt(), "", "")));
         }
         List<DancerShare> dancerShares = dancerShareRepository
                 .findByUserIdAndEventTypeOrderByCreatedAtDesc(userId, ShareEventType.SHARE);
         if (!dancerShares.isEmpty()) {
-            Map<Long, String> names = dancerNames(dancerShares.stream()
+            Map<Long, String> names = refNames.names(UserBehaviorEvent.RefKind.DANCER, dancerShares.stream()
                     .map(DancerShare::getDancerId).toList());
             dancerShares.forEach(s -> rows.add(new AdminUserStatsRow(
-                    s.getId(), "分享舞伴「" + names.getOrDefault(s.getDancerId(), DANCER_FALLBACK) + "」",
-                    channelText(s.getChannel()), s.getCreatedAt(), "", "")));
+                    s.getId(), "分享舞伴「" + names.getOrDefault(s.getDancerId(), BehaviorRefNameResolver.DANCER_FALLBACK) + "」",
+                    refNames.dictionary(UserBehaviorEvent.DetailDict.SHARE_CHANNEL, s.getChannel()), s.getCreatedAt(), "", "")));
         }
         rows.sort(Comparator.comparing(AdminUserStatsRow::time,
                 Comparator.nullsLast(Comparator.reverseOrder())));
@@ -224,12 +217,12 @@ public class AdminUserStatsDetailService {
         if (favs.isEmpty()) {
             return List.of();
         }
-        Map<Long, String> names = dancerNames(favs.stream()
+        Map<Long, String> names = refNames.names(UserBehaviorEvent.RefKind.DANCER, favs.stream()
                 .map(DancerFavorite::getDancerId).toList());
         return favs.stream()
                 .map(f -> new AdminUserStatsRow(
                         f.getId(),
-                        "收藏「" + names.getOrDefault(f.getDancerId(), DANCER_FALLBACK) + "」",
+                        "收藏「" + names.getOrDefault(f.getDancerId(), BehaviorRefNameResolver.DANCER_FALLBACK) + "」",
                         "舞伴收藏",
                         f.getCreatedAt(), "", ""))
                 .toList();
@@ -243,7 +236,7 @@ public class AdminUserStatsDetailService {
         if (demands.isEmpty()) {
             return List.of();
         }
-        Map<Long, String> names = dancerNames(demands.stream()
+        Map<Long, String> names = refNames.names(UserBehaviorEvent.RefKind.DANCER, demands.stream()
                 .map(DemandRecord::getDancerId).toList());
         return demands.stream()
                 .map(d -> {
@@ -254,7 +247,7 @@ public class AdminUserStatsDetailService {
                     String sub = fulfilled ? "已确认履约" : "邀约";
                     return new AdminUserStatsRow(
                             d.getId(),
-                            "邀约「" + names.getOrDefault(d.getDancerId(), DANCER_FALLBACK) + "」",
+                            "邀约「" + names.getOrDefault(d.getDancerId(), BehaviorRefNameResolver.DANCER_FALLBACK) + "」",
                             sub,
                             d.getCreatedAt(), badgeText, badgeCls);
                 })
@@ -268,21 +261,22 @@ public class AdminUserStatsDetailService {
         ReportStatus rs = status == null ? null : parseOrNull(ReportStatus.class, status);
         List<VenueFeedback> feedbacks = feedbackRepository.findByUserIdForAdminDetail(userId, rs);
         if (!feedbacks.isEmpty()) {
-            Map<Long, String> names = venueNames(feedbacks.stream()
+            Map<Long, String> names = refNames.names(UserBehaviorEvent.RefKind.VENUE, feedbacks.stream()
                     .map(VenueFeedback::getVenueId).toList());
             feedbacks.forEach(f -> {
                 ReportStatus fs = f.getStatus() == null ? ReportStatus.PENDING : f.getStatus();
                 rows.add(new AdminUserStatsRow(
                         f.getId(),
                         "上报「" + names.getOrDefault(f.getVenueId(), "门店") + "」",
-                        feedbackTypeText(f.getType()),
+                        refNames.dictionary(UserBehaviorEvent.DetailDict.VENUE_FEEDBACK_TYPE,
+                                f.getType() == null ? null : f.getType().name()),
                         f.getCreatedAt(), fs.getDisplayName(), reportBadgeCls(fs)));
             });
         }
         // 暂停营业报告：status=PENDING 时只取未处置（admin_action IS NULL）
         List<VenueStatusReport> reports = statusReportRepository.findByUserIdForAdminDetail(userId);
         if (!reports.isEmpty()) {
-            Map<Long, String> names = venueNames(reports.stream()
+            Map<Long, String> names = refNames.names(UserBehaviorEvent.RefKind.VENUE, reports.stream()
                     .map(VenueStatusReport::getVenueId).toList());
             reports.stream()
                     .filter(r -> status == null
@@ -293,7 +287,8 @@ public class AdminUserStatsDetailService {
                         rows.add(new AdminUserStatsRow(
                                 r.getId(),
                                 "报告「" + names.getOrDefault(r.getVenueId(), "门店") + "」",
-                                reportTypeText(r.getType()),
+                                refNames.dictionary(UserBehaviorEvent.DetailDict.STATUS_REPORT_REASON,
+                                r.getType() == null ? null : r.getType().name()),
                                 r.getCreatedAt(),
                                 pending ? "待处理" : adminActionText(action),
                                 pending ? "badge--warning" : reportBadgeCls(action)));
@@ -302,20 +297,6 @@ public class AdminUserStatsDetailService {
         rows.sort(Comparator.comparing(AdminUserStatsRow::time,
                 Comparator.nullsLast(Comparator.reverseOrder())));
         return rows;
-    }
-
-    // ── 名称批量取回（规避 N+1） ──────────────────────────────────────────────
-
-    private Map<Long, String> dancerNames(List<Long> ids) {
-        return dancerRepository.findByIds(ids).stream()
-                .collect(Collectors.toMap(Dancer::getId, Dancer::getNickname,
-                        (a, b) -> a, java.util.LinkedHashMap::new));
-    }
-
-    private Map<Long, String> venueNames(List<Long> ids) {
-        return venueRepository.findByIdInAndDeletedFalse(ids).stream()
-                .collect(Collectors.toMap(Venue::getId, Venue::getName,
-                        (a, b) -> a, java.util.LinkedHashMap::new));
     }
 
     // ── 文案与徽标（服务端权威，镜像前端字典，见类注释） ────────────────────────
@@ -333,27 +314,6 @@ public class AdminUserStatsDetailService {
             case APP_FEEDBACK_REWARD -> "意见被采纳";
             case CROWD_CONFIRMED -> "热度被确认";
         };
-    }
-
-    /** 分享渠道中文（channel：BUTTON/MENU/TIMELINE；空 = 未知渠道） */
-    private static String channelText(String channel) {
-        if (channel == null) return "";
-        return switch (channel) {
-            case "BUTTON" -> "按钮分享";
-            case "MENU" -> "菜单分享";
-            case "TIMELINE" -> "朋友圈分享";
-            default -> "分享";
-        };
-    }
-
-    /** 信息反馈类型中文（FeedbackType displayName；空 = 其他） */
-    private static String feedbackTypeText(FeedbackType type) {
-        return type == null ? "其他问题" : type.getDisplayName();
-    }
-
-    /** 暂停营业报告类型中文（ReportType displayName；空 = 暂停营业） */
-    private static String reportTypeText(ReportType type) {
-        return type == null ? "暂停营业" : type.getDisplayName();
     }
 
     /** 状态报告处置中文（AdminAction；null 已在上游按待处理处理） */

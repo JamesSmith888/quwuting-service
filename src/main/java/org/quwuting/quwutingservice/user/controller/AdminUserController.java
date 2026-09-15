@@ -5,14 +5,21 @@ import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.user.dto.request.MarkWechatReviewRequest;
 import org.quwuting.quwutingservice.user.dto.response.AdminDailyStatItem;
+import org.quwuting.quwutingservice.user.dto.response.AdminUserBehaviorAnalysisResponse;
+import org.quwuting.quwutingservice.user.dto.response.AdminUserBehaviorProfileResponse;
+import org.quwuting.quwutingservice.user.dto.response.AdminUserBehaviorTimelineResponse;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserDetailResponse;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserItem;
+import org.quwuting.quwutingservice.user.dto.response.AdminUserRetentionResponse;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserStatsResponse;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserStatsRow;
 import org.quwuting.quwutingservice.user.enums.AdminUserStatsType;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.user.enums.UserSortMode;
 import org.quwuting.quwutingservice.user.service.AdminDailyStatsService;
+import org.quwuting.quwutingservice.user.service.AdminUserBehaviorAnalyticsService;
+import org.quwuting.quwutingservice.user.service.AdminUserBehaviorService;
+import org.quwuting.quwutingservice.user.service.AdminUserRetentionService;
 import org.quwuting.quwutingservice.user.service.AdminUserService;
 import org.quwuting.quwutingservice.user.service.AdminUserStatsDetailService;
 import org.springframework.data.domain.Page;
@@ -49,6 +56,9 @@ public class AdminUserController {
     private final AdminUserService adminUserService;
     private final AdminUserStatsDetailService statsDetailService;
     private final AdminDailyStatsService dailyStatsService;
+    private final AdminUserRetentionService userRetentionService;
+    private final AdminUserBehaviorService adminUserBehaviorService;
+    private final AdminUserBehaviorAnalyticsService behaviorAnalyticsService;
 
     /**
      * 用户分页列表（GET /admin/users?page=&size=&keyword=&role=&city=&sort=）。
@@ -90,6 +100,24 @@ public class AdminUserController {
             @RequestParam(defaultValue = "30") int days) {
         UserContext.requireAdmin();
         return ApiResponse.ok(dailyStatsService.dailyStats(days));
+    }
+
+    /**
+     * 用户留存分析（GET /admin/users/retention?days=30，仅 ADMIN；2026-09-15，
+     * docs/agents/35-dashboard-stats.md）：近 N 天（含今日，缺省 30，钳制 7~90）
+     * 的<b>留存一屏</b>——汇总（有效用户 / 近 7 日活跃 / 其中老用户回访）+
+     * 逐日新老活跃拆分 + 已到期批次加权的留存曲线 + 批次留存矩阵（D1/D3/D7/D14/D30）。
+     * <p>
+     * 活跃口径 = 有效活跃事实集（用户主动行为 12 表，<b>不含登录自动打卡</b>）——
+     * 与大盘「真实互动」、顶卡「近 7 日活跃」同一事实源（{@code UserStatsSql}）。
+     * 未到期的留存格返回 {@code null}（前端「—」），<b>不是 0</b>。
+     * 注意：<b>MySQL 8 方言</b>（生产 RDS MySQL），PG 环境不可执行。
+     */
+    @GetMapping("/retention")
+    public ApiResponse<AdminUserRetentionResponse> retention(
+            @RequestParam(defaultValue = "30") int days) {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(userRetentionService.retention(days));
     }
 
     /**
@@ -136,5 +164,62 @@ public class AdminUserController {
         UserContext.requireAdmin();
         adminUserService.setWechatReview(id, request.marked());
         return ApiResponse.ok(null);
+    }
+
+    // ── 用户行为轨迹与行为分析（2026-09-15，docs/agents/35-dashboard-stats.md） ──────
+
+    /**
+     * 用户行为统计分析（GET /admin/users/behavior-analysis?days=30，仅 ADMIN；2026-09-15）：
+     * 挂在资料协作（用户）域下的平台级行为盘子——类型分布（全目录，含 0 次）+
+     * 活跃分层（六层互斥完备，按「占可用天数比例」分档，避免把新注册判成沉默）+
+     * 行为宽度分布 + 活跃时段直方图（24 格）+ 口径自证（账号盘子漏斗）。
+     * <p>
+     * 口径 = 主动行为事实集（{@code UserBehaviorEvent.Nature#ACTIVE}，<b>不含登录自动打卡</b>，
+     * 打卡在类型分布里以「系统信号」档显式出现）；用户范围 = {@code UserStatsSql.USER_SCOPE}
+     * （已剔除 ADMIN 运营号 / {@code test_} 开发联号 / 微信审核账号）。
+     * 注意：<b>MySQL 8 方言</b>（生产 RDS MySQL），PG 环境不可执行。
+     */
+    @GetMapping("/behavior-analysis")
+    public ApiResponse<AdminUserBehaviorAnalysisResponse> behaviorAnalysis(
+            @RequestParam(defaultValue = "30") int days) {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(behaviorAnalyticsService.analysis(days));
+    }
+
+    /**
+     * 用户行为轨迹（GET /admin/users/{id}/behavior-timeline?days=30&type=&limit=50，仅 ADMIN；
+     * 2026-09-15）：把 18 个事件源合并成<b>一条可读时间线</b>（时间倒序）——
+     * 含主动行为、协作（认领）、系统信号（打卡=打开）与被动痕迹（站内信/公告已读等），
+     * 每条带口径档标签（{@code natureLabel}）；「算不算活跃」由标签显式回答，
+     * 一切活跃/留存指标仍只认主动行为事实集。
+     * <p>
+     * 返回含 {@code total} 与 {@code truncated}（前端须诚实地写「已显示最近 N 条」）；
+     * {@code typeOptions} 为全目录下发（前端禁再写一份事件字典）。type 非法 → 1007。
+     */
+    @GetMapping("/{id}/behavior-timeline")
+    public ApiResponse<AdminUserBehaviorTimelineResponse> behaviorTimeline(
+            @PathVariable Long id,
+            @RequestParam(defaultValue = "30") int days,
+            @RequestParam(required = false) String type,
+            @RequestParam(defaultValue = "50") int limit) {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(adminUserBehaviorService.timeline(id, days, type, limit));
+    }
+
+    /**
+     * 用户行为统计画像（GET /admin/users/{id}/behavior-profile?days=30，仅 ADMIN；2026-09-15）：
+     * 单账号窗口内的类型分布（条数/覆盖天数/最近一次）+ 活跃天数 + 打开天数 +
+     * 近 7 日与此前 7 日对比 + 活跃时段直方图。
+     * <p>
+     * 「活跃天数」只认主动行为、「打开天数」只认登录自动打卡——两个数字并排展示，
+     * 「天天打开却从不互动」这类形态才看得出来（审核/巡检号画像）。
+     * 窗口内无主动行为时 {@code firstActiveAt/lastActiveAt} 显式下发 null（不是 0、不是缺失）。
+     */
+    @GetMapping("/{id}/behavior-profile")
+    public ApiResponse<AdminUserBehaviorProfileResponse> behaviorProfile(
+            @PathVariable Long id,
+            @RequestParam(defaultValue = "30") int days) {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(adminUserBehaviorService.profile(id, days));
     }
 }

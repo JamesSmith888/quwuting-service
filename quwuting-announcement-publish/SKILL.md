@@ -57,11 +57,22 @@ bash /Users/xin.y/WeChatProjects/quwuting-service/scripts/sync-skills.sh
   到点 30s 强转）→ OFFLINE →（重新 publish，唯一复活通道）→ PUBLISHED`。
 - **置顶 `pinned`**：**只有 pinned=true 的公告进首页导航栏公告行**（强触达位）；不置顶
   只在公告中心（我的页入口）。发布新公告默认问用户要不要置顶；数据更新公告惯例 pinned=true。
+- **触达等级 `touchLevel`（2026-09-15 新增）**：`ALERT` = 计入用户未读徽标（"我的 → 公告中心"
+  的数字 + 列表未读点），需用户打开详情或点「全部已读」才消除；`SILENT` = **不打扰**，
+  不计入未读，但照常可见可查、置顶时仍进首页公告行。
+  **不传该字段 = 后端按分类派生**（`NOTICE→ALERT`，`DATA_UPDATE→SILENT`）——即
+  **每日舞讯 / 数据更新公告天然落在「不打扰」档**，无需显式传参；发 `NOTICE` 运营公告
+  也默认 ALERT，符合"需要用户知晓"的语义。
+  ⚠️ **只在一种情况下需要显式传**：某条公告的语义与分类缺省相反（例如发一条
+  `NOTICE` 但只是例行说明、不想打扰用户 → `"touchLevel": "SILENT"`）。
+  判据：**问一句"用户若没看到它，会不会吃亏？"** 会 → ALERT，不会 → SILENT；
+  流水 / 存档类内容一律不得计入未读（这是 2026-09-15 的根因修复，见后端 docs/agents/34
+  「触达等级」——旧口径下每日舞讯天天亮徽标、用户被迫逐条点进详情）。
 - **自动下线 `offlineAt`**：MANUAL 公告建议显式设置（SYSTEM 数据更新公告按
   ops-config `auto_offline_hours` 默认 24h 自动过期）——新功能/运营公告长期 pinned 会
   持续霸占首页（2026-09-08 新功能公告实证：设 72h）。校验：必须晚于 now 且晚于 publishAt。
 - **字段约束**：title ≤50 字；content = markdown 原文（≤50KB，towxml 渲染）；
-  `CreateAnnouncementRequest = {title, content, category, pinned?, publishAt?, offlineAt?}`。
+  `CreateAnnouncementRequest = {title, content, category, touchLevel?, pinned?, publishAt?, offlineAt?}`。
 
 ## 正文写法（markdown 契约）
 

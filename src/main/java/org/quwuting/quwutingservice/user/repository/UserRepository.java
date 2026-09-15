@@ -10,6 +10,7 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.HashMap;
@@ -104,11 +105,17 @@ public interface UserRepository extends JpaRepository<User, Long> {
                                               Pageable pageable);
 
     /**
-     * 管理端用户列表（最近活跃降序，2026-08-27 用户管理增强）：原生 SQL——"最近
-     * 活跃" = 用户资料更新（updated_at）/ 积分流水（qwt_points_transactions）/
-     * 邀约（qwt_demand_records）/ 打卡（qwt_daily_checkins）四源 MAX(created_at)
-     * 的 GREATEST，与 {@link AdminUserStatsService} 的 lastActive 定义同源
-     * （单一口径，前端展示与排序一致）。过滤条件与 findPageByFilters 同口径。
+     * 管理端用户列表（最近露面降序，2026-08-27 用户管理增强）：原生 SQL——
+     * <b>「最近露面」= 用户资料更新（updated_at）/ 积分流水 / 邀约 / <u>打卡</u>
+     * 四源 MAX(created_at) 的 GREATEST</b>，与 {@link AdminUserStatsService}
+     * 的 {@code lastSeenFor} 定义同源（单一口径，前端展示与排序一致）。
+     * <p>
+     * <b>命名契约（2026-09-15）</b>：「露面」≠「活跃」。本口径含<b>登录自动打卡</b>
+     * （{@code app.ts onLaunch} → {@code autoCheckIn}），语义 = 「这个账号最后一次
+     * 出现」，用于运营找「最近来过的号」；它<b>刻意不</b>作为活跃/留存指标——
+     * 管理端一切「活跃」一律指 {@link UserStatsSql#ACTIVE_FACT_UNION}（用户主动行为）
+     * 口径，字面与语义都不得混用（这正是 2026-09-15 修复的那类错误决策，见
+     * docs/agents/35）。
      * <p>
      * <b>role 必须传 name() 字符串（2026-08-20 根因修复先例）</b>：原生 SQL 绑定
      * enum 无 JPA 元数据 → 默认 ORDINAL，与 varchar 列比较必然错配——调用方
@@ -141,36 +148,50 @@ public interface UserRepository extends JpaRepository<User, Long> {
                                                   Pageable pageable);
 
     /**
-     * 用户总数（未软删；管理端统计概览 + 公告触达分母）。
+     * <b>平台真实用户数</b>（2026-09-15）：{@link UserStatsSql#USER_SCOPE} 口径——
+     * 未软删、{@code role='USER'}、非 {@code test_} 开发号、非微信审核账号。
      * <p>
-     * <b>统计口径（2026-09-09 V17）：排除微信审核账号（wechat_review=true）</b>——
-     * 审核员账号的注册/打卡/上报是平台统计噪音（打卡型噪音占比曾 60%+），不删除
-     * 账号、仅统计排除；名单见 V17 迁移，后续 admin-web 用户详情页手动标记。
+     * 这是管理端一切「用户盘子」类分母的<b>唯一</b>来源（数据看板「累计注册」、
+     * 账本渗透率、留存分析分母、公告触达率分母），与大盘按日趋势的注册序列、
+     * 与「近 7 日活跃」同分母——2026-09-15 前此处为「全部未软删非审核账号」
+     * （含 ADMIN 运营号与 {@code test_} 开发号），与趋势线口径不一致：图上 30 天
+     * 注册之和 ≠ 顶卡累计注册，用户对不上账。
      */
-    long countByDeletedFalseAndWechatReviewFalse();
+    @Query(value = "SELECT COUNT(*) FROM qwt_users u WHERE " + UserStatsSql.USER_SCOPE, nativeQuery = true)
+    long countRealUsers();
 
-    /** 指定角色用户数（未软删且非微信审核；管理端统计概览——管理员数） */
+    /** 指定角色用户数（未软删且非微信审核；管理端统计概览——管理员数，与真实用户口径正交） */
     long countByDeletedFalseAndWechatReviewFalseAndRole(UserRole role);
 
-    /** 指定时间后注册的用户数（未软删且非微信审核；管理端统计概览——今日新增） */
-    long countByDeletedFalseAndWechatReviewFalseAndCreatedAtGreaterThanEqual(LocalDateTime since);
+    /**
+     * 指定时间后注册的<b>真实用户</b>数（2026-09-15）：
+     * {@link UserStatsSql#USER_SCOPE} 口径 + {@code created_at >= :since}
+     * ——数据看板「今日新增」，与大盘注册序列同口径。
+     */
+    @Query(value = "SELECT COUNT(*) FROM qwt_users u WHERE " + UserStatsSql.USER_SCOPE
+            + " AND u.created_at >= :since", nativeQuery = true)
+    long countRealUsersCreatedSince(@Param("since") LocalDateTime since);
 
     /**
-     * 近 N 日活跃用户数（2026-08-27 用户管理增强）：与
-     * {@link #findPageByFiltersOrderByLastActive} 同源的四源 MAX >= 阈值。
-     * <b>2026-09-09 V17：排除微信审核账号</b>（统计口径同上，噪音去权）。
+     * <b>近 N 日活跃用户数</b>（有效活跃口径；2026-09-15 重写，仅 ADMIN 消费）。
+     * <p>
+     * 口径 = 当日出现在 {@link UserStatsSql#ACTIVE_FACT_UNION}（12 表用户主动行为）
+     * 的去重用户数，与大盘「真实互动」序列、留存分析同一事实源。
+     * <p>
+     * <b>2026-09-15 根因修复（勿回退）</b>：旧实现为「四源 MAX ≥ 阈值」——
+     * 四源含 {@code qwt_daily_checkins}（登录<b>自动</b>打卡）与 {@code u.updated_at}，
+     * 于是数据看板顶卡「近 7 日活跃」实际统计的是「近 7 日打开过的号」，把审核/巡检/
+     * 打卡型噪音全算作活跃，与同屏「真实互动」曲线自相矛盾（同一名词两套定义）。
+     * 现口径只认用户主动行为；「最后露面」另有其口径（{@link #findPageByFiltersOrderByLastActive}），
+     * 二者不得互相替代。
+     *
+     * @param sinceDay 窗口起始（含，Service 层现算）
      */
     @Query(value = """
-            SELECT COUNT(*) FROM qwt_users u
-            WHERE u.deleted = false
-              AND u.wechat_review = false
-              AND GREATEST(
-                COALESCE(u.updated_at, u.created_at),
-                COALESCE((SELECT MAX(t.created_at) FROM qwt_points_transactions t WHERE t.user_id = u.id), u.created_at),
-                COALESCE((SELECT MAX(d.created_at) FROM qwt_demand_records d WHERE d.user_id = u.id), u.created_at),
-                COALESCE((SELECT MAX(c.created_at) FROM qwt_daily_checkins c WHERE c.user_id = u.id), u.created_at)
-              ) >= :since
-            """,
-            nativeQuery = true)
-    long countActiveSince(@Param("since") LocalDateTime since);
+            SELECT COUNT(DISTINCT f.user_id)
+            FROM (""" + " " + UserStatsSql.ACTIVE_FACT_UNION + " " + """
+            ) f
+            JOIN qwt_users u ON u.id = f.user_id
+            WHERE """ + " " + UserStatsSql.USER_SCOPE, nativeQuery = true)
+    long countActiveUsers(@Param("sinceDay") LocalDate sinceDay);
 }

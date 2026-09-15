@@ -14,6 +14,7 @@ import org.quwuting.quwutingservice.announcement.entity.AnnouncementRead;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementCategory;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementSource;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementStatus;
+import org.quwuting.quwutingservice.announcement.enums.AnnouncementTouchLevel;
 import org.quwuting.quwutingservice.announcement.repository.AnnouncementReadRepository;
 import org.quwuting.quwutingservice.announcement.repository.AnnouncementRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
@@ -54,7 +55,12 @@ import java.util.stream.Collectors;
  *       offlineAt（OFFLINE 复活唯一通道，不清空会被 offlineDue 立即再度下线）；SYSTEM
  *       数据更新公告按 ops-config auto_offline_hours（默认 24h）自动过期；</li>
  *   <li>SYSTEM 公告 operator_id 恒 null（系统/Agent 来源审计先例）；</li>
- *   <li>数据更新公告同日防重：查询防重 + V7 生成列唯一索引兜底并发。</li>
+ *   <li>数据更新公告同日防重：查询防重 + V7 生成列唯一索引兜底并发；</li>
+ *   <li><b>未读口径（2026-09-15 收敛）</b>：只有 {@code touchLevel = ALERT} 的公告
+ *       才构成用户未读债务（见 {@link AnnouncementTouchLevel} 的根因说明）。SILENT
+ *       （数据更新 / 每日舞讯等流水）照常可见可查、置顶仍进首页，但恒不计入未读徽标
+ *       与未读红点。列表项的 {@code unread} 字段即本判据的派生结果（
+ *       {@link #isUnread} 为唯一实现），前端零分支消费。</li>
  * </ul>
  */
 @Slf4j
@@ -76,7 +82,7 @@ public class AnnouncementService {
     // ── 用户端 ────────────────────────────────────────────────
 
     /**
-     * 可见公告列表（PUBLISHED + 已生效，pinned 优先倒序；read 批量派生）。
+     * 可见公告列表（PUBLISHED + 已生效，pinned 优先倒序；read/unread 批量派生）。
      *
      * @param pinned null = 全量（公告中心）；true = 仅置顶（首页公告栏数据源，
      *               2026-09-05 契约：非置顶公告不进首页，只在公告中心出现）
@@ -97,14 +103,38 @@ public class AnnouncementService {
                         userId, result.getContent().stream().map(Announcement::getId).collect(Collectors.toList()));
         return result.map(a -> new AnnouncementSummaryResponse(
                 a.getId(), a.getTitle(), a.getCategory(), a.getSource(),
-                a.isPinned(), a.getPublishAt(), readIds.contains(a.getId()), a.getCreatedAt()));
+                a.isPinned(), a.getPublishAt(),
+                readIds.contains(a.getId()),
+                isUnread(a, readIds),
+                a.getCreatedAt()));
     }
 
-    /** 未读公告数（首页公告条 / 我的页入口红点数据源）；excludeCategory=FLASH——快讯无已读回执，不得计入 */
+    /**
+     * 未读公告数（我的页「公告中心」入口徽标数据源）。
+     * <p>
+     * 口径 = <b>需触达（ALERT）</b>的可见未读公告；SILENT（每日舞讯等流水）恒不计入
+     * —— 2026-09-15 收敛，见 {@link AnnouncementTouchLevel}。excludeCategory=FLASH：
+     * 快讯无已读回执，不得计入。
+     */
     @Transactional(readOnly = true)
     public long unreadCount(Long userId) {
         return announcementRepository.countUnread(
-                AnnouncementCategory.FLASH, AnnouncementStatus.PUBLISHED, LocalDateTime.now(), userId);
+                AnnouncementCategory.FLASH, AnnouncementStatus.PUBLISHED,
+                AnnouncementTouchLevel.ALERT, LocalDateTime.now(), userId);
+    }
+
+    /**
+     * 未读债务判据（<b>唯一实现单点</b>，2026-09-15）：仅 ALERT 等级的公告构成未读；
+     * SILENT（数据更新 / 每日舞讯等流水）恒不计。
+     * <p>
+     * 列表未读点、我的页徽标、首页公告条未读点全部消费本判据派生的 {@code unread}
+     * 字段（前端零分支）——三处渲染不再各自解释"什么算未读"。
+     * <p>
+     * 判据写成 {@code != SILENT} 而非 {@code == ALERT}：存量 / 未知值一律按"需触达"
+     * 处理（保守方向 = 宁可多提醒一次，也不静默丢掉触达）。
+     */
+    private static boolean isUnread(Announcement a, Set<Long> readIds) {
+        return a.getTouchLevel() != AnnouncementTouchLevel.SILENT && !readIds.contains(a.getId());
     }
 
     /** 公告详情（已下线/已软删 → 404；不自动标已读，由前端调 markRead） */
@@ -135,6 +165,38 @@ public class AnnouncementService {
         }
     }
 
+    /**
+     * 全部已读（2026-09-15，docs/agents/34「未读收敛通道」）。
+     * <p>
+     * 用户主动声明「这些我都知道了」——一次性为全部未读的<b>需触达</b>公告补写已读回执，
+     * 把"逐条点进详情"的 O(N) 收敛成本降为一次点击。补这个通道的理由：未读分级
+     * （{@link AnnouncementTouchLevel}）让日常不再积压，但只要还存在"积压"的可能
+     * （长期未登录、连续多条重要公告），用户就仍需要一条一次点击清零的逃生出口——
+     * 只靠"少发"来避免积压，是把系统的债转嫁给用户操作。
+     * <p>
+     * <b>语义边界</b>：这是<b>用户主动动作</b>，回执如实记录"用户声明已读"这一事实，
+     * 因此不影响阅读统计口径（与逐条点开详情得到的回执同构）。本项目刻意<b>不</b>采用
+     * 站内信的"进入列表即全读"——公告是运营内容，不替用户做已读决定
+     * （2026-09-01 决策记录，见 docs/agents/34）。
+     * <p>
+     * 只覆盖 ALERT 公告：SILENT 本就不计入未读，写回执既无意义又会污染阅读率。
+     *
+     * @return 收敛后的未读数（重新统计的权威值，前端直接采用，省掉一次往返）
+     */
+    @Transactional
+    public long markAllRead(Long userId) {
+        LocalDateTime now = LocalDateTime.now();
+        int inserted = readRepository.markVisibleReads(
+                userId, AnnouncementStatus.PUBLISHED.name(),
+                AnnouncementTouchLevel.ALERT.name(), AnnouncementCategory.FLASH.name(), now);
+        if (inserted > 0) {
+            log.info("[announcement] read-all: userId={} marked={}", userId, inserted);
+        }
+        return announcementRepository.countUnread(
+                AnnouncementCategory.FLASH, AnnouncementStatus.PUBLISHED,
+                AnnouncementTouchLevel.ALERT, now, userId);
+    }
+
     // ── 管理端 ────────────────────────────────────────────────
 
     /** 管理端列表（状态/分类/来源筛选，id 倒序）；excludeCategory=FLASH——快讯走独立管理菜单 */
@@ -162,6 +224,7 @@ public class AnnouncementService {
         validateSchedule(request.publishAt(), request.offlineAt());
         Announcement a = new Announcement();
         applyFields(a, request.title(), request.content(), request.category(),
+                resolveTouchLevel(request.touchLevel(), request.category()),
                 request.pinned() != null && request.pinned(), request.publishAt(), request.offlineAt());
         a.setSource(AnnouncementSource.MANUAL); // 管理端创建恒 MANUAL（SYSTEM 走 createDataUpdateAnnouncement）
         a.setStatus(AnnouncementStatus.DRAFT);
@@ -197,11 +260,14 @@ public class AnnouncementService {
             a.setTitle(request.title());
             a.setContent(request.content());
             a.setCategory(request.category());
+            // 触达等级随分类一起可改：显式传入即采用，缺省按（可能已改的）分类重新派生
+            a.setTouchLevel(resolveTouchLevel(request.touchLevel(), request.category()));
             a.setPinned(request.pinned() != null && request.pinned());
             a.setOfflineAt(request.offlineAt());
         } else {
             validateSchedule(request.publishAt(), request.offlineAt());
             applyFields(a, request.title(), request.content(), request.category(),
+                    resolveTouchLevel(request.touchLevel(), request.category()),
                     request.pinned() != null && request.pinned(), request.publishAt(), request.offlineAt());
         }
         a.setOperatorId(adminId);
@@ -269,12 +335,19 @@ public class AnnouncementService {
         announcementRepository.save(a);
     }
 
-    /** 阅读统计：阅读人数 + 阅读率（分母 = 有效用户数） */
+    /**
+     * 阅读统计：阅读人数 + 阅读率。
+     * <p>
+     * <b>分母口径（2026-09-15 收敛）</b>= {@code UserStatsSql.USER_SCOPE}（平台真实
+     * 用户——未软删、{@code role='USER'}、非 {@code test_} 开发号、非微信审核账号），
+     * 即「公告的实际受众」。此前为「全部未软删非审核账号」（含 ADMIN 运营号与开发
+     * 联调号），与本仓其它分母不是同一个盘子，已统一为单一事实源（docs/agents/35）。
+     */
     @Transactional(readOnly = true)
     public AnnouncementStatsResponse stats(Long id) {
         findAny(id); // 存在性校验
         long readCount = readRepository.countByAnnouncementId(id);
-        long totalUsers = userRepository.countByDeletedFalseAndWechatReviewFalse();
+        long totalUsers = userRepository.countRealUsers();
         double readRate = totalUsers == 0 ? 0 : (double) readCount / totalUsers;
         return new AnnouncementStatsResponse(readCount, totalUsers, readRate);
     }
@@ -312,6 +385,9 @@ public class AnnouncementService {
         a.setTitle(DATA_UPDATE_TITLE);
         a.setContent(content);
         a.setCategory(category);
+        // 触达等级走分类缺省映射（数据更新 = 流水，恒 SILENT）——不在此硬写枚举，
+        // 保持"分类 → 缺省档位"只有一个声明处（AnnouncementCategory#defaultTouchLevel）
+        a.setTouchLevel(category.defaultTouchLevel());
         a.setSource(AnnouncementSource.SYSTEM);
         a.setStatus(AnnouncementStatus.PUBLISHED);
         a.setPublishAt(LocalDateTime.now());
@@ -357,13 +433,26 @@ public class AnnouncementService {
     // ── 内部工具 ──────────────────────────────────────────────
 
     private void applyFields(Announcement a, String title, String content, AnnouncementCategory category,
-                             boolean pinned, LocalDateTime publishAt, LocalDateTime offlineAt) {
+                             AnnouncementTouchLevel touchLevel, boolean pinned,
+                             LocalDateTime publishAt, LocalDateTime offlineAt) {
         a.setTitle(title);
         a.setContent(content);
         a.setCategory(category);
+        a.setTouchLevel(touchLevel);
         a.setPinned(pinned);
         a.setPublishAt(publishAt);
         a.setOfflineAt(offlineAt);
+    }
+
+    /**
+     * 触达等级解析（<b>唯一缺省判据</b>，2026-09-15）：请求显式给出即采用，缺省按分类
+     * 派生（{@link AnnouncementCategory#defaultTouchLevel()}）。设计成"可空 + 服务端派生"
+     * 而非必填，是为了让不传该字段的自动化发布链路（Agent / Skill 直接调管理端接口）
+     * 也能落在正确档位——每加一条发布通道就要记得补参数，漏一处就复发老问题。
+     */
+    private static AnnouncementTouchLevel resolveTouchLevel(AnnouncementTouchLevel requested,
+                                                            AnnouncementCategory category) {
+        return requested != null ? requested : category.defaultTouchLevel();
     }
 
     /**
@@ -451,7 +540,8 @@ public class AnnouncementService {
 
     private AdminAnnouncementResponse toAdminResponse(Announcement a) {
         return new AdminAnnouncementResponse(
-                a.getId(), a.getTitle(), a.getContent(), a.getCategory(), a.getSource(), a.getScope(),
+                a.getId(), a.getTitle(), a.getContent(), a.getCategory(), a.getTouchLevel(),
+                a.getSource(), a.getScope(),
                 a.getStatus(), a.isPinned(), a.getPublishAt(), a.getOfflineAt(),
                 a.getPublishedAt(), a.getOfflinedAt(), a.getOperatorId(),
                 a.getCreatedAt(), a.getUpdatedAt());

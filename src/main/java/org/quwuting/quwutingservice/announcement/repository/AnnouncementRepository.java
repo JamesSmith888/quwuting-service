@@ -4,6 +4,7 @@ import org.quwuting.quwutingservice.announcement.entity.Announcement;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementCategory;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementSource;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementStatus;
+import org.quwuting.quwutingservice.announcement.enums.AnnouncementTouchLevel;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -135,13 +136,23 @@ public interface AnnouncementRepository extends JpaRepository<Announcement, Long
     /**
      * 未读公告数：可见公告 − 该用户已读（NOT EXISTS 派生，对齐站内信 unread-count 模式）。
      * <p>
+     * <b>口径（2026-09-15 收敛）</b>：只统计 {@code touchLevel = ALERT} 的公告——SILENT
+     * （数据更新 / 每日舞讯等流水内容）恒不计入未读，否则日更公告会让徽标只增不减。
+     * 判据见 {@link AnnouncementTouchLevel}；调用方一律传 {@code ALERT}，禁另写口径。
+     * <p>
      * excludeCategory 由公告侧传 FLASH（快讯无已读回执，<b>绝不能计入公告未读数</b>——
      * 否则红点永不收敛，docs/agents/47）；快讯侧不使用本查询。
+     * <p>
+     * ⚠️ <b>同源声明</b>：本查询与
+     * {@code AnnouncementReadRepository#markVisibleReads}（「全部已读」的批量写入）
+     * 共享同一套未读判据（可见性谓词 + ALERT + 无回执）。<b>改此处条件必须同改那一处</b>，
+     * 否则会出现"点了全部已读但徽标不清零"的幽灵数字（docs/agents/34「未读口径」）。
      */
     @Query("""
             SELECT COUNT(a) FROM Announcement a
             WHERE a.deleted = false AND a.status = :status
               AND (:excludeCategory IS NULL OR a.category <> :excludeCategory)
+              AND a.touchLevel = :touchLevel
               AND (a.publishAt IS NULL OR a.publishAt <= :now)
               AND NOT EXISTS (
                   SELECT 1 FROM AnnouncementRead r
@@ -149,6 +160,7 @@ public interface AnnouncementRepository extends JpaRepository<Announcement, Long
             """)
     long countUnread(@Param("excludeCategory") AnnouncementCategory excludeCategory,
                      @Param("status") AnnouncementStatus status,
+                     @Param("touchLevel") AnnouncementTouchLevel touchLevel,
                      @Param("now") LocalDateTime now,
                      @Param("userId") Long userId);
 

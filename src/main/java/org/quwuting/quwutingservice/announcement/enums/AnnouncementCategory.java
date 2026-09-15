@@ -22,5 +22,23 @@ package org.quwuting.quwutingservice.announcement.enums;
 public enum AnnouncementCategory {
     NOTICE,
     DATA_UPDATE,
-    FLASH
+    FLASH;
+
+    /**
+     * 分类对应的缺省触达等级（<b>唯一映射点</b>，2026-09-15，见
+     * {@link AnnouncementTouchLevel}）：调用方一律走本方法，禁自行 if/else 判断分类。
+     * <ul>
+     *   <li>{@link #NOTICE} → {@link AnnouncementTouchLevel#ALERT}：运营公告按定义
+     *       是"需要用户知晓的变更"，缺省即打断（发布侧可显式下调）；</li>
+     *   <li>{@link #DATA_UPDATE} → {@link AnnouncementTouchLevel#SILENT}：数据更新 /
+     *       每日舞讯是流水记录，可查即可，不计未读（发布侧可显式上调）；</li>
+     *   <li>{@link #FLASH} → {@link AnnouncementTouchLevel#SILENT}：快讯域本就无已读
+     *       回执（靠 {@code excludeCategory=FLASH} 排除在未读之外），取 SILENT 与之一致。</li>
+     * </ul>
+     * 缺省值让"自动化发布的链路不传该字段也能落在正确档位"——否则每加一条发布通道
+     * 都要记得补参数，漏一处就复发旧问题。
+     */
+    public AnnouncementTouchLevel defaultTouchLevel() {
+        return this == NOTICE ? AnnouncementTouchLevel.ALERT : AnnouncementTouchLevel.SILENT;
+    }
 }

@@ -18,7 +18,13 @@ import org.springframework.web.bind.annotation.RestController;
  * 全局公告用户端接口（2026-09-01，docs/agents/34，需登录）。
  * <p>
  * 小程序消费面：首页公告条 / 公告中心列表 / 详情页（towxml 渲染 markdown）。
- * 已读机制 = 回执表（用户 × 公告唯一），详情打开后前端调 read 幂等标记。
+ * <p>
+ * <b>已读机制</b>：回执表（用户 × 公告唯一）。两条收敛路径——
+ * <ul>
+ *   <li>{@code POST /{id}/read}：逐条（详情页打开即调，幂等）；</li>
+ *   <li>{@code POST /read-all}：一次性全部（用户在公告中心主动点「全部已读」，2026-09-15）。</li>
+ * </ul>
+ * 未读口径 = 需触达（ALERT）的可见公告（2026-09-15 收敛，见 {@code AnnouncementTouchLevel}）。
  * 管理端（发布/下线/统计）在 {@link AdminAnnouncementController}。
  */
 @RestController
@@ -43,7 +49,13 @@ public class AnnouncementController {
         return ApiResponse.ok(announcementService.listVisible(userId, page, size, pinned));
     }
 
-    /** 未读公告数（我的页「公告中心」入口红点数据源；口径 = 全部可见公告，含非置顶） */
+    /**
+     * 未读公告数（我的页「公告中心」入口徽标数据源）。
+     * <p>
+     * 口径 = <b>需触达（ALERT）</b>的可见未读公告数（2026-09-15 收敛）：SILENT 的流水类
+     * 公告（数据更新 / 每日舞讯）恒不计入——否则日更公告会让徽标只增不减。详见
+     * {@code AnnouncementTouchLevel} 与 docs/agents/34「触达等级」。
+     */
     @GetMapping("/unread-count")
     public ApiResponse<Long> unreadCount() {
         Long userId = UserContext.requireAuth();
@@ -63,5 +75,21 @@ public class AnnouncementController {
         Long userId = UserContext.requireAuth();
         announcementService.markRead(userId, id);
         return ApiResponse.ok(null);
+    }
+
+    /**
+     * 全部已读（2026-09-15，docs/agents/34「未读收敛通道」）：
+     * 一次性为全部未读的需触达公告补写已读回执，幂等（重复调用返回同一结果）。
+     * <p>
+     * <b>用户主动动作</b>——由用户在公告中心点「全部已读」触发，不是"进入列表即全读"
+     * （公告是运营内容，不替用户做已读决定；语义边界见 Service#markAllRead）。
+     * <p>
+     * 返回收敛后的未读数（权威值，前端直接采用，省掉一次往返；对齐
+     * {@code POST /user/wx-subscribe-settings} 的"写操作返回最新状态"先例）。
+     */
+    @PostMapping("/read-all")
+    public ApiResponse<Long> markAllRead() {
+        Long userId = UserContext.requireAuth();
+        return ApiResponse.ok(announcementService.markAllRead(userId));
     }
 }

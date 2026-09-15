@@ -33,12 +33,12 @@ import java.util.Map;
  * <p>
  * 定位：运营查用户/看贡献/识别异常的列表——行 = 用户公开资料（昵称/头像/角色/
  * 加入天数 + <b>V53 资料字段 age/gender/city</b>）+ 积分余额 + 贡献档案摘要
- * （贡献值 + 等级称号）+ 行为信号（需求/履约/最近活跃）；详情 = 完整画像
+ * （贡献值 + 等级称号）+ 行为信号（需求/履约/最近露面）；详情 = 完整画像
  * （积分收支 + 贡献明细 + 需求/上报/认领分布 + 打卡连续性）。展示边界 =
  * 管理端（Controller requireAdmin），<b>不建公开用户主页</b>（2026-08-21 审核
  * 驳回沉淀，见 AGENTS.md「小程序类目合规 UGC 红线」）；openId 等敏感字段绝不下发。
  * <p>
- * 性能：一页用户的余额/贡献/需求/履约/最近活跃聚合走<b>批量查询</b>
+ * 性能：一页用户的余额/贡献/需求/履约/最近露面聚合走<b>批量查询</b>
  * （findBalancesByUserIds / ContributionService.aggregatesFor /
  * AdminUserStatsService 各 GROUP BY），避免 N+1。
  * <p>
@@ -51,6 +51,9 @@ public class AdminUserService {
 
     /** 无昵称用户的展示占位（与 UserPublicService 同口径，管理端列表可读性） */
     private static final String NICKNAME_FALLBACK = "舞友";
+
+    /** 统计概览「近 7 日活跃」窗口（含今日）——与数据看板顶卡、留存分析同窗口 */
+    private static final int ACTIVE_DAYS = 7;
 
     private final UserRepository userRepository;
     private final PointsAccountRepository pointsAccountRepository;
@@ -75,9 +78,9 @@ public class AdminUserService {
         Map<Long, ContributionService.ContributionAggregate> contributions =
                 contributionService.aggregatesFor(userIds);
         Map<Long, DemandSummary> demands = statsService.demandSummaries(userIds);
-        Map<Long, LocalDateTime> lastActive = statsService.lastActiveFor(userIds, profileUpdatedAt(users.getContent()));
+        Map<Long, LocalDateTime> lastSeen = statsService.lastSeenFor(userIds, profileUpdatedAt(users.getContent()));
         return users.map(u -> toItem(u, balances.getOrDefault(u.getId(), 0L),
-                contributions.get(u.getId()), demands.get(u.getId()), lastActive.get(u.getId())));
+                contributions.get(u.getId()), demands.get(u.getId()), lastSeen.get(u.getId())));
     }
 
     /**
@@ -96,7 +99,7 @@ public class AdminUserService {
         ReportSummary reports = statsService.reportSummaries(ids).getOrDefault(id, emptyReports());
         ClaimSummary claims = statsService.claimSummaries(ids).getOrDefault(id, emptyClaims());
         CheckinSummary checkin = statsService.checkinSummary(id);
-        LocalDateTime lastActive = statsService.lastActiveFor(ids, profileUpdatedAt(List.of(user)))
+        LocalDateTime lastSeen = statsService.lastSeenFor(ids, profileUpdatedAt(List.of(user)))
                 .getOrDefault(id, null);
         long joinedDays = joinedDays(user);
         String nickname = displayName(user);
@@ -110,7 +113,7 @@ public class AdminUserService {
                 user.getAge(),
                 user.getGender(),
                 user.getCity(),
-                lastActive,
+                lastSeen,
                 points,
                 contributionService.briefFor(id),
                 demand,
@@ -120,22 +123,34 @@ public class AdminUserService {
                 Boolean.TRUE.equals(user.getWechatReview()));
     }
 
-    /** 统计概览（GET /admin/users/stats）：总用户 / 今日新增 / 管理员 / 近 7 日活跃 */
+    /**
+     * 统计概览（GET /admin/users/stats）：总用户 / 今日新增 / 管理员 / 近 7 日活跃。
+     * <p>
+     * <b>四项口径（2026-09-15 收敛，全部可交叉验算）</b>：前三项走
+     * {@code UserStatsSql.USER_SCOPE}（真实舞友，剔 ADMIN 运营号 / {@code test_}
+     * 开发号 / 微信审核账号）；「近 7 日活跃」= 有效活跃（用户主动行为 12 表去重），
+     * 与数据看板「真实互动」序列、留存分析同一事实源。
+     * <p>
+     * <b>2026-09-15 根因修复（勿回退）</b>：旧「近 7 日活跃」用的是「四源 MAX」
+     * （资料更新 / 积分流水 / 邀约 / <u>登录自动打卡</u>），实义是「近 7 日打开过的号」，
+     * 与同屏「打开 ≠ 真实使用」的口径说明自相矛盾；旧「总用户」含 ADMIN 与开发号，
+     * 与达 30 天注册序列不同分母（顶卡数字 ≠ 曲线之和）。详见 docs/agents/35。
+     */
     @Transactional(readOnly = true)
     public AdminUserStatsResponse stats() {
         LocalDateTime now = LocalDateTime.now();
         LocalDateTime todayStart = now.toLocalDate().atStartOfDay();
-        LocalDateTime activeSince = now.minusDays(7);
+        LocalDate activeSince = now.toLocalDate().minusDays(ACTIVE_DAYS - 1L);
         return new AdminUserStatsResponse(
-                userRepository.countByDeletedFalseAndWechatReviewFalse(),
-                userRepository.countByDeletedFalseAndWechatReviewFalseAndCreatedAtGreaterThanEqual(todayStart),
+                userRepository.countRealUsers(),
+                userRepository.countRealUsersCreatedSince(todayStart),
                 userRepository.countByDeletedFalseAndWechatReviewFalseAndRole(UserRole.ADMIN),
-                userRepository.countActiveSince(activeSince));
+                userRepository.countActiveUsers(activeSince));
     }
 
     private AdminUserItem toItem(User user, long pointsBalance,
                                  ContributionService.ContributionAggregate agg,
-                                 DemandSummary demand, LocalDateTime lastActiveAt) {
+                                 DemandSummary demand, LocalDateTime lastSeenAt) {
         return new AdminUserItem(
                 user.getId(),
                 displayName(user),
@@ -151,7 +166,7 @@ public class AdminUserService {
                 agg != null ? agg.levelName() : "新晋舞友",
                 demand != null ? demand.total() : 0,
                 demand != null ? demand.fulfilled() : 0,
-                lastActiveAt,
+                lastSeenAt,
                 Boolean.TRUE.equals(user.getWechatReview()));
     }
 
@@ -169,7 +184,7 @@ public class AdminUserService {
         userRepository.save(user);
     }
 
-    /** 最近活跃四源之一的「资料更新」源：updated_at 兜底 createdAt（无任何更新记录） */
+    /** 最近露面四源之一的「资料更新」源：updated_at 兜底 createdAt（无任何更新记录） */
     private static Map<Long, LocalDateTime> profileUpdatedAt(List<User> users) {
         return users.stream().collect(java.util.stream.Collectors.toMap(
                 User::getId,

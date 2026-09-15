@@ -11,7 +11,7 @@ import java.time.LocalDateTime;
  * <p>
  * 定位：运营查用户/看贡献/识别异常的列表行——用户公开资料（昵称/头像/角色/
  * 加入天数 + <b>V53 资料字段 age/gender/city</b>）+ 积分余额 + 贡献档案摘要
- * （贡献值 + 等级称号）+ <b>行为信号</b>（需求单数/履约数/最近活跃）。
+ * （贡献值 + 等级称号）+ <b>行为信号</b>（需求单数/履约数/最近露面）。
  * 展示边界 = 管理端（requireAdmin），不建公开用户主页（审核红线见 AGENTS.md
  * 「小程序类目合规 UGC 红线」）；openId 等敏感字段绝不下发。
  * <p>
@@ -44,8 +44,10 @@ public record AdminUserItem(
         long demandCount,
         /** 履约次数（fulfilled_at 非空；2026-08-27 V54 履约闭环） */
         long fulfilledCount,
-        /** 最近活跃时间（资料更新/积分流水/邀约/打卡 四源 MAX，最低回退加入时间——
-         *  从未有任何行为 = 加入时间，见 AdminUserStatsService lastActive 定义） */
+        /** 最近露面时间（资料更新/积分流水/邀约/打卡 四源 MAX，最低回退加入时间——
+         *  从未有任何行为 = 加入时间，见 AdminUserStatsService lastSeenFor 定义）。
+         *  <b>语义 = 「这个账号最后一次出现」，含登录自动打卡，勿当「活跃」用</b>
+         *  （管理端「活跃」专指用户主动行为口径，见 docs/agents/35 命名契约） */
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
         LocalDateTime lastActiveAt,
         /** 微信审核账号标记（2026-09-09 V17；true = 管理端统计口径已排除该账号） */

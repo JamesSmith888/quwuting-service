@@ -26,6 +26,8 @@
 | 公告入口 | **首页公告条（v3 悬浮式 + 可关闭：同日不重显、次日/新公告回归；关闭 ≠ 已读；悬浮条存在时内容区让位——收藏/城市列表首项不被遮挡，状态卡存在时由状态卡让位）+ 我的页「公告中心」入口**，双入口 |
 | 数据更新公告触发 | **自动 + 手动双通道**：venuesync 写库成功后自动生成 SYSTEM 公告（同日防重），管理员也可在后台手动发布同类别公告 |
 | 已读机制 | **已读回执表**（user_id × announcement_id 唯一），支持未读红点与阅读率统计 |
+| **触达等级（2026-09-15 用户拍板，根因修复）** | 新增 `touch_level`：**未读徽标 = 「需触达（ALERT）」公告的未读**；流水类公告（数据更新 / 每日舞讯）落 `SILENT` ⇒ 不再计入未读，但**仍可在公告中心查看、置顶仍进首页公告栏**——把「可见性」与「未读债务」拆成两件事 |
+| **未读收敛通道（2026-09-15 用户拍板）** | 新增 `POST /announcements/read-all`：用户在公告中心主动点「全部已读」，一次点击清零。**仍不做**「进入列表即全读」（公告是运营内容，不替用户做已读决定；与站内信的差异保持不变） |
 
 ## 数据模型（MySQL 迁移 V7，qwt_ 前缀）
 
@@ -41,6 +43,7 @@
 | title | varchar(100) NOT NULL | 标题，≤ 50 字（前端限制） |
 | content | mediumtext NOT NULL | Markdown 原文 |
 | category | varchar(32) NOT NULL | `NOTICE` 运营公告 / `DATA_UPDATE` 数据更新 |
+| touch_level | varchar(16) NOT NULL DEFAULT 'ALERT' | **触达等级**（V26，2026-09-15）：`ALERT` 计入未读 / `SILENT` 不打扰（仅可查）。未读口径的唯一判据，见「触达等级」节 |
 | source | varchar(16) NOT NULL | `MANUAL` / `SYSTEM` |
 | scope | varchar(16) NOT NULL DEFAULT 'ALL' | 一期仅 ALL；预留 `CITY`（城市粒度，后续扩展） |
 | status | varchar(20) NOT NULL DEFAULT 'DRAFT' | 状态机枚举（STRING 存储，禁 CHECK；对齐 ReportStatus 先例）：DRAFT → PUBLISHED → OFFLINE |
@@ -69,8 +72,15 @@
 - 已读记录**不软删**（用户已读事实保留）；膨胀预案：单条公告发布超 N 天 + 阅读率统计归档后，
   可对超期公告的 reads 行做离线归档（本期不做，仅预留）
 
-**未读数口径**：`count(PUBLISHED 且已生效公告) − count(该用户已读)`，
+**未读数口径（2026-09-15 收敛）**：`count(touch_level='ALERT' 且 PUBLISHED 且已生效且非快讯) − count(该用户已读)`，
 SQL 用 NOT EXISTS 子查询派生（对齐站内信 unread-count 模式）。
+**SILENT 的公告恒不计入**——这是「未读徽标只增不减」的根因修复（见「触达等级」节）。
+
+> ⚠️ **同源声明**：未读判据在**两处** SQL 中各写一遍——
+> `AnnouncementRepository#countUnread`（读：徽标）与
+> `AnnouncementReadRepository#markVisibleReads`（写：全部已读）。
+> 两处的 WHERE 条件必须逐条对应，**改一处必须同改另一处**，否则会出现
+> "点了全部已读但徽标不清零"的幽灵数字。
 
 ## 后端接口（新域 announcement 包，对齐 appfeedback 分包风格）
 
@@ -81,10 +91,16 @@ SQL 用 NOT EXISTS 子查询派生（对齐站内信 unread-count 模式）。
 
 | 接口 | 说明 |
 |------|------|
-| GET /announcements | 列表（分页倒序；pinned 优先；read 布尔派生；含 category/source 标签）。**可选 `pinned` 过滤参数**（2026-09-05）：`true` = 仅置顶（首页公告栏数据源）；不传 = 全量（公告中心） |
-| GET /announcements/unread-count | 未读数（我的页入口徽标数据源；**口径 = 全部可见公告，含非置顶**——首页公告栏只出置顶，但公告中心红点要覆盖全部未读） |
+| GET /announcements | 列表（分页倒序；pinned 优先；**read 已读事实 + unread 未读债务** 双布尔派生；含 category/source 标签）。**可选 `pinned` 过滤参数**（2026-09-05）：`true` = 仅置顶（首页公告栏数据源）；不传 = 全量（公告中心） |
+| GET /announcements/unread-count | 未读数（我的页入口徽标数据源；**口径 = 需触达（ALERT）的可见未读公告**，2026-09-15 收敛） |
 | GET /announcements/{id} | 详情（返回 markdown 原文 + 元信息；已下线/已删 → 404） |
 | POST /announcements/{id}/read | 标记已读（幂等；详情页打开即调） |
+| POST /announcements/read-all | **全部已读**（2026-09-15）：一次收敛全部未读的 ALERT 公告，幂等；返回收敛后的未读数 |
+
+> **列表响应为什么要有 `read` 和 `unread` 两个布尔**（2026-09-15）：`read` = 已读回执事实
+> （用户是否打开过详情）；`unread` = 是否构成未读债务（ALERT 且无回执）。SILENT 公告
+> `read=false` 但 `unread=false`——**渲染未读点一律用 `unread`**，`!read` 会把"不打扰"
+> 读成"未读"。判据单点 = `AnnouncementService#isUnread`。
 
 ### 管理端（Web 后台）
 
@@ -97,7 +113,13 @@ SQL 用 NOT EXISTS 子查询派生（对齐站内信 unread-count 模式）。
 | POST /admin/announcements/{id}/publish | 发布（body 可带 publishAt 定时；publish_at 未到 → 状态仍 DRAFT 但置计划时间） |
 | POST /admin/announcements/{id}/offline | 下线（置 OFFLINE + offlined_at；小程序端详情 404，列表不展示） |
 | POST /admin/announcements/{id}/delete | 软删除（deleted=1） |
-| GET /admin/announcements/{id}/stats | 阅读统计（阅读人数 = count(reads)、阅读率 = reads / 有效用户数） |
+| GET /admin/announcements/{id}/stats | 阅读统计（阅读人数 = count(reads)、阅读率 = reads / **真实用户数**） |
+
+> **触达分母口径（2026-09-15 收敛）**：分母 = `UserStatsSql.USER_SCOPE`（未软删、
+> `role='USER'`、非 `test_` 开发号、非微信审核账号）= **公告的实际受众**，与数据看板
+> 「累计注册」、留存分母同一个盘子（此前为「全部未软删非审核账号」，含 ADMIN 运营号与
+> 开发联调号——分母口径与其它统计不一致）。详见
+> [35-dashboard-stats.md](35-dashboard-stats.md)「口径单一事实源」。
 
 ### 状态机与边界
 
@@ -128,7 +150,85 @@ SQL 用 NOT EXISTS 子查询派生（对齐站内信 unread-count 模式）。
 - SYSTEM 公告创建仅内部调用（service 方法），不暴露管理端创建接口的 SYSTEM 来源入口
   （管理员手动发只能选 MANUAL）。
 
+## 触达等级 `touch_level`（2026-09-15，未读口径根因修复）
+
+### 现象与根因
+
+**现象**：小程序「我的 → 公告中心」入口的数字徽标长期只增不减（每日舞讯每天至少 +1），
+公告中心列表每行还挂一个未读点；用户必须**逐条点进详情**才能消除，而实际阅读率很低
+⇒ 徽标失效（"狼来了"），真正需要知晓的运营公告也被一起无视。
+
+**机制层（三个零件拼出必然结果）**：
+
+1. **未读 = 逐条确认的债务**。`unreadCount` = `count(可见公告) − count(回执)`，隐含前提是
+   "每条公告都是一个需要用户确认知悉的事项"；
+2. **收敛路径唯一 = 进详情页**（单条 `POST /{id}/read`），消除 N 条 = N 次点击；
+3. **内容性质与触达策略脱钩**：`category` 只决定列表标签文字，`pinned` 只决定是否进首页，
+   未读口径对所有非 FLASH 公告一视同仁——发布方**没有任何办法表达"这条是流水，别计未读"**。
+
+**决策层（真正的根因）**：公告系统设计于 2026-09-01，当时的前提写得很明确——
+公告 = **低频运营内容**，因此逐条已读是**正确**的（低频、每条都值得读、逐条回执还能喂阅读率）。
+但 **09-09「公告分开制」**（同日可并存多条 DATA_UPDATE）与 **09-15「高置信永远自动发公告」**
+之后，公告变成**日更高频流水**，前提被业务演进打破，而**未读模型没有随之演进**。
+⇒ 根因不是某行代码写错，而是「未读语义」与「内容频率 / 性质」的耦合被业务演进切断后，
+系统里没有任何机制保证两者同步演进。同类问题只要再出现一次（任何一类通知变成高频），
+就会以同样的形态复发。
+
+### 设计
+
+一个字段回答一个问题：**这条公告是否构成用户的未读债务**（"用户不知道就会吃亏"的信息）。
+
+| 值 | 含义 | 行为 |
+|----|------|------|
+| `ALERT` | 需用户知晓（新功能、规则调整、平台变更…） | 计入未读徽标 / 未读红点；未读即"用户欠一个知道" |
+| `SILENT` | 流水 / 存档（数据更新、每日舞讯…） | **恒不计入未读**；仍出现在公告中心、仍可搜索阅读、置顶时仍进首页公告栏 |
+
+**与另外两个维度正交、互不替代**（判据）：
+
+- `category` = 内容**分类**（给用户看的标签）；
+- `pinned` = **位置**（是否进首页公告栏这个强触达位）；
+- `touch_level` = **打扰与否**（是否计入未读）。**"可见性"与"未读债务"是两件事**——
+  这正是旧模型把两者混在一起才出的问题。
+
+**缺省值 = 分类派生，且是单点**：`AnnouncementCategory#defaultTouchLevel()`
+（`NOTICE` → `ALERT`，其余 → `SILENT`）。
+- 请求体里的 `touchLevel` **可空**，缺省走该映射 ⇒ **自动化发布链路（Agent / Skill 直接调
+  管理端接口）不传参也能落在正确档位**——否则每加一条发布通道都要记得补参数，漏一处就复发。
+- 落库默认 `ALERT`（保守：新建条目未显式指定时宁可多提醒一次，也不静默丢掉触达）。
+- `createDataUpdateAnnouncement`（SYSTEM 通道）显式走同一映射，**不在服务里硬写枚举**。
+
+### 存量回填（V26）
+
+`UPDATE qwt_announcements SET touch_level='SILENT' WHERE category <> 'NOTICE'`
+——DATA_UPDATE（数据更新 / 每日舞讯）是流水；FLASH（行业快讯）本就无已读回执。
+**纯口径切换、不动任何已读回执**：回填后用户侧历史未读徽标自然归零，不需要逐条补回执。
+
+### 相关：未读收敛通道（同日落地）
+
+即便分级后不再日常积压，只要**存在积压的可能**（长期未登录、连续多条重要公告），
+用户就需要一条一次点击清零的出口——只靠"少发"避免积压，是把系统的债转嫁给用户操作。
+故新增 `POST /announcements/read-all`：
+
+- **语义 = 用户主动动作**（不是"进入列表即全读"），回执如实记录"用户声明已读"，
+  与逐条点开详情得到的回执同构 ⇒ **不影响阅读率口径**；
+- 只覆盖 `ALERT` 公告（SILENT 本不计未读，写回执反而污染阅读率）；
+- 实现 = 一条 `INSERT IGNORE ... SELECT`（`AnnouncementReadRepository#markVisibleReads`）：
+  幂等靠唯一键而非应用层"先查后插"——并发下后者必抛重复键、而异常会让事务 rollback-only，
+  同事务内再统计未读就会炸；
+- 返回收敛后的未读数（权威值，前端直接落 data，省一次往返）。
+
+### 防复发（判据沉淀）
+
+1. **未读徽标 = 需要用户知晓的信息的债务**。任何新增公告类型，先问"用户不知道会不会吃亏"：
+   不会 ⇒ 落 SILENT。**流水 / 存档类内容一律不得计入未读**。
+2. **判据只许一处实现**：`AnnouncementService#isUnread`（列表 unread 派生）+
+   `countUnread`（徽标）。前端一律消费后端派生的 `unread`，**禁写 `!read`**。
+3. **写侧与读侧两处 SQL 必须同改**（见「未读数口径」同源声明）。
+4. **发布侧后果必须对运营可见**：管理端编辑页「用户提醒」控件（含后果文案）、列表「不打扰」标记。
+
 ## 数据更新公告触发链路（B 场景）
+
+
 
 - **触发点**：venuesync 写库成功处调用 `AnnouncementService.createSystem(...)`：
   - `VenueSyncDataService.batchCreateVenues`（批量新增门店后）
@@ -222,7 +322,9 @@ placeholder 处）+ placeholder 自身 static 定位下块级靠左再左移半�
     （数据源 = GET /announcements/unread-count）。
 - **页面（已落地）**：
   - `pages/announcements/announcements`：列表（分类标签 + 置顶标识 + 未读点 + 时间，
-    分页触底加载）；已读逐条在详情页发生（后端无 read-all，列表页不自动全读）。
+    分页触底加载）；**未读点消费后端派生的 `unread`**（禁 `!read`，2026-09-15）；
+    顶部「全部已读」动作行（仅未读 > 0 时出现）。逐条已读仍在详情页发生，
+    **列表页不自动全读**（不做"进入即全读"）。
   - `pages/announcement-detail/announcement-detail`：详情（**towxml 渲染 markdown**，
     onLoad 取 id → 详情 → towxml 解析 → `<towxml nodes>` 渲染；打开即调 read 接口
     标已读，幂等失败静默）。
@@ -295,6 +397,22 @@ placeholder 处）+ placeholder 自身 static 定位下块级靠左再左移半�
 2. **首页公告栏只出置顶**：`findVisiblePage` / `listVisible` / `GET /announcements`
    全链路新增可选 `pinned` 过滤；小程序首页 `listAnnouncements(0, 1, true)`。
    未读数口径不变（全部可见公告）。**无需数据迁移**（pinned 列 V7 已有）。
+
+### 2026-09-15 修订（用户拍板：触达等级 + 未读收敛通道）
+
+1. **V26 迁移**：`qwt_announcements.touch_level varchar(16) NOT NULL DEFAULT 'ALERT'`
+   + 存量回填 `category <> 'NOTICE'` → `SILENT`。
+2. **用户端接口**：列表项新增 `unread` 派生字段；新增 `POST /announcements/read-all`；
+   `GET /announcements/unread-count` 口径收敛为**只计 ALERT**。
+3. **管理端**：请求/响应 DTO 增加 `touchLevel`（请求可空 = 按分类派生）；编辑页新增
+   「用户提醒」控件（分类切换自动带出该分类缺省档位，可手动覆盖）；列表页新增「不打扰」标记。
+4. **小程序**：列表未读点与首页公告条未读点改用 `unread`；公告中心新增顶部「全部已读」
+   动作行（仅未读 > 0 时出现；**不做成右下角悬浮按钮**——右下角 fixed 位归计时胶囊，
+   项目既有契约，`check:float-corner` 门禁约束）。
+5. **验证边界**：后端 `./mvnw -q clean test-compile` ✓；管理端 `npm run build` ✓；
+   小程序 `npx tsc --noEmit` + `npm run mirror:js` + `npm run check`（十一道）✓。
+   **V26 迁移尚未在任何库执行**（本地 develop 未起服务、生产未动），部署时随 Flyway 应用；
+   `read-all` 的原生 SQL 与迁移 DDL 均属"只能真机/真库验证"的部分，未做运行期冒烟（验证红线）。
 
 ## 风险与降级（P0：towxml × Skyline）
 

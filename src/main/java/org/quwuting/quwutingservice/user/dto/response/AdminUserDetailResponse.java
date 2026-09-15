@@ -34,7 +34,8 @@ public record AdminUserDetailResponse(
         String gender,
         /** 常驻城市（行政区划名，null = 未填写） */
         String city,
-        /** 最近活跃时间（资料更新/积分流水/邀约/打卡 四源 MAX，最低回退加入时间） */
+        /** 最近露面时间（资料更新/积分流水/邀约/打卡 四源 MAX，最低回退加入时间；
+         *  含登录自动打卡，语义 = 账号最后一次出现，勿当「活跃」用） */
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
         LocalDateTime lastActiveAt,
         /** 积分账户（余额 + 累计收支 + 流水条数） */

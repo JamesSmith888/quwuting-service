@@ -1,6 +1,7 @@
 package org.quwuting.quwutingservice.spend.repository;
 
 import org.quwuting.quwutingservice.spend.entity.SpendEntryEntity;
+import org.quwuting.quwutingservice.user.repository.UserStatsSql;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.Repository;
 import org.springframework.data.repository.query.Param;
@@ -19,11 +20,11 @@ import java.util.List;
  * {@code UserDailyStatsRepository} 先例。继承空标记 {@link Repository} 而非
  * {@code JpaRepository}，不生成标准 CRUD。
  * <p>
- * <b>口径（与大盘 35 号完全同族，禁止散落再定义）</b>：全部聚合
- * {@code JOIN qwt_users} 过滤——{@code deleted=false AND role='USER'
- * AND open_id NOT LIKE 'test\_%' AND wechat_review=false}，即剔除
- * ADMIN 运营号、test_ 开发联调号、微信审核账号（V17 标记体系）。
- * 软删账目（deleted=1）不入任何计数。
+ * <b>口径（唯一权威 = {@link UserStatsSql}，2026-09-15 起本类不再自带口径正文）</b>：
+ * 全部聚合 {@code JOIN qwt_users} 并引用 {@link UserStatsSql#USER_SCOPE}
+ * （剔 ADMIN 运营号 / {@code test_} 开发联调号 / 微信审核账号）——此处曾逐条抄写该
+ * 谓词 5 遍，任一处漏改即与大盘口径漂移，故收敛为编译期常量 + 门禁
+ * {@code UserStatsSqlMirrorTest}。软删账目（{@code deleted=1}）不入任何计数。
  * <p>
  * <b>MySQL 8 方言</b>（WITH RECURSIVE 骨架补零；生产 RDS MySQL，
  * <b>勿在 PG 环境执行</b>，同 {@code UserDailyStatsRepository}）。
@@ -154,9 +155,7 @@ public interface SpendStatsRepository extends Repository<SpendEntryEntity, Long>
             FROM qwt_spend_entries e
             JOIN qwt_users u ON u.id = e.user_id
             WHERE e.deleted = 0
-              AND u.deleted = false AND u.role = 'USER'
-              AND u.open_id NOT LIKE 'test\\_%'
-              AND u.wechat_review = false
+              AND""" + " " + UserStatsSql.USER_SCOPE + " " + """
             """, nativeQuery = true)
     SummaryRow sumSummary(@Param("activeSince") LocalDate activeSince);
 
@@ -184,9 +183,7 @@ public interface SpendStatsRepository extends Repository<SpendEntryEntity, Long>
                        JOIN qwt_users u ON u.id = e.user_id
                        WHERE e.deleted = 0
                          AND e.ts >= CAST(:sinceDay AS DATETIME)
-                         AND u.deleted = false AND u.role = 'USER'
-                         AND u.open_id NOT LIKE 'test\\_%'
-                         AND u.wechat_review = false
+                         AND""" + " " + UserStatsSql.USER_SCOPE + " " + """
                        GROUP BY DATE(e.ts)) s ON s.day = d.day
             ORDER BY d.day
             """, nativeQuery = true)
@@ -204,9 +201,7 @@ public interface SpendStatsRepository extends Repository<SpendEntryEntity, Long>
             FROM qwt_spend_entries e
             JOIN qwt_users u ON u.id = e.user_id
             WHERE e.deleted = 0 AND e.direction = 'EXPENSE'
-              AND u.deleted = false AND u.role = 'USER'
-              AND u.open_id NOT LIKE 'test\\_%'
-              AND u.wechat_review = false
+              AND""" + " " + UserStatsSql.USER_SCOPE + " " + """
             GROUP BY e.category
             ORDER BY entryCount DESC
             """, nativeQuery = true)
@@ -224,9 +219,7 @@ public interface SpendStatsRepository extends Repository<SpendEntryEntity, Long>
             FROM qwt_spend_entries e
             JOIN qwt_users u ON u.id = e.user_id
             WHERE e.deleted = 0 AND e.venue_id IS NOT NULL
-              AND u.deleted = false AND u.role = 'USER'
-              AND u.open_id NOT LIKE 'test\\_%'
-              AND u.wechat_review = false
+              AND""" + " " + UserStatsSql.USER_SCOPE + " " + """
             GROUP BY e.venue_id
             ORDER BY entryCount DESC
             LIMIT :limit
@@ -251,9 +244,7 @@ public interface SpendStatsRepository extends Repository<SpendEntryEntity, Long>
             FROM qwt_spend_entries e
             JOIN qwt_users u ON u.id = e.user_id
             WHERE e.deleted = 0
-              AND u.deleted = false AND u.role = 'USER'
-              AND u.open_id NOT LIKE 'test\\_%'
-              AND u.wechat_review = false
+              AND""" + " " + UserStatsSql.USER_SCOPE + " " + """
             GROUP BY e.user_id, u.nickname, u.avatar_url
             ORDER BY lastEntryAt DESC
             """, nativeQuery = true)

@@ -16,32 +16,31 @@ import java.util.List;
  * 舞伴 {@code DancerStatsRepository} 独立统计仓库先例）。继承空标记
  * {@link Repository} 而非 {@code JpaRepository}——不生成标准 CRUD，避免职责重叠。
  * <p>
- * <b>口径说明（与 2026-09-06 生产库真实画像分析一致，docs/agents/35）</b>：
+ * <b>口径权威 = {@link UserStatsSql}（2026-09-15 起，本类不再自带口径正文）</b>：
+ * 用户范围谓词与有效活跃事实集全部引用该类的编译期常量，配套门禁
+ * {@code UserStatsSqlMirrorTest} 阻止内联抄写回潮。
  * <ul>
- *   <li><b>注册数</b>：当日 qwt_users.created_at 落当日且未软删的真实舞友
- *       （role='USER'，剔除 role='ADMIN' 的运营/测试号与 open_id 以 test_ 开头的
- *       开发联调号）——与小程序端「我」页可见、与微信后台「累计用户」口径不同
- *       （微信含未登录游客，DB 只记登录建号用户）；</li>
- *   <li><b>打开数（打卡口径）</b>：当日 qwt_daily_checkins 去重用户——打卡是
- *       app.ts onLaunch 登录后自动触发（services/autoCheckIn.ts），仅代表「当天
- *       打开过小程序且登录成功」，<b>不代表真实使用</b>；</li>
- *   <li><b>真实互动数</b>：当日至少在任一互动行为表（门店/舞伴浏览、门店/舞伴
- *       分享、表情认可、门店/舞伴收藏、邀约、关注、热度上报、纠错、标签互动）有
- *       记录的去重用户——这是运营关注的「有效日活」口径；</li>
- *   <li><b>打卡型噪音注册</b>：当日注册且<u>注册后从未有任何真实互动</u>的
- *       用户数（互动全集 NOT EXISTS）——识别微信审核/自动巡检流量（2026-09-03 起
- *       占比骤升 60%+，深夜均匀注册等特征见 35 号文档），前端以「噪音占比」呈现。</li>
+ *   <li><b>注册数</b>：当日注册的<b>真实舞友</b>（{@link UserStatsSql#USER_SCOPE}：
+ *       剔 ADMIN 运营号 / {@code test_} 开发号 / 微信审核账号）——与小程序「我」页
+ *       可见口径一致，与微信后台「累计用户」口径不同（微信含未登录游客）；</li>
+ *   <li><b>打开数（打卡口径）</b>：当日 {@code qwt_daily_checkins} 去重用户。打卡由
+ *       {@code app.ts onLaunch} 登录后<b>自动</b>触发（{@code services/autoCheckIn.ts}），
+ *       仅代表「当天打开过」，<b>不代表真实使用</b>——本序列保留是因为它能反映触达/唤醒，
+ *       但它<b>不得</b>作为「活跃」用于任何活跃或留存指标（判据见
+ *       {@link UserStatsSql#ACTIVE_FACT_UNION}）；</li>
+ *   <li><b>真实互动数</b>：当日出现在有效活跃事实集（12 表用户主动行为）的去重用户
+ *       ——「有效日活」唯一口径，与顶卡「近 7 日活跃」、留存分析同一事实源；</li>
+ *   <li><b>打卡型噪音注册</b>：当日注册且<b>注册后从未有任何痕迹</b>的用户数
+ *       （{@link UserStatsSql#TRACE_FACT_UNION} NOT EXISTS，含被动痕迹，故意比
+ *       有效活跃宽：宁可漏判噪音，不可误判真实用户）——识别微信审核/自动巡检流量。</li>
  * </ul>
  * <p>
- * <b>2026-09-09 V17 口径收紧</b>：全部四序列排除微信审核账号（qwt_users.
- * wechat_review=true，V17 存量名单 + admin-web 用户详情页手动标记）——注册/噪音
- * 在用户表子查询直接过滤；打开/互动在行为子查询外层
- * {@code user_id NOT IN (SELECT id FROM qwt_users WHERE wechat_review = true)}
- * 过滤（行为表无用户标记冗余，统一回查用户表）。
+ * 三条序列的用户范围<b>完全一致</b>（都走 {@link UserStatsSql#USER_SCOPE}）；
+ * 2026-09-15 前「打开/互动」只剔审核号、注册剔 ADMIN+开发号，同图不同分母，已收敛。
  * <p>
- * MySQL 8 方言（生产 RDS 已切 MySQL，2026-08-30；WITH RECURSIVE 骨架补零 +
- * DATE_SUB/INTERVAL 语法与 application-mysql.yaml 同族；<b>勿在 PG 环境执行</b>）。
- * 骨架 = [today-(days-1), today]（含今日，实时），各源 LEFT JOIN 天然补零。
+ * MySQL 8 方言（WITH RECURSIVE 骨架补零 + INTERVAL 语法；生产 RDS MySQL，
+ * <b>勿在 PG 环境执行</b>）。骨架 = [today-(days-1), today]（含今日，实时），
+ * 各源 LEFT JOIN 天然补零。
  */
 public interface UserDailyStatsRepository extends Repository<User, Long> {
 
@@ -52,22 +51,23 @@ public interface UserDailyStatsRepository extends Repository<User, Long> {
     interface DailyStatsRow {
         /** 统计日 */
         LocalDate getDay();
-        /** 当日注册数（role='USER' 且非 test_ 前缀，见类注释口径） */
+        /** 当日注册数（真实舞友，见 {@link UserStatsSql#USER_SCOPE}） */
         Long getRegistered();
-        /** 当日打开数 = 打卡去重用户（登录自动打卡口径） */
+        /** 当日打开数 = 打卡去重用户（登录自动打卡口径，仅代表打开过） */
         Long getOpened();
-        /** 当日真实互动用户数（浏览/分享/收藏/表情/邀约/关注/上报等去重） */
+        /** 当日有效活跃用户数（用户主动行为去重 = 有效日活） */
         Long getInteractive();
-        /** 当日注册中「打卡型噪音」数（注册后从未真实互动，疑似审核/巡检） */
+        /** 当日注册中「打卡型噪音」数（注册后从未有任何痕迹，疑似审核/巡检） */
         Long getNoisy();
     }
 
     /**
-     * 大盘按日趋势 mega-query：一条 DB 往返取回 注册/打开/互动/噪音 四组按天
-     * 序列（骨架 30 天含今日，天然补零）。噪音判定子查询扫互动全集（NOT EXISTS），
-     * 表量级（数千行）下开销可接受；若未来互动表膨胀，可加 user_id 覆盖索引评估。
+     * 大盘按日趋势 mega-query：一条 DB 往返取回 注册/打开/互动/噪音 四组按天序列
+     * （骨架含今日，天然补零）。
+     * <p>
+     * 噪音判定的 NOT EXISTS 扫痕迹全集（{@link UserStatsSql#TRACE_FACT_UNION}）——
+     * 表量级（数千行）下开销可接受；若互动表显著膨胀，再评估 user_id 覆盖索引。
      *
-     * @param days     窗口天数（含今日，1~90，Service 层钳制）
      * @param sinceDay 骨架起始（today-(days-1)，Service 层现算传入）
      */
     @Query(value = """
@@ -82,60 +82,30 @@ public interface UserDailyStatsRepository extends Repository<User, Long> {
                    COALESCE(i.cnt, 0) AS interactive,
                    COALESCE(n.cnt, 0) AS noisy
             FROM date_series d
-            LEFT JOIN (SELECT DATE(created_at) AS day, COUNT(*) AS cnt
-                       FROM qwt_users
-                       WHERE deleted = false AND role = 'USER'
-                         AND open_id NOT LIKE 'test\\_%'
-                         AND wechat_review = false
-                         AND created_at >= CAST(:sinceDay AS DATETIME)
-                       GROUP BY day) r ON r.day = d.day
-            LEFT JOIN (SELECT checkin_date AS day, COUNT(DISTINCT c.user_id) AS cnt
-                       FROM qwt_daily_checkins c
-                       WHERE c.checkin_date >= CAST(:sinceDay AS DATE)
-                         AND c.user_id NOT IN (SELECT id FROM qwt_users WHERE wechat_review = true)
-                       GROUP BY day) o ON o.day = d.day
-            LEFT JOIN (SELECT t.day AS day, COUNT(DISTINCT t.user_id) AS cnt
-                       FROM (
-                           SELECT user_id, view_date AS day FROM qwt_venue_views WHERE user_id IS NOT NULL AND view_date >= CAST(:sinceDay AS DATE)
-                           UNION ALL SELECT user_id, view_date AS day FROM qwt_dancer_views WHERE user_id IS NOT NULL AND view_date >= CAST(:sinceDay AS DATE)
-                           UNION ALL SELECT user_id, DATE(created_at) AS day FROM qwt_venue_shares WHERE user_id IS NOT NULL AND created_at >= CAST(:sinceDay AS DATETIME)
-                           UNION ALL SELECT user_id, DATE(created_at) AS day FROM qwt_dancer_shares WHERE user_id IS NOT NULL AND created_at >= CAST(:sinceDay AS DATETIME)
-                           UNION ALL SELECT user_id, reaction_date AS day FROM qwt_venue_reactions WHERE user_id IS NOT NULL AND deleted = false AND reaction_date >= CAST(:sinceDay AS DATE)
-                           UNION ALL SELECT user_id, DATE(created_at) AS day FROM qwt_favorites WHERE user_id IS NOT NULL AND deleted = false AND unfavorited_at IS NULL AND created_at >= CAST(:sinceDay AS DATETIME)
-                           UNION ALL SELECT user_id, DATE(created_at) AS day FROM qwt_dancer_favorites WHERE user_id IS NOT NULL AND deleted = false AND created_at >= CAST(:sinceDay AS DATETIME)
-                           UNION ALL SELECT user_id, DATE(created_at) AS day FROM qwt_demand_records WHERE user_id IS NOT NULL AND created_at >= CAST(:sinceDay AS DATETIME)
-                           UNION ALL SELECT user_id, DATE(created_at) AS day FROM qwt_venue_status_watchers WHERE user_id IS NOT NULL AND deleted = false AND created_at >= CAST(:sinceDay AS DATETIME)
-                           UNION ALL SELECT user_id, report_date AS day FROM qwt_venue_crowd_reports WHERE user_id IS NOT NULL AND deleted = false AND report_date >= CAST(:sinceDay AS DATE)
-                           UNION ALL SELECT user_id, DATE(created_at) AS day FROM qwt_venue_feedbacks WHERE user_id IS NOT NULL AND deleted = false AND created_at >= CAST(:sinceDay AS DATETIME)
-                           UNION ALL SELECT user_id, DATE(created_at) AS day FROM qwt_tag_interactions WHERE user_id IS NOT NULL AND deleted = false AND created_at >= CAST(:sinceDay AS DATETIME)
-                       ) t
-                       WHERE t.user_id NOT IN (SELECT id FROM qwt_users WHERE wechat_review = true)
-                       GROUP BY t.day) i ON i.day = d.day
             LEFT JOIN (SELECT DATE(u.created_at) AS day, COUNT(*) AS cnt
                        FROM qwt_users u
-                       WHERE u.deleted = false AND u.role = 'USER'
-                         AND u.open_id NOT LIKE 'test\\_%'
-                         AND u.wechat_review = false
+                       WHERE """ + " " + UserStatsSql.USER_SCOPE + " " + """
                          AND u.created_at >= CAST(:sinceDay AS DATETIME)
-                         AND NOT EXISTS (SELECT 1 FROM (
-                               SELECT user_id FROM qwt_venue_views WHERE user_id IS NOT NULL
-                               UNION SELECT user_id FROM qwt_dancer_views WHERE user_id IS NOT NULL
-                               UNION SELECT user_id FROM qwt_venue_shares WHERE user_id IS NOT NULL
-                               UNION SELECT user_id FROM qwt_dancer_shares WHERE user_id IS NOT NULL
-                               UNION SELECT user_id FROM qwt_venue_reactions WHERE user_id IS NOT NULL AND deleted = false
-                               UNION SELECT user_id FROM qwt_favorites WHERE user_id IS NOT NULL AND deleted = false
-                               UNION SELECT user_id FROM qwt_dancer_favorites WHERE user_id IS NOT NULL AND deleted = false
-                               UNION SELECT user_id FROM qwt_demand_records WHERE user_id IS NOT NULL
-                               UNION SELECT user_id FROM qwt_venue_status_watchers WHERE user_id IS NOT NULL AND deleted = false
-                               UNION SELECT user_id FROM qwt_venue_crowd_reports WHERE user_id IS NOT NULL AND deleted = false
-                               UNION SELECT user_id FROM qwt_venue_feedbacks WHERE user_id IS NOT NULL AND deleted = false
-                               UNION SELECT user_id FROM qwt_tag_interactions WHERE user_id IS NOT NULL AND deleted = false
-                               UNION SELECT user_id FROM qwt_messages WHERE user_id IS NOT NULL AND deleted = false
-                               UNION SELECT user_id FROM qwt_venue_status_reports WHERE user_id IS NOT NULL AND deleted = false
-                               UNION SELECT user_id FROM qwt_recruitment_contacts WHERE user_id IS NOT NULL AND deleted = false
-                               UNION SELECT user_id FROM qwt_announcement_reads WHERE user_id IS NOT NULL
-                           ) act WHERE act.user_id = u.id)
-                       GROUP BY day) n ON n.day = d.day
+                       GROUP BY DATE(u.created_at)) r ON r.day = d.day
+            LEFT JOIN (SELECT c.checkin_date AS day, COUNT(DISTINCT c.user_id) AS cnt
+                       FROM qwt_daily_checkins c
+                       JOIN qwt_users u ON u.id = c.user_id
+                       WHERE """ + " " + UserStatsSql.USER_SCOPE + " " + """
+                         AND c.checkin_date >= CAST(:sinceDay AS DATE)
+                       GROUP BY c.checkin_date) o ON o.day = d.day
+            LEFT JOIN (SELECT f.day AS day, COUNT(DISTINCT f.user_id) AS cnt
+                       FROM (""" + " " + UserStatsSql.ACTIVE_FACT_UNION + " " + """
+                       ) f
+                       JOIN qwt_users u ON u.id = f.user_id
+                       WHERE """ + " " + UserStatsSql.USER_SCOPE + " " + """
+                       GROUP BY f.day) i ON i.day = d.day
+            LEFT JOIN (SELECT DATE(u.created_at) AS day, COUNT(*) AS cnt
+                       FROM qwt_users u
+                       WHERE """ + " " + UserStatsSql.USER_SCOPE + " " + """
+                         AND u.created_at >= CAST(:sinceDay AS DATETIME)
+                         AND NOT EXISTS (SELECT 1 FROM (""" + " " + UserStatsSql.TRACE_FACT_UNION + " " + """
+                               ) act WHERE act.user_id = u.id)
+                       GROUP BY DATE(u.created_at)) n ON n.day = d.day
             ORDER BY d.day
             """, nativeQuery = true)
     List<DailyStatsRow> countDailyStats(@Param("sinceDay") LocalDate sinceDay);

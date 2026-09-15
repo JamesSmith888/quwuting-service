@@ -16,6 +16,7 @@ import org.quwuting.quwutingservice.announcement.enums.AnnouncementCategory;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementScope;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementSource;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementStatus;
+import org.quwuting.quwutingservice.announcement.enums.AnnouncementTouchLevel;
 import org.quwuting.quwutingservice.base.BaseEntity;
 
 import java.time.LocalDateTime;
@@ -53,6 +54,20 @@ public class Announcement extends BaseEntity {
     @Enumerated(EnumType.STRING)
     @Column(length = 32, nullable = false)
     private AnnouncementCategory category;
+
+    /**
+     * 触达等级（{@link AnnouncementTouchLevel}，2026-09-15）：<b>是否计入用户未读</b>的
+     * 唯一判据 —— ALERT 计入未读徽标/红点，SILENT 恒不计入（仅可查）。
+     * <p>
+     * 缺省 {@code ALERT}（保守：新建条目若未显式指定，宁可多提醒一次也不静默丢弃触达；
+     * 发布侧由 {@link AnnouncementCategory#defaultTouchLevel()} 派生，自动化通道无需传参
+     * 即可落在正确档位）。DDL 列 {@code touch_level varchar(16) NOT NULL DEFAULT 'ALERT'}
+     * 由 V26 迁移建立。
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(length = 16, nullable = false)
+    @ColumnDefault("'ALERT'")
+    private AnnouncementTouchLevel touchLevel = AnnouncementTouchLevel.ALERT;
 
     /** 来源（MANUAL 人工 / SYSTEM 系统） */
     @Enumerated(EnumType.STRING)
