@@ -885,6 +885,28 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
         Long getPv();
         /** 近30天独立用户浏览数 UV（仅已登录去重，COUNT DISTINCT 天然忽略 NULL） */
         Long getUv();
+        /**
+         * 近30天「跨天复访」的登录用户数（2026-09-15 新增）：同一登录用户在本场所的浏览
+         * 落在 <b>≥2 个不同 view_date</b> 上的人数——回答"有多少人是真的回头再来"，
+         * 而不是"这家店被看了多少次"。
+         * <p>
+         * 与 uv 的分工：uv = 近30天去重访客数（人数），本指标 = 其中"来过至少两天的"
+         * 人数（人数 × 时间分布）。同一批流量下，uv 无法区分"10 人各来 1 天"与
+         * "5 人各来 2 天"，本指标能——它是兴趣强度的度量，不是流量规模的度量。
+         * <p>
+         * 抗刷性来自天然约束（不依赖频控）：单日刷 1000 次 PV 仍只产生 1 个 view_date，
+         * 脚本<b>无法</b>把一个用户刷成"复访用户"；要伪造必须跨天持续操作（成本随
+         * 天数线性上升）。与 ln 压缩修的是同一类病（虚假量级膨胀）但维度不同——
+         * ln 压缩主"总量"、本指标主"时间分布"，两者条件独立，不构成重复计量。
+         * <p>
+         * <b>展示字段，不进入热度公式</b>（同 viewCount30d / favoriteCount / postCount
+         * 既有范式——"下发仅供展示、不计入公式"）：排序侧需在 JPQL 的
+         * {@link #HEAT_BEHAVIOR} 内表达「按用户分组后计数」，而 JPQL 无 FROM 派生表能力，
+         * 进排序须把全部列表主查询 native 化重写（收益/风险比不成立，论证见
+         * {@link #HEAT_SCORE} 的 2026-09-02 双算优化评估结论）。后端仅下发、
+         * 前端作"真实兴趣"说明性指标展示。
+         */
+        Long getRepeatvisitors();
         /** 加权浏览贡献输入（2026-08-27 新增）：近30天 Σ(来源权重 × 近7天时效因子)，
          *  热度公式浏览项 = round(ln(1 + 本值))——来源/时效权重常量唯一事实源 =
          *  {@link org.quwuting.quwutingservice.config.VenueHeatWeights} */
@@ -936,6 +958,11 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      *       2026-08-11 由 created_at >= reportSince 迁移）</li>
      *   <li>lateststatuslogtime：当前状态的实时事实，全量 MAX，无窗口约束</li>
      * </ul>
+     * <b>2026-09-15 新增 repeatvisitors</b>（跨天复访用户数）：views 表上的第二个子查询——
+     * 需 {@code GROUP BY user_id} + {@code HAVING COUNT(DISTINCT view_date) >= 2} 的
+     * "分组后再计数"形态，同表同往返（<b>不新增 DB 往返</b>），语义与"为何不进公式"
+     * 见 {@link HeatCounters#getRepeatvisitors()}。
+     * <p>
      * 收藏趋势（多行时间序列）与满意度（分组均值，依赖 raters 条件触发）形态不同，
      * 不参与本合并，仍为独立查询。
      */
@@ -945,6 +972,13 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                 WHERE vv.venue_id = :venueId AND vv.view_date >= :viewSince AND vv.view_date < :viewUntil) AS pv,
               (SELECT COUNT(DISTINCT vv.user_id) FROM qwt_venue_views vv
                 WHERE vv.venue_id = :venueId AND vv.view_date >= :viewSince AND vv.view_date < :viewUntil) AS uv,
+              (SELECT COUNT(*) FROM (
+                  SELECT vv.user_id FROM qwt_venue_views vv
+                   WHERE vv.venue_id = :venueId
+                     AND vv.view_date >= :viewSince AND vv.view_date < :viewUntil
+                     AND vv.user_id IS NOT NULL
+                   GROUP BY vv.user_id
+                   HAVING COUNT(DISTINCT vv.view_date) >= 2) rv) AS repeatvisitors,
               (SELECT COALESCE(SUM(
                         CASE vv.source WHEN 'LIST' THEN"""
             + " " + VenueHeatWeights.VIEW_SOURCE_LIST + " " + """

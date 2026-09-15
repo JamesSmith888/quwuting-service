@@ -33,4 +33,25 @@ public interface VenueShareRepository extends JpaRepository<VenueShare, Long> {
      * SHARE（分享动作），时间倒序——「分享 N 次」统计点击查看每条明细的数据源。
      */
     List<VenueShare> findByUserIdAndEventTypeOrderByCreatedAtDesc(Long userId, ShareEventType eventType);
+
+    /**
+     * 对账口径·批量：一批**活动**的事件数（2026-09-16，V28，docs/agents/49-venue-activities.md §8）。
+     * <p>
+     * 用途是回答那个唯一能拿去跟门店谈的问题——「**这条活动被传播了多少次 / 带来了多少人
+     * 打开**」。SHARE = 传播次数（分享意图），OPEN = 卡片被点开次数（真实回流）；
+     * 两者差值即"传了但没人看"，是判断分享文案/卡片图是否有效的信号。
+     * <p>
+     * 与 23 号贡献档案的 countGroupByUserIdsAndEventType 同构（同一张表、同一种聚合形态，
+     * 只是分组键从 userId 换成 activityId）——刻意不合并成一个"万能分组"方法：
+     * 分组键不同就是两个查询意图，硬合并会引入字符串参数决定 group by 的动态 JPQL。
+     * <p>
+     * GROUP BY 批量而非逐条 count：管理端列表一页 10~20 条，逐条就是 N+1。
+     *
+     * @return 每行 = [activityId, count]；无事件的 activityId 不出现（调用方按 0 兜底）
+     */
+    @Query("SELECT s.activityId, COUNT(s) FROM VenueShare s " +
+           "WHERE s.activityId IN :activityIds AND s.eventType = :eventType " +
+           "GROUP BY s.activityId")
+    List<Object[]> countGroupByActivityIdsAndEventType(@Param("activityIds") Collection<Long> activityIds,
+                                                       @Param("eventType") ShareEventType eventType);
 }

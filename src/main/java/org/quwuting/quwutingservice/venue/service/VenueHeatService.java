@@ -207,6 +207,10 @@ public class VenueHeatService {
                 POSITIVE_REACTION_CODES, NEGATIVE_REACTION_CODES);
         long viewCount30d = orZero(counters.getPv());
         long viewUv30d = orZero(counters.getUv());
+        // 跨天复访用户数（2026-09-15）：展示字段，不进热度公式——「为何不进公式」
+        // （JPQL 无 FROM 派生表，进排序须 native 重写全部列表主查询）见
+        // VenueRepository.HeatCounters#getRepeatvisitors 与 VenueHeatResponse 同名字段注释
+        long repeatVisitorCount30d = orZero(counters.getRepeatvisitors());
         // 加权浏览贡献输入（2026-08-27）：来源质量加权 + 近7天时效因子的 30 天合计，
         // 热度公式浏览项 = round(ln(1 + 本值))——线性 PV 计数被重构，见 VenueHeatWeights
         // 浏览贡献注释（马太效应反馈循环修复）。viewCount30d（原始 PV）仅作展示用。
@@ -344,7 +348,7 @@ public class VenueHeatService {
 
         return new VenueHeatResponse(
                 heatScore,
-                viewCount30d, viewUv30d,
+                viewCount30d, viewUv30d, repeatVisitorCount30d,
                 favoriteCount, newFavoriteCount30d, favoriteTrend, unfavoriteTrend, viewTrend, viewSourceTrend, reactionTrend,
                 postCount, newPostCount30d,
                 ratingCount30d, positiveReactionCount30d, negativeReactionCount30d,

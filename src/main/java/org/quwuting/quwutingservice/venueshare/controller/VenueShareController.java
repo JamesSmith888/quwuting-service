@@ -28,7 +28,8 @@ public class VenueShareController {
 
     /**
      * 记录一次分享动作（分享面板弹出时由 onShareAppMessage / onShareTimeline 触发）。
-     * POST /venues/{id}/shares  body: {"channel": "BUTTON"|"MENU"|"TIMELINE"}（可选）
+     * POST /venues/{id}/shares
+     * body: {"channel": "BUTTON"|"MENU"|"TIMELINE", "activityId": 1}（均可选）
      */
     @PostMapping("/{id}/shares")
     public ApiResponse<Void> recordShare(
@@ -36,13 +37,15 @@ public class VenueShareController {
             @Valid @RequestBody(required = false) RecordShareRequest request
     ) {
         String channel = request != null ? request.channel() : null;
-        venueShareService.recordShare(id, UserContext.getCurrentUserId(), channel);
+        Long activityId = request != null ? request.activityId() : null;
+        venueShareService.recordShare(id, UserContext.getCurrentUserId(), channel, activityId);
         return ApiResponse.ok(null);
     }
 
     /**
-     * 记录一次分享打开（被分享者打开详情页且路径携带 share_from 时触发）。
-     * POST /venues/{id}/share-opens  body: {"shareFrom": 123}（可选）
+     * 记录一次分享打开（被分享者打开详情页且路径携带 share_from / act_id 时触发）。
+     * POST /venues/{id}/share-opens
+     * body: {"shareFrom": 123, "activityId": 1}（均可选）
      */
     @PostMapping("/{id}/share-opens")
     public ApiResponse<Void> recordShareOpen(
@@ -50,7 +53,8 @@ public class VenueShareController {
             @Valid @RequestBody(required = false) RecordShareOpenRequest request
     ) {
         Long shareFrom = request != null ? request.shareFrom() : null;
-        venueShareService.recordOpen(id, UserContext.getCurrentUserId(), shareFrom);
+        Long activityId = request != null ? request.activityId() : null;
+        venueShareService.recordOpen(id, UserContext.getCurrentUserId(), shareFrom, activityId);
         return ApiResponse.ok(null);
     }
 }

@@ -36,7 +36,8 @@ import java.time.LocalDateTime;
 @Table(name = "qwt_venue_shares", indexes = {
         @Index(name = "qwt_idx_venue_shares_venue_time", columnList = "venueId, createdAt"),
         @Index(name = "qwt_idx_venue_shares_user", columnList = "userId"),
-        @Index(name = "qwt_idx_venue_shares_from", columnList = "shareFrom")
+        @Index(name = "qwt_idx_venue_shares_from", columnList = "shareFrom"),
+        @Index(name = "qwt_idx_venue_shares_activity", columnList = "activityId, eventType")
 })
 public class VenueShare {
 
@@ -46,6 +47,18 @@ public class VenueShare {
 
     @Column(nullable = false)
     private Long venueId;
+
+    /**
+     * 活动 ID（2026-09-16，V28，docs/agents/49-venue-activities.md §8），可空。
+     * <p>
+     * NULL = 场所级分享（门店详情页 / 门店热度页发起，或 V28 之前的存量事件）——
+     * 它们确实不知道当时有没有活动，替历史数据补一个归因是更坏的选择。
+     * <p>
+     * 两条事件共用本列，靠 {@link #eventType} 区分语义：
+     * SHARE 行 = 分享者点的是哪条活动的分享按钮；OPEN 行 = 哪条活动的分享卡片被点开。
+     * 非外键：活动删除或到期下线后事件行仍保留原值（分析型数据不做级联清理）。
+     */
+    private Long activityId;
 
     /** 事件发起者（分享者 / 打开者），匿名时为 null（匿名参与 IP 频控，不参与身份归因） */
     private Long userId;
