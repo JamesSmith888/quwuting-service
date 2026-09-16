@@ -105,6 +105,15 @@ public class VenueService {
     /** 联想建议条数上限（suggest 轻量接口，前端滚动联想无需更多） */
     private static final int MAX_SUGGEST_SIZE = 8;
 
+    /**
+     * 匹配解释行「简介片段」的上下文半径（2026-09-16，见 {@link #descriptionSnippet}）：
+     * 简介常达数十字，整段塞进一行 caption 必然溢出换行，故只保留命中词前后各 N 字。
+     * 口径登记 = docs/agents/38-venue-aliases.md §4.1.6「已知边界」。
+     */
+    private static final int MATCH_SNIPPET_PAD = 8;
+    /** 简介片段越界端补的省略号（单字符 U+2026，非三连点；行尾截断另由 CSS ellipsis 负责） */
+    private static final String SNIPPET_ELLIPSIS = "…";
+
     // ===== 门店照片域（2026-08-20，见 AGENTS.md「门店照片域」） =====
 
     /** 单次照片上传数量上限（与前端 image-upload maxCount=9 对齐——后端独立校验防绕过） */
