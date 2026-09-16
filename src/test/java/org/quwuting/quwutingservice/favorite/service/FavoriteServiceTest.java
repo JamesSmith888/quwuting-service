@@ -104,8 +104,8 @@ class FavoriteServiceTest {
 
     /**
      * 按映射器入参回显构造响应（isHot/statusChanged 九参重载契约的观测点）。
-     * 末位 matchedAlias 恒 null——收藏列表无 keyword 上下文，不做「别名命中解释」
-     * （该字段仅列表搜索场景注入，见 VenueResponse#matchedAlias 语义边界）。
+     * 末位 matchedHint 恒 null——收藏列表无 keyword 上下文，不做「匹配解释」
+     * （该字段仅列表搜索场景注入，见 VenueResponse#matchedHint 语义边界）。
      */
     private static VenueResponse response(Long id, boolean isHot, boolean statusChanged) {
         return new VenueResponse(

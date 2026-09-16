@@ -6,8 +6,10 @@ import org.quwuting.quwutingservice.venue.config.VenueDefaultsConfig;
 import org.quwuting.quwutingservice.venue.dto.BusinessHoursEntry;
 import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
+import org.quwuting.quwutingservice.venue.dto.VenueMatchHint;
 import org.quwuting.quwutingservice.venue.dto.response.VenueResponse;
 import org.quwuting.quwutingservice.venue.dto.response.VenueSnapshotItem;
+import org.quwuting.quwutingservice.venue.enums.VenueMatchField;
 import org.quwuting.quwutingservice.venue.enums.VenueType;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
@@ -152,23 +154,26 @@ public class VenueResponseMapper {
     }
 
     /**
-     * 十参重载（2026-09-10 门店别名域「命中即解释」契约）：matchedAlias = 本次 keyword
-     * 命中的门店别名，仅列表搜索场景由 {@code VenueService#loadMatchedAliases} 批量装配
-     * 传入，驱动列表卡片名称正下方的「别名 · X」命中解释行——用户用别名搜到店时，
-     * 卡片必须复现他输入的那个词，否则匹配不可自证（详见 {@link VenueResponse#matchedAlias()}）。
+     * 十参重载（2026-09-16 匹配解释通用化，取代 2026-09-10 的 matchedAlias 单载体版）：
+     * matchedHint = 本次 keyword 命中的「卡片上不可见」载体（别名 / 舞讯收录名 / 详细地址 /
+     * 门店简介），仅列表搜索场景由 {@code VenueService#loadMatchHints} 批量装配传入，驱动列表
+     * 卡片的「{载体} · {命中原文}」解释行——用户在卡片上找不到自己输的那个词时匹配不可自证
+     * （详见 {@link VenueResponse#matchedHint()} 与 docs/agents/38-venue-aliases.md §4.1）。
      * <p>
-     * 注入边界同 isHot / crowdBadgeText 先例：仅列表搜索场景传真实值；无 keyword 或
-     * 命中来自 name·地址·标签等其他载体的场景走九参重载（恒 null）——非命中门店
-     * 零带宽、零布局变化。禁止在收藏列表/详情/编辑回显场景传非 null（那些场景无
-     * keyword 上下文，传值即语义错误）。
+     * 注入边界同 isHot / crowdBadgeText 先例：仅列表搜索场景传真实值；无 keyword / 命中来源
+     * 全部可在卡片上自证的场景走九参重载（恒 null）——非命中门店零带宽、零布局变化。禁止在
+     * 收藏列表/详情/编辑回显场景传非 null（那些场景无 keyword 上下文，传值即语义错误）。
+     * <p>
+     * <b>地址脱敏的连带处理点</b>：见 {@link #demaskMatchHint}。
      */
     public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot, long viewCount,
                                     List<String> photos, String crowdBadgeText, String crowdLatestText,
-                                    boolean statusChanged, String statusLatestText, String matchedAlias) {
+                                    boolean statusChanged, String statusLatestText, VenueMatchHint matchedHint) {
         List<String> customTags = deserializeStringList(v.getTags(), "tags");
         List<String> effectiveTags = defaultsConfig.merge(customTags);
         List<String> defaultTags = defaultsConfig.tags();
         List<String> effectivePhotos = photos != null ? photos : deserializeStringList(v.getPhotos(), "photos");
+        boolean cityOnly = cityOnlyAddress(v);
         return new VenueResponse(
                 v.getId(),
                 v.getName(),
@@ -187,10 +192,10 @@ public class VenueResponseMapper {
                  * 正是本方法产物，缓存里存的就是脱敏后副本，不存在"缓存漏出全地址"。
                  * 禁止在 Controller / Service / 前端另行隐藏（同一事实多处表达必漏）。
                  */
-                cityOnlyAddress(v) ? null : v.getDistrict(),
-                cityOnlyAddress(v) ? null : v.getAddress(),
-                cityOnlyAddress(v) ? null : v.getLongitude(),
-                cityOnlyAddress(v) ? null : v.getLatitude(),
+                cityOnly ? null : v.getDistrict(),
+                cityOnly ? null : v.getAddress(),
+                cityOnly ? null : v.getLongitude(),
+                cityOnly ? null : v.getLatitude(),
                 deserializeList(v.getBusinessHours(), BUSINESS_HOURS_LIST, "businessHours"),
                 deserializeList(v.getTickets(), TICKET_LIST, "tickets"),
                 deserializeList(v.getPartnerFees(), PARTNER_FEE_LIST, "partnerFees"),
@@ -208,8 +213,30 @@ public class VenueResponseMapper {
                 v.getUpdatedAt(),
                 statusChanged,
                 statusLatestText,
-                matchedAlias
+                demaskMatchHint(matchedHint, cityOnly)
         );
+    }
+
+    /**
+     * 匹配解释载荷的地址脱敏（2026-09-16，{@link #cityOnlyAddress} 的连带处理）。
+     * <p>
+     * <b>问题</b>：{@code KW_MATCH} 是在 SQL 层匹配实体里的完整 {@code address}，而地址脱敏
+     * 发生在响应层——两条路径不同层，于是城市级类型（歌友会）会「被详细地址搜到，却连区县都
+     * 看不到」，永久无法自证。若为了解释而回传地址，又直接击穿「只公开到城市级」的口径。
+     * <p>
+     * <b>处理（2026-09-16 用户拍板）</b>：保留命中，把 {@code text} 降为 null——
+     * 「这家店是因为地址被搜到的」这一<b>事实</b>可以说明，具体地址<b>不可以</b>；
+     * 前端渲染「需联系获取」。{@code field} 本身不动（前端靠它选文案）。
+     * <p>
+     * <b>为什么写在这里</b>：本类是全仓唯一的实体→响应映射点，地址可见性判定只此一处
+     * （与上方 district/address 置 null 同一闸门）；禁止在 Service 或前端另行隐藏——
+     * 同一事实多处表达必漏（本方法所在的这次改动，正是「SQL 层匹配 × 响应层脱敏」分层的
+     * 直接产物，不在第三处再开一个判定）。
+     */
+    private static VenueMatchHint demaskMatchHint(VenueMatchHint hint, boolean cityOnly) {
+        if (hint == null || !cityOnly) return hint;
+        if (hint.field() != VenueMatchField.ADDRESS) return hint;
+        return new VenueMatchHint(VenueMatchField.ADDRESS, null);
     }
 
     /** 反序列化 JSON 数组字符串列（tags / photos / businessHours），空数据返回空列表而非 null */

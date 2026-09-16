@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonFormat;
 import org.quwuting.quwutingservice.venue.dto.BusinessHoursEntry;
 import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
+import org.quwuting.quwutingservice.venue.dto.VenueMatchHint;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.enums.VenueType;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
@@ -108,29 +109,31 @@ public record VenueResponse(
          */
         String statusLatestText,
         /**
-         * 本次搜索命中的门店别名（2026-09-10 门店别名域「命中即解释」契约，
-         * docs/agents/38-venue-aliases.md §4.1）——用户用别名搜到店后，卡片必须在
-         * <b>名称正下方</b>复现他输入的那个词，否则「匹配不可自证」：搜不到用户以为
-         * 平台没收录，搜到了却在卡片上找不到自己输的词，用户会认为平台数据错了。
+         * 本次搜索的「匹配解释」载荷（2026-09-16 通用化，取代原 {@code matchedAlias} 单一载体；
+         * docs/agents/38-venue-aliases.md §4.1）。用户用一个词搜到了店，卡片必须在可见位置
+         * 复现他输入的那个词，否则「匹配不可自证」：搜不到用户以为平台没收录，搜到了却在
+         * 卡片上找不到自己输的词，用户会认为平台数据错了。
          * <p>
-         * 语义边界（严禁扩散）：
+         * <b>为什么是「卡片上不可见的载体」才进来</b>：解释行的唯一职责是补上卡片上缺失的
+         * 那段文本。命中 {@code name} 走标题高亮、{@code city}/{@code district} 走位置行、
+         * {@code tags} 走标签行——这些载体卡片上看得见，前端对既有行染色即可自证，
+         * 再叠一行解释纯属冗余（详见 {@link org.quwuting.quwutingservice.venue.enums.VenueMatchField}）。
+         * <p>
+         * <b>语义边界（严禁扩散）</b>：
          * <ul>
-         *   <li><b>单值 + 条件下发</b>：仅当本次 keyword 确实命中该店某条
-         *       {@link org.quwuting.quwutingservice.venue.entity.VenueAlias} 时非 null，
-         *       取录入顺序（id ASC，与详情页 aliases 同口径）第一条命中者；无 keyword /
-         *       命中来自 name·地址·标签等其他载体时为 null——非命中门店<b>零带宽、
-         *       零布局变化</b>（前端条件渲染，条件行同信号行不占骨架屏）；</li>
-         *   <li><b>只来自 qwt_venue_aliases</b>：绝不允许回退到同步映射别名
-         *       {@link org.quwuting.quwutingservice.venue.entity.VenueSyncAlias} 的
-         *       sourceName——那是管线匹配配置（信息源原始店名，可能带城市前缀/渠道
-         *       后缀的脏数据），在用户可见红线之外；</li>
-         *   <li><b>与详情页 aliases 严格分离</b>：详情下发全量数组（身份核验），列表
-         *       只下发命中的那一条（匹配解释）——列表<b>不下发</b> aliases 数组，
-         *       守住 38 §5「列表零带宽」口径；</li>
-         *   <li><b>只补展示、不改结果集</b>：命中集由 KW_MATCH 决定，本字段由
-         *       Service 层对当页门店内存二次判定装配（见 VenueService#loadMatchedAliases）
-         *       ——判定不中的最坏后果仅为「该店少一行别名解释」，绝不漏店。</li>
+         *   <li><b>单值 + 条件下发</b>：仅当本次 keyword 确实命中了该店某个不可见载体时非 null，
+         *       按 ALIAS → SYNC_ALIAS → ADDRESS → DESCRIPTION 优先级取第一个；无 keyword /
+         *       命中来源全部可在卡片上自证时为 null——非命中门店<b>零带宽、零布局变化</b>
+         *       （前端条件渲染，条件行同信号行不占骨架屏）；</li>
+         *   <li><b>只补展示、不改结果集</b>：命中集由 KW_MATCH 决定，本字段由 Service 层对当页
+         *       门店内存二次判定装配（见 VenueService#loadMatchHints）——判定不中的最坏后果
+         *       仅为「该店少一行解释」，绝不漏店；</li>
+         *   <li><b>{@code text} 为 null 是有效值</b>：表示该载体确实命中、但原文不可公开展示
+         *       （城市级地址类型——歌友会——的地址被 {@code VenueResponseMapper} 脱敏）。
+         *       前端必须据此渲染「需联系获取」，<b>禁止</b>整行不渲染；</li>
+         *   <li><b>注入边界同 isHot / crowdBadgeText 先例</b>：仅列表搜索场景传真实值；收藏列表/
+         *       详情/编辑回显场景无 keyword 上下文，传值即语义错误（恒 null）。</li>
          * </ul>
          */
-        String matchedAlias
+        VenueMatchHint matchedHint
 ) {}

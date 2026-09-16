@@ -16,6 +16,7 @@ import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
 import org.quwuting.quwutingservice.venue.config.VenueDefaultsConfig;import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
 import org.quwuting.quwutingservice.venue.dto.TicketEntry;
+import org.quwuting.quwutingservice.venue.dto.VenueMatchHint;
 import org.quwuting.quwutingservice.venue.dto.request.CreateVenueRequest;
 import org.quwuting.quwutingservice.venue.dto.response.AdminVenuePhotoResponse;
 import org.quwuting.quwutingservice.venue.dto.response.CityStatsResponse;
@@ -31,6 +32,7 @@ import org.quwuting.quwutingservice.venue.entity.VenuePhoto;
 import org.quwuting.quwutingservice.venue.entity.VenueStatusLog;
 import org.quwuting.quwutingservice.venue.enums.PartnerFeeUnit;
 import org.quwuting.quwutingservice.venue.enums.TicketType;
+import org.quwuting.quwutingservice.venue.enums.VenueMatchField;
 import org.quwuting.quwutingservice.venue.enums.VenuePhotoStatus;
 import org.quwuting.quwutingservice.venue.enums.VenueSortMode;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
@@ -46,6 +48,8 @@ import org.quwuting.quwutingservice.venuepost.repository.VenuePostRepository;
 import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportLatestService;
 import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportService;
 import org.quwuting.quwutingservice.venuestatuswatcher.service.VenueStatusWatcherService;
+import org.quwuting.quwutingservice.venuesync.entity.VenueSyncAlias;
+import org.quwuting.quwutingservice.venuesync.repository.VenueSyncAliasRepository;
 import org.quwuting.quwutingservice.venueclaim.entity.VenueClaim;
 import org.quwuting.quwutingservice.venueclaim.enums.ClaimStatus;
 import org.quwuting.quwutingservice.venueclaim.repository.VenueClaimRepository;
@@ -79,6 +83,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -146,6 +151,12 @@ public class VenueService {
     /** 门店相册照片（2026-08-20 门店照片域：独立表 + PENDING 先审后发，见 AGENTS.md「门店照片域」） */
     private final VenuePhotoRepository venuePhotoRepository;
     private final VenueAliasRepository venueAliasRepository;
+    /**
+     * 舞讯收录名映射（2026-09-16 匹配解释通用化）：列表搜索装配 {@code matchedHint} 时，
+     * 与门店别名并列为「卡片上不可见」的命中来源候选（{@link VenueMatchField#SYNC_ALIAS}）。
+     * 只补展示、不参与过滤/排序。
+     */
+    private final VenueSyncAliasRepository venueSyncAliasRepository;
     /** 场所实体缓存显式逐出（照片写方法 key 依赖查询结果，@CacheEvict 无法表达，见 VenueClaimService 同款先例） */
     private final CacheManager cacheManager;
 
@@ -977,7 +988,10 @@ public class VenueService {
         page = Math.max(0, page);
         size = Math.min(Math.max(1, size), MAX_PAGE_SIZE);
         PageRequest pageable = PageRequest.of(page, size);
-        List<String> searchTerms = splitSearchTerms(keyword);
+        // 拆词单点（splitRawSearchTerms）产出「原始词」，SQL 通道再逐词转义——命中判定与
+        // 匹配解释共用同一份词表，消除「展示层自己拆一遍词」的第二套口径。
+        List<String> rawTerms = splitRawSearchTerms(keyword);
+        List<String> searchTerms = rawTerms.stream().map(VenueService::escapeLikeLiteral).toList();
         String keywordPattern = null;
         String kwPrefixPattern = null;
         Set<Long> filterIds = null;
@@ -1031,12 +1045,12 @@ public class VenueService {
         // 用户拍板推翻同日「中性角标」方案；活跃口径与详情页公告条同源——列表行有文案 ⇔
         // 详情页有公告条，见 StatusReportLatestService#latestTextsByVenue）
         Map<Long, String> statusLatestTexts = statusReportLatestService.latestTextsByVenue(venueIds);
-        // 批量命中别名（2026-09-10 门店别名域「命中即解释」契约，见 VenueResponse#matchedAlias）：
+        // 批量「匹配解释」载荷（2026-09-16 通用化，取代 2026-09-10 的 matchedAlias 单载体版）：
         // 只补展示、不改结果集——命中集由 KW_MATCH 决定，本步只在当页门店里找出「用户输的
-        // 那个词落在哪条别名上」，供卡片在名称正下方复现（否则匹配不可自证）。无 keyword
-        // 时 searchTerms 为空 → 空 Map，全页恒 null，零额外查询（同 photos 等批量装配模式，
-        // 一次 IN 覆盖整页规避 N+1；别名表规模极小，单次 IN 毫秒级）。
-        Map<Long, String> matchedAliases = loadMatchedAliases(venueIds, searchTerms);
+        // 那个词落在哪个卡片上不可见的载体上」，供卡片复现（否则匹配不可自证，见
+        // docs/agents/38-venue-aliases.md §4.1）。无 keyword → 空 Map，全页恒 null，零额外
+        // 查询（同 photos 等批量装配模式，一次 IN 覆盖整页规避 N+1；两张别名表规模极小）。
+        Map<Long, VenueMatchHint> matchHints = loadMatchHints(result.getContent(), rawTerms);
         return result.map(v -> venueResponseMapper.toResponse(
                 v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
                 hotVenueIds.contains(v.getId()),
@@ -1046,45 +1060,161 @@ public class VenueService {
                 crowdLatestTexts.get(v.getId()),
                 false,
                 statusLatestTexts.get(v.getId()),
-                matchedAliases.get(v.getId())));
+                matchHints.get(v.getId())));
     }
 
     /**
-     * 整页「命中别名」批量装配（2026-09-10 门店别名域「命中即解释」契约，见
-     * {@link VenueResponse#matchedAlias}）。一次 IN 取回本页全部门店的有效别名，
-     * 在内存里按 {@code searchTerms} 逐词做<b>字面包含</b>判定，每店取录入顺序
-     * （id ASC，与详情页 aliases 同口径）第一条命中者。
-     * <p>
-     * <b>口径一致性（关键）</b>：{@code searchTerms} 已由 {@link #escapeLikeLiteral}
-     * 转义（{@code ! → !!}、{@code % → !%}、{@code _ → !_}），故本方法必须把候选别名用
-     * <b>同一个</b> {@code escapeLikeLiteral} 转义后再比较，才能与 KW_MATCH 的
-     * {@code LIKE ... ESCAPE '!'} 语义对齐（否则别名含 {@code %} / {@code _} 时展示层
-     * 与结果集口径分叉）。转义后 contains = SQL 的「字面子串」。
-     * <p>
-     * 大小写不敏感（与 MySQL 默认 ci 排序规则、前端 highlightSegments 同口径）——
-     * 中文无影响，含英文的别名（如 "MIX"）搜 "mix" 同样命中且同样高亮。
-     * <p>
-     * <b>只补展示</b>：本方法不参与过滤/排序——判定不中的最坏后果仅为「该店少一行
-     * 别名解释」，绝不会让本该出现的门店消失（结果集唯一决定方 = KW_MATCH）。
+     * 整页「匹配解释」批量装配（2026-09-16 通用化，见 {@link VenueResponse#matchedHint} 与
+     * {@code docs/agents/38-venue-aliases.md} §4.1）。
+     *
+     * <p><b>职责＝补上卡片上缺失的那段文本。</b>逐词先查 name / city / district / tags
+     * （这些载体卡片上本来就看得见，前端对既有行染色即可自证），<b>全部</b>词都能在卡片上
+     * 找到 → 恒 null（不出解释行，非命中门店零带宽零布局变化）；否则按下列优先级取
+     * <b>第一个</b>命中的「卡片不可见」载体（单值，与前端单行槽契约一致）：
+     *
+     * <ol>
+     *   <li>{@link VenueMatchField#ALIAS} —— 门店别名，取录入顺序（id ASC，与详情页 aliases
+     *       同口径）第一条命中者。优先级最高＝保持 2026-09-10 既有行为不回归；</li>
+     *   <li>{@link VenueMatchField#SYNC_ALIAS} —— 舞讯收录名，经 {@link #sanitizeSyncName}
+     *       保守裁剪后展示；</li>
+     *   <li>{@link VenueMatchField#ADDRESS} —— 详细地址（原文整条；地址是出门决策信息，
+     *       不做片段截取）。<b>脱敏判定不在本方法</b>：城市级类型的地址可见性唯一归属
+     *       {@code VenueResponseMapper} 的地址脱敏闸门，此处只取原文；</li>
+     *   <li>{@link VenueMatchField#DESCRIPTION} —— 门店简介，取命中词上下文片段
+     *       （前后各 {@link #MATCH_SNIPPET_PAD} 字，越界端补省略号）。</li>
+     * </ol>
+     *
+     * <p><b>判定口径（与 KW_MATCH 等价，论证在此）</b>：本方法用<b>原始词</b>对候选原文做
+     * 大小写不敏感的 {@code contains}。{@code LIKE '%词%' ESCAPE '!'} 在词为字面量时与
+     * {@code contains} 判定<b>完全等价</b>——{@code escapeLikeLiteral} 只改变 SQL 通配符语义
+     * （把 {@code %} / {@code _} / {@code !} 降级为字面字符），两边同时字面化后包含关系不变。
+     * 故此处<b>不需要</b>再转义：既与结果集同口径，又让 {@code indexOf} 的返回位置能直接映射
+     * 回原串切片（转义会改变串长，位置映射即失真——这正是简介片段截取必须用原始词的原因）。
+     *
+     * <p><b>只补展示</b>：本方法不参与过滤/排序——判定不中的最坏后果仅为「该店少一行解释」，
+     * 绝不会让本该出现的门店消失（结果集唯一决定方 = KW_MATCH）。
      */
-    private Map<Long, String> loadMatchedAliases(List<Long> venueIds, List<String> searchTerms) {
-        if (venueIds.isEmpty() || searchTerms.isEmpty()) return Collections.emptyMap();
-        List<VenueAlias> aliases = new ArrayList<>(venueAliasRepository.findByVenueIdInAndDeletedFalse(venueIds));
-        aliases.sort(Comparator.comparing(VenueAlias::getId));
-        Map<Long, String> matched = new HashMap<>();
-        for (VenueAlias alias : aliases) {
-            String raw = alias.getAlias();
-            if (raw == null || raw.isEmpty()) continue;
-            if (matched.containsKey(alias.getVenueId())) continue;
-            String haystack = escapeLikeLiteral(raw).toLowerCase(Locale.ROOT);
-            for (String term : searchTerms) {
-                if (haystack.contains(term.toLowerCase(Locale.ROOT))) {
-                    matched.put(alias.getVenueId(), raw);
-                    break;
-                }
-            }
+    private Map<Long, VenueMatchHint> loadMatchHints(List<Venue> venues, List<String> rawTerms) {
+        if (venues.isEmpty() || rawTerms.isEmpty()) return Collections.emptyMap();
+        List<Long> venueIds = venues.stream().map(Venue::getId).toList();
+        Map<Long, List<String>> aliasesByVenue = groupOrdered(
+                venueAliasRepository.findByVenueIdInAndDeletedFalse(venueIds),
+                VenueAlias::getVenueId, VenueAlias::getId, VenueAlias::getAlias);
+        Map<Long, List<String>> syncNamesByVenue = groupOrdered(
+                venueSyncAliasRepository.findByVenueIdInAndDeletedFalse(venueIds),
+                VenueSyncAlias::getVenueId, VenueSyncAlias::getId, VenueSyncAlias::getSourceName);
+        Map<Long, VenueMatchHint> matched = new HashMap<>();
+        for (Venue venue : venues) {
+            VenueMatchHint hint = matchHintFor(venue, rawTerms,
+                    aliasesByVenue.getOrDefault(venue.getId(), List.of()),
+                    syncNamesByVenue.getOrDefault(venue.getId(), List.of()));
+            if (hint != null) matched.put(venue.getId(), hint);
         }
         return matched;
+    }
+
+    /** 按门店分组、组内按 id ASC 排序的候选文本（「录入顺序」与详情页 aliases 同口径） */
+    private static <T> Map<Long, List<String>> groupOrdered(List<T> rows,
+                                                            Function<T, Long> venueIdOf,
+                                                            Function<T, Long> idOf,
+                                                            Function<T, String> textOf) {
+        Map<Long, List<String>> grouped = new HashMap<>();
+        rows.stream().sorted(Comparator.comparing(idOf)).forEach(row -> {
+            String text = textOf.apply(row);
+            if (text == null || text.isEmpty()) return;
+            grouped.computeIfAbsent(venueIdOf.apply(row), key -> new ArrayList<>()).add(text);
+        });
+        return grouped;
+    }
+
+    /** 单店匹配解释判定：按 {@link #loadMatchHints} 所列优先级取第一个命中的不可见载体 */
+    private VenueMatchHint matchHintFor(Venue venue, List<String> rawTerms,
+                                        List<String> aliases, List<String> syncNames) {
+        List<String> unexplained = rawTerms.stream()
+                .filter(term -> !isSelfEvidentOnCard(venue, term))
+                .toList();
+        if (unexplained.isEmpty()) return null;
+
+        String alias = firstMatching(aliases, unexplained);
+        if (alias != null) return new VenueMatchHint(VenueMatchField.ALIAS, alias);
+
+        String syncName = sanitizeSyncName(firstMatching(syncNames, unexplained));
+        if (StringUtils.hasText(syncName)) {
+            return new VenueMatchHint(VenueMatchField.SYNC_ALIAS, syncName);
+        }
+
+        if (matchesAny(venue.getAddress(), unexplained)) {
+            return new VenueMatchHint(VenueMatchField.ADDRESS, venue.getAddress());
+        }
+
+        String snippet = descriptionSnippet(venue.getDescription(), unexplained);
+        return snippet == null ? null : new VenueMatchHint(VenueMatchField.DESCRIPTION, snippet);
+    }
+
+    /**
+     * 该输入词是否已在结果卡片上自证。卡片可见文本 = 店名（标题行）/ 城市 + 区县（位置行）/
+     * 标签（标签 chip 行）；命中这些载体时前端对既有行染色即可，再叠一行解释纯属冗余。
+     * 标签比对直接用 JSON 原始列（与 KW_MATCH 的 {@code v.tags LIKE} 同口径）。
+     */
+    private static boolean isSelfEvidentOnCard(Venue venue, String term) {
+        return containsIgnoreCase(venue.getName(), term)
+                || containsIgnoreCase(venue.getCity(), term)
+                || containsIgnoreCase(venue.getDistrict(), term)
+                || containsIgnoreCase(venue.getTags(), term);
+    }
+
+    private static boolean containsIgnoreCase(String text, String term) {
+        return text != null && !term.isEmpty()
+                && text.toLowerCase(Locale.ROOT).contains(term.toLowerCase(Locale.ROOT));
+    }
+
+    private static boolean matchesAny(String text, List<String> terms) {
+        return terms.stream().anyMatch(term -> containsIgnoreCase(text, term));
+    }
+
+    /** 取候选列表（已按录入顺序排好）中第一条命中的原文 */
+    private static String firstMatching(List<String> candidates, List<String> terms) {
+        for (String candidate : candidates) {
+            if (matchesAny(candidate, terms)) return candidate;
+        }
+        return null;
+    }
+
+    /**
+     * 门店简介的命中片段（2026-09-16）：简介常达数十字，整段塞进一行 caption 会溢出换行，
+     * 故只取命中词前后各 {@link #MATCH_SNIPPET_PAD} 字，越界端补省略号。
+     */
+    private static String descriptionSnippet(String description, List<String> rawTerms) {
+        if (!StringUtils.hasText(description)) return null;
+        String lower = description.toLowerCase(Locale.ROOT);
+        int hitAt = -1;
+        int hitLength = 0;
+        for (String term : rawTerms) {
+            int index = lower.indexOf(term.toLowerCase(Locale.ROOT));
+            if (index >= 0 && (hitAt < 0 || index < hitAt)) {
+                hitAt = index;
+                hitLength = term.length();
+            }
+        }
+        if (hitAt < 0) return null;
+        int from = Math.max(0, hitAt - MATCH_SNIPPET_PAD);
+        int to = Math.min(description.length(), hitAt + hitLength + MATCH_SNIPPET_PAD);
+        return (from > 0 ? SNIPPET_ELLIPSIS : "") + description.substring(from, to)
+                + (to < description.length() ? SNIPPET_ELLIPSIS : "");
+    }
+
+    /**
+     * 舞讯收录名的展示裁剪（2026-09-16，保守三则，实证定档）：① trim；② 内部连续空白折叠为
+     * 单个半角空格；③ 剥离尾部空括号残留（如「鑫莎（）」→「鑫莎」）。
+     *
+     * <p><b>明确不做「剥城市前缀 / 渠道后缀」</b>——该顾虑源自 2026-09-10 的防御性假设，
+     * 但源侧 323 条真实 {@code source_name} 实测：渠道后缀 0 条；以城市名开头的仅 2 条且均为
+     * 店名本体（「湖州梦境文化俱乐部」「秦皇岛莎莎舞」）。按假设剥前缀会误伤合法店名，
+     * 属「用一个不存在的风险换真实的坏数据」。将来源侧真出现脏前缀，先治数据、再谈裁剪。
+     */
+    private static String sanitizeSyncName(String raw) {
+        if (raw == null) return null;
+        return raw.trim().replaceAll("\\s+", " ").replaceAll("[（(]\\s*[）)]$", "").trim();
     }
 
     /**
@@ -1287,12 +1417,18 @@ public class VenueService {
     // ===== 关键词检索 helpers（2026-09-02，与 repository 的 KW_MATCH/RELEVANCE_KEYS 配套） =====
 
     /**
-     * 关键词拆词归一：trim + 截长 → 按 {@link #KEYWORD_SPLIT_REGEX} 拆词 → 去空 token →
-     * 截断至 {@link #MAX_KEYWORD_TOKENS} → 每词 LIKE 字面转义。返回空列表 = 无关键词。
-     * 转义（escapeLikeLiteral）后词内 {@code !}/{@code %}/{@code _} 为字面量，
-     * 与 repository 谓词/排序里的 {@code ESCAPE '!'} 配套，防通配符注入全表命中。
+     * 关键词拆词归一（原始词，不转义）：trim + 截长 → 按 {@link #KEYWORD_SPLIT_REGEX} 拆词 →
+     * 去空 token → 截断至 {@link #MAX_KEYWORD_TOKENS}。返回空列表 = 无关键词。
+     *
+     * <p><b>为什么产出原始词而非转义词</b>（2026-09-16 收敛）：本方法从
+     * {@code splitSearchTerms}（拆词 + 转义合一）中拆出，成为<b>全仓唯一拆词点</b>——
+     * SQL 通道（{@code keywordPattern} / {@code findIdsByKeyword}）在调用处按需转义，
+     * 匹配解释层（{@link #loadMatchHints}）用原始词做 {@code contains} 与位置切片。
+     * 转义版本曾让「解释层要不要跟着转义」成为每轮都要重新论证的悬案（转义会改变串长，
+     * 使 {@code indexOf} 位置无法映射回原串）；拆开后判据收敛为一句：
+     * <b>转义是 SQL 通道的事，展示层一律用原始词</b>（等价性论证见 {@link #loadMatchHints}）。
      */
-    private List<String> splitSearchTerms(String keyword) {
+    private List<String> splitRawSearchTerms(String keyword) {
         if (!StringUtils.hasText(keyword)) return List.of();
         String trimmed = keyword.trim();
         if (trimmed.length() > MAX_KEYWORD_LENGTH) trimmed = trimmed.substring(0, MAX_KEYWORD_LENGTH);
@@ -1300,7 +1436,6 @@ public class VenueService {
                 .map(String::trim)
                 .filter(StringUtils::hasText)
                 .limit(MAX_KEYWORD_TOKENS)
-                .map(VenueService::escapeLikeLiteral)
                 .toList();
     }
 
