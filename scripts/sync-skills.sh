@@ -18,7 +18,11 @@
 #
 set -uo pipefail
 
-PROJECT_ROOT="${QW_PROJECT_ROOT:-/Users/xin.y/WeChatProjects/quwuting-service}"
+# 仓根默认值自定位（2026-09-17）：脚本位于 <repo>/scripts/，故仓根 = 上一级目录。
+# 此前写死绝对路径（/Users/xin.y/WeChatProjects/quwuting-service），换机/换目录后
+# 直接报「项目根目录不存在」——同步失效而 skill 仍照跑，等于把漂移重新引入。
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="${QW_PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SKILLS_HOME="${QW_SKILLS_HOME:-$HOME/.workbuddy/skills}"
 BACKUP_ROOT="$SKILLS_HOME/.sync-backup"
 
@@ -38,6 +42,7 @@ MANAGED_SKILLS=(
   quwuting-venue-daily-sync
   quwuting-announcement-publish
   quwuting-bulletin-publish
+  quwuting-venue-activity-publish
 )
 
 RSYNC_EXCLUDES=(--exclude=.DS_Store --exclude=__pycache__ --exclude=*.pyc)

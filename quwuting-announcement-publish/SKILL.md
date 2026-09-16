@@ -14,7 +14,7 @@ agent_created: true
 ## ⓪ 运行前必做 · Skill 双副本同步（2026-09-14 用户要求：每次跑 Skill 前都先同步）
 
 ```bash
-bash /Users/xin.y/WeChatProjects/quwuting-service/scripts/sync-skills.sh
+bash scripts/sync-skills.sh          # 在 quwuting-service 仓内执行（脚本自定位仓根）
 ```
 
 权威方向 = **项目路径**（`quwuting-service/quwuting-*`，Git 可回溯）→ 运行时镜像
@@ -31,7 +31,7 @@ bash /Users/xin.y/WeChatProjects/quwuting-service/scripts/sync-skills.sh
 3. **防重先查后发**：发布前必 `GET /admin/announcements?page=0&size=10` 扫一眼——
    同日同类公告已存在时按「补充 vs 重发」分流（见 Step 2），严禁同日重复轰炸。
 4. **双位置同步约定**（同 quwuting-venue-daily-sync）：
-   - 项目路径（Git，源文件）：`/Users/xin.y/WeChatProjects/quwuting-service/quwuting-announcement-publish/`
+   - 项目路径（Git，源文件）：`quwuting-service/quwuting-announcement-publish/`（仓内相对路径）
    - 用户路径（WorkBuddy 加载）：`~/.workbuddy/skills/quwuting-announcement-publish/`
    - 改动先写项目路径，再 `cp -R` 到用户路径（排除 .DS_Store/__pycache__）。
 

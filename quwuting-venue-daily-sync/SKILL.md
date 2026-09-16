@@ -13,7 +13,7 @@ agent_created: true
 ## ⓪ 运行前必做 · Skill 双副本同步（2026-09-14 用户要求：每次跑 Skill 前都先同步）
 
 ```bash
-bash /Users/xin.y/WeChatProjects/quwuting-service/scripts/sync-skills.sh
+bash scripts/sync-skills.sh          # 在 quwuting-service 仓内执行（脚本自定位仓根）
 ```
 
 - **权威方向 = 项目路径**（`quwuting-service/quwuting-*`，Git 可回溯）→ 运行时镜像
@@ -87,12 +87,12 @@ CEASED 而平台已 OPEN，用户投诉「明明营业却显示停业」，详�
 
 本 Skill 存在**两份副本**，任何改动都必须保持同步，**项目路径 = 权威源**：
 
-- **项目路径（源文件，可提交）**：`/Users/xin.y/WeChatProjects/quwuting-service/quwuting-venue-daily-sync/`
+- **项目路径（源文件，可提交）**：`quwuting-service/quwuting-venue-daily-sync/`（仓内相对路径）
 - **用户路径（运行时加载）**：`~/.workbuddy/skills/quwuting-venue-daily-sync/`
 
 **同步规则（一律走脚本，别手抄 diff/cp）**：
 
-1. **会话开始 / 每次运行本 Skill 前**：跑 `bash /Users/xin.y/WeChatProjects/quwuting-service/scripts/sync-skills.sh`
+1. **会话开始 / 每次运行本 Skill 前**：跑 `bash scripts/sync-skills.sh          # 在 quwuting-service 仓内执行（脚本自定位仓根）`
    （覆盖 `SKILL.md` + `scripts/` + `reference/` 全部文件；只读检查加 `--check`）。
 2. 改动后：**先写项目路径，再跑同一个脚本**落地到用户路径 —— 保证 Git 侧始终是权威版本。
 3. **方向恒为「项目 → 运行时」单向镜像**（2026-09-14 修正旧「较新一方覆盖另一方」）：
