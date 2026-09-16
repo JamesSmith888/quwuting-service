@@ -28,6 +28,13 @@ bash scripts/sync-skills.sh --check  # 只读检查差异（退出码 1 = 有差
 > ② `scripts/sync-skills.sh` 的 `MANAGED_SKILLS` 数组（否则镜像不生成、也不会被检查）。
 > **只改项目侧 = 本轮跑的还是旧契约**——本项目已有此漂移前科，故升格为红线。
 
+⛔ **备份目录必须在 `skills/` 之外**（2026-09-17 实测事故）：备份若落在
+`skills/.sync-backup/`，其 `<时间戳>/quwuting-xxx/SKILL.md` 与 Skill **目录同形**，
+会被 Skill 扫描器一并收录 ⇒ **实际加载到的是备份里的旧稿**（实测调用
+`quwuting-bulletin-publish` 命中 `.sync-backup/20260917-003155/` 的 139 行旧版，
+而正式副本已是 257 行）。同步跑得越勤 ⇒ 备份越多 ⇒ 中招概率越高。
+**勿再把备份改回 `skills/` 内**，现备份在 `~/.workbuddy/.skill-sync-backup/`。
+
 ## 🚫 红线（最高优先，违反即事故）
 
 1. **渠道限定语必须转译，不能原样上屏**。源情报里出现「本群贵宾 / 群友专享 /

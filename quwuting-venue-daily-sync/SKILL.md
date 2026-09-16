@@ -18,7 +18,13 @@ bash scripts/sync-skills.sh          # 在 quwuting-service 仓内执行（脚�
 
 - **权威方向 = 项目路径**（`quwuting-service/quwuting-*`，Git 可回溯）→ 运行时镜像
   `~/.workbuddy/skills/`。脚本只做**单向镜像**（不做双向合并，避免静默吞掉一侧改动），
-  覆盖前自动备份到 `~/.workbuddy/skills/.sync-backup/<时间戳>/`。
+  覆盖前自动备份到 `~/.workbuddy/.skill-sync-backup/<时间戳>/`。
+- ⛔ **备份目录必须在 `skills/` 之外**（2026-09-17 实测事故）：备份若落在
+  `skills/.sync-backup/`，其 `<时间戳>/quwuting-xxx/SKILL.md` 与 Skill **目录同形**，
+  会被 Skill 扫描器一并收录 ⇒ **实际加载到的是备份里的旧稿**（实测调用
+  `quwuting-bulletin-publish` 命中 `.sync-backup/20260917-003155/` 的 139 行旧版，
+  而正式副本已是 257 行）。同步跑得越勤 ⇒ 备份越多 ⇒ 中招概率越高。
+  **勿再把备份改回 `skills/` 内。**
 - 只想知道有没有漂移：加 `--check`（只读，有差异退出码 1）。
 - **为什么必须有这一步**：运行时加载的是 `~/.workbuddy/skills/` 那一份 —— 只改项目侧 =
   本轮跑的还是**旧契约**（2026-09-14 实证：bulletin 项目侧五稿已删 `title` 字段，

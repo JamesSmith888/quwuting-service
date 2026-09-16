@@ -22,6 +22,13 @@ bash scripts/sync-skills.sh          # 在 quwuting-service 仓内执行（脚�
 `~/.workbuddy/skills/`；脚本单向镜像 + 覆盖前自动备份，只读检查加 `--check`。
 **只改项目侧 = 本轮跑的还是旧契约**——本 Skill 正是漂移受害者（详见脚本头部注释）。
 
+⛔ **备份目录必须在 `skills/` 之外**（2026-09-17 实测事故）：备份若落在
+`skills/.sync-backup/`，其 `<时间戳>/quwuting-xxx/SKILL.md` 与 Skill **目录同形**，
+会被 Skill 扫描器一并收录 ⇒ **实际加载到的是备份里的旧稿**（实测调用本 Skill 命中
+`.sync-backup/20260917-003155/` 的 139 行旧版，而正式副本已是 257 行）。
+同步跑得越勤 ⇒ 备份越多 ⇒ 中招概率越高。**勿再把备份改回 `skills/` 内**，
+现备份在 `~/.workbuddy/.skill-sync-backup/`。
+
 ## 🚫 红线（最高优先，违反即事故）
 
 1. **内容边界（比技术实现更重要）**：快讯**只描述「服务可得性」**——哪家店 / 哪个时段

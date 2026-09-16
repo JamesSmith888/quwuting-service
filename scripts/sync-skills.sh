@@ -24,7 +24,14 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="${QW_PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SKILLS_HOME="${QW_SKILLS_HOME:-$HOME/.workbuddy/skills}"
-BACKUP_ROOT="$SKILLS_HOME/.sync-backup"
+# 备份必须放在 **SKILLS_HOME 之外**（2026-09-17 实测事故）：
+# 原为 `$SKILLS_HOME/.sync-backup`，而 WorkBuddy 的 Skill 扫描器连点开头目录一并收录
+# ——`skills/.sync-backup/<ts>/quwuting-xxx/SKILL.md` 的目录形状与被管理的 Skill 完全同形，
+# 于是**加载到的是备份里的旧稿**（实测：调用 quwuting-bulletin-publish 命中
+# `.sync-backup/20260917-003155/...` 的 139 行旧版，而正式副本已是 257 行）。
+# 危害大于漂移本身：同步跑得越勤 ⇒ 备份越多 ⇒ 命中旧稿的概率越高。
+# 现改为与 skills 同级但在其外的隐藏目录；QW_BACKUP_ROOT 可覆盖。
+BACKUP_ROOT="${QW_BACKUP_ROOT:-$(dirname "$SKILLS_HOME")/.skill-sync-backup}"
 
 MODE="sync"
 for arg in "$@"; do
