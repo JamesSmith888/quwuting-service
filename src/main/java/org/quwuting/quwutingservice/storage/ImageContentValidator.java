@@ -30,8 +30,9 @@ import java.util.List;
  * <p>
  * 校验项：
  * <ol>
- *   <li>URL 必须匹配本应用公开桶前缀（{projectUrl}/storage/v1/object/public/{bucket}/），
- *       排除外部图床与 SSRF 面；</li>
+ *   <li>URL 必须匹配本应用自有存储前缀——Supabase 形态
+ *       （{projectUrl}/storage/v1/object/public/{bucket}/，含 legacy 项目）或 OSS 形态
+ *       （https://{bucket}.{endpoint}/，oss 配置完整即生效），排除外部图床与 SSRF 面；</li>
  *   <li>下载内容大小 ≤ 配置上限（maxFileSize）；</li>
  *   <li>magic bytes 必须匹配 JPEG / PNG / WebP 之一（排除 exe / HTML / 脚本等改名伪造文件）；</li>
  *   <li>JPEG / PNG 解析宽高并限制尺寸上限（防解压炸弹 decompression bomb）。</li>
@@ -51,6 +52,7 @@ public class ImageContentValidator {
     private static final int READ_BUFFER = 8192;
 
     private final StorageProperties props;
+    private final StorageProviderProperties providerProps;
     private final HttpClient httpClient;
     private final Cache<String, Boolean> resultCache;
     /**
@@ -58,9 +60,20 @@ public class ImageContentValidator {
      * （均为本应用自有 Supabase 项目，安全语义保持封闭——任意外部域名仍被拒）。
      */
     private final List<String> storagePrefixes;
+    /**
+     * OSS 公开读前缀（2026-09-17 切回国内新增）：https://{bucket}.{endpoint}/，
+     * oss 配置完整即生效（与 provider 开关无关——过渡期 provider=supabase 而 DB 中
+     * 已混有 OSS 形态 URL，白名单须两形态并存）。
+     */
+    private final String ossPublicPrefix;
+    /** OSS 内网下载基址（配置 internal-endpoint 才有；校验下载走同地域内网免流量费） */
+    private final String ossInternalBase;
+    /** OSS 通道单文件上限（与 supabase.maxFileSize 默认一致，校验时按 URL 形态取用） */
+    private final long ossMaxFileSize;
 
-    public ImageContentValidator(StorageProperties props) {
+    public ImageContentValidator(StorageProperties props, StorageProviderProperties providerProps) {
         this.props = props;
+        this.providerProps = providerProps;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(3))
                 .followRedirects(HttpClient.Redirect.NORMAL)
@@ -79,16 +92,52 @@ public class ImageContentValidator {
             }
         }
         this.storagePrefixes = List.copyOf(prefixes);
+        if (providerProps != null && providerProps.ossPublicConfigured()) {
+            StorageProviderProperties.Oss oss = providerProps.oss();
+            this.ossPublicPrefix = "https://" + oss.bucket() + "." + oss.endpoint() + "/";
+            this.ossInternalBase = isNotBlank(oss.internalEndpoint())
+                    ? "https://" + oss.bucket() + "." + oss.internalEndpoint()
+                    : null;
+            this.ossMaxFileSize = oss.maxFileSize();
+        } else {
+            this.ossPublicPrefix = null;
+            this.ossInternalBase = null;
+            this.ossMaxFileSize = 0;
+        }
     }
 
-    /** URL 是否属于本应用自有存储前缀（当前项目 + 历史遗留项目） */
+    private static boolean isNotBlank(String s) {
+        return s != null && !s.isBlank();
+    }
+
+    /** URL 是否属于本应用自有存储前缀（当前项目 + 历史遗留项目 + OSS 公开桶） */
     private boolean matchesStoragePrefix(String url) {
+        if (ossPublicPrefix != null && url.startsWith(ossPublicPrefix)) {
+            return true;
+        }
         for (String prefix : storagePrefixes) {
             if (url.startsWith(prefix)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /** URL 形态对应的单文件上限（OSS URL 用 storage.oss.max-file-size，其余用 Supabase 配置） */
+    private long maxBytesFor(String url) {
+        return (ossPublicPrefix != null && url.startsWith(ossPublicPrefix))
+                ? ossMaxFileSize : props.maxFileSize();
+    }
+
+    /**
+     * 校验下载地址：OSS URL 且配置内网 endpoint 时改走内网（同地域 ECS 免流量费 + 毫秒级），
+     * 其余原样返回。内网不可达时由 downloadAndCheck 兜底公网重试。
+     */
+    private String toDownloadUrl(String url) {
+        if (ossInternalBase != null && ossPublicPrefix != null && url.startsWith(ossPublicPrefix)) {
+            return ossInternalBase + "/" + url.substring(ossPublicPrefix.length());
+        }
+        return url;
     }
 
     /** 校验单个图片 URL（null / 空白直接通过——字段可空性由调用方语义决定） */
@@ -141,37 +190,55 @@ public class ImageContentValidator {
         }
     }
 
-    /** 下载并校验（Caffeine 加载函数；返回 false 不抛异常，统一由调用方拒绝） */
+    /**
+     * 下载并校验（Caffeine 加载函数）：OSS URL 且配置内网 endpoint 时优先走内网，
+     * 内网下载失败兜底公网重试一次（本地开发环境 internal 不通不致校验失败）。
+     */
     private Boolean downloadAndCheck(String url) {
+        String fetchUrl = toDownloadUrl(url);
+        Boolean result = attemptDownload(fetchUrl, maxBytesFor(url));
+        if (result == null && !fetchUrl.equals(url)) {
+            result = attemptDownload(url, maxBytesFor(url));
+        }
+        return result;
+    }
+
+    /**
+     * 单次下载并校验。
+     * 返回 true=有效图片（缓存）；false=内容无效（缓存，同 URL 重复提交不再下载）；
+     * null=下载失败（不缓存——内网误配/瞬时网络故障可于下次提交重试并触发公网兜底，
+     * 避免旧逻辑「下载失败也缓存 false」把瞬时故障固化 10 分钟）。
+     */
+    private Boolean attemptDownload(String fetchUrl, long maxBytes) {
         try {
-            HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+            HttpRequest request = HttpRequest.newBuilder(URI.create(fetchUrl))
                     .timeout(Duration.ofSeconds(10))
                     .GET()
                     .build();
             HttpResponse<InputStream> resp = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
             if (resp.statusCode() != 200) {
-                log.warn("[image-validate] download failed status={} url={}", resp.statusCode(), url);
-                return false;
+                log.warn("[image-validate] download failed status={} url={}", resp.statusCode(), fetchUrl);
+                return null;
             }
             try (InputStream in = resp.body()) {
-                byte[] content = readLimited(in);
+                byte[] content = readLimited(in, maxBytes);
                 if (content == null) {
                     return false; // 超过 maxFileSize，判超限
                 }
-                return isValidContent(content);
+                return isValidContent(content, maxBytes);
             }
         } catch (IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            log.warn("[image-validate] download error url={}", url, e);
-            return false;
+            log.warn("[image-validate] download error url={}", fetchUrl, e);
+            return null;
         }
     }
 
-    /** 限流读取：内容超过 maxFileSize 字节返回 null（判超限），避免大文件整读入内存 */
-    private byte[] readLimited(InputStream in) throws IOException {
-        int limit = Math.toIntExact(props.maxFileSize()) + 1;
+    /** 限流读取：内容超过 maxBytes 字节返回 null（判超限），避免大文件整读入内存 */
+    private byte[] readLimited(InputStream in, long maxBytes) throws IOException {
+        int limit = Math.toIntExact(maxBytes) + 1;
         ByteArrayOutputStream out = new ByteArrayOutputStream(Math.min(limit, 64 * 1024));
         byte[] buf = new byte[READ_BUFFER];
         int total = 0;
@@ -186,9 +253,14 @@ public class ImageContentValidator {
         return out.toByteArray();
     }
 
-    /** 纯内容校验（可单测）：大小 ≤ 上限 + magic bytes 命中 + JPEG/PNG 尺寸合规 */
+    /** 纯内容校验（可单测，默认上限）：大小 ≤ 上限 + magic bytes 命中 + JPEG/PNG 尺寸合规 */
     boolean isValidContent(byte[] content) {
-        if (content == null || content.length == 0 || content.length > props.maxFileSize()) {
+        return isValidContent(content, props.maxFileSize());
+    }
+
+    /** 纯内容校验（可单测，按 URL 形态的上限）：大小 ≤ 上限 + magic bytes 命中 + JPEG/PNG 尺寸合规 */
+    boolean isValidContent(byte[] content, long maxBytes) {
+        if (content == null || content.length == 0 || content.length > maxBytes) {
             return false;
         }
         if (isJpeg(content) || isPng(content)) {

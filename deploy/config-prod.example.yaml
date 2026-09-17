@@ -29,7 +29,7 @@ wechat:
 jwt:
   secret: <JWT 签名密钥>
 
-# Supabase Storage（前端直传，后端签发凭证；与 DB 解耦，迁移后继续使用）
+# Supabase Storage（前端直传，后端签发凭证；2026-09-17 起为过渡通道）
 supabase:
   storage:
     project-url: https://<project-ref>.supabase.co
@@ -37,6 +37,28 @@ supabase:
     bucket: qwt-public
     # 历史遗留 Supabase 项目 URL（旧项目图片未迁移，校验白名单；逗号分隔）
     # legacy-project-urls: https://<legacy-ref>.supabase.co
+
+# 对象存储 Provider（2026-09-17 OSS 切回国内）
+# 切流时序：先保持 provider=supabase 部署本版 → 小程序/后台新版本全量 →
+# 下面四件套填好后把 provider 翻成 oss（改完重启服务生效，无需改代码）。
+# OSS 配置（bucket 须与 ECS 同地域=华东1杭州，公共读）：
+# 凭证走 ECS 实例角色（阿里云最佳实践，控制台不建议建长期 AK）：
+#   1. RAM 控制台 → 角色 → 创建角色（阿里云服务 → ECS，角色名如 quwuting-oss-role）；
+#   2. 给角色附加最小权限自定义策略（见 docs/agents/11-storage.md，仅本 bucket 读写）；
+#   3. ECS 控制台 → 实例 → 实例设置 → 授予 RAM 角色 → 选该角色；
+#   4. 下方 credential-mode 填 instance-role + instance-role-name 填角色名即可，
+#      STS 临时凭证由后端自动拉取/轮转——无需任何 AccessKey。
+storage:
+  provider: supabase            # supabase | oss
+  oss:
+    endpoint: oss-cn-hangzhou.aliyuncs.com
+    bucket: <bucket 名称，如 quwuting-public>
+    credential-mode: instance-role
+    instance-role-name: <ECS 实例角色名，如 quwuting-oss-role>
+    access-key-id:              # 实例角色模式留空（本地开发才填 RAM AK）
+    access-key-secret:          # 实例角色模式留空
+    # 杭州 ECS 内网 endpoint：后端内容校验下载走内网（免流量费+毫秒级）
+    internal-endpoint: oss-cn-hangzhou-internal.aliyuncs.com
 
 # 可选（腾讯位置服务 / 高德，无则删除整个键）
 # app:

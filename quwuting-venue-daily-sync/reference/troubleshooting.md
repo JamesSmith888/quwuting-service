@@ -102,3 +102,12 @@
   （size=20）撞上必 500 —— **已改成单条容错**（落盘 `cross_check_error` + 汇总打印），不再中断整轮。
 - **修复方向（待拍板）**：先抓 500 堆栈定位到行；重点查 matchedHint 装配对 `text=null` /
   非常规 district 的处理。
+
+## `/admin/venue-sync/venues/export` 分页从 0 起（2026-09-17 实证）
+
+- **复现**：`?page=1&size=30` 在 totalElements=10 / totalPages=1 的城（北海）返回 `content: []`
+  且 `first=false / last=true / numberOfElements=0`——**静默空结果，不报错**；`?page=0` 才是第一页。
+- **后果**：脚本若按「page=1 起步」翻页，首覆/同城同名核查会拿到空名单，把已有店的城误判成
+  零门店（本轮侥幸未造成事故：城市词表核对先拦了一道，且 EXISTED 幂等兜底）。
+- **口径**：export 翻页一律从 `page=0` 起；拿空 `content` 时先核对 `number` 是否已越界
+  （`number ≥ totalPages` = 页码越界，不是没数据）。

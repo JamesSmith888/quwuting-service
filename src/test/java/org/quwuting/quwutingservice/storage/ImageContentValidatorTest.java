@@ -26,7 +26,8 @@ class ImageContentValidatorTest {
             5 * 1024 * 1024, new String[]{".jpg", ".jpeg", ".png", ".webp"},
             50 * 1024 * 1024, new String[0]);
 
-    private final ImageContentValidator validator = new ImageContentValidator(PROPS);
+    private final ImageContentValidator validator = new ImageContentValidator(
+            PROPS, new StorageProviderProperties("supabase", null));
 
     private static byte[] generateImage(String format, int width, int height) throws Exception {
         BufferedImage img = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);

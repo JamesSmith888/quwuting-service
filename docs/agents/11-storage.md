@@ -7,14 +7,15 @@
 
 ## 文件存储（storage 模块）
 
-### 架构：前端直传 Supabase Storage
+### 架构：前端直传对象存储（双 provider，2026-09-17 起）
 
-后端**不接收文件流**，仅签发上传凭证。前端凭凭证直传 Supabase Storage REST API，上传成功后将公开 URL 写入业务字段随表单提交。
+后端**不接收文件流**，仅签发上传凭证。前端凭凭证直传对象存储，上传成功后将公开 URL 写入业务字段随表单提交。2026-09-17 起支持双 provider（`storage.provider` 切换，详见下「OSS 切回国内」）：
 
 ```
 前端 wx.chooseMedia 选图
-  → GET /storage/upload-token（后端校验登录态 + 文件类型/大小 → 生成唯一路径 → 返回凭证）
-  → wx.uploadFile 直传 Supabase Storage（Authorization: Bearer anonKey）
+  → GET /storage/upload-token（后端校验登录态 + 文件类型/大小 → 生成唯一路径 → 按 provider 签发凭证）
+  → provider=supabase：wx.uploadFile 直传 Supabase Storage（Authorization: Bearer anonKey）
+    provider=oss：wx.uploadFile PostObject 直传 https://{bucket}.{endpoint}（formData 表单签名，无 Authorization）
   → 上传成功 → publicUrl 写入业务字段（imageUrl / photos / wechatQr）
 ```
 
@@ -22,7 +23,7 @@
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
-| GET | `/storage/upload-token` | 需登录 | 参数：category, fileName, fileSize → 返回 UploadTokenResponse |
+| GET | `/storage/upload-token` | 需登录 | 参数：category, fileName, fileSize → 返回 UploadTokenResponse（超集形态，`provider` 判别 supabase / oss 两套字段；NON_NULL 序列化，老客户端向后兼容） |
 
 ### 文件分类（FileCategory）
 
@@ -32,11 +33,12 @@
 | VENUE_PHOTO | `venue-photos/` | 场所相册 |
 | VENUE_QR | `venue-qr/` | 微信二维码 |
 
-上传路径格式：`{prefix}/{userId}/{uuid}.{ext}`（按用户隔离，UUID 保证唯一）。
+上传路径格式：`{prefix}/{userId}/{uuid}.{ext}`（按用户隔离，UUID 保证唯一；**两套 provider 路径格式一致**，存量对象迁移保持路径不变）。
 
 ### 配置
 
 ```yaml
+# Supabase 通道（过渡期默认；与 DB 解耦的历史配置）
 supabase:
   storage:
     project-url: ${SUPABASE_PROJECT_URL:}   # 如 https://xxxx.supabase.co
@@ -44,6 +46,60 @@ supabase:
     bucket: ${SUPABASE_STORAGE_BUCKET:qwt-public}  # 公开读 bucket
     max-file-size: 5242880                  # 5MB
     allowed-extensions: .jpg,.jpeg,.png,.webp
+
+# 对象存储 Provider 切换（2026-09-17 OSS 切回国内新增）
+storage:
+  provider: ${STORAGE_PROVIDER:supabase}    # supabase（默认）| oss
+  oss:
+    endpoint: ${OSS_ENDPOINT:}              # 如 oss-cn-hangzhou.aliyuncs.com（须与 ECS 同地域）
+    bucket: ${OSS_BUCKET:}                  # 公共读 bucket
+    credential-mode: ${OSS_CREDENTIAL_MODE:ak}    # ak（默认/本地）| instance-role（生产推荐）
+    instance-role-name: ${OSS_INSTANCE_ROLE_NAME:}  # ECS 实例角色名（instance-role 模式必填）
+    access-key-id: ${OSS_ACCESS_KEY_ID:}    # RAM 子账号 AK（仅 ak 模式使用）
+    access-key-secret: ${OSS_ACCESS_KEY_SECRET:}
+    internal-endpoint: ${OSS_INTERNAL_ENDPOINT:}  # 校验下载走内网免流量费；本地开发留空
+    max-file-size: 5242880                  # 与 supabase 通道一致
+    allowed-extensions: .jpg,.jpeg,.png,.webp
+```
+
+### OSS 切回国内（2026-09-17，双 provider 设计）
+
+**动机**：DB 已迁阿里云 RDS MySQL（08-31），对象存储为最后一项海外依赖——① supabase.co 无法 ICP 备案（微信合法域名硬伤）；② 详情页大图跨洲加载慢（联系方式卡卡顿实证根因）；③ ImageContentValidator 跨洲下载校验 300-500ms。切杭州 OSS 后校验走内网（免费+毫秒级），且后端/ECS/RDS/OSS 归一一张账单。
+
+**OSS 直传模型（服务端签名 PostObject，无 SDK 依赖；凭证 = ECS 实例角色 STS 临时凭证，生产无长期 AK）**：
+
+- **凭证来源双模式**（2026-09-17 按阿里云控制台最佳实践定稿，`OssCredentialService`）：`credential-mode=instance-role`（生产推荐）= ECS 绑定实例角色，后端从实例元数据端点（100.100.100.200）取 STS 临时凭证（AccessKeyId/Secret/SecurityToken，自动轮转，剩余 <5min 同步刷新，无长期 AK 可泄漏）；`credential-mode=ak`（本地开发兜底）= 显式 RAM 子账号 AK/SK；
+- `/storage/upload-token` 在 `provider=oss` 时签发：`policy`（JSON：UTC 过期 15min + `{"bucket":...}` + `["eq","$key",uploadPath]` + `["content-length-range",1,limit]`）Base64 后以 **AccessKeySecret HmacSHA1 签名**（`StorageService.base64HmacSha1`，JDK 内置零依赖）；
+- Secret 永不出后端；policy 限定精确 key，凭证泄露也只能写那一个对象，15min 过期；实例角色模式下 policy 附加 `["eq","$x-oss-security-token",token]` 条件；
+- 前端 formData：`key / policy / OSSAccessKeyId / signature / success_action_status=200`（实例角色模式加 `x-oss-security-token`）+ file（**file 必须为最后字段**，wx.uploadFile 与浏览器 FormData 均天然满足）；
+- 上传 URL = `https://{bucket}.{endpoint}`（虚拟主机式），publicUrl = host + `/` + uploadPath。
+
+**URL 白名单与内网校验（ImageContentValidator）**：
+- 白名单 = Supabase 前缀（projectUrl + legacyProjectUrls）+ OSS 前缀（`https://{bucket}.{endpoint}/`，**oss 配置完整即生效，与 provider 开关无关**——过渡期两代 URL 并存）；
+- 配置 `internal-endpoint` 后，OSS URL 的校验下载改走内网；**内网不可达自动兜底公网重试**（本地开发不致校验失败）；
+- 下载失败（non-200/网络异常）不再缓存 false（旧逻辑会把瞬时故障固化 10min），内容无效仍缓存。
+
+**切换 runbook（与 08-22 Supabase 项目切换同款先例，全程可回退）**：
+1. 建桶（杭州/标准/LRS/公共读）+ **创建 ECS 实例角色并附加最小权限策略 + 绑定到实例**（替代长期 AK，控制台最佳实践）+ bucket CORS（admin-web 域）+ 微信合法域名加 bucket endpoint（**保留 supabase.co 域**）；
+2. 部署本版后端（`provider=supabase` 默认值，零行为变化）+ 发版小程序/admin-web（按 provider 分支，新旧两端自适配）；
+3. 全量后切流：服务器 config 填 OSS 四件套 + `STORAGE_PROVIDER=oss` 重启；
+4. 对象迁移：`scripts/migrate_supabase_to_oss.py`（零依赖，枚举 Supabase → 下载 → V1 签名 PUT OSS，同路径；覆盖过渡窗口落 Supabase 的直传对象）；
+5. URL 改写：`scripts/migrate_oss_url_rewrite_mysql.sql`（MySQL 方言；**列清单比 08-22 PG 版多 4 列**：group_chats.qr_code_url / app_feedbacks.image_url / venue_photos.url / dancer_photos.cover_url；先核对后改写再复核）；
+6. 对账后退订 Supabase；`supabase.storage` 配置块保留（历史回退通道），白名单 legacy 前缀保留。
+
+**最小权限策略 JSON**（附加到实例角色；本机调试用 ak 模式时可建 RAM 子账号挂同策略，替换桶名）：
+
+```json
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["oss:PutObject", "oss:PostObject", "oss:GetObject", "oss:ListObjects"],
+      "Resource": ["acs:oss:*:*:<bucket>", "acs:oss:*:*:<bucket>/*"]
+    }
+  ]
+}
 ```
 
 ### 安全模型（2026-08-12 修订，恶意文件防线）
