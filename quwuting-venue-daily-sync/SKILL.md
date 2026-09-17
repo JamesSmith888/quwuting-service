@@ -123,6 +123,11 @@ CEASED 而平台已 OPEN，用户投诉「明明营业却显示停业」，详�
   ——吃命中 JSON + 平台全量，算「表①/② 反转候选、表③ 新店候选、表⑤ 暂停候选（白名单差集 +
   范围细化 + 守卫剔除）」，并打印**提交前自检**（覆盖城市、仅有城市名无名单的 header、县级回挂、
   暂停家数与城市分布）。范围细化第三条规则由平台 district 数据驱动，**不再手抄县级→母城映射**。
+- 🆕 **双源 M/S 脚本 `scripts/qw_ms.py`（2026-09-16 新增，≥2 源当天必用）**：`qw_analyze.py` 的 M/S 是
+  **扁平 sources 口径**（只分「被点名 / 未被点名」）——单源日 |S|=1 恰好等价，**双源日必须逐店算**
+  `M = 点名该店的源集合`、`S = 覆盖该店所在城市的源集合`，否则会把「一源点名」误当「全源一致」。
+  入参 = mentions（**每条必须带 `src` 字段**）+ match + export；产出五表（含 表⑤′ 单源降级项、
+  守卫剔除、人工锁/豁免标注、全源一致确认营业门店清单供零写库日发公告）。用法见脚本 docstring。
 
 ## 工作流（采集 → 比对 → 五表 → 分级执行）
 
@@ -323,10 +328,13 @@ UNMATCHED 标记为「新店候选」前，若存疑先联网核实。数据源�
   items = `{"venueId","reportDate","sourceId","status":"OPEN","confidence"}`。
   自动注入 `"source":"AGENT_BATCH"`（V8 `change_source` 列，后台「更新记录」展示「批量更新」标签，
   与人工 ADMIN 区分），可 `--change-source` 覆盖。后端仅反转 CEASED/SUSPENDED → OPEN，其余静默跳过。
+  ⚠️ `--source-id` 同上，务必显式传本轮源标识（默认值 xianbao360 是历史遗留）。
   ⚠️ 返回体新增 `skippedLocked` / `skippedExempt` / `skipped[]`（V25 门禁）——**必须逐类汇报**。
 - **表② 反转**：同上，条目追加 `"forceReversal":true`。
 - **表⑤ 关门暂停**：`python3 scripts/qw_api.py status-suspend --items 'JSON数组' --report-date YYYY-MM-DD --base-url <BASE_URL>`
   items 只需 `{"venueId"}`（脚本补 reportDate/sourceId/source）。
+  ⚠️ **必须显式传 `--source-id <本轮源标识>`**：`qw_api.py` 的默认值是 `xianbao360`（历史遗留），
+  异源日会把渠道标识写错（2026-09-17 实证：市井慢时光单源日写成 xianbao360）。
   后端 `POST /admin/venue-daily-openings/batch-suspend`：仅 **OPEN → SUSPENDED**，非 OPEN 与不存在
   静默跳过；审计 changedBy=null + changeSource=AGENT_BATCH；关注者收站内信/订阅消息（大批量时
   消息量较大，属既有语义不是 bug）；**刻意不产生数据更新公告**。返回 `{total, suspended, venueNotFound, details}`。
@@ -402,7 +410,9 @@ POST /admin/venue-aliases/batch-import
   （2026-09-15 用户拍板：「高置信的永远自动发送公告」）；
   （表③ 新店**须先经用户放行建档**——红线 4——公告在放行环节一并确认）；
   发布前先 `GET /admin/announcements` 核对今日是否已有 DATA_UPDATE（已发且信息不全才 offline 旧条）。
-  ⚠️ 全源一致但平台已 OPEN（当日零写库）时**不发公告**——无正向内容，发了是噪音。
+  🔴 **当日零写库（表① 无）也直接发（2026-09-17 用户授权「确定的就执行，然后发公告，不需要我确认了」）**：
+  用 `announcement-playbook §5`「确认营业门店」版式，**不再逐次询问**；单源日措辞**不得写「两源共同确认」**，
+  且名单**只取高置信（EXACT/ALIAS）命中店**（CONTAINED 不入公告——包含式匹配会挂到不同店上）。
 - **表⑤（关门/暂停）刻意不发公告**：公告口径是「新增/恢复」的正向信息，数百家转暂停对外发布
   是纯噪音且引发恐慌；暂停只写库 + 通知关注者。
 - **公告已发后再补充门店 → 新发一条独立公告**（勿改写已发布公告）；原地 update 仅用于修正原公告

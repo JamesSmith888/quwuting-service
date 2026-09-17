@@ -22,6 +22,18 @@ import java.time.LocalDateTime;
 })
 public class VenueStatusLog {
 
+    /**
+     * change_source 值域（本字段的唯一声明处，引用方一律取常量，禁再抄字面量）。
+     * <p>
+     * 语义 = 「谁写的」，与 {@code Venue.status_source}（「这个值代表谁的判断」= 权威
+     * 层级依据）分工不重叠，切勿混用（见 {@link org.quwuting.quwutingservice.venue.enums.VenueStatusSource}）。
+     */
+    /** Agent + Skill 批量落库（舞讯同步 status-reverse 通道，2026-09-01 V8） */
+    public static final String CHANGE_SOURCE_AGENT_BATCH = "AGENT_BATCH";
+
+    /** 系统按门店开业计划自动兑现（2026-09-17 V29，见 docs/agents/50-venue-opening-plan.md） */
+    public static final String CHANGE_SOURCE_SCHEDULED = "SCHEDULED";
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
@@ -43,10 +55,11 @@ public class VenueStatusLog {
     private Long changedBy;
 
     /**
-     * 变更来源标识（2026-09-01，V8）：
+     * 变更来源标识（2026-09-01，V8；2026-09-17 加 SCHEDULED）：
      * AGENT_BATCH = Agent+Skill 批量落库（舞讯同步 status-reverse 通道）；
-     * ADMIN = 管理端人工写库；null = 旧数据或其他系统自动变更。
-     * 供管理后台「更新记录」区分「批量更新」与人工/其他来源。
+     * ADMIN = 管理端人工写库；SCHEDULED = 系统按开业计划自动兑现（V29，changedBy 为 null）；
+     * null = 旧数据或其他系统自动变更。
+     * 供管理后台「更新记录」区分来源。取值见本类顶部常量。
      */
     @Column(length = 20)
     private String changeSource;

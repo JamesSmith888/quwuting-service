@@ -14,6 +14,7 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -22,6 +23,26 @@ import java.util.Set;
 public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecificationExecutor<Venue> {
 
     Optional<Venue> findByIdAndDeletedFalse(Long id);
+
+    /**
+     * 到期应兑现的开业计划（2026-09-17，V29；方案见 docs/agents/50-venue-opening-plan.md）：
+     * {@code expected_open_date <= today} 且未删除，按开业日升序（先到期先处理）。
+     * <p>
+     * <b>刻意不排除 {@code status = OPEN} 的行</b>——那些是「人工提前开业、开业日忘了清」
+     * 的悬挂值：交由 {@code VenueService#applyScheduledOpening} 的早退分支清掉（自愈）。
+     * 若在这里按状态过滤，悬挂值就永远清不掉了（本查询是清理它的唯一入口）。
+     * <p>
+     * 走索引 {@code qwt_idx_expected_open_date}；调用方传 Pageable 作防御性上限
+     * （「即将开业」门店量级极小，正常轮次返回 0~个位数行）。
+     */
+    @Query("""
+            SELECT v FROM Venue v
+            WHERE v.deleted = false
+              AND v.expectedOpenDate IS NOT NULL
+              AND v.expectedOpenDate <= :today
+            ORDER BY v.expectedOpenDate ASC, v.id ASC
+            """)
+    List<Venue> findDueOpeningPlans(@Param("today") LocalDate today, Pageable pageable);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT v FROM Venue v WHERE v.id = :id AND v.deleted = false")

@@ -32,6 +32,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
@@ -284,6 +285,16 @@ def main() -> int:
                 d = _get(args.base_url, f"/venues?{q}")
             except SystemExit:
                 continue
+            except urllib.error.HTTPError as e:
+                # 2026-09-16 实证：个别 keyword 会让 /venues 列表接口 500
+                # （`keyword=金莎` 时 size<=11 正常、size>=12 必 500；单店详情接口正常）。
+                # 交叉验证是「兜底增益」而非主判据 ⇒ 单条失败不得中断整轮比对，
+                # 但必须落盘标记 + 汇总打印，交人工复核（静默跳过 = 假阴性无人知）。
+                r["cross_check_error"] = f"HTTP {e.code}"
+                continue
+            except Exception as e:                       # 超时/DNS/解析等一律降级
+                r["cross_check_error"] = f"{type(e).__name__}"
+                continue
             items = d if isinstance(d, list) else d.get("content", [])
             hits = [x for x in items if x.get("city") == r["platform_city"]]
             if len(hits) == 1:
@@ -310,6 +321,11 @@ def main() -> int:
     print("UNMATCHED（进表③前必须 keyword 交叉验证）:")
     for r in un:
         print(f"  {r['src_city']}·{r['name']}  守卫={r['guard']}  邻近候选={r.get('fuzzy_hints')}")
+    err = [r for r in results if r.get("cross_check_error")]
+    if err:
+        print(f"⚠️ keyword 交叉验证失败 {len(err)} 条（接口报错，需人工补验）:")
+        for r in err:
+            print(f"  {r['src_city']}·{r['name']}  {r['cross_check_error']}")
     print("非 OPEN 命中（反转候选）:")
     for r in results:
         if r.get("venueId") and r["status"] != "OPEN":

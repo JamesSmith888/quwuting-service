@@ -109,7 +109,8 @@ class FavoriteServiceTest {
      */
     private static VenueResponse response(Long id, boolean isHot, boolean statusChanged) {
         return new VenueResponse(
-                id, "舞厅" + id, VenueStatus.OPEN, "营业中", null, null,
+                // 第 5 参 = expectedOpenDate（V29）：OPEN 门店恒为 null（服务端「置 OPEN 即清空」）
+                id, "舞厅" + id, VenueStatus.OPEN, "营业中", null, null, null,
                 Collections.emptyList(), null, "绍兴市", null, null,
                 null, null, Collections.emptyList(), Collections.emptyList(),
                 Collections.emptyList(), null, null, Collections.emptyList(),

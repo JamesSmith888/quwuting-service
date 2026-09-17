@@ -179,6 +179,14 @@ public class VenueResponseMapper {
                 v.getName(),
                 v.getStatus(),
                 v.getStatus().getDisplayName(),
+                /**
+                 * 预期开业日（2026-09-17，V29）：原样透传实体值，<b>本类不做任何派生</b>
+                 * ——展平/降级判定（status 非 OPEN 且日期 > 今天 ⇒ UPCOMING）依赖客户端
+                 * 当天日期，是本类不该有的时间语义（同 NOT_OPEN_YET 归前端的理由）。
+                 * 计划兑现后实体值已被清空，故本字段与 status 不会出现「已 OPEN 但还挂着
+                 * 开业日」的组合（清空由 {@code VenueService} 两个写路径保证）。
+                 */
+                v.getExpectedOpenDate(),
                 v.getVenueType(),
                 v.getImageUrl(),
                 effectivePhotos,

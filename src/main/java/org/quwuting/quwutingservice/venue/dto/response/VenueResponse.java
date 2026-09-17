@@ -9,6 +9,7 @@ import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.enums.VenueType;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -17,6 +18,23 @@ public record VenueResponse(
         String name,
         VenueStatus status,
         String statusDisplay,
+        /**
+         * 预期开业日（2026-09-17 新增，V29；方案见 docs/agents/50-venue-opening-plan.md）。
+         * <p>
+         * <b>与 {@code status} 是一对，前端必须两个一起消费</b>：{@code status} 回答
+         * 「此刻开不开」（现在时），本字段回答「什么时候开」（将来时）。{@code status}
+         * 为停业类且本字段 &gt; 今天 ⇒ 派生展示态 {@code UPCOMING}，徽标读作
+         * 「9月18日开业」；{@code status} 为 OPEN 时本字段恒 null（计划已兑现即清空）。
+         * <p>
+         * <b>为什么不下发「即将开业」这个状态字符串</b>：判据「日期 &gt; 今天」依赖
+         * 客户端当天日期，而下发字符串就会把判定冻在服务端响应时刻（响应被缓存/跨零点
+         * 都会错）。故下发<b>原始事实</b>（日期），派生归前端 —— 与 {@code NOT_OPEN_YET}
+         * 复用同一理由（见 utils/venueStatus.ts「为什么派生放在前端」）。
+         * <p>
+         * 展示派生单点 = 小程序 {@code utils/venueStatus.resolveEffectiveStatus}；
+         * 服务端只负责字段本身的真实性，禁止在别处再判一遍。
+         */
+        @JsonFormat(pattern = "yyyy-MM-dd") LocalDate expectedOpenDate,
         /**
          * 门店类型（2026-09-13 新增，V24）：舞厅 / KTV / 歌友会，驱动列表快捷筛选与
          * 详情页地址展示粒度。前端据此分支渲染：<b>城市级类型（歌友会）只展示城市</b>，

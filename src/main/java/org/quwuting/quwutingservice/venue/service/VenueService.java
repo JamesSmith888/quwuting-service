@@ -68,6 +68,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import tools.jackson.databind.ObjectMapper;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
@@ -314,6 +315,13 @@ public class VenueService {
         venue.setWechatQr(req.wechatQr());
         venue.setTags(serializeStringList(defaultsConfig.filterCustomOnly(req.tags())));
         venue.setSortWeight(req.sortWeight() != null ? req.sortWeight() : 0);
+        // 开业计划（2026-09-17，V29；方案见 docs/agents/50-venue-opening-plan.md）：
+        // 新建时直接填开业日 ⇒ 门店一建立就是「即将开业」（徽标派生 UPCOMING），
+        // 顺带解掉 V1 建表 `status DEFAULT 'OPEN'` 留下的缺口——未开业的新店若不被
+        // 显式设成非 OPEN，录进去就是「营业中」，是同一类错误的另一个方向。
+        // 置 OPEN 即计划已兑现 ⇒ 开业日作废（一个计划只兑现一次，不留两套真值）。
+        venue.setExpectedOpenDate(
+                venue.getStatus() == VenueStatus.OPEN ? null : req.expectedOpenDate());
         Venue saved = venueRepository.save(venue);
         // 初始状态日志：建立审计链起点（fromStatus=null 表示首次创建）
         VenueStatusLog initialLog = new VenueStatusLog();
@@ -427,6 +435,16 @@ public class VenueService {
         venue.setWechatQr(req.wechatQr());
         venue.setTags(serializeStringList(defaultsConfig.filterCustomOnly(req.tags())));
         venue.setSortWeight(req.sortWeight() != null ? req.sortWeight() : venue.getSortWeight());
+        // 开业计划（2026-09-17，V29；方案见 docs/agents/50-venue-opening-plan.md）：
+        // 空值语义 = 清空（与 status / venueType / sortWeight 的「null = 保留原值」刻意
+        // 不同，判据见 CreateVenueRequest#expectedOpenDate 注释——本字段有合法的清空
+        // 场景且零存量、无旧表单负担，故取全量覆盖语义）。
+        // 置 OPEN 即「计划已兑现 / 人工提前开业」⇒ 开业日随之作废：一个计划只兑现一次，
+        // 不留「已营业但仍挂着开业日」的第二套真值（前台也会读作自相矛盾）。
+        // 注：statusBlocked（程序化写库被门禁拦）时状态未变，此处按**更新后的实际状态**
+        // 判定，故被拦也不会误清开业日。
+        venue.setExpectedOpenDate(
+                venue.getStatus() == VenueStatus.OPEN ? null : req.expectedOpenDate());
         VenueResponse response = venueResponseMapper.toResponse(venueRepository.save(venue),
                 Collections.emptyList(), false, 0L,
                 loadPublicPhotosByVenueIds(List.of(id)).getOrDefault(id, List.of()));
@@ -791,6 +809,87 @@ public class VenueService {
         // 详情公共部分缓存失效：status 与 statusUpdatedAt（新增状态日志）均属公共事实
         invalidateDetailPublic(venueId);
         // 列表主查询缓存失效：营业状态是列表徽标/排序展示（2026-08-30 新增）
+        invalidateVenueListCache();
+    }
+
+    /**
+     * 兑现开业计划（2026-09-17，V29；方案见 docs/agents/50-venue-opening-plan.md）。
+     * <p>
+     * 由 {@code VenueOpeningScheduler} 在 {@code expected_open_date <= today} 时逐店调用。
+     * 这是本域的**第 6 个状态写入点**，与 {@link #reopenByReport}（人工确认恢复营业）的
+     * 副作用链刻意保持同构，差异只有三处、且都是语义要求：
+     * <ol>
+     *   <li><b>changeSource = SCHEDULED</b>（{@link VenueStatusLog#CHANGE_SOURCE_SCHEDULED}）：
+     *       与 AGENT_BATCH / ADMIN 并列，供管理端「更新记录」区分「系统按计划兑现」与
+     *       「人改的 / 舞讯推的」——审计链上这三者的可信度不同；</li>
+     *   <li><b>changedBy = null</b>：系统自动变更，无操作人；</li>
+     *   <li><b>清空 expectedOpenDate</b>：计划兑现即作废（一个计划只兑现一次）。</li>
+     * </ol>
+     * <p>
+     * <b>为什么必须打人工锁</b>（{@link VenueStatusGuardService#lockOnManualChange}，
+     * 走 OPEN 档 3 天）：开业计划是**人设定的**，属人工意图的延伸，理应享受与人工置
+     * OPEN 同等的优先权。而一家新店刚开业时，舞讯**大概率尚未收录它** —— 次日「未上榜
+     * 差集」推断正好命中，会把状态推回暂停，自动开业第二天就自我推翻。48 号文档已经
+     * 把这条路径完整踩过一遍（{@code applyBatchSuspend} 的未上榜推断），这里是同一个
+     * 坑的第二个入口。
+     * <p>
+     * 幂等：计划已被其它路径兑现/撤销（{@code expectedOpenDate == null}）时早退；
+     * 人工已提前置 OPEN 时只清悬挂的开业日（见 {@link #clearFulfilledOpeningPlan}），
+     * 不重复写日志、不重复发关注者通知。
+     * <p>
+     * 事务：由调用方（调度器）开启——调度器是独立 Bean，经 Spring 代理调用本方法，
+     * 故 {@code @Transactional} 正常生效。**勿把调度循环搬进本类**：同类内自调用
+     * 不经代理，事务与缓存注解会静默失效。
+     */
+    @Transactional
+    @Caching(evict = {
+            @CacheEvict(value = CacheConfig.CACHE_VENUE, key = "#venueId"),
+            @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
+    })
+    public void applyScheduledOpening(Long venueId) {
+        Venue venue = venueRepository.findByIdAndDeletedFalse(venueId)
+                .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
+        if (venue.getExpectedOpenDate() == null) {
+            return; // 计划已被兑现/撤销：无动作（幂等，同 reopenByReport 的早退惯例）
+        }
+        if (venue.getStatus() == VenueStatus.OPEN) {
+            // 人工已提前开业：状态无需改动，只清掉悬挂的开业日（否则「已营业 + 还有开业日」
+            // 两套真值并存，前台读到自相矛盾的组合）
+            clearFulfilledOpeningPlan(venue);
+            return;
+        }
+        VenueStatus fromStatus = venue.getStatus();
+        VenueStatusLog statusLog = new VenueStatusLog();
+        statusLog.setVenueId(venue.getId());
+        statusLog.setFromStatus(fromStatus);
+        statusLog.setToStatus(VenueStatus.OPEN);
+        statusLog.setChangedBy(null); // 系统自动，无操作人
+        statusLog.setChangeSource(VenueStatusLog.CHANGE_SOURCE_SCHEDULED);
+        venueStatusLogRepository.save(statusLog);
+        venue.setStatus(VenueStatus.OPEN);
+        venue.setExpectedOpenDate(null); // 计划兑现即作废
+        // 人工锁：计划是人设的 ⇒ 与人工置 OPEN 同档 3 天（理由见 javadoc）
+        venueStatusGuardService.lockOnManualChange(venue, VenueStatus.OPEN, LocalDateTime.now());
+        venueRepository.save(venue);
+        // 关注者通知（同事务；早退分支已保证此处必为实际变更）
+        venueStatusWatcherService.notifyStatusChanged(venue.getId(), fromStatus, VenueStatus.OPEN);
+        venueHeatService.invalidate(venueId);
+        invalidateDetailPublic(venueId);
+        invalidateVenueListCache();
+        log.info("[venue/{}/scheduled-opening] 开业计划兑现：{} → OPEN（已打人工锁，开业日已清空）",
+                venue.getId(), fromStatus);
+    }
+
+    /**
+     * 计划已被人工提前兑现（门店已 OPEN 但开业日仍挂在库）时只清悬挂值。
+     * <p>
+     * 不写状态日志、不发通知——状态本身没有变化，只是把一个已兑现的计划归档掉。
+     * 仍逐出详情/列表缓存（{@code expectedOpenDate} 随响应下发，缓存里存的是旧副本）。
+     */
+    private void clearFulfilledOpeningPlan(Venue venue) {
+        venue.setExpectedOpenDate(null);
+        venueRepository.save(venue);
+        invalidateDetailPublic(venue.getId());
         invalidateVenueListCache();
     }
 

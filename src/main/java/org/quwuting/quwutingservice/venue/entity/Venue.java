@@ -9,6 +9,7 @@ import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.enums.VenueStatusSource;
 import org.quwuting.quwutingservice.venue.enums.VenueType;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Getter
@@ -31,6 +32,25 @@ public class Venue extends BaseEntity {
     @Column(length = 20, nullable = false)
     @ColumnDefault("'OPEN'")
     private VenueStatus status = VenueStatus.OPEN;
+
+    /**
+     * 预期开业日（2026-09-17 新增，V29；方案见 docs/agents/50-venue-opening-plan.md）。
+     * <p>
+     * 与 {@link #status} 构成「现在时 × 将来时」这一对：status 是此刻的事实，本列是
+     * 开业计划。一家「明天开业」的门店，status 保持停业类（今天的事实正确无误），
+     * 本列写 9-18 —— 展示层据此派生 {@code UPCOMING}（徽标直接读作「9月18日开业」），
+     * 到点由 {@code VenueOpeningScheduler} 走 VenueService 正规通道自动转 OPEN
+     * 并清空本列（写状态日志 change_source=SCHEDULED + 打 3 天人工锁 + 清缓存 + 通知关注者）。
+     * <p>
+     * <b>为什么不是一个新增的 UPCOMING 状态枚举值</b>：本列的值是「日期 × 今天」的
+     * <b>函数</b>而非独立事实——落库会出现「开业日已过、库里还写着即将开业」的假状态
+     * （同活动域 NOT_STARTED 由 ActivityStateResolver 派生而不落库）；且不新增枚举
+     * ⇒ 所有基于存储态的守卫（热度上报「非营业禁报」、报告类型守卫、V25 人工锁与豁免
+     * 判定）天然正确、零改动。详见 V29 迁移注释。
+     * <p>
+     * null = 无开业计划（存量门店与「计划已兑现」的全量常态）。
+     */
+    private LocalDate expectedOpenDate;
 
     /**
      * 门店类型（2026-09-13 新增，V24 迁移）。列默认值唯一声明通道 = @ColumnDefault。
