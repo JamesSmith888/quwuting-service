@@ -55,11 +55,13 @@ storage:
   oss:
     endpoint: ${OSS_ENDPOINT:}
     bucket: ${OSS_BUCKET:}
-    # 生产 = ECS 实例角色（阿里云最佳实践：无长期 AK，STS 临时凭证自动轮转）
-    credential-mode: ${OSS_CREDENTIAL_MODE:ak}
+    # STS 临时凭证：生产走 ECS 实例角色（无 AK）；本机调试填充 assume-role-* 三项即可
     instance-role-name: ${OSS_INSTANCE_ROLE_NAME:}
-    access-key-id: ${OSS_ACCESS_KEY_ID:}
-    access-key-secret: ${OSS_ACCESS_KEY_SECRET:}
+    sts-endpoint: ${OSS_STS_ENDPOINT:https://sts.aliyuncs.com/}
+    assume-role-arn: ${OSS_ASSUME_ROLE_ARN:}
+    assume-role-access-key-id: ${OSS_ASSUME_ROLE_AK:}
+    assume-role-access-key-secret: ${OSS_ASSUME_ROLE_SK:}
+    assume-role-session-name: ${OSS_ROLE_SESSION_NAME:}
     # 服务器（杭州 ECS）填内网 endpoint：校验下载走内网免流量费
     internal-endpoint: ${OSS_INTERNAL_ENDPOINT:}
 

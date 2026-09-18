@@ -53,10 +53,11 @@ storage:
   oss:
     endpoint: ${OSS_ENDPOINT:}              # 如 oss-cn-hangzhou.aliyuncs.com（须与 ECS 同地域）
     bucket: ${OSS_BUCKET:}                  # 公共读 bucket
-    credential-mode: ${OSS_CREDENTIAL_MODE:ak}    # ak（默认/本地）| instance-role（生产推荐）
-    instance-role-name: ${OSS_INSTANCE_ROLE_NAME:}  # ECS 实例角色名（instance-role 模式必填）
-    access-key-id: ${OSS_ACCESS_KEY_ID:}    # RAM 子账号 AK（仅 ak 模式使用）
-    access-key-secret: ${OSS_ACCESS_KEY_SECRET:}
+    instance-role-name: ${OSS_INSTANCE_ROLE_NAME:}   # ECS 实例角色名（生产主路径，无 AK）
+    sts-endpoint: ${OSS_STS_ENDPOINT:https://sts.aliyuncs.com/}
+    assume-role-arn: ${OSS_ASSUME_ROLE_ARN:}         # acs:ram::<UID>:role/<role>（本机兜底）
+    assume-role-access-key-id: ${OSS_ASSUME_ROLE_AK:}     # 仅授予 sts:AssumeRole
+    assume-role-access-key-secret: ${OSS_ASSUME_ROLE_SK:}
     internal-endpoint: ${OSS_INTERNAL_ENDPOINT:}  # 校验下载走内网免流量费；本地开发留空
     max-file-size: 5242880                  # 与 supabase 通道一致
     allowed-extensions: .jpg,.jpeg,.png,.webp
@@ -68,7 +69,10 @@ storage:
 
 **OSS 直传模型（服务端签名 PostObject，无 SDK 依赖；凭证 = ECS 实例角色 STS 临时凭证，生产无长期 AK）**：
 
-- **凭证来源双模式**（2026-09-17 按阿里云控制台最佳实践定稿，`OssCredentialService`）：`credential-mode=instance-role`（生产推荐）= ECS 绑定实例角色，后端从实例元数据端点（100.100.100.200）取 STS 临时凭证（AccessKeyId/Secret/SecurityToken，自动轮转，剩余 <5min 同步刷新，无长期 AK 可泄漏）；`credential-mode=ak`（本地开发兜底）= 显式 RAM 子账号 AK/SK；
+- **凭证恒为 STS 临时凭证**（2026-09-18 统一：本地/生产同一套代码路径，无"长期 AK 直签"分支，`OssCredentialService` 单点解析）：<br>
+  <b>① 优先 ECS 实例角色</b>（生产主路径）——ECS 绑定实例角色后，后端从实例元数据端点（http://100.100.100.200/latest/meta-data/ram/security-credentials/{role}）取临时凭证（AccessKeyId/Secret/SecurityToken），无需任何 AccessKey、由阿里云自动轮转；<br>
+  <b>② 不可达（本机开发等非 ECS 环境）自动兜底 AssumeRole</b>——用仅具 `sts:AssumeRole` 权限（无任何 OSS 权限）的 RAM 子账号 AK 调 STS（V1 RPC 签名，零依赖）换同一角色的临时凭证；元数据失败后抑制 5min 重试窗口，避免本机每次凭证请求都等超时；<br>
+  两条路径产出同构凭证（都带 SecurityToken），因此本地与生产前端直传代码完全一致；凭证剩余 &lt;5min 同步刷新；
 - `/storage/upload-token` 在 `provider=oss` 时签发：`policy`（JSON：UTC 过期 15min + `{"bucket":...}` + `["eq","$key",uploadPath]` + `["content-length-range",1,limit]`）Base64 后以 **AccessKeySecret HmacSHA1 签名**（`StorageService.base64HmacSha1`，JDK 内置零依赖）；
 - Secret 永不出后端；policy 限定精确 key，凭证泄露也只能写那一个对象，15min 过期；实例角色模式下 policy 附加 `["eq","$x-oss-security-token",token]` 条件；
 - 前端 formData：`key / policy / OSSAccessKeyId / signature / success_action_status=200`（实例角色模式加 `x-oss-security-token`）+ file（**file 必须为最后字段**，wx.uploadFile 与浏览器 FormData 均天然满足）；
@@ -80,14 +84,19 @@ storage:
 - 下载失败（non-200/网络异常）不再缓存 false（旧逻辑会把瞬时故障固化 10min），内容无效仍缓存。
 
 **切换 runbook（与 08-22 Supabase 项目切换同款先例，全程可回退）**：
-1. 建桶（杭州/标准/LRS/公共读）+ **创建 ECS 实例角色并附加最小权限策略 + 绑定到实例**（替代长期 AK，控制台最佳实践）+ bucket CORS（admin-web 域）+ 微信合法域名加 bucket endpoint（**保留 supabase.co 域**）；
+1. 建桶（杭州/标准/LRS/公共读）+ **创建 RAM 角色并附加最小权限策略**：角色的信任策略同时勾选「阿里云服务 = ECS」（生产实例角色）和（可选）指定 RAM 用户（本机 AssumeRole 用），再在 ECS 实例上授予该角色（控制台最佳实践：生产完全不建长期 AK）+ bucket CORS（admin-web 域）+ 微信合法域名加 bucket endpoint（**保留 supabase.co 域**）；
 2. 部署本版后端（`provider=supabase` 默认值，零行为变化）+ 发版小程序/admin-web（按 provider 分支，新旧两端自适配）；
 3. 全量后切流：服务器 config 填 OSS 四件套 + `STORAGE_PROVIDER=oss` 重启；
 4. 对象迁移：`scripts/migrate_supabase_to_oss.py`（零依赖，枚举 Supabase → 下载 → V1 签名 PUT OSS，同路径；覆盖过渡窗口落 Supabase 的直传对象）；
 5. URL 改写：`scripts/migrate_oss_url_rewrite_mysql.sql`（MySQL 方言；**列清单比 08-22 PG 版多 4 列**：group_chats.qr_code_url / app_feedbacks.image_url / venue_photos.url / dancer_photos.cover_url；先核对后改写再复核）；
 6. 对账后退订 Supabase；`supabase.storage` 配置块保留（历史回退通道），白名单 legacy 前缀保留。
 
-**最小权限策略 JSON**（附加到实例角色；本机调试用 ak 模式时可建 RAM 子账号挂同策略，替换桶名）：
+**本机调试（非 ECS）所需的最小 RAM 配置**：
+- RAM 用户（如 `quwuting-sts-caller`）**只**授予：`{ "Effect": "Allow", "Action": ["sts:AssumeRole"], "Resource": "acs:ram::<UID>:role/<role>" }`——无任何 OSS 权限；
+- 该角色的信任策略把此 RAM 用户加入受信主体，生产侧则把 ECS 加入受信主体（两者可同时存在，角色与权限策略共用一份）；
+- 配置填 `assume-role-arn` + `assume-role-access-key-id/secret` 即可，代码路径与生产完全相同。
+
+**角色权限策略 JSON**（附加到角色，替换桶名——生产实例角色 / 本机 AssumeRole 共用同一角色）：
 
 ```json
 {

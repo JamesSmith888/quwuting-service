@@ -14,13 +14,14 @@
     export SUPABASE_ANON='<项目 anon key（公开桶可匿名 list/read）>'
     export OSS_ENDPOINT='oss-cn-hangzhou.aliyuncs.com'
     export OSS_BUCKET='<bucket 名称>'
-    # 凭证二选一：
-    #   a) 在 ECS 上跑（推荐）：先给实例绑定角色，加 --use-instance-role --role-name <角色名>
-    #   b) 本机跑：export OSS_ACCESS_KEY_ID='<RAM 子账号 AK>' / OSS_ACCESS_KEY_SECRET='<SK>'
+    # 凭证（与后端同一套：恒为 STS 临时凭证，优先实例角色，本机自动兜底 AssumeRole）：
+    #   a) ECS 上跑：--role-name <实例角色名>（无需任何 AK）
+    #   b) 本机跑：--assume-role-arn acs:ram::<UID>:role/<角色名> \
+    #              --oss-ak '<仅具 sts:AssumeRole 权限的 AK>' --oss-sk '<SK>'
     python3 scripts/migrate_supabase_to_oss.py [--dry-run] [--limit N]
 
 也可用命令行参数代替环境变量（--supabase-url/--supabase-anon/--oss-endpoint/
---oss-bucket/--oss-ak/--oss-sk）。
+--oss-bucket/--role-name/--assume-role-arn/--oss-ak/--oss-sk）。
 
 上传通道：OSS PUT + V1 头签名（HMAC-SHA1，Content-MD5 保证完整性），
 零第三方依赖（纯标准库），与 migrate_supabase_storage.py 同款工程约定。
@@ -52,6 +53,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -60,6 +62,7 @@ from email.utils import formatdate
 
 LIST_PAGE = 200
 METADATA_BASE = "http://100.100.100.200/latest/meta-data/ram/security-credentials/"
+STS_ENDPOINT_DEFAULT = "https://sts.aliyuncs.com/"
 
 MIME_BY_EXT = {
     ".jpg": "image/jpeg",
@@ -69,6 +72,11 @@ MIME_BY_EXT = {
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
 }
+
+
+def percent_encode(value):
+    """阿里云 RPC 风格参数编码（RFC3986：仅 A-Za-z0-9-_.~ 保留，其余转义；空格→%20）。"""
+    return urllib.parse.quote(str(value), safe="-_.~")
 
 
 def http_request(method, url, headers=None, body=None, timeout=120):
@@ -153,7 +161,7 @@ def oss_put(bucket, endpoint, ak, sk, key, data, content_type, security_token=No
 
 
 def fetch_instance_role_credentials(role_name):
-    """从 ECS 实例元数据端点取 STS 临时凭证（阿里云最佳实践：无长期 AK）。"""
+    """从 ECS 实例元数据端点取 STS 临时凭证（阿里云最佳实践：无长期 AK 参与签名）。"""
     url = METADATA_BASE + role_name
     status, raw = http_request("GET", url, timeout=10)
     if status != 200:
@@ -162,6 +170,38 @@ def fetch_instance_role_credentials(role_name):
     if doc.get("Code") != "Success":
         raise RuntimeError(f"实例角色凭证响应异常 Code={doc.get('Code')!r}")
     return doc["AccessKeyId"], doc["AccessKeySecret"], doc["SecurityToken"], doc.get("Expiration")
+
+
+def assume_role(ak, sk, role_arn, endpoint=STS_ENDPOINT_DEFAULT, session=None, duration=3600):
+    """STS AssumeRole 换临时凭证（非 ECS 环境：该 AK 仅具 sts:AssumeRole 权限）。"""
+    params = {
+        "Action": "AssumeRole",
+        "Version": "2015-04-01",
+        "Format": "JSON",
+        "AccessKeyId": ak,
+        "SignatureMethod": "HMAC-SHA1",
+        "SignatureNonce": uuid.uuid4().hex,
+        "SignatureVersion": "1.0",
+        "Timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "RoleArn": role_arn,
+        "RoleSessionName": session or ("qwt-migrate-" + uuid.uuid4().hex[:8]),
+        "DurationSeconds": str(duration),
+    }
+    canonical = "&".join(
+        f"{percent_encode(k)}={percent_encode(v)}" for k, v in sorted(params.items())
+    )
+    string_to_sign = "GET&" + percent_encode("/") + "&" + percent_encode(canonical)
+    signature = base64.b64encode(
+        hmac.new((sk + "&").encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha1).digest()
+    ).decode("utf-8")
+    status, raw = http_request("GET", endpoint + "?" + canonical + "&Signature=" + percent_encode(signature), timeout=15)
+    if status != 200:
+        raise RuntimeError(f"AssumeRole 失败 HTTP {status} {raw[:200]!r}")
+    doc = json.loads(raw.decode("utf-8"))
+    creds = doc.get("Credentials")
+    if not creds:
+        raise RuntimeError(f"AssumeRole 响应无 Credentials：Code={doc.get('Code')!r} Message={doc.get('Message')!r}")
+    return creds["AccessKeyId"], creds["AccessKeySecret"], creds["SecurityToken"], creds.get("Expiration")
 
 
 def copy_one(old_base, old_bucket, old_anon, oss, name):
@@ -190,19 +230,45 @@ def parse_iso_ts(s):
 
 
 def make_creds_provider(args):
-    """凭证提供器：实例角色模式（自动刷新 STS）或显式 AK 模式。返回 () -> (ak, sk, token)。"""
-    if not args.use_instance_role:
-        return lambda: (args.oss_ak, args.oss_sk, None)
-    if not args.role_name:
-        sys.exit("--use-instance-role 需要 --role-name（或环境变量 OSS_INSTANCE_ROLE_NAME）")
+    """
+    凭证提供器（与后端同一套：凭证恒为 STS 临时凭证）。
+    优先 ECS 实例角色元数据端点；不可达则假定 AssumeRole（本机构建时提供 ARN + AK）。
+    返回 () -> (ak, sk, token)。
+    """
+    if not args.role_name and not args.assume_role_arn:
+        sys.exit("缺少凭证配置：ECS 上跑加 --role-name <实例角色名>；本机跑加 --assume-role-arn <角色ARN> "
+                 "（配合仅具 sts:AssumeRole 权限的 --oss-ak/--oss-sk）")
+    if args.assume_role_arn and (not args.oss_ak or not args.oss_sk):
+        sys.exit("--assume-role-arn 需要同时提供 --oss-ak/--oss-sk（该 AK 仅授予 sts:AssumeRole）")
+
     lock = threading.Lock()
     state = {"exp": 0.0, "creds": None}
+    metadata_down = {"until": 0.0}
+
+    def fetch():
+        now = time.time()
+        if args.role_name and now >= metadata_down["until"]:
+            try:
+                ak, sk, token, expiration = fetch_instance_role_credentials(args.role_name)
+                print("      凭证来源：ECS 实例角色（STS）")
+                return (ak, sk, token), expiration
+            except Exception as e:
+                # 非 ECS 环境：抑制 5 分钟，改用 AssumeRole（避免每次都等元数据超时）
+                metadata_down["until"] = time.time() + 300
+                print(f"      实例元数据不可用（{e}），改用 AssumeRole")
+        if args.assume_role_arn:
+            ak, sk, token, expiration = assume_role(
+                args.oss_ak, args.oss_sk, args.assume_role_arn, args.sts_endpoint, args.role_session
+            )
+            print("      凭证来源：STS AssumeRole（非 ECS 环境）")
+            return (ak, sk, token), expiration
+        sys.exit("无法获取凭证：请检查 ECS 实例角色绑定，或提供 --assume-role-arn + AK/SK")
 
     def provider():
         with lock:
             if state["creds"] is None or state["exp"] - time.time() < 300:
-                ak, sk, token, expiration = fetch_instance_role_credentials(args.role_name)
-                state["creds"] = (ak, sk, token)
+                creds, expiration = fetch()
+                state["creds"] = creds
                 state["exp"] = parse_iso_ts(expiration) if expiration else time.time() + 3600
             return state["creds"]
     return provider
@@ -216,13 +282,17 @@ def main():
     ap.add_argument("--oss-endpoint", default=os.environ.get("OSS_ENDPOINT"))
     ap.add_argument("--oss-bucket", default=os.environ.get("OSS_BUCKET"))
     ap.add_argument("--oss-ak", default=os.environ.get("OSS_ACCESS_KEY_ID"),
-                    help="RAM 子账号 AK（--use-instance-role 时不需要）")
+                    help="RAM 子账号 AK：仅授予 sts:AssumeRole（ECS 上跑实例角色模式时留空）")
     ap.add_argument("--oss-sk", default=os.environ.get("OSS_ACCESS_KEY_SECRET"),
-                    help="RAM 子账号 SK（--use-instance-role 时不需要）")
-    ap.add_argument("--use-instance-role", action="store_true",
-                    help="在 ECS 上运行时用实例角色 STS 临时凭证上传（阿里云最佳实践）")
+                    help="RAM 子账号 SK：仅授予 sts:AssumeRole（ECS 上跑实例角色模式时留空）")
     ap.add_argument("--role-name", default=os.environ.get("OSS_INSTANCE_ROLE_NAME"),
-                    help="ECS 实例角色名（--use-instance-role 时必填）")
+                    help="ECS 实例角色名（优先来源：实例元数据端点）")
+    ap.add_argument("--assume-role-arn", default=os.environ.get("OSS_ASSUME_ROLE_ARN"),
+                    help="角色 ARN（acs:ram::UID:role/xxx）：非 ECS 环境兜底")
+    ap.add_argument("--role-session", default=os.environ.get("OSS_ROLE_SESSION_NAME"),
+                    help="AssumeRole 会话名（留空自动生成）")
+    ap.add_argument("--sts-endpoint", default=os.environ.get("OSS_STS_ENDPOINT", STS_ENDPOINT_DEFAULT),
+                    help="STS 接口地址")
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--dry-run", action="store_true")
@@ -234,8 +304,6 @@ def main():
                        ("--oss-endpoint", args.oss_endpoint), ("--oss-bucket", args.oss_bucket)):
         if not val:
             sys.exit(f"缺少 {label}（可用环境变量或参数提供）")
-    if not args.use_instance_role and (not args.oss_ak or not args.oss_sk):
-        sys.exit("缺少 --oss-ak/--oss-sk（或在 ECS 上加 --use-instance-role --role-name <角色名>）")
 
     print(f"[1/2] 枚举 Supabase 桶 {args.bucket} 对象 …")
     if args.objects_file:
@@ -261,7 +329,7 @@ def main():
 
     oss = (args.oss_bucket, args.oss_endpoint, make_creds_provider(args))
     print(f"[2/2] 并发拷贝 {len(names)} 个对象 → https://{args.oss_bucket}.{args.oss_endpoint}/"
-          f"（concurrency={args.concurrency}，凭证={'实例角色 STS' if args.use_instance_role else 'RAM AK'}）…")
+          f"（concurrency={args.concurrency}，凭证=STS 临时凭证）…")
     done = ok = 0
     total_bytes = 0
     failures = []

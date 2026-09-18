@@ -4,10 +4,7 @@ import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.springframework.stereotype.Service;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
-import java.security.GeneralSecurityException;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -86,8 +83,8 @@ public class StorageService {
     private UploadTokenResponse generateOssTicket(String uploadPath, long contentLimit) {
         if (!providerProps.ossUploadConfigured()) {
             throw new IllegalStateException(
-                    "OSS 直传未配置：需补齐 storage.oss.endpoint / bucket 及凭证"
-                            + "（credential-mode=instance-role 填 instance-role-name；ak 填 access-key-id/secret）");
+                    "OSS 直传未配置：需补齐 storage.oss.endpoint / bucket 及 STS 凭证来源"
+                            + "（instance-role-name 或 assume-role-arn + assume-role-access-key-id/secret）");
         }
         StorageProviderProperties.Oss oss = providerProps.oss();
         OssCredentialService.OssCredentials creds = ossCredentials.resolve();
@@ -105,7 +102,7 @@ public class StorageService {
                 + tokenCondition + "]}";
         String policyB64 = Base64.getEncoder()
                 .encodeToString(policyJson.getBytes(StandardCharsets.UTF_8));
-        String signature = base64HmacSha1(creds.accessKeySecret(), policyB64);
+        String signature = OssSigner.base64HmacSha1(creds.accessKeySecret(), policyB64);
         return new UploadTokenResponse(
                 "oss",
                 null, null,
@@ -118,17 +115,6 @@ public class StorageService {
                 signature,
                 creds.securityToken()
         );
-    }
-
-    /** HmacSHA1 → Base64（PostObject 表单签名；JDK 内置，零依赖） */
-    private static String base64HmacSha1(String secret, String data) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA1");
-            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA1"));
-            return Base64.getEncoder().encodeToString(mac.doFinal(data.getBytes(StandardCharsets.UTF_8)));
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("OSS 上传签名失败", e);
-        }
     }
 
     /** 视频分类（2026-08-22 舞伴短视频）——校验走视频扩展名 + 独立大小上限通道 */
