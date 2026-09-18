@@ -17,8 +17,12 @@
   ref_only        表④ 命中且已 OPEN / 未覆盖城市
   suspend_items   表⑤ 关门候选（白名单差集 + 范围细化，已剔除守卫）——提交前请核对自检行
 
-⚠️ 本脚本只算清单，**不写库**。全源一致门（|S|>=2 且 M==S）由 Agent 侧据此判定：
-sources 只有 1 个时，reversal_auto 与 suspend_items 都只能当「待放行清单」。
+⚠️ 本脚本只算清单，**不写库**。全源一致门由 Agent 侧据此判定：
+- `reversal_auto`（EXACT/ALIAS + 平台 CEASED/SUSPENDED）= **表①，永远自动写库 + 自动发公告**
+  （2026-09-15 用户拍板，**单源日也不降级**）；低置信 → `reversal_manual`（表②，待放行）。
+- `suspend_items`（关门方向）**仍受 |S|>=2 约束**：`len(sources) < 2` 时只能当「待放行清单」，
+  **不得直接提交**（「未提及即关门」是语义，不是跳过确认门的授权）。
+  ⚠️ 双源日请改用 `qw_ms.py`——本脚本的 sources 是扁平口径，分不清「一源点名」与「全源一致」。
 """
 from __future__ import annotations
 

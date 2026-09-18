@@ -7,12 +7,20 @@
 **双源日必须逐店算**：`M = 点名该店的源集合`、`S = 覆盖该店所在城市的源集合`，
 再按判定链分流：
 
-    M == S            → 确定开门 → 表①（EXACT/ALIAS）/ 表②（CONTAINED）
-    M == ∅            → 确定关门 → 表⑤（|S|>=2）/ 表⑤′（|S|<2，单源降级）
-    0 < |M| < |S|     → 源间冲突 → 表②
-    |S| < 2           → 单源覆盖 → 表②
+    M == S + EXACT/ALIAS → 确定开门 → 表①（**不受 |S| 约束**：单源日也自动写库 + 自动发公告）
+    M == S + CONTAINED   → 低置信   → 表②
+    M == ∅ + |S| >= 2    → 确定关门 → 表⑤
+    M == ∅ + |S| < 2     → 单源覆盖 → 表⑤′（待放行）
+    0 < |M| < |S|        → 源间冲突 → 表②
+    |S| < 2 且 M != S    → 单源覆盖 → 表②
 
-（`---` 均以 close-direction-playbook §2 + SKILL.md 「分类主键」为准。）
+⚠️ **表① 不受「全源一致门」约束（2026-09-15 用户拍板，本文件 2026-09-18 补齐）**：
+用户原话「**高置信的永远自动发送公告**」⇒ `M==S + EXACT/ALIAS + 平台 CEASED/SUSPENDED`
+永远进表①、单源日也不降级。全源一致门自此只拦**低置信（CONTAINED）**与**关门方向（表⑤）**。
+（此前本脚本先判 `|S|<2` 再判置信度，与 SKILL.md Step 4 表① 行不一致；09-17 当日恰好
+「命中店平台状态全为 OPEN ⇒ 表① 0」，该漂移未被触发，09-18 才暴露 —— 已修正。）
+
+（`---` 均以 SKILL.md Step 4「分类主键」为准。）
 
 前置：mentions JSON 的每条 mention 必须带 `src` 字段（来源标识）；
       `qw_match.py` 的产出与 mentions **逐条同序**，本脚本据此对齐。
@@ -138,10 +146,12 @@ def main() -> int:
         if v["venueId"] in guard_ids:
             t4.append({**row, "why": "字典守卫条目"})
         elif v["status"] in ("CEASED", "SUSPENDED"):
-            if len(Sc) < 2:
-                t2.append({**row, "why": f"单源覆盖城市 |S|={len(Sc)}"})
-            elif Mset == Sc and r["confidence"] in ("EXACT", "ALIAS"):
+            if Mset == Sc and r["confidence"] in ("EXACT", "ALIAS"):
+                # 🔴 高置信开门 = 表①，**不受来源数约束**（2026-09-15 用户拍板；
+                #    「高置信的永远自动发送公告」⇒ 单源日也自动写库 + 自动发公告、不询问）
                 t1.append(row)
+            elif len(Sc) < 2:
+                t2.append({**row, "why": f"单源覆盖城市 |S|={len(Sc)}"})
             else:
                 t2.append({**row, "why": ("源间冲突 0<|M|<|S|" if Mset and Mset != Sc else
                                           "低置信(CONTAINED)" if r["confidence"] == "CONTAINED"

@@ -66,14 +66,22 @@ PREFIX_LEN_TOL = 6           # 首二字子串兜底的名称长度差上限
 
 
 def norm(s: str | None) -> str:
-    """归一化：去空白/小写/全角括号与全角字母数字转半角。"""
+    """归一化：去空白/小写/全角括号与全角字母数字转半角/**去装饰性分隔号**。
+
+    ⚠️ **分隔号必须剥掉（2026-09-18 实证）**：平台「新·合·富舞厅」vs 舞讯「新合富」——
+    中间夹间隔号时「全等 / 去后缀 / 包含」三道全部失效（长度差 4>6 不成立？包含？都不成立），
+    真店被误判 UNMATCHED 进表③ = **假新店**（反过来真身 #1207 的 SUSPENDED 还留在库里没人恢复）。
+    分隔号（· ・ • . ~ ～）在店名里纯粹是装饰，归一时一律剥掉；
+    ⚠️ 注意保留 `-`（如「鎏金-铂金翰」）——短横在少数店名里是语义的一部分，未纳入剥离集。
+    """
     if not s:
         return ""
-    s = s.strip().lower().replace("\u3000", "").replace(" ", "")
+    s = s.strip().lower()
     for a, b in (("（", "("), ("）", ")"), ("【", "("), ("】", ")"),
                  ("［", "("), ("］", ")"), ("[", "("), ("]", ")")):
         s = s.replace(a, b)
-    return "".join(chr(ord(c) - 0xFEE0) if 0xFF01 <= ord(c) <= 0xFF5E else c for c in s)
+    s = "".join(chr(ord(c) - 0xFEE0) if 0xFF01 <= ord(c) <= 0xFF5E else c for c in s)
+    return re.sub(r"[\s\u3000·・•.~]+", "", s)
 
 
 def strip_suffix(s: str) -> str:

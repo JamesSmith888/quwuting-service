@@ -111,3 +111,21 @@
   零门店（本轮侥幸未造成事故：城市词表核对先拦了一道，且 EXISTED 幂等兜底）。
 - **口径**：export 翻页一律从 `page=0` 起；拿空 `content` 时先核对 `number` 是否已越界
   （`number ≥ totalPages` = 页码越界，不是没数据）。
+
+## 🚨 写库核验禁用「公开详情接口」判成败 —— 读侧有旧值窗口（2026-09-18 实证，既有行为）
+
+- **现象**：`status-reverse` 返回 `statusReversed=1`，`guard/query` 与 admin export **立刻**读出
+  `OPEN`，但 `GET /venues/{id}`（公开详情）**连续两次以上仍返回旧的 `SUSPENDED`**，本轮实测
+  约 8 分钟后才转正。若拿公开详情当核验口径，会**误判成「写失败」并重复提交**。
+- **根因（静态定位）**：`VenueService.venueDetailPublicCache` = Caffeine
+  `refreshAfterWrite(30s)` + `expireAfterWrite(10min)`；而 `invalidateDetailPublic(...)` /
+  `invalidateVenueListCache()` 的调用点集中在**场所编辑类写路径**（`updateVenue` / 照片 / 热度等），
+  **`dailyopening`（批量反转 / 批量暂停）与 `venuesync` 通道的 Service 里 grep 不到任何缓存失效调用**
+  ⇒ 批量通道写完不失效读缓存，只靠 TTL 兜底。列表侧注释写明 TTL 60s（滞后较轻），
+  **详情侧最坏 10 分钟**。
+- **口径（采集侧立刻执行）**：**核验一律以 `admin export`（含 `statusSource`）或
+  `POST /admin/venue-sync/guard/query` 为准**；公开详情/公开列表只用于「用户视角观感抽查」，
+  **不作为写库成败判据**。写库前后 diff 也必须用 admin export（本就是既有规定）。
+- **修复方向（待用户拍板，采集侧不得自行改后端）**：在 `batch` / `batch-suspend` 两个通道的
+  写路径末尾补 `invalidateDetailPublic(id)` + `invalidateVenueListCache()`（与场所编辑同口径），
+  或由批量服务发领域事件、VenueService 订阅失效。
