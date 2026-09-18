@@ -107,8 +107,22 @@ def list_objects(base, bucket, anon, prefix, limit=LIST_PAGE, offset=0):
     return json.loads(raw.decode("utf-8"))
 
 
+def is_folder(item):
+    """
+    目录判据（2026-09-18 修正：本项目 Supabase 桶实测踩坑）。
+    两代 storage-api 行为不同，必须都兜住：
+    - 旧版：目录项 name 带尾斜杠（"venue-qr/"）；
+    - 新版：目录项 name **不带**尾斜杠，靠 id=null 且 metadata=null 识别。
+    只看 name.endswith("/") 会把目录当文件 → 枚举出 8 条目录名、一个对象都没迁。
+    """
+    name = item.get("name") or ""
+    if name.endswith("/"):
+        return True
+    return item.get("id") is None and item.get("metadata") is None
+
+
 def enumerate_all(base, bucket, anon):
-    """递归枚举桶内全部对象名（兼容"平铺返回全部"与"目录式返回文件夹"两种行为）。"""
+    """递归枚举桶内全部对象名（兼容两代 API：目录式 + name 相对/绝对两种形态）。"""
     names, queue, visited = [], [""], set()
     while queue:
         prefix = queue.pop(0)
@@ -122,10 +136,12 @@ def enumerate_all(base, bucket, anon):
                 break
             for it in items:
                 name = it.get("name") or ""
-                if name.endswith("/"):
-                    queue.append(name)  # 目录 → 继续下钻
+                # 新版：name 相对 prefix（"uuid.jpg"）；老版：返回完整路径 —— 两种都兜住
+                full = name if (prefix and name.startswith(prefix)) else prefix + name
+                if is_folder(it):
+                    queue.append(full.rstrip("/") + "/")  # 目录 → 继续下钻
                 else:
-                    names.append(name)
+                    names.append(full)
             offset += len(items)
             if len(items) < LIST_PAGE:
                 break
