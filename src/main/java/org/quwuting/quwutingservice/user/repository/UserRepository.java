@@ -25,6 +25,22 @@ public interface UserRepository extends JpaRepository<User, Long> {
     /** Web 管理后台密码登录用：取平台管理员账号（2026-08-31） */
     Optional<User> findFirstByRoleAndDeletedFalse(UserRole role);
 
+    /**
+     * 按角色取全部用户 id（2026-09-19 新增，ADMIN 排除用）。
+     * <p>
+     * <b>当前未被调用（2026-09-19 用户决策："先不要做任何排除"）</b>：
+     * {@code HeatAccountExclusionService} 的 ADMIN 自动排除分支已摘除，故本方法暂时没有
+     * 消费方。<b>保留不删</b>：它是"恢复 ADMIN 自动排除"的唯一通道——在该服务的
+     * {@code loadExcludedUserIds()} 里加一行 {@code ids.addAll(userRepository
+     * .findIdsByRoleAndDeletedFalse(UserRole.ADMIN));} 即可接回（其余接线、SQL 参数、
+     * 缓存全部现成）。删掉它等于把"想恢复时"变成重新發明一次。
+     * <p>
+     * 只取 id 不取实体：消费方只需一个 id 集合参与 SQL 的 {@code NOT IN} 谓词，
+     * 实体字段无消费方——避免把整个 User 图拉进内存。
+     */
+    @Query("SELECT u.id FROM User u WHERE u.role = :role AND u.deleted = false")
+    List<Long> findIdsByRoleAndDeletedFalse(@Param("role") UserRole role);
+
     Optional<User> findByIdAndDeletedFalse(Long id);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
@@ -194,4 +210,104 @@ public interface UserRepository extends JpaRepository<User, Long> {
             JOIN qwt_users u ON u.id = f.user_id
             WHERE """ + " " + UserStatsSql.USER_SCOPE, nativeQuery = true)
     long countActiveUsers(@Param("sinceDay") LocalDate sinceDay);
+
+    /**
+     * <b>近 N 日活跃用户 id 集合</b>（2026-09-19，用户信息列表「近期活跃」筛选 +
+     * 行级「7 日活跃」标记共用；仅 ADMIN 消费）。
+     * <p>
+     * 口径与 {@link #countActiveUsers} 完全同源——{@link UserStatsSql#ACTIVE_FACT_UNION}
+     * （12 表用户主动行为，<b>不含登录自动打卡</b>）+ {@link UserStatsSql#USER_SCOPE}
+     * 去重用户 id；窗口起点由 Service 层现算（近 7 日 = 含今日共 7 天，与统计条
+     * 「近 7 日活跃」同窗，数字可交叉验算）。
+     * <p>
+     * 为什么「先取 id 集合再 IN」而不是把事实集子查询嵌进列表 SQL：列表分页查询
+     * 有 JPQL 与原生 SQL 两种形态，JPQL 无法嵌原生 UNION 子查询；id 集合量级 =
+     * 活跃用户数（远小于总用户数），一次查询后经 {@code IN} 谓词进各排序变体，
+     * 分页/计数语义全部留在库内（禁内存分页）。
+     */
+    @Query(value = """
+            SELECT DISTINCT f.user_id
+            FROM (""" + " " + UserStatsSql.ACTIVE_FACT_UNION + " " + """
+            ) f
+            JOIN qwt_users u ON u.id = f.user_id
+            WHERE """ + " " + UserStatsSql.USER_SCOPE, nativeQuery = true)
+    List<Long> findIdsActiveSince(@Param("sinceDay") LocalDate sinceDay);
+
+    // ── 「近期活跃」筛选专用变体（active 族，2026-09-19） ────────────────────────
+    //
+    // active 族 = activeWithin 筛选启用时的专用路径，与上方三条同名无后缀查询
+    // 唯一差异是一行 `AND u.id IN :activeIds` 谓词。不把可空集合谓词合并进原查询
+    // 的原因：原生 SQL 里 `:param IS NULL OR x IN :param` 的空集合绑定是 MySQL
+    // 语法错误（`IN ()`），Hibernate 对「集合参数 + IS NULL」短路也无版本稳定
+    // 保障——三排序 × 是否筛选 = 显式六条，直白零魔法；:activeIds 由 Service
+    // 保证非空（空集合在 Service 短路为空页，不会进入本族查询）。
+
+    /**
+     * 用户列表（默认 id 倒序 + 活跃筛选）：仅限 {@code u.id IN :activeIds}
+     * （近 N 日主动行为用户 id 集合，非空由调用方保证），过滤条件与
+     * {@link #findPageByFilters} 同口径。
+     */
+    @Query("SELECT u FROM User u WHERE (:keyword IS NULL OR :keyword = '' " +
+            "OR LOWER(u.nickname) LIKE LOWER(CONCAT('%', :keyword, '%'))) " +
+            "AND (:role IS NULL OR u.role = :role) " +
+            "AND (:city IS NULL OR u.city = :city) " +
+            "AND u.id IN :activeIds " +
+            "ORDER BY u.id DESC")
+    Page<User> findPageByFiltersActive(@Param("keyword") String keyword,
+                                       @Param("role") UserRole role,
+                                       @Param("city") String city,
+                                       @Param("activeIds") Collection<Long> activeIds,
+                                       Pageable pageable);
+
+    /**
+     * 用户列表（积分余额降序 + 活跃筛选）：排序与 {@link #findPageByFiltersOrderByPoints}
+     * 同口径，行集限制在 {@code :activeIds} 内。
+     */
+    @Query("SELECT u FROM User u LEFT JOIN PointsAccount a ON a.userId = u.id " +
+            "WHERE (:keyword IS NULL OR :keyword = '' " +
+            "OR LOWER(u.nickname) LIKE LOWER(CONCAT('%', :keyword, '%'))) " +
+            "AND (:role IS NULL OR u.role = :role) " +
+            "AND (:city IS NULL OR u.city = :city) " +
+            "AND u.id IN :activeIds " +
+            "ORDER BY COALESCE(a.balance, 0) DESC, u.id DESC")
+    Page<User> findPageByFiltersActiveOrderByPoints(@Param("keyword") String keyword,
+                                                    @Param("role") UserRole role,
+                                                    @Param("city") String city,
+                                                    @Param("activeIds") Collection<Long> activeIds,
+                                                    Pageable pageable);
+
+    /**
+     * 用户列表（最近露面降序 + 活跃筛选）：排序与
+     * {@link #findPageByFiltersOrderByLastActive} 同口径（四源 MAX「最近露面」，
+     * 含登录自动打卡——语义与「活跃」的边界见其 javadoc），行集限制在
+     * {@code :activeIds} 内。role 必须传 name() 字符串（同原生 SQL ORDINAL 先例）。
+     */
+    @Query(value = """
+            SELECT u.* FROM qwt_users u
+            WHERE u.deleted = false
+              AND (:keyword IS NULL OR :keyword = '' OR LOWER(u.nickname) LIKE LOWER(CONCAT('%', :keyword, '%')))
+              AND (:role IS NULL OR u.role = :role)
+              AND (:city IS NULL OR u.city = :city)
+              AND u.id IN (:activeIds)
+            ORDER BY GREATEST(
+                COALESCE(u.updated_at, u.created_at),
+                COALESCE((SELECT MAX(t.created_at) FROM qwt_points_transactions t WHERE t.user_id = u.id), u.created_at),
+                COALESCE((SELECT MAX(d.created_at) FROM qwt_demand_records d WHERE d.user_id = u.id), u.created_at),
+                COALESCE((SELECT MAX(c.created_at) FROM qwt_daily_checkins c WHERE c.user_id = u.id), u.created_at)
+            ) DESC, u.id DESC
+            """,
+            nativeQuery = true,
+            countQuery = """
+                    SELECT COUNT(*) FROM qwt_users u
+                    WHERE u.deleted = false
+                      AND (:keyword IS NULL OR :keyword = '' OR LOWER(u.nickname) LIKE LOWER(CONCAT('%', :keyword, '%')))
+                      AND (:role IS NULL OR u.role = :role)
+                      AND (:city IS NULL OR u.city = :city)
+                      AND u.id IN (:activeIds)
+                    """)
+    Page<User> findPageByFiltersActiveOrderByLastActive(@Param("keyword") String keyword,
+                                                        @Param("role") String role,
+                                                        @Param("city") String city,
+                                                        @Param("activeIds") Collection<Long> activeIds,
+                                                        Pageable pageable);
 }

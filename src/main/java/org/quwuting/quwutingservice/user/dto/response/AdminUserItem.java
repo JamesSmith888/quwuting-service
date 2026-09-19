@@ -50,6 +50,10 @@ public record AdminUserItem(
          *  （管理端「活跃」专指用户主动行为口径，见 docs/agents/35 命名契约） */
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
         LocalDateTime lastActiveAt,
+        /** 近 7 日有过主动行为（2026-09-19；ACTIVE_FACT_UNION 12 表口径，
+         *  <b>不含登录自动打卡</b>——与统计条「近 7 日活跃」同口径同窗口，
+         *  前端渲染行级「7 日活跃」标记，与「最近露面」严格区分两个概念） */
+        boolean activeWithin7d,
         /** 微信审核账号标记（2026-09-09 V17；true = 管理端统计口径已排除该账号） */
         boolean wechatReview
 ) {}

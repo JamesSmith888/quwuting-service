@@ -69,8 +69,16 @@ class VenueHotVenueIdsSqlTest {
     void hotFilteredListQueryExecutesAgainstRealDatabase() {
         Page<Venue> page = venueRepository.searchRankedNoLocation(
                 null, null, null, null, null, null, null, null,
+                // nearbyCities（2026-09-19 城市级门店可见性）：恒非空契约——空集合会渲染成
+                // IN () 语法错误，故真实调用方（VenueService/CityCentroidService）恒含空串哨兵
+                Set.of(""),
+                // cityScopeLimited（2026-09-19 二次修正）：false = 无空间参考点 ⇒ 不限制
+                // ——本测试模拟的就是「无坐标且未选城市」这一路径
+                false,
                 org.quwuting.quwutingservice.venuereaction.ReactionCode.positiveCodeNames(),
                 2 /* 积分权重（与 PointsProperties 默认一致；本测试只验证 SQL 语义层） */,
+                // excludedUserIds（2026-09-19 内部账号排除）：同为恒非空契约（-1 哨兵）
+                java.util.List.of(-1L),
                 true, venueLookupService.getHotVenueIds(), PageRequest.of(0, 20));
         assertNotNull(page, "热门筛选列表查询应执行成功（参数绑定/谓词合法）");
         // 热门筛选语义：返回的每一家都必须在热门集合内

@@ -333,6 +333,56 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             """;
 
     /**
+     * 城市级门店（当前仅歌友会）的<b>可见性</b>谓词（2026-09-19 由「无条件放行」改为
+     * 「该城市附近 300km」）。
+     * <p>
+     * <b>原口径与根因</b>：{@code cityOnlyAddress} 类型不落经纬度（写路径主动清空，见
+     * {@code VenueService.applyCityOnlyAddressPolicy}——「存了再藏」永远不如「根本不存」），
+     * 而 {@link #RADIUS_PREDICATE} 的默认 300km 可达圈依赖距离表达式 ⇒ 无坐标时距离为 NULL
+     * ⇒ 谓词恒假 ⇒ 整批歌友会被静默过滤。当时的修复是「城市级类型无条件放行」。
+     * <p>
+     * <b>新口径（用户拍板 2026-09-19）</b>：歌友会是「联系获取地址」的私密聚拢型门店，
+     * 跨城前往不是常态——无条件放行等于让<b>无锡的歌友会出现于全国任意用户的默认列表</b>
+     * （实测该店热度登顶后落到全国首位），而它的真实可达范围就是所在城市及周边。
+     * 语义改为：<b>门店所在城市落在参考点 300km 内才可见</b>——参考点 = 请求坐标（有定位）
+     * 或用户显式选择的城市（无定位），由 {@code CityCentroidService.cityScope} 换算为
+     * {@code :cityScopeLimited} + {@code :nearbyCities}。城市是歌友会<b>唯一成立的精度</b>：
+     * 它的坐标被刻意不存，用城市名做邻近判断既守住了"不落精确地址"，又恢复了可达圈语义。
+     * <p>
+     * <b>2026-09-19 二次修正：无参考点 ⇒ 不限制</b>（{@code :cityScopeLimited = false} 整条短路）。
+     * 初版把「既无坐标也无城市」写成「只剩哨兵 ⇒ 歌友会不进列表」，上线即被用户实测推翻：
+     * <b>站内热度 / 最新收录是「全网探索排序」，前端刻意不传坐标也不传半径</b>
+     * （{@code scopeFree}，为了让公共查询命中后端无坐标视图缓存）——于是这两类<b>正常功能态</b>下
+     * 参考点恒为 null，歌友会<b>整类消失</b>。而同一请求里普通门店按「全国」展示：
+     * 同一个列表里只藏一个品类 = **标签撒谎**（列表说"全部城市"却少一类店），与
+     * 「标签恒等于结果」的既有纪律（2026-09-01 v2 可达圈模型核心约定）冲突。修正后
+     * <b>可见性只在"有参照物"时才收缩</b>——判据与边界见 {@code CityCentroidService} 类注释。
+     * <p>
+     * <b>两个显式意图出口</b>（不受邻近约束，否则"用户明确要找这家店"会被位置静默否决）：
+     * <ul>
+     *   <li>{@code :keyword IS NOT NULL}——用户在<b>按名搜索</b>，意图明确到店名级别；</li>
+     *   <li>{@code :venueType IS NOT NULL}——用户在<b>按类型筛选</b>（选HALL 时 SONG_CLUB 本就被
+     *       {@code :venueType} 过滤掉，选歌友会时即用户要看全部歌友会）。</li>
+     * </ul>
+     * <p>
+     * <b>恒非空契约</b>：{@code :nearbyCities} 为空集合会渲染成 {@code IN ()} 语法错误——
+     * 调用方（VenueService）恒传入含空串哨兵的集合（城市名不可能为空串）。
+     * <p>
+     * <b>为何放 LIST_FILTERS 而不是 RADIUS_PREDICATE</b>：无坐标分支（{@code searchRankedNoLocation}
+     * 等）根本不含 RADIUS_PREDICATE——放那里等于「用户不开定位就能看到全国歌友会」，
+     * 与本次修复的目的相反。可见性是<b>结果集约束</b>，与「怎么排序」无关。
+     * <p>
+     * <b>声明位置约束</b>：必须位于 {@link #LIST_FILTERS} 之前——接口字段按声明顺序初始化，
+     * Java 禁止初始化器中的向前引用（同 {@link #CITY_ONLY_TYPE_PREDICATE} 的既有约束）。
+     */
+    String CITY_ONLY_VISIBILITY_PREDICATE = """
+            AND (:cityScopeLimited = false
+                 OR v.venueType NOT IN ("""
+            + VenueType.CITY_ONLY_HQL_IN_LIST + """
+                ) OR :keyword IS NOT NULL OR :venueType IS NOT NULL OR v.city IN :nearbyCities)
+            """;
+
+    /**
      * 列表筛选条件（全部排序变体共用）。
      * 所有参数可空：null 表示不限制；keyword / tag 需调用方预先包装为 %xx%。
      * <p>
@@ -363,13 +413,14 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
               AND (:status IS NULL OR v.status = :status)
               AND (:venueType IS NULL OR v.venueType = :venueType)
               AND (:keyword IS NULL OR
-              """
+            """
             + " " + KW_MATCH + " " + """
               )
               AND (:filterIds IS NULL OR v.id IN :filterIds)
               AND (:tag IS NULL OR v.tags LIKE :tag)
               AND (:hotOnly = false OR v.id IN :hotIds)
-            """;
+            """
+            + CITY_ONLY_VISIBILITY_PREDICATE;
 
     /**
      * Haversine 球面距离（km，别名 v 的场所坐标 → 请求者坐标）。
@@ -430,45 +481,49 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             """;
 
     /**
-     * 「浏览贡献」（JPQL 版）：来源质量加权 + 近 7 天时效衰减 + 对数压缩。
-     * <b>2026-08-27 从 HEAT_BEHAVIOR 抽出的子公式</b>（原线性 {@code COUNT(*) × VIEW}，
-     * 因马太效应反馈循环重构，语义见 {@link VenueHeatWeights} 浏览贡献注释）。
-     * <p>
-     * 数学形态：{@code LN(1 + Σ(source_weight × time_factor))}，30 天窗口
-     * （[CURRENT_DATE-30, CURRENT_DATE]，实时含今日，同 HEAT_BEHAVIOR 锚点）。
+     * 「浏览贡献」（JPQL 版）：<b>去重浏览人数 × 权重 + 匿名浏览对数项</b>。
+     * <b>2026-09-19 二重构</b>（2026-08-27 的「来源加权人次 + ln 压缩」被整体替换，
+     * 论证与生产实证见 {@link VenueHeatWeights} 浏览贡献注释）：
+     * <pre>
+     * 浏览贡献 = 近30天去重浏览人数 × 0.30
+     *          + 近7天去重浏览人数 × 0.40
+     *          + ln(1 + 近30天匿名浏览行数) × 1.00
+     * </pre>
      * <ul>
-     *   <li>source_weight：LIST 0.5 / OTHER 1.0 / SEARCH 1.5 / SHARE 2.0——列表点入
-     *       是位置偏差驱动的被动流量（排序→曝光→浏览→排序的马太闭环核心），降权；
-     *       搜索/分享是主动兴趣与口碑传播，加权（来源判定唯一事实源 =
-     *       前端 venue-detail 单一判定点 + {@link ViewSource} 枚举）；</li>
-     *   <li>time_factor：近 7 天（含今天）×2，7~30 天 ×1——热度更"当下"；</li>
-     *   <li>LN(1+x)：浏览量的边际信息含量递减（0→10 次远比 1000→2000 更能说明
-     *       热度上升），对数压缩后头部店不再以线性差距碾压长尾。</li>
+     *   <li><b>人数项</b>：唯一键 {@code (venueId, userId, viewDate, source)} ⇒ 一人一天
+     *       最多贡献 1，刷量无效；天花板由真实用户池决定，不会自催化无上限膨胀，故无需
+     *       再上 ln（旧口径把「人」与「人次」混在一起压，等于把最有区分度的信源压平）；</li>
+     *   <li><b>近7天独立一项</b>：保留时效语义（热度要"当下"）。旧口径把时效折叠进加权和
+     *       再被 ln 抹平，实测近 7 天翻倍对最终得分几乎无影响——独立成项才真正生效；</li>
+     *   <li><b>匿名项</b>：未登录用户占 PV 的 45%~54%，丢弃会损失过半真实行为，保留但用
+     *       ln 封顶（≈6 分）——匿名不可去重，只有 60s 频控，必须压缩。</li>
      * </ul>
      * 三处镜像统一引用本口径（JPQL 本常量 / native findHotVenueIds / Java
      * VenueHeatService.computeHeat），权重常量唯一事实源 = {@link VenueHeatWeights}。
      * <p>
-     * HQL 语法注意：{@code LN} 是 Hibernate 注册的数学函数（PG 方言映射 ln）；
-     * {@code source} 枚举比较用<b>全限定枚举字面量</b>（HQL 标准做法，无需参数，
-     * 同 HEAT_BEHAVIOR 积分项先例）；近 7 天窗口减法带 {@code day} 单位后缀
-     * （裸整数 {@code CURRENT_DATE - 7} 会被 Hibernate 7 报 SemanticException）。
+     * HQL 语法注意：{@code LN} 是 Hibernate 注册的数学函数；子查询内 {@code COUNT(DISTINCT ...)}
+     * 天然忽略 NULL（与 favorites/ratings/reactions 三项 2026-09-19 改人数口径同写法）；
+     * 时间量减法必须带 {@code day} 单位后缀（裸整数会被 Hibernate 7 报 SemanticException）。
+     * 近 7 天窗口沿用 2026-08-27 既有的 {@code CURRENT_DATE - 7 day} 边界（含今日共 8 个
+     * 自然日），<b>刻意不改</b>——改边界会同时改变三处镜像的历史可比性，且与"近 30 天"
+     * 的 {@code - 30 day} 保持同一写法。
      */
     String VIEW_BEHAVIOR = """
-            LN(1 + (SELECT COALESCE(SUM(
-                     CASE WHEN vv.source = org.quwuting.quwutingservice.venue.enums.ViewSource.LIST THEN"""
-            + " " + VenueHeatWeights.VIEW_SOURCE_LIST + " " + """
-                     WHEN vv.source = org.quwuting.quwutingservice.venue.enums.ViewSource.SEARCH THEN"""
-            + " " + VenueHeatWeights.VIEW_SOURCE_SEARCH + " " + """
-                     WHEN vv.source = org.quwuting.quwutingservice.venue.enums.ViewSource.SHARE THEN"""
-            + " " + VenueHeatWeights.VIEW_SOURCE_SHARE + " " + """
-                     ELSE"""
-            + " " + VenueHeatWeights.VIEW_SOURCE_OTHER + " " + """
-                     END
-                     * CASE WHEN vv.viewDate >= (CURRENT_DATE - 7 day) THEN"""
-            + " " + VenueHeatWeights.VIEW_RECENCY_7D_MULTIPLIER + " " + """
-                     ELSE 1 END), 0)
-                FROM VenueView vv
-                WHERE vv.venueId = v.id AND vv.viewDate >= (CURRENT_DATE - 30 day) AND vv.viewDate <= CURRENT_DATE))
+            ((SELECT COUNT(DISTINCT vv1.userId) FROM VenueView vv1
+                WHERE vv1.venueId = v.id AND vv1.userId IS NOT NULL
+                  AND vv1.userId NOT IN :excludedUserIds
+                  AND vv1.viewDate >= (CURRENT_DATE - 30 day) AND vv1.viewDate <= CURRENT_DATE) * """
+            + " " + VenueHeatWeights.VIEW_UV_30D + " " + """
+             + (SELECT COUNT(DISTINCT vv2.userId) FROM VenueView vv2
+                WHERE vv2.venueId = v.id AND vv2.userId IS NOT NULL
+                  AND vv2.userId NOT IN :excludedUserIds
+                  AND vv2.viewDate >= (CURRENT_DATE - 7 day) AND vv2.viewDate <= CURRENT_DATE) * """
+            + " " + VenueHeatWeights.VIEW_UV_7D + " " + """
+             + LN(1 + (SELECT COUNT(vv3) FROM VenueView vv3
+                WHERE vv3.venueId = v.id AND vv3.userId IS NULL
+                  AND vv3.viewDate >= (CURRENT_DATE - 30 day) AND vv3.viewDate <= CURRENT_DATE)) * """
+            + " " + VenueHeatWeights.VIEW_ANON_LN + " " + """
+            )
             """;
 
     /**
@@ -477,16 +532,39 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 「零行为门店运营权重守卫」而独立成常量——见 {@link #HEAT_SCORE}）。
      * <p>
      * 语义与热门标记的「行为热度」（完整热度分扣除运营权重 sortWeight）完全一致：
-     * <b>2026-08-27 起浏览项 = {@link #VIEW_BEHAVIOR}（来源加权 + 近7天×2 + ln 压缩）</b>
-     * + 近30天新增收藏×8（<b>2026-09-01 收敛 + 2026-09-07 校准 15→8</b>：收藏总数为
-     * 累计展示、不再计入公式——
+     * <b>2026-09-19 起浏览项 = {@link #VIEW_BEHAVIOR}（近30天去重浏览人数×0.3 + 近7天
+     * 去重浏览人数×0.4 + ln(1+匿名浏览行数)×1）</b>
+     * + 近30天<b>收藏人数</b>×8（<b>2026-09-01 收敛 + 2026-09-07 校准 15→8 +
+     * 2026-09-19 改人数口径</b>：收藏总数为累计展示、不再计入公式——
      * 旧双列「收藏总数×10 + 新增×15」是集合包含关系，一次收藏重复计 10+15=25 分，
      * 且存量永续制造马太；单次收藏不得碾压整月浏览贡献上限，见
      * {@link org.quwuting.quwutingservice.config.VenueHeatWeights}）
      * + 近30天新增动态×5（2026-09-01 由动态总数改窗口，admin 内容存量不参与）
-     * + 近30天评分数×8
-     * + 近30天正向 Reaction×3 + 近30天收到积分 × :pointsWeight（2026-08-10 V2 新增，
+     * + 近30天<b>评分人数</b>×8
+     * + 近30天<b>正向 Reaction 人数</b>×3 + 近30天收到积分 × :pointsWeight（2026-08-10 V2 新增，
      * 权重来自配置 app.points.heat-weight，运营校准对象）。
+     * <p>
+     * <b>2026-09-19 口径修正：主动信号由「次数/条数」改为「去重人数」（三处镜像同步）</b>——
+     * 根因（生产实证「约翰（歌友会）」事件：6 天登顶全国第 1，行为热度 158.9，其中 97% 来自
+     * 15 个账号的点击）：原口径按<b>行数</b>累加，而这两类行的唯一键都允许同一人重复产出——
+     * ① Reaction 唯一键含 {@code reaction_date} ⇒ <b>同一人每天可重投一票</b>，30 天窗口把
+     * 「打卡天数」当成了「人气」（单人对单店理论上限 3×30 = 90 分，且无人数门槛）；
+     * ② 评分唯一键含 {@code tag}（4 个维度）⇒ <b>一次评价最多计 4 次</b>（单人上限 32 分）。
+     * 修正为 {@code COUNT(DISTINCT userId)} 后，两类的每人每店上限回到与收藏同构的
+     * 「一次 = 一票」：<b>热度被约束为「有多少人」，而不是「点了多少下」</b>——
+     * 与浏览项（2026-09-19 起同为「去重人数」口径）、复访用户数等既有"人"的度量同量纲。
+     * 权重数值（8 / 8 / 3）不变，故「主动信号 &gt; 被动浏览」的意图差保留。
+     * <p>
+     * <b>2026-09-19 内部账号排除</b>：全部行为输入追加 {@code userId NOT IN :excludedUserIds}
+     * （浏览表 user_id 可空，故写 {@code (userId IS NULL OR userId NOT IN ...)} 保住匿名浏览）。
+     * 集合唯一供给方 = {@link org.quwuting.quwutingservice.venue.service.HeatAccountExclusionService}
+     * （ADMIN 角色 ∪ 运营配置名单 ∪ 哨兵，恒非空）。根因：全网 76% 的反馈行、49% 的收藏行
+     * 由 14 个平台早期账号产出——公式最高权重输入的供给方是平台自己人。
+     * <b>展示字段不排除</b>（PV/UV/收藏总数/动态总数/评价总人数/负向反馈保持原始事实口径），
+     * 排除只作用于<b>公式输入</b>——口径分叉是有意的：展示回答"发生了什么"，公式回答"有多火"。
+     * <p>
+     * 注意：本片段引用 {@code :positiveCodes}、{@code :pointsWeight} 与
+     * {@code :excludedUserIds}——使用本片段的查询方法必须声明这三个参数。
      * <p>
      * <b>2026-08-08 口径统一</b>（修复列表/详情双口径分叉）：本片段是
      * {@link org.quwuting.quwutingservice.venue.service.VenueHeatService#computeHeat}
@@ -527,26 +605,30 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     String HEAT_BEHAVIOR = """
             ("""
             + VIEW_BEHAVIOR + """
-             + (SELECT COUNT(*) FROM Favorite f
+             + (SELECT COUNT(DISTINCT f.userId) FROM Favorite f
                 WHERE f.venueId = v.id AND f.deleted = false
+                  AND f.userId NOT IN :excludedUserIds
                   AND f.createdAt >= (CURRENT_DATE - 30 day) AND f.createdAt < (CURRENT_DATE + 1 day)) * """
             + VenueHeatWeights.NEW_FAVORITE + """
              + (SELECT COUNT(*) FROM VenuePost p
                 WHERE p.venueId = v.id AND p.deleted = false
                   AND p.createdAt >= (CURRENT_DATE - 30 day) AND p.createdAt < (CURRENT_DATE + 1 day)) * """
             + VenueHeatWeights.POST + """
-             + (SELECT COUNT(*) FROM TagInteraction ti
+             + (SELECT COUNT(DISTINCT ti.userId) FROM TagInteraction ti
                 WHERE ti.venueId = v.id AND ti.deleted = false AND ti.score IS NOT NULL
+                  AND ti.userId NOT IN :excludedUserIds
                   AND ti.createdAt >= (CURRENT_DATE - 30 day) AND ti.createdAt < (CURRENT_DATE + 1 day)) * """
             + VenueHeatWeights.RATING + """
-             + (SELECT COUNT(*) FROM VenueReaction r
+             + (SELECT COUNT(DISTINCT r.userId) FROM VenueReaction r
                 WHERE r.venueId = v.id AND r.deleted = false
+                  AND r.userId NOT IN :excludedUserIds
                   AND r.reactionCode IN :positiveCodes
                   AND r.createdAt >= (CURRENT_DATE - 30 day) AND r.createdAt < (CURRENT_DATE + 1 day)) * """
             + VenueHeatWeights.REACTION + """
              + (SELECT COALESCE(SUM(-pt.delta), 0) FROM PointsTransaction pt
                 WHERE pt.targetType = org.quwuting.quwutingservice.points.enums.PointsTargetType.VENUE
                   AND pt.targetId = v.id AND pt.delta < 0
+                  AND pt.userId NOT IN :excludedUserIds
                   AND pt.createdAt >= (CURRENT_DATE - 30 day) AND pt.createdAt < (CURRENT_DATE + 1 day)) * :pointsWeight)
             """;
 
@@ -648,8 +730,11 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                              @Param("latitude") double latitude,
                              @Param("longitude") double longitude,
                              @Param("radiusKm") Double radiusKm,
+                             @Param("nearbyCities") Set<String> nearbyCities,
+                             @Param("cityScopeLimited") boolean cityScopeLimited,
                              @Param("positiveCodes") List<String> positiveCodes,
                              @Param("pointsWeight") int pointsWeight,
+                             @Param("excludedUserIds") List<Long> excludedUserIds,
                              @Param("hotOnly") boolean hotOnly,
                              @Param("hotIds") Set<Long> hotIds,
                              Pageable pageable);
@@ -681,8 +766,11 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                        @Param("kwPrefix") String kwPrefix,
                                        @Param("filterIds") Set<Long> filterIds,
                                        @Param("tag") String tag,
+                                       @Param("nearbyCities") Set<String> nearbyCities,
+                                       @Param("cityScopeLimited") boolean cityScopeLimited,
                                        @Param("positiveCodes") List<String> positiveCodes,
                                        @Param("pointsWeight") int pointsWeight,
+                                       @Param("excludedUserIds") List<Long> excludedUserIds,
                                        @Param("hotOnly") boolean hotOnly,
                                        @Param("hotIds") Set<Long> hotIds,
                                        Pageable pageable);
@@ -715,6 +803,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                               @Param("latitude") double latitude,
                               @Param("longitude") double longitude,
                               @Param("radiusKm") Double radiusKm,
+                              @Param("nearbyCities") Set<String> nearbyCities,
+                              @Param("cityScopeLimited") boolean cityScopeLimited,
                               @Param("hotOnly") boolean hotOnly,
                               @Param("hotIds") Set<Long> hotIds,
                               Pageable pageable);
@@ -737,8 +827,11 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                            @Param("keyword") String keyword,
                            @Param("filterIds") Set<Long> filterIds,
                            @Param("tag") String tag,
+                           @Param("nearbyCities") Set<String> nearbyCities,
+                           @Param("cityScopeLimited") boolean cityScopeLimited,
                            @Param("positiveCodes") List<String> positiveCodes,
                            @Param("pointsWeight") int pointsWeight,
+                           @Param("excludedUserIds") List<Long> excludedUserIds,
                            @Param("hotOnly") boolean hotOnly,
                            @Param("hotIds") Set<Long> hotIds,
                            Pageable pageable);
@@ -765,8 +858,11 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                        @Param("latitude") double latitude,
                                        @Param("longitude") double longitude,
                                        @Param("radiusKm") Double radiusKm,
+                                       @Param("nearbyCities") Set<String> nearbyCities,
+                                       @Param("cityScopeLimited") boolean cityScopeLimited,
                                        @Param("positiveCodes") List<String> positiveCodes,
                                        @Param("pointsWeight") int pointsWeight,
+                                       @Param("excludedUserIds") List<Long> excludedUserIds,
                                        @Param("hotOnly") boolean hotOnly,
                                        @Param("hotIds") Set<Long> hotIds,
                                        Pageable pageable);
@@ -787,6 +883,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                              @Param("keyword") String keyword,
                              @Param("filterIds") Set<Long> filterIds,
                              @Param("tag") String tag,
+                             @Param("nearbyCities") Set<String> nearbyCities,
+                             @Param("cityScopeLimited") boolean cityScopeLimited,
                              @Param("hotOnly") boolean hotOnly,
                              @Param("hotIds") Set<Long> hotIds,
                              Pageable pageable);
@@ -811,6 +909,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                          @Param("latitude") double latitude,
                                          @Param("longitude") double longitude,
                                          @Param("radiusKm") Double radiusKm,
+                                         @Param("nearbyCities") Set<String> nearbyCities,
+                                         @Param("cityScopeLimited") boolean cityScopeLimited,
                                          @Param("hotOnly") boolean hotOnly,
                                          @Param("hotIds") Set<Long> hotIds,
                                          Pageable pageable);
@@ -928,21 +1028,31 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
          * 前端作"真实兴趣"说明性指标展示。
          */
         Long getRepeatvisitors();
-        /** 加权浏览贡献输入（2026-08-27 新增）：近30天 Σ(来源权重 × 近7天时效因子)，
-         *  热度公式浏览项 = round(ln(1 + 本值))——来源/时效权重常量唯一事实源 =
-         *  {@link org.quwuting.quwutingservice.config.VenueHeatWeights} */
-        Double getWeightedviews30d();
+        /**
+         * 近30天<b>去重浏览人数</b>（登录用户，排除内部账号）——热度公式浏览项输入
+         * （2026-09-19 新增，取代 2026-08-27 的 {@code weightedviews30d} 加权人次）。
+         * 与展示字段 {@link #getUv()} 的分叉是有意的：uv 含全部账号（原始事实）。
+         */
+        Long getViewuv30d();
+        /** 近7天<b>去重浏览人数</b>（登录用户，排除内部账号）——热度公式浏览项时效输入 */
+        Long getViewuv7d();
+        /** 近30天匿名浏览行数（user_id IS NULL，未登录访问）——ln(1+本值) 进公式，封顶 ≈6 分 */
+        Long getViewanon30d();
         /** 收藏总数 */
         Long getFavtotal();
-        /** 近30天新增收藏 */
+        /** 近30天<b>收藏人数</b>（去重 userId；2026-09-19 由「新增收藏条数」改人数口径，见 HEAT_BEHAVIOR） */
         Long getFavrecent();
         /** 动态总数 */
         Long getPosttotal();
         /** 近30天新增动态 */
         Long getPostrecent();
-        /** 近30天评分数（score 非空的交互记录数，按 created_at 窗口——改分不刷新窗口，防"定期改分保持计数常青"） */
+        /** 近30天<b>评分人数</b>（去重 userId，score 非空，按 created_at 窗口——改分不刷新窗口，
+         *  防"定期改分保持计数常青"；2026-09-19 由「评分数（条目数）」改人数口径，
+         *  原口径下同一人的一次评价按维度（4 个 tag）重复计 4 次，见 HEAT_BEHAVIOR） */
         Long getRatingcount30d();
-        /** 近30天正向 Reaction 总数（仅 Polarity.POSITIVE 的 code，热度公式计入项） */
+        /** 近30天<b>正向 Reaction 人数</b>（去重 userId，仅 Polarity.POSITIVE 的 code，热度公式计入项；
+         *  2026-09-19 由「总数（行数）」改人数口径——唯一键含 reaction_date，原口径把
+         *  「同一人每天重投的打卡天数」当成了人气，见 HEAT_BEHAVIOR） */
         Long getPositivereactioncount30d();
         /** 近30天负向 Reaction 总数（仅 Polarity.NEGATIVE 的 code，不计入公式，单独展示负面信号） */
         Long getNegativereactioncount30d();
@@ -974,6 +1084,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 窗口语义（与 VenueHeatService 保持一致，2026-08-13 实时化含今日）：
      * <ul>
      *   <li>viewSince/viewUntil：浏览按 view_date 过滤，[30天前的日期, 明天)，含今日</li>
+     *   <li>viewRecentSince：浏览时效窗口起点（7天前的日期），仅浏览项「近7天人数」使用</li>
      *   <li>windowSince/windowUntil：其余滚动窗口按时间戳过滤，[30天前0点, now)，实时含今日</li>
      *   <li>now：活跃上报为实时 TTL 窗口（expires_at > now，TTL 唯一事实源 = 列，
      *       2026-08-11 由 created_at >= reportSince 迁移）</li>
@@ -986,6 +1097,25 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * <p>
      * 收藏趋势（多行时间序列）与满意度（分组均值，依赖 raters 条件触发）形态不同，
      * 不参与本合并，仍为独立查询。
+     * <p>
+     * <b>2026-09-19 两处口径修正（三处镜像同步，见 {@link #HEAT_BEHAVIOR} 长注释）</b>：
+     * <ol>
+     *   <li><b>公式输入改「去重人数」</b>：{@code viewuv30d} / {@code viewuv7d} /
+     *       {@code viewanon30d} / {@code favrecent} /
+     *       {@code ratingcount30d} / {@code positivereactioncount30d} / {@code pointsreceived30d}
+     *       七个<b>进热度公式</b>的字段（2026-09-19 二重构：浏览项由「加权人次」改为
+     *       「近30天去重人数 + 近7天去重人数 + 匿名对数项」）
+     *       {@code user_id NOT IN :excludedUserIds}（view 表 user_id 可空 ⇒ 加
+     *       {@code IS NULL OR} 保住匿名浏览）；</li>
+     *   <li><b>展示字段保持原始事实</b>：{@code pv} / {@code uv} / {@code repeatvisitors} /
+     *       {@code favtotal} / {@code posttotal} / {@code postrecent} / {@code raters} /
+     *       {@code negativereactioncount30d} / {@code pointsreceivedtotal} 不含排除条件——
+     *       声明式口径：<b>展示回答"发生了什么"，公式回答"有多火"</b>。故
+     *       {@code pv ≥ weightedviews 的原始计数} 一类关系不再严格成立，是<b>有意的口径分叉</b>，
+     *       勿"顺手统一"（那会让内部/测试账号的浏览重新污染排序）。</li>
+     * </ol>
+     * {@code :excludedUserIds} 由 {@code HeatAccountExclusionService} 供给且恒非空（含哨兵），
+     * 调用方无需判空。
      */
     @Query(value = """
             SELECT
@@ -1000,36 +1130,35 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                      AND vv.user_id IS NOT NULL
                    GROUP BY vv.user_id
                    HAVING COUNT(DISTINCT vv.view_date) >= 2) rv) AS repeatvisitors,
-              (SELECT COALESCE(SUM(
-                        CASE vv.source WHEN 'LIST' THEN"""
-            + " " + VenueHeatWeights.VIEW_SOURCE_LIST + " " + """
-                        WHEN 'SEARCH' THEN"""
-            + " " + VenueHeatWeights.VIEW_SOURCE_SEARCH + " " + """
-                        WHEN 'SHARE' THEN"""
-            + " " + VenueHeatWeights.VIEW_SOURCE_SHARE + " " + """
-                        ELSE"""
-            + " " + VenueHeatWeights.VIEW_SOURCE_OTHER + " " + """
-                        END
-                        * CASE WHEN vv.view_date >= (DATE_SUB(CURRENT_DATE, INTERVAL 7 DAY)) THEN"""
-            + " " + VenueHeatWeights.VIEW_RECENCY_7D_MULTIPLIER + " " + """
-                        ELSE 1 END), 0)
-                FROM qwt_venue_views vv
-                WHERE vv.venue_id = :venueId AND vv.view_date >= :viewSince AND vv.view_date < :viewUntil) AS weightedviews30d,
+              (SELECT COUNT(DISTINCT vv.user_id) FROM qwt_venue_views vv
+                WHERE vv.venue_id = :venueId AND vv.user_id IS NOT NULL
+                  AND vv.user_id NOT IN :excludedUserIds
+                  AND vv.view_date >= :viewSince AND vv.view_date < :viewUntil) AS viewuv30d,
+              (SELECT COUNT(DISTINCT vv.user_id) FROM qwt_venue_views vv
+                WHERE vv.venue_id = :venueId AND vv.user_id IS NOT NULL
+                  AND vv.user_id NOT IN :excludedUserIds
+                  AND vv.view_date >= :viewRecentSince AND vv.view_date < :viewUntil) AS viewuv7d,
+              (SELECT COUNT(*) FROM qwt_venue_views vv
+                WHERE vv.venue_id = :venueId AND vv.user_id IS NULL
+                  AND vv.view_date >= :viewSince AND vv.view_date < :viewUntil) AS viewanon30d,
               (SELECT COUNT(*) FROM qwt_favorites f
                 WHERE f.venue_id = :venueId AND f.deleted = false) AS favtotal,
-              (SELECT COUNT(*) FROM qwt_favorites f
+              (SELECT COUNT(DISTINCT f.user_id) FROM qwt_favorites f
                 WHERE f.venue_id = :venueId AND f.deleted = false
+                  AND f.user_id NOT IN :excludedUserIds
                   AND f.created_at >= :windowSince AND f.created_at < :windowUntil) AS favrecent,
               (SELECT COUNT(*) FROM qwt_venue_posts p
                 WHERE p.venue_id = :venueId AND p.deleted = false) AS posttotal,
               (SELECT COUNT(*) FROM qwt_venue_posts p
                 WHERE p.venue_id = :venueId AND p.deleted = false
                   AND p.created_at >= :windowSince AND p.created_at < :windowUntil) AS postrecent,
-              (SELECT COUNT(*) FROM qwt_tag_interactions ti
+              (SELECT COUNT(DISTINCT ti.user_id) FROM qwt_tag_interactions ti
                 WHERE ti.venue_id = :venueId AND ti.deleted = false AND ti.score IS NOT NULL
+                  AND ti.user_id NOT IN :excludedUserIds
                   AND ti.created_at >= :windowSince AND ti.created_at < :windowUntil) AS ratingcount30d,
-              (SELECT COUNT(*) FROM qwt_venue_reactions r
+              (SELECT COUNT(DISTINCT r.user_id) FROM qwt_venue_reactions r
                 WHERE r.venue_id = :venueId AND r.deleted = false
+                  AND r.user_id NOT IN :excludedUserIds
                   AND r.reaction_code IN :positiveCodes
                   AND r.created_at >= :windowSince AND r.created_at < :windowUntil) AS positivereactioncount30d,
               (SELECT COUNT(*) FROM qwt_venue_reactions r
@@ -1053,16 +1182,19 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                 WHERE pt.target_type = 'VENUE' AND pt.target_id = :venueId AND pt.delta < 0) AS pointsreceivedtotal,
               (SELECT COALESCE(SUM(-pt.delta), 0) FROM qwt_points_transactions pt
                 WHERE pt.target_type = 'VENUE' AND pt.target_id = :venueId AND pt.delta < 0
+                  AND pt.user_id NOT IN :excludedUserIds
                   AND pt.created_at >= :windowSince AND pt.created_at < :windowUntil) AS pointsreceived30d
             """, nativeQuery = true)
     HeatCounters countHeatCounters(@Param("venueId") Long venueId,
                                    @Param("viewSince") java.time.LocalDate viewSince,
+                                   @Param("viewRecentSince") java.time.LocalDate viewRecentSince,
                                    @Param("viewUntil") java.time.LocalDate viewUntil,
                                    @Param("windowSince") LocalDateTime windowSince,
                                    @Param("windowUntil") LocalDateTime windowUntil,
                                    @Param("now") LocalDateTime now,
                                    @Param("positiveCodes") List<String> positiveCodes,
-                                   @Param("negativeCodes") List<String> negativeCodes);
+                                   @Param("negativeCodes") List<String> negativeCodes,
+                                   @Param("excludedUserIds") List<Long> excludedUserIds);
 
     /**
      * 趋势单日行投影（热度页 收藏/浏览/反馈 三张趋势图的统一数据源）。
@@ -1091,9 +1223,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
         Long getViewsharecount();
         /** 当日来源=SEARCH 浏览数（「浏览来源」图第三序列=搜索结果，2026-08-13 晚新增） */
         Long getViewsearchcount();
-        /** 当日正向反馈数 */
+        /** 当日正向反馈**人数**（去重 userId；2026-09-19 由「条数」改人数口径，与顶部「反馈人数」同量纲） */
         Long getPosreaction();
-        /** 当日负向反馈数 */
+        /** 当日负向反馈**人数**（去重 userId；同上，与正向同口径并排呈现） */
         Long getNegreaction();
         /** 当日收到积分（target_type='VENUE' 的 SUM，2026-08-10 V2 新增，已补零） */
         Long getPoints();
@@ -1130,6 +1262,22 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      *   <li>views（含来源分列）按 view_date（DATE 列）过滤 [viewSince, viewUntil)
      *       （viewUntil = 明天 0 点，覆盖今日全天）</li>
      * </ul>
+     * <p>
+     * <b>2026-09-19 口径对齐（与热度公式/顶部互动卡同源，防同屏数字打架）</b>：
+     * <ol>
+     *   <li><b>全部序列排除内部账号</b>（{@code :excludedUserIds}，供给方
+     *       {@code HeatAccountExclusionService}）。不强制的后果很直观：顶部「反馈人数」
+     *       已排除（如 2 人），趋势图却仍画出内部账号的 30 条 —— 同一张页面上两个数字
+     *       互相打脸。views 系列另有 {@code (user_id IS NULL OR ...)} 保住匿名浏览
+     *       （匿名无法按身份去重/排除，note 已显性说明「含匿名访问」）。</li>
+     *   <li><b>反馈序列改「当日去重人数」</b>（正向与负向对称改，{@code COUNT(DISTINCT user_id)}）：
+     *       原按行数，而反馈唯一键含 {@code reaction_date} —— 同一人一周投 6 次会在图上贡献
+     *       6 根柱子，与顶部「N 人」的语义直接冲突。收藏序列无需改：唯一键
+     *       {@code (user_id, venue_id)} 保证「逐日条数 ≡ 逐日人数」；取消收藏同理。</li>
+     * </ol>
+     * <b>已知口径边界（勿当缺陷修）</b>：趋势按天分别去重，<b>多天求和 ≠ 顶部 30 天去重人数</b>
+     * （同一人不同天各计一次 = 「人日」）。这是刻意的：趋势回答"那天有多少人在表达"，
+     * 顶部回答"近30天一共有多少人"。前端 note 已写明。
      */
     @Query(value = """
             WITH RECURSIVE date_series AS (
@@ -1151,52 +1299,61 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             LEFT JOIN (SELECT CAST(created_at AS DATE) AS day, COUNT(*) AS cnt
                        FROM qwt_favorites
                        WHERE venue_id = :venueId AND deleted = false
+                         AND user_id NOT IN :excludedUserIds
                          AND created_at >= :windowSince AND created_at < :windowUntil
                        GROUP BY day) f ON f.day = d.day
             LEFT JOIN (SELECT CAST(unfavorited_at AS DATE) AS day, COUNT(*) AS cnt
                        FROM qwt_favorites
                        WHERE venue_id = :venueId
+                         AND user_id NOT IN :excludedUserIds
                          AND unfavorited_at IS NOT NULL
                          AND unfavorited_at >= :windowSince AND unfavorited_at < :windowUntil
                        GROUP BY day) uf ON uf.day = d.day
             LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
                        FROM qwt_venue_views
                        WHERE venue_id = :venueId
+                         AND (user_id IS NULL OR user_id NOT IN :excludedUserIds)
                          AND view_date >= :viewSince AND view_date < :viewUntil
                        GROUP BY day) v ON v.day = d.day
             LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
                        FROM qwt_venue_views
                        WHERE venue_id = :venueId
                          AND source = 'LIST'
+                         AND (user_id IS NULL OR user_id NOT IN :excludedUserIds)
                          AND view_date >= :viewSince AND view_date < :viewUntil
                        GROUP BY day) vl ON vl.day = d.day
             LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
                        FROM qwt_venue_views
                        WHERE venue_id = :venueId
                          AND source = 'SHARE'
+                         AND (user_id IS NULL OR user_id NOT IN :excludedUserIds)
                          AND view_date >= :viewSince AND view_date < :viewUntil
                        GROUP BY day) vs ON vs.day = d.day
             LEFT JOIN (SELECT view_date AS day, COUNT(*) AS cnt
                        FROM qwt_venue_views
                        WHERE venue_id = :venueId
                          AND source = 'SEARCH'
+                         AND (user_id IS NULL OR user_id NOT IN :excludedUserIds)
                          AND view_date >= :viewSince AND view_date < :viewUntil
                        GROUP BY day) vq ON vq.day = d.day
-            LEFT JOIN (SELECT CAST(created_at AS DATE) AS day, COUNT(*) AS cnt
+            LEFT JOIN (SELECT CAST(created_at AS DATE) AS day, COUNT(DISTINCT user_id) AS cnt
                        FROM qwt_venue_reactions
                        WHERE venue_id = :venueId AND deleted = false
+                         AND user_id NOT IN :excludedUserIds
                          AND reaction_code IN :positiveCodes
                          AND created_at >= :windowSince AND created_at < :windowUntil
                        GROUP BY day) pr ON pr.day = d.day
-            LEFT JOIN (SELECT CAST(created_at AS DATE) AS day, COUNT(*) AS cnt
+            LEFT JOIN (SELECT CAST(created_at AS DATE) AS day, COUNT(DISTINCT user_id) AS cnt
                        FROM qwt_venue_reactions
                        WHERE venue_id = :venueId AND deleted = false
+                         AND user_id NOT IN :excludedUserIds
                          AND reaction_code IN :negativeCodes
                          AND created_at >= :windowSince AND created_at < :windowUntil
                        GROUP BY day) nr ON nr.day = d.day
             LEFT JOIN (SELECT CAST(created_at AS DATE) AS day, SUM(-delta) AS cnt
                        FROM qwt_points_transactions
                        WHERE target_type = 'VENUE' AND target_id = :venueId AND delta < 0
+                         AND user_id NOT IN :excludedUserIds
                          AND created_at >= :windowSince AND created_at < :windowUntil
                        GROUP BY day) pt ON pt.day = d.day
             ORDER BY d.day
@@ -1209,7 +1366,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                          @Param("windowSince") LocalDateTime windowSince,
                                          @Param("windowUntil") LocalDateTime windowUntil,
                                          @Param("positiveCodes") List<String> positiveCodes,
-                                         @Param("negativeCodes") List<String> negativeCodes);
+                                         @Param("negativeCodes") List<String> negativeCodes,
+                                         @Param("excludedUserIds") List<Long> excludedUserIds);
 
     /**
      * 查询城市内热门场所 ID 集合（城市内热度排名前 20% 且 热度分 ≥ 绝对门槛）。
@@ -1271,40 +1429,44 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                     SELECT v.id, v.city,
                            v.sort_weight AS sort_weight,
                            v.sort_weight
-                           + LN(1 + (SELECT COALESCE(SUM(
-                                    CASE vv.source WHEN 'LIST' THEN"""
-            + " " + VenueHeatWeights.VIEW_SOURCE_LIST + " " + """
-                                    WHEN 'SEARCH' THEN"""
-            + " " + VenueHeatWeights.VIEW_SOURCE_SEARCH + " " + """
-                                    WHEN 'SHARE' THEN"""
-            + " " + VenueHeatWeights.VIEW_SOURCE_SHARE + " " + """
-                                    ELSE"""
-            + " " + VenueHeatWeights.VIEW_SOURCE_OTHER + " " + """
-                                    END
-                                    * CASE WHEN vv.view_date >= (DATE_SUB(CURRENT_DATE, INTERVAL 7 DAY)) THEN"""
-            + " " + VenueHeatWeights.VIEW_RECENCY_7D_MULTIPLIER + " " + """
-                                    ELSE 1 END), 0)
-                                FROM qwt_venue_views vv
-                                WHERE vv.venue_id = v.id AND vv.view_date >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND vv.view_date <= CURRENT_DATE))
-                           + (SELECT COUNT(*) FROM qwt_favorites f
+                           + ((SELECT COUNT(DISTINCT vv1.user_id) FROM qwt_venue_views vv1
+                                WHERE vv1.venue_id = v.id AND vv1.user_id IS NOT NULL
+                                  AND vv1.user_id NOT IN :excludedUserIds
+                                  AND vv1.view_date >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND vv1.view_date <= CURRENT_DATE) * """
+            + " " + VenueHeatWeights.VIEW_UV_30D + " " + """
+                              + (SELECT COUNT(DISTINCT vv2.user_id) FROM qwt_venue_views vv2
+                                WHERE vv2.venue_id = v.id AND vv2.user_id IS NOT NULL
+                                  AND vv2.user_id NOT IN :excludedUserIds
+                                  AND vv2.view_date >= (DATE_SUB(CURRENT_DATE, INTERVAL 7 DAY)) AND vv2.view_date <= CURRENT_DATE) * """
+            + " " + VenueHeatWeights.VIEW_UV_7D + " " + """
+                              + LN(1 + (SELECT COUNT(*) FROM qwt_venue_views vv3
+                                WHERE vv3.venue_id = v.id AND vv3.user_id IS NULL
+                                  AND vv3.view_date >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND vv3.view_date <= CURRENT_DATE)) * """
+            + " " + VenueHeatWeights.VIEW_ANON_LN + " " + """
+                             )
+                           + (SELECT COUNT(DISTINCT f.user_id) FROM qwt_favorites f
                               WHERE f.venue_id = v.id AND f.deleted = false
+                                AND f.user_id NOT IN :excludedUserIds
                                 AND f.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND f.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * """
             + VenueHeatWeights.NEW_FAVORITE + """
                            + (SELECT COUNT(*) FROM qwt_venue_posts p
                               WHERE p.venue_id = v.id AND p.deleted = false
                                 AND p.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND p.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * """
             + VenueHeatWeights.POST + """
-                           + (SELECT COUNT(*) FROM qwt_tag_interactions ti
+                           + (SELECT COUNT(DISTINCT ti.user_id) FROM qwt_tag_interactions ti
                               WHERE ti.venue_id = v.id AND ti.deleted = false AND ti.score IS NOT NULL
+                                AND ti.user_id NOT IN :excludedUserIds
                                 AND ti.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND ti.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * """
             + VenueHeatWeights.RATING + """
-                           + (SELECT COUNT(*) FROM qwt_venue_reactions r
+                           + (SELECT COUNT(DISTINCT r.user_id) FROM qwt_venue_reactions r
                               WHERE r.venue_id = v.id AND r.deleted = false
+                                AND r.user_id NOT IN :excludedUserIds
                                 AND r.reaction_code IN :positiveCodes
                                 AND r.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND r.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * """
             + VenueHeatWeights.REACTION + """
                            + (SELECT COALESCE(SUM(-pt.delta), 0) FROM qwt_points_transactions pt
                               WHERE pt.target_type = 'VENUE' AND pt.target_id = v.id AND pt.delta < 0
+                                AND pt.user_id NOT IN :excludedUserIds
                                 AND pt.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND pt.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * :pointsWeight
                            AS heat_score
                     FROM qwt_venues v
@@ -1316,5 +1478,42 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             """, nativeQuery = true)
     List<Long> findHotVenueIds(@Param("positiveCodes") List<String> positiveCodes,
                                @Param("pointsWeight") int pointsWeight,
+                               @Param("excludedUserIds") List<Long> excludedUserIds,
                                @Param("minHotScore") int minHotScore);
+
+    /**
+     * 城市质心（按城市对「已有坐标的存活门店」求经纬度均值）。
+     * <p>
+     * <b>用途（唯一消费方 = {@code CityCentroidService}）</b>：城市级地址门店（歌友会）
+     * 按设计<b>不落坐标</b>（见 {@code VenueService.applyCityOnlyAddressPolicy}），
+     * 但要判断「它的城市是否在用户 300km 内」就需要一个城市级参考点——本查询从已有数据
+     * <b>派生</b>该参考点（同城门店坐标的均值），不引入任何外部地理数据集、不改表结构：
+     * 「城市质心」是既有坐标的聚合，不是新的事实。
+     * <p>
+     * <b>精度边界（有意接受）</b>：均值受同城门店分布影响，量级偏差可达数十公里——
+     * 对「300km 可达圈」这种粗粒度判断无影响（判据是"跨不跨城"，不是"多少公里"）；
+     * <b>不得</b>把它用作距离展示或精确半径筛选（那是 {@link #DISTANCE_KM} 的职责，
+     * 依赖门店自身坐标）。
+     * <p>
+     * 只对 {@code latitude} 非空的门店聚合：城市若一家带坐标的门店都没有（新导入城市
+     * 未补坐标）则该城市不出现在结果中——调用方对缺失城市的兜底见 CityCentroidService。
+     */
+    @Query("""
+            SELECT v.city AS city, AVG(v.latitude) AS latitude, AVG(v.longitude) AS longitude
+            FROM Venue v
+            WHERE v.deleted = false AND v.city IS NOT NULL
+              AND v.latitude IS NOT NULL AND v.longitude IS NOT NULL
+            GROUP BY v.city
+            """)
+    List<CityCentroid> findCityCentroids();
+
+    /** 城市质心投影（{@link #findCityCentroids}）。字段名与 JPQL 别名严格对应。 */
+    interface CityCentroid {
+        /** 城市名（标准行政区划名，与 qwt_venues.city 同词表） */
+        String getCity();
+        /** 该城市已有坐标门店的纬度均值 */
+        Double getLatitude();
+        /** 该城市已有坐标门店的经度均值 */
+        Double getLongitude();
+    }
 }

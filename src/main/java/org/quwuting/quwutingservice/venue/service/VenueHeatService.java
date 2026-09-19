@@ -28,12 +28,28 @@ import java.util.concurrent.TimeUnit;
 /**
  * 场所热度计算服务（多维度聚合）。
  * <p>
- * 热度指数 = 浏览贡献（ln(1+加权浏览)，来源加权列表0.5/其他1/搜索1.5/分享2 + 近7天×2，
- *           2026-08-27 重构——原线性 PV×1 被马太反馈循环放大，见 VenueHeatWeights）
- *           + 近30天新增收藏 × W_NEW_FAVORITE（2026-09-01 收敛：收藏总数仅展示、不计入
- *             公式——旧双列「收藏总数×10 + 新增×15」是集合包含关系，一次收藏重复计 25 分）
- *           + 近30天新增动态 × W_POST + 近期评价数 × W_RATING + 近30天正向 Reaction × W_REACTION
+ * 热度指数 = 浏览贡献（近30天去重浏览人数×0.3 + 近7天去重浏览人数×0.4 + ln(1+匿名浏览行数)×1，
+ *           <b>2026-09-19 二重构</b>——2026-08-27 的「来源加权人次 + ln 压缩」把浏览压到
+ *           实测封顶 6.4 分（低于 1 次收藏的 8 分），等于让最稀疏的信源主导排序；新口径按
+ *           「有多少人来看」计，与主动信号的「人数」口径同量纲，论证见 VenueHeatWeights）
+ *           + 近30天收藏人数 × W_NEW_FAVORITE（2026-09-01 收敛：收藏总数仅展示、不计入
+ *             公式——旧双列「收藏总数×10 + 新增×15」是集合包含关系，一次收藏重复计 25 分；
+ *             2026-09-19 由「新增收藏条数」改「收藏人数」）
+ *           + 近30天新增动态 × W_POST + 近30天评分人数 × W_RATING
+ *           + 近30天正向反馈人数 × W_REACTION
  *           + 满意度偏移 × W_SATISFACTION（无评分时为 0）。
+ * <p>
+ * <b>2026-09-19 口径修正（生产实证「约翰（歌友会）6 天登顶全国第 1」事件）</b>：
+ * <ol>
+ *   <li><b>主动信号改「去重人数」</b>（{@code COUNT(DISTINCT userId)}）：原口径按行数累加，
+ *       而反馈的唯一键含 {@code reaction_date}（同一人每天可重投）、评分的唯一键含
+ *       {@code tag}（4 个维度各计一次）——同一人可被重复放大到 3×30 / 8×4 分。改人数口径后
+ *       每人每店的主动信号上限回到「收藏 8 + 评分 8 + 反馈 3」；</li>
+ *   <li><b>内部账号排除</b>：公式输入按 {@link HeatAccountExclusionService}
+ *       的集合（ADMIN ∪ 运营配置名单）过滤——全网 76% 的反馈行、49% 的收藏行原本由
+ *       14 个平台早期账号产出，即榜单在度量平台自己人的点击。展示字段<b>不排除</b>
+ *       （口径分叉有意，见 {@code VenueRepository.countHeatCounters} javadoc）。</li>
+ * </ol>
  * <p>
  * 2026-08 缺陷修复确立的语义（见 AGENTS.md「场所热度」章节）：
  * <ul>
@@ -100,6 +116,14 @@ public class VenueHeatService {
     private static final int WINDOW_DAYS = 30;
 
     /**
+     * 浏览项的时效窗口：7 天（2026-09-19 浏览改人数口径后新增）。
+     * 边界与 SQL 镜像严格一致：JPQL {@code CURRENT_DATE - 7 day} / native
+     * {@code DATE_SUB(CURRENT_DATE, INTERVAL 7 DAY)}——沿用 2026-08-27 既有的
+     * 「- 7 day」写法（含今日共 8 个自然日），改数值必须三处镜像同改。
+     */
+    private static final int VIEW_RECENT_WINDOW_DAYS = 7;
+
+    /**
      * 趋势图窗口：30 天（2026-08-08 由 14 天扩展，与其余滚动指标一致）。
      * 根因：时间范围刷选控件（略缩图）需要足够长的全量窗口才有"缩放"意义——
      * 全量=趋势窗口，默认选中最近 14 天，用户可放大到全量或缩小到 7 天；
@@ -132,6 +156,12 @@ public class VenueHeatService {
      * 时读积分聚合，延迟解析安全——循环依赖根因见后端 AGENTS.md「场所热度」）。
      */
     private final org.quwuting.quwutingservice.points.service.PointsService pointsService;
+    /**
+     * 热度统计内部账号排除集合（2026-09-19）：公式输入（加权浏览 / 收藏 / 评分 / 正向反馈 /
+     * 收到积分）按它过滤——与列表排序（{@code HEAT_SCORE}）、热门判定（{@code findHotVenueIds}）
+     * 共用同一份集合，三处镜像必须同源（否则热度页数字与列表排位会打架）。见其类注释。
+     */
+    private final HeatAccountExclusionService heatExclusionService;
     private final LoadingCache<Long, VenueHeatResponse> heatCache;
 
     public VenueHeatService(VenueLookupService venueLookupService,
@@ -139,6 +169,7 @@ public class VenueHeatService {
                             org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository venueStatusLogRepository,
                             TagInteractionRepository tagInteractionRepository,
                             org.quwuting.quwutingservice.config.PointsProperties pointsProperties,
+                            HeatAccountExclusionService heatExclusionService,
                             @org.springframework.context.annotation.Lazy
                             org.quwuting.quwutingservice.points.service.PointsService pointsService) {
         this.venueLookupService = venueLookupService;
@@ -146,6 +177,7 @@ public class VenueHeatService {
         this.venueStatusLogRepository = venueStatusLogRepository;
         this.tagInteractionRepository = tagInteractionRepository;
         this.pointsProperties = pointsProperties;
+        this.heatExclusionService = heatExclusionService;
         this.pointsService = pointsService;
         // loader 为 computeHeat（实例方法引用）：字段必须先于缓存构建完成赋值。
         // 异步刷新默认运行在 ForkJoinPool.commonPool——热度计算不依赖请求上下文，安全。
@@ -196,26 +228,42 @@ public class VenueHeatService {
         LocalDateTime windowSince = today.atStartOfDay().minusDays(WINDOW_DAYS);
         LocalDateTime windowUntil = now;
         LocalDate sinceDate30d = today.minusDays(WINDOW_DAYS);
+        // 浏览时效窗口起点（2026-09-19 浏览改人数口径后新增）：近 7 天去重浏览人数是
+        // 热度公式的独立一项，边界与 SQL 镜像的 (CURRENT_DATE - 7 day) 一致
+        LocalDate sinceDate7d = today.minusDays(VIEW_RECENT_WINDOW_DAYS);
         // views 按 view_date（DATE 列）过滤：上界 = 明天 0 点，覆盖今日全天
         LocalDate viewUntil = today.plusDays(1);
         // 活跃上报为实时 TTL 窗口（expires_at > now，TTL 唯一事实源 = 列），是实时事实，
         // 不受滚动窗口约束
 
         // ── 全部单值计数器：跨 6 张表合并为 1 次 DB 往返（标量子查询 mega-query） ──
+        // 排除集合（ADMIN ∪ 运营名单，恒非空）经参数注入：仓库侧只对**进公式**的字段
+        // （加权浏览/收藏/评分/正向反馈/收到积分）施加过滤，展示字段保持原始事实口径
+        // —— 声明式口径见 VenueRepository.countHeatCounters javadoc。
+        // 本方法内**取一次、两处复用**（计数器 + 趋势）：同一个值必然同口径，
+        // 避免"两条查询各自去取"在未来引入取值时刻不一致。
+        List<Long> excludedUserIds = heatExclusionService.excludedUserIds();
         VenueRepository.HeatCounters counters = venueRepository.countHeatCounters(
-                venueId, sinceDate30d, viewUntil, windowSince, windowUntil, now,
-                POSITIVE_REACTION_CODES, NEGATIVE_REACTION_CODES);
+                venueId, sinceDate30d, sinceDate7d, viewUntil, windowSince, windowUntil, now,
+                POSITIVE_REACTION_CODES, NEGATIVE_REACTION_CODES,
+                excludedUserIds);
         long viewCount30d = orZero(counters.getPv());
         long viewUv30d = orZero(counters.getUv());
         // 跨天复访用户数（2026-09-15）：展示字段，不进热度公式——「为何不进公式」
         // （JPQL 无 FROM 派生表，进排序须 native 重写全部列表主查询）见
         // VenueRepository.HeatCounters#getRepeatvisitors 与 VenueHeatResponse 同名字段注释
         long repeatVisitorCount30d = orZero(counters.getRepeatvisitors());
-        // 加权浏览贡献输入（2026-08-27）：来源质量加权 + 近7天时效因子的 30 天合计，
-        // 热度公式浏览项 = round(ln(1 + 本值))——线性 PV 计数被重构，见 VenueHeatWeights
-        // 浏览贡献注释（马太效应反馈循环修复）。viewCount30d（原始 PV）仅作展示用。
-        double weightedViews30d = orZeroDouble(counters.getWeightedviews30d());
-        long viewComponent = Math.round(Math.log1p(weightedViews30d));
+        // 浏览贡献（2026-09-19 二重构：由「来源加权人次 + ln 压缩」改为「去重人数口径」）：
+        //   近30天去重浏览人数 × 0.30 + 近7天去重浏览人数 × 0.40 + ln(1+匿名浏览行数) × 1.00
+        // 旧口径把「人」与「人次」混在一起压，实测封顶仅 6.4 分（低于 1 次收藏的 8 分），
+        // 排序实际由最稀疏的信源主导；新口径下头部店浏览项 ≈58 分，与收藏同量级
+        // （论证与生产实证见 VenueHeatWeights 浏览贡献注释）。viewCount30d（原始 PV）仍仅作展示。
+        long viewUvFormula30d = orZero(counters.getViewuv30d());
+        long viewUvFormula7d = orZero(counters.getViewuv7d());
+        long viewAnon30d = orZero(counters.getViewanon30d());
+        long viewComponent = Math.round(viewUvFormula30d * VenueHeatWeights.VIEW_UV_30D
+                + viewUvFormula7d * VenueHeatWeights.VIEW_UV_7D
+                + Math.log1p(viewAnon30d) * VenueHeatWeights.VIEW_ANON_LN);
         long favoriteCount = orZero(counters.getFavtotal());
         long newFavoriteCount30d = orZero(counters.getFavrecent());
         long postCount = orZero(counters.getPosttotal());
@@ -243,6 +291,9 @@ public class VenueHeatService {
         // ── 趋势（多行时间序列，独立 1 次往返：收藏（含取消收藏）/浏览（含来源分列）/
         //    正负向 Reaction/收到积分八序列合一，近30天+今日、缺失日补零——
         //    见 VenueRepository.countDailyTrends） ──
+        // 2026-09-19 口径对齐：趋势序列与上方公式输入同源——全部排除内部账号，且反馈序列
+        // 改「当日去重人数」（原按行数会在同一屏与顶部「反馈人数」打架）。排除集合复用
+        // 上方已取的同一个 List（同一次取值 = 同口径，无需二次调用服务）。
         List<FavoriteTrendPoint> favoriteTrend = new ArrayList<>(TREND_WINDOW_DAYS + 1);
         List<FavoriteTrendPoint> unfavoriteTrend = new ArrayList<>(TREND_WINDOW_DAYS + 1);
         List<FavoriteTrendPoint> viewTrend = new ArrayList<>(TREND_WINDOW_DAYS + 1);
@@ -252,7 +303,8 @@ public class VenueHeatService {
         List<FavoriteTrendPoint> pointsTrend = new ArrayList<>(TREND_WINDOW_DAYS + 1);
         for (VenueRepository.DailyTrendRow row : venueRepository.countDailyTrends(
                 venueId, sinceDate30d, statsAsOfDate, sinceDate30d, viewUntil,
-                windowSince, windowUntil, POSITIVE_REACTION_CODES, NEGATIVE_REACTION_CODES)) {
+                windowSince, windowUntil, POSITIVE_REACTION_CODES, NEGATIVE_REACTION_CODES,
+                excludedUserIds)) {
             String day = row.getDay().toString();
             favoriteTrend.add(new FavoriteTrendPoint(day, orZero(row.getFavcount())));
             // 取消收藏趋势（V19：unfavorited_at 非空行按日分组；与新增收藏同骨架同窗口）
@@ -299,30 +351,36 @@ public class VenueHeatService {
         //   formulaText  = 默认展示的「中等简洁规则」——人话 + 当前各分项数据，
         //                  无 ln/加权符号；前端默认展示，问号入口可收起的完整版在 formulaDetail。
         //   formulaDetail = 点击展开的「完整规则」——条目化分项说明，保留规则细节。
-        String weightedViewsText = String.format("%.1f", weightedViews30d);
+        // 2026-09-19 文案随口径修正（主动信号由「次数/条数」改为「去重人数」）：单位写在
+        // **标签里**（「新增收藏人数 N×8」）而不是数字与 × 之间——保持既有「N×W」形态，
+        // 前端与单测按该形态解析/断言（见 VenueHeatServiceTest 的 contains("2×8") 一族）。
         String satisfactionTerm = satisfactionScore != null
                 ? String.format(" · 满意度偏移 %.1f×20", satisfactionOffset)
                 : "";
         String clampSuffix = heatClamped ? "（满意度负偏移按0计）" : "";
         String formulaText = "热度 " + heatScore + " = 近30天人气：浏览贡献 " + viewComponent
-                + "（来源加权+近7天翻倍）· 新增收藏 " + newFavoriteCount30d + "×" + VenueHeatWeights.NEW_FAVORITE
+                + "（近30天" + viewUvFormula30d + "人 + 近7天" + viewUvFormula7d + "人）· 新增收藏人数 " + newFavoriteCount30d + "×" + VenueHeatWeights.NEW_FAVORITE
                 + " · 新动态 " + newPostCount30d + "×" + VenueHeatWeights.POST
-                + " · 评分 " + ratingCount30d + "×" + VenueHeatWeights.RATING
-                + " · 正向反馈 " + positiveReactionCount30d + "×" + VenueHeatWeights.REACTION
+                + " · 评分人数 " + ratingCount30d + "×" + VenueHeatWeights.RATING
+                + " · 正向反馈人数 " + positiveReactionCount30d + "×" + VenueHeatWeights.REACTION
                 + " · 礼物 " + pointsReceived30d + "×" + pointsWeight
                 + satisfactionTerm + clampSuffix;
 
         StringBuilder detail = new StringBuilder();
         detail.append("完整计算规则（近30天）：\n");
-        detail.append("· 浏览贡献 ").append(viewComponent).append(" 分：按来源加权（列表×0.5 / 其他×1 / 搜索×1.5 / 分享×2）、近7天翻倍，再压缩取整（加权 ")
-                .append(weightedViewsText).append(" → ").append(viewComponent)
-                .append(" 分）——降低“排得靠前→看的人多”造成的热度虚高，更反映主动兴趣\n");
-        detail.append("· 近30天新增收藏×").append(VenueHeatWeights.NEW_FAVORITE).append("：当前 ").append(newFavoriteCount30d)
-                .append(" 次（收藏总数 ").append(favoriteCount).append(" 次为累计展示、不计入热度；取消收藏自动抵消）\n");
+        detail.append("· 浏览贡献 ").append(viewComponent).append(" 分：近30天有 ").append(viewUvFormula30d)
+                .append(" 人看过（每人×").append(VenueHeatWeights.VIEW_UV_30D).append("），其中近7天 ")
+                .append(viewUvFormula7d).append(" 人（每人×").append(VenueHeatWeights.VIEW_UV_7D)
+                .append("），另有未登录访问 ").append(viewAnon30d).append(" 次（压缩后×")
+                .append(VenueHeatWeights.VIEW_ANON_LN).append("）—— 按「有多少人来看」计，")
+                .append("同一个人反复打开只算一人，未登录访问压到很低，避免“排得靠前→看的人多”造成的热度虚高\n");
+        detail.append("· 近30天收藏人数×").append(VenueHeatWeights.NEW_FAVORITE).append("：当前 ").append(newFavoriteCount30d)
+                .append(" 人（收藏总数 ").append(favoriteCount).append(" 次为累计展示、不计入热度；取消收藏自动抵消）\n");
         detail.append("· 近30天新增动态×").append(VenueHeatWeights.POST).append("：当前 ").append(newPostCount30d).append(" 条\n");
-        detail.append("· 近30天评分数×").append(VenueHeatWeights.RATING).append("：当前 ").append(ratingCount30d).append(" 条\n");
-        detail.append("· 近30天正向反馈×").append(VenueHeatWeights.REACTION).append("：当前 ").append(positiveReactionCount30d)
-                .append(" 条（服务问题、排队太久等负向反馈不计入，单独展示）\n");
+        detail.append("· 近30天评分人数×").append(VenueHeatWeights.RATING).append("：当前 ").append(ratingCount30d)
+                .append(" 人（同一人评多个维度只计一次，避免单人被放大）\n");
+        detail.append("· 近30天正向反馈人数×").append(VenueHeatWeights.REACTION).append("：当前 ").append(positiveReactionCount30d)
+                .append(" 人（同一人近30天多次反馈只计一次；服务问题、排队太久等负向反馈不计入，单独展示）\n");
         detail.append("· 近30天收到礼物价值×").append(pointsWeight).append("：当前 ").append(pointsReceived30d).append(" 分\n");
         detail.append(satisfactionScore != null
                 ? "当前满意度 " + satisfactionScore + " 分。"
@@ -371,10 +429,6 @@ public class VenueHeatService {
         return value != null ? value : 0L;
     }
 
-    /** 加权浏览输入可能为 null（无浏览记录时子查询返回 NULL）→ 按 0 计 */
-    private static double orZeroDouble(Double value) {
-        return value != null ? value : 0.0;
-    }
 
     /**
      * 计算综合满意度：近30天各维度评分的等权均分。

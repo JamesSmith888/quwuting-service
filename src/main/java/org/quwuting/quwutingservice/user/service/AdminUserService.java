@@ -24,8 +24,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 管理端用户列表/详情服务（2026-08-27，docs/agents/23；仅 ADMIN；2026-08-27
@@ -55,23 +57,57 @@ public class AdminUserService {
     /** 统计概览「近 7 日活跃」窗口（含今日）——与数据看板顶卡、留存分析同窗口 */
     private static final int ACTIVE_DAYS = 7;
 
+    /** 列表「近 30 日活跃」筛选窗口（含今日）——与 ACTIVE_DAYS 同一「含今日共 N 天」语义 */
+    private static final int ACTIVE_WINDOW_30D = 30;
+
     private final UserRepository userRepository;
     private final PointsAccountRepository pointsAccountRepository;
     private final ContributionService contributionService;
     private final AdminUserStatsService statsService;
 
-    /** 用户分页列表（keyword 昵称模糊 + role/city 筛选 + 排序模式，全部可空/可缺省） */
+    /**
+     * 用户分页列表（keyword 昵称模糊 + role/city 筛选 + 排序模式，全部可空/可缺省；
+     * 2026-09-19 增 {@code activeWithinDays}「近期活跃」筛选——仅支持 7/30，
+     * 口径 = ACTIVE_FACT_UNION 用户主动行为（不含登录自动打卡），非法值 → 1007）。
+     * <p>
+     * <b>近期活跃接线（一次查询两用）</b>：行级「7 日活跃」标记（badge）恒需要
+     * 近 7 日活跃 id 集合，筛选启用 7 日窗口时直接复用同一集合（不重复查询）；
+     * 筛选集合为空时直接短路空页（不进 SQL——原生 SQL 空集合 {@code IN ()} 是
+     * 语法错误，且语义上「筛选后无人」本就应返回空页）。
+     */
     @Transactional(readOnly = true)
     public Page<AdminUserItem> list(String keyword, UserRole role, String city,
-                                    UserSortMode sort, int page, int size) {
+                                    UserSortMode sort, Integer activeWithinDays, int page, int size) {
         String kw = (keyword == null || keyword.isBlank()) ? null : keyword.trim();
         PageRequest pageable = PageRequest.of(page, size);
+        // 行级 badge 集合：近 7 日（含今日）主动行为用户，与统计条「近 7 日活跃」同口径同窗
+        Set<Long> active7dIds = Set.copyOf(
+                userRepository.findIdsActiveSince(LocalDate.now().minusDays(ACTIVE_DAYS - 1L)));
+        Collection<Long> activeFilterIds = null;
+        if (activeWithinDays != null) {
+            activeFilterIds = switch (activeWithinDays) {
+                case ACTIVE_DAYS -> active7dIds; // 7 日筛选复用 badge 集合（同窗同口径）
+                case ACTIVE_WINDOW_30D -> userRepository.findIdsActiveSince(
+                        LocalDate.now().minusDays(ACTIVE_WINDOW_30D - 1L));
+                default -> throw new BusinessException(1007, "activeWithin 仅支持 7 或 30");
+            };
+            if (activeFilterIds.isEmpty()) {
+                return Page.empty(pageable);
+            }
+        }
         Page<User> users = switch (sort == null ? UserSortMode.LATEST_JOINED : sort) {
-            case POINTS_DESC -> userRepository.findPageByFiltersOrderByPoints(kw, role, city, pageable);
+            case POINTS_DESC -> activeFilterIds != null
+                    ? userRepository.findPageByFiltersActiveOrderByPoints(kw, role, city, activeFilterIds, pageable)
+                    : userRepository.findPageByFiltersOrderByPoints(kw, role, city, pageable);
             // 原生 SQL 绑定 enum 无 JPA 元数据（ORDINAL 错配先例）——role 传 name() 字符串
-            case LAST_ACTIVE_DESC -> userRepository.findPageByFiltersOrderByLastActive(
-                    kw, role == null ? null : role.name(), city, pageable);
-            case LATEST_JOINED -> userRepository.findPageByFilters(kw, role, city, pageable);
+            case LAST_ACTIVE_DESC -> activeFilterIds != null
+                    ? userRepository.findPageByFiltersActiveOrderByLastActive(
+                            kw, role == null ? null : role.name(), city, activeFilterIds, pageable)
+                    : userRepository.findPageByFiltersOrderByLastActive(
+                            kw, role == null ? null : role.name(), city, pageable);
+            case LATEST_JOINED -> activeFilterIds != null
+                    ? userRepository.findPageByFiltersActive(kw, role, city, activeFilterIds, pageable)
+                    : userRepository.findPageByFilters(kw, role, city, pageable);
         };
         List<Long> userIds = users.getContent().stream().map(User::getId).toList();
         Map<Long, Long> balances = toMap(pointsAccountRepository.findBalancesByUserIds(userIds));
@@ -80,7 +116,8 @@ public class AdminUserService {
         Map<Long, DemandSummary> demands = statsService.demandSummaries(userIds);
         Map<Long, LocalDateTime> lastSeen = statsService.lastSeenFor(userIds, profileUpdatedAt(users.getContent()));
         return users.map(u -> toItem(u, balances.getOrDefault(u.getId(), 0L),
-                contributions.get(u.getId()), demands.get(u.getId()), lastSeen.get(u.getId())));
+                contributions.get(u.getId()), demands.get(u.getId()), lastSeen.get(u.getId()),
+                active7dIds.contains(u.getId())));
     }
 
     /**
@@ -150,7 +187,8 @@ public class AdminUserService {
 
     private AdminUserItem toItem(User user, long pointsBalance,
                                  ContributionService.ContributionAggregate agg,
-                                 DemandSummary demand, LocalDateTime lastSeenAt) {
+                                 DemandSummary demand, LocalDateTime lastSeenAt,
+                                 boolean activeWithin7d) {
         return new AdminUserItem(
                 user.getId(),
                 displayName(user),
@@ -167,6 +205,7 @@ public class AdminUserService {
                 demand != null ? demand.total() : 0,
                 demand != null ? demand.fulfilled() : 0,
                 lastSeenAt,
+                activeWithin7d,
                 Boolean.TRUE.equals(user.getWechatReview()));
     }
 

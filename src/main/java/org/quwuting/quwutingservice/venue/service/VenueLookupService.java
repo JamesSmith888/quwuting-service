@@ -37,6 +37,11 @@ public class VenueLookupService {
     private final VenueRepository venueRepository;
     private final VenueHotProperties venueHotProperties;
     private final org.quwuting.quwutingservice.config.PointsProperties pointsProperties;
+    /**
+     * 热度统计内部账号排除集合（2026-09-19）：热门判定与列表排序共用同一份行为口径，
+     * 排除集合必须同源注入，否则会出现「列表排位已排除、热门标签仍算内部账号」的分叉。
+     */
+    private final HeatAccountExclusionService heatExclusionService;
 
     /**
      * 按 ID 查询场所（含缓存）。
@@ -68,12 +73,18 @@ public class VenueLookupService {
      * sortWeight 仍参与城市内排名与列表排序（运营推广提升曝光），但不得伪造热门
      * 资格（2026-08-08 用户反馈根因修复：运营加权门店若行为热度不足门槛，不得标记
      * 热门——保证与详情页热度指数口径一致，见 AGENTS.md「热门场所标记」）。
+     * <p>
+     * <b>2026-09-19 内部账号排除</b>：行为热度的全部输入按
+     * {@link HeatAccountExclusionService} 的集合过滤（ADMIN ∪ 运营配置名单），
+     * 与列表排序（{@code HEAT_SCORE}）同源——两个入口必须共用一份集合，否则会出现
+     * 「排位已排除、热门标签仍算内部账号」的分叉。
      */
     @Cacheable(value = CacheConfig.CACHE_HOT_VENUE_IDS, sync = true)
     @Transactional(readOnly = true)
     public Set<Long> getHotVenueIds() {
         return new HashSet<>(venueRepository.findHotVenueIds(
                 ReactionCode.positiveCodeNames(), pointsProperties.heatWeight(),
+                heatExclusionService.excludedUserIds(),
                 venueHotProperties.minHeatScore()));
     }
 }

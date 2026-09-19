@@ -123,6 +123,12 @@ class UserStatsSqlMirrorTest {
         assertTrue(queryOf(UserRepository.class, "countActiveUsers", LocalDate.class)
                         .contains(UserStatsSql.ACTIVE_FACT_UNION),
                 "近 7 日活跃必须走统一活跃事实集");
+        assertTrue(queryOf(UserRepository.class, "findIdsActiveSince", LocalDate.class)
+                        .contains(UserStatsSql.ACTIVE_FACT_UNION)
+                        && queryOf(UserRepository.class, "findIdsActiveSince", LocalDate.class)
+                                .contains(UserStatsSql.USER_SCOPE),
+                "列表「近期活跃」id 集合必须走统一事实集 + 统一用户范围谓词——"
+                        + "否则列表筛选/行级标记与统计条「近 7 日活跃」会给出对不上的数字");
         for (String method : List.of("listCohortSizes", "listCohortRetention", "listDailyActivity", "sumActivity")) {
             assertTrue(queryOf(UserRetentionRepository.class, method, LocalDate.class)
                             .contains(UserStatsSql.USER_SCOPE),

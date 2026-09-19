@@ -35,8 +35,14 @@ class VenueLookupServiceTest {
 
     @Mock
     private VenueRepository venueRepository;
+    /** 2026-09-19 热度统计内部账号排除集合（ADMIN ∪ 运营配置名单）——热门判定与列表同源 */
+    @Mock
+    private HeatAccountExclusionService heatExclusionService;
 
     private VenueLookupService service;
+
+    /** 排除集合样本：由 mock 供给，断言它确实被传进 SQL（接线锁死，不依赖真实名单） */
+    private static final List<Long> EXCLUDED_USER_IDS = List.of(2L, -1L);
 
     @BeforeEach
     void setUp() {
@@ -46,19 +52,24 @@ class VenueLookupServiceTest {
         service = new VenueLookupService(venueRepository, new VenueHotProperties(70),
                 new org.quwuting.quwutingservice.config.PointsProperties(2, 5, 5, 2,
                         new org.quwuting.quwutingservice.config.PointsProperties.GiftLimits(10, 20, 5),
-                        new org.quwuting.quwutingservice.config.PointsProperties.GateLimits(50), 3));
+                        new org.quwuting.quwutingservice.config.PointsProperties.GateLimits(50), 3),
+                heatExclusionService);
     }
 
     @Test
     void getHotVenueIds_passesConfiguredMinHeatScoreToRepository() {
-        when(venueRepository.findHotVenueIds(anyList(), eq(2), eq(70))).thenReturn(List.of(1L, 2L, 3L));
+        when(heatExclusionService.excludedUserIds()).thenReturn(EXCLUDED_USER_IDS);
+        when(venueRepository.findHotVenueIds(anyList(), eq(2), anyList(), eq(70))).thenReturn(List.of(1L, 2L, 3L));
 
         var result = service.getHotVenueIds();
 
         assertEquals(3, result.size());
         assertTrue(result.contains(1L));
         // 门槛必须来自配置（本测试构造的 70），且正向 code 列表仍为唯一事实源；
-        // 积分权重（2）也必须来自配置传入 SQL（V2 校准机制：改配置即生效）
-        verify(venueRepository).findHotVenueIds(eq(ReactionCode.positiveCodeNames()), eq(2), eq(70));
+        // 积分权重（2）也必须来自配置传入 SQL（V2 校准机制：改配置即生效）；
+        // 排除集合（2026-09-19）必须来自 HeatAccountExclusionService——热门判定与列表
+        // 排序共用同一份集合，漏传即产生「排位已排除、热门标签仍算内部账号」的分叉
+        verify(venueRepository).findHotVenueIds(
+                eq(ReactionCode.positiveCodeNames()), eq(2), eq(EXCLUDED_USER_IDS), eq(70));
     }
 }

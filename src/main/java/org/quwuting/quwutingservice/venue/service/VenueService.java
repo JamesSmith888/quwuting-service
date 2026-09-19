@@ -169,6 +169,19 @@ public class VenueService {
     private final VenueSyncAliasRepository venueSyncAliasRepository;
     /** 场所实体缓存显式逐出（照片写方法 key 依赖查询结果，@CacheEvict 无法表达，见 VenueClaimService 同款先例） */
     private final CacheManager cacheManager;
+    /**
+     * 热度统计内部账号排除集合（2026-09-19）：ADMIN ∪ 运营配置名单，恒非空（见其类注释）。
+     * 列表排序（HEAT_SCORE）与热门判定（findHotVenueIds）都要按它过滤行为输入——
+     * 根因：全网 76% 的反馈行由 14 个平台早期账号产出，榜单度量的是内部点击而非用户人气。
+     */
+    private final HeatAccountExclusionService heatExclusionService;
+    /**
+     * 城市质心 / 城市级门店可见性范围（2026-09-19）：城市级门店（歌友会）可见性改为
+     * 「该城市附近 300km」的判据供给方，见 {@link VenueRepository#CITY_ONLY_VISIBILITY_PREDICATE}。
+     * 半径常量同属该服务（{@code CityCentroidService.CITY_ONLY_NEARBY_RADIUS_KM}）——
+     * 判据与常量收在一个家，避免"常量在这里、语义在那边"。
+     */
+    private final CityCentroidService cityCentroidService;
 
     /**
      * 详情接口「公共部分」缓存（2026-08-13 新增，性能优化：详情接口 DB 往返 5→2 次）。
@@ -236,7 +249,14 @@ public class VenueService {
 
     /** 列表主查询无坐标视图缓存键（不可变参数指纹，见 {@link #venueListCache} 注释）。
      *  kwPrefixPattern（2026-09-02 相关度排序前缀 pattern）与 keywordPattern 同源同变，
-     *  一并入键保证 ORDER BY 相关度键与结果一致。 */
+     *  一并入键保证 ORDER BY 相关度键与结果一致。
+     *  <p>
+     *  <b>2026-09-19 复核（城市级门店可见性改造）</b>：新谓词引入了 {@code :nearbyCities}
+     *  这一<b>请求外输入</b>，本键是否需要扩键取决于它是不是本键的函数——无坐标分支下
+     *  参考点只能是「显式城市」（无城市则退回哨兵），故 {@code nearbyCities} 是
+     *  {@code city} 的纯函数，<b>无需扩键</b>（见 {@link #loadVenueListPage}）。
+     *  将来若给城市级门店的可见性引入任何<b>与 city 无关</b>的输入（如账号地区、
+     *  历史到访城市），<b>必须同步扩本键</b>，否则会串味。 */
     private record VenueListKey(
             VenueSortMode sortMode,
             String city,
@@ -1342,6 +1362,21 @@ public class VenueService {
                                           boolean hasCoords, Double latitude, Double longitude,
                                           Double radius, List<String> positiveCodes, int pointsWeight,
                                           boolean hotOnly, Set<Long> hotIds, PageRequest pageable) {
+        // 城市级门店可见性范围（2026-09-19）：只影响歌友会一类，见
+        // VenueRepository.CITY_ONLY_VISIBILITY_PREDICATE。参考点 = 请求坐标（有定位）
+        // 或显式选择的城市（无定位）——**无坐标分支下它只是 city 的纯函数**，
+        // 故与 VenueListKey 的缓存语义一致（key 已含 city，无需扩键）。
+        // ⚠️ 参考点完全缺失时（无定位 / 全网探索排序 heat·newest 刻意不传坐标）结果为
+        // limited=false = **不限制**，此时普通门店本就是全国视角，城市级门店必须同口径，
+        // 否则同一个列表只藏一个品类 = 标签撒谎。
+        CityCentroidService.CityScope cityScope = cityCentroidService.cityScope(
+                hasCoords ? latitude : null, hasCoords ? longitude : null, city);
+        Set<String> nearbyCities = cityScope.cities();
+        boolean cityScopeLimited = cityScope.limited();
+        // 热度统计排除集合（ADMIN ∪ 运营配置名单，恒非空）：热度排序与热门筛选的行为输入
+        // 都要按它过滤。它是"分钟级可变"的策略，而无坐标视图缓存 TTL 60s——两者量级一致，
+        // 改名单后最长 60s 生效，与既有「热度累积靠 60s 自然过期兜底」同族，不额外联动失效。
+        List<Long> excludedUserIds = heatExclusionService.excludedUserIds();
         // 无坐标分支：仅单串 keyword（filterIds 为 null）可入缓存——多词 AND 的白名单集合
         // 与请求参数强耦合（无法收敛进 VenueListKey），且为精确意图的窄结果，恒实时查询。
         if (!hasCoords && filterIds == null) {
@@ -1358,34 +1393,36 @@ public class VenueService {
             return switch (sortMode) {
                 case RECOMMENDED, DISTANCE -> venueRepository.searchRankedNoLocation(
                         city, district, status, venueType, keywordPattern, kwPrefixPattern, filterIds, tagPattern,
-                        positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
+                        nearbyCities, cityScopeLimited, positiveCodes, pointsWeight, excludedUserIds, hotOnly, hotIds, pageable);
                 case HEAT -> venueRepository.searchHeat(
                         city, district, status, venueType, keywordPattern, filterIds, tagPattern,
-                        positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
+                        nearbyCities, cityScopeLimited, positiveCodes, pointsWeight, excludedUserIds, hotOnly, hotIds, pageable);
                 case NEWEST -> venueRepository.searchNewest(
                         city, district, status, venueType, keywordPattern, filterIds, tagPattern,
-                        hotOnly, hotIds, pageable);
+                        nearbyCities, cityScopeLimited, hotOnly, hotIds, pageable);
             };
         }
         return switch (sortMode) {
             case RECOMMENDED -> venueRepository.searchRanked(city, district, status, venueType, keywordPattern,
                     kwPrefixPattern, filterIds, tagPattern,
-                    latitude, longitude, radius, positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
+                    latitude, longitude, radius, nearbyCities, cityScopeLimited, positiveCodes, pointsWeight, excludedUserIds,
+                    hotOnly, hotIds, pageable);
             case DISTANCE -> venueRepository.searchNearest(city, district, status, venueType, keywordPattern,
                     filterIds, tagPattern,
-                    latitude, longitude, radius, hotOnly, hotIds, pageable);
+                    latitude, longitude, radius, nearbyCities, cityScopeLimited, hotOnly, hotIds, pageable);
             case HEAT -> hasCoords && radius != null
                     ? venueRepository.searchHeatWithinRadius(city, district, status, venueType, keywordPattern,
                             filterIds, tagPattern,
-                            latitude, longitude, radius, positiveCodes, pointsWeight, hotOnly, hotIds, pageable)
+                            latitude, longitude, radius, nearbyCities, cityScopeLimited, positiveCodes, pointsWeight,
+                            excludedUserIds, hotOnly, hotIds, pageable)
                     : venueRepository.searchHeat(city, district, status, venueType, keywordPattern, filterIds, tagPattern,
-                            positiveCodes, pointsWeight, hotOnly, hotIds, pageable);
+                            nearbyCities, cityScopeLimited, positiveCodes, pointsWeight, excludedUserIds, hotOnly, hotIds, pageable);
             case NEWEST -> hasCoords && radius != null
                     ? venueRepository.searchNewestWithinRadius(city, district, status, venueType, keywordPattern,
                             filterIds, tagPattern,
-                            latitude, longitude, radius, hotOnly, hotIds, pageable)
+                            latitude, longitude, radius, nearbyCities, cityScopeLimited, hotOnly, hotIds, pageable)
                     : venueRepository.searchNewest(city, district, status, venueType, keywordPattern, filterIds,
-                            tagPattern, hotOnly, hotIds, pageable);
+                            tagPattern, nearbyCities, cityScopeLimited, hotOnly, hotIds, pageable);
         };
     }
 
@@ -1394,25 +1431,40 @@ public class VenueService {
      * 按 {@link VenueListKey#sortMode()} 分发无坐标排序口径：RECOMMENDED 与 DISTANCE
      * 降级共用 searchRankedNoLocation（无坐标无法按距离排序，防御性回退推荐排序）；
      * HEAT / NEWEST 排序口径不同，各走其专用查询。
+     * <p>
+     * <b>两个"请求外"输入的取值口径（与缓存键的可复现性要求一致）</b>：
+     * <ul>
+     *   <li>{@code nearbyCities}：无坐标分支下只由 {@code key.city()} 决定（参考点 = 显式城市；
+     *       无城市则退回哨兵），<b>纯函数、与缓存键同源</b>——不会出现"同键不同结果"；</li>
+     *   <li>{@code excludedUserIds}：与请求参数无关的全局策略（ADMIN ∪ 运营名单），
+     *       取 loader 执行时刻的值（30s 缓存），列表缓存 60s TTL 覆盖其变化——两者同为
+     *       "分钟级兜底"语义，不引入联动失效。</li>
+     * </ul>
      */
     private Page<Venue> loadVenueListPage(VenueListKey key) {
         PageRequest pageable = PageRequest.of(key.page(), key.size());
         // hotIds 全局集合（5min 缓存）：loader 回源时取当前集合，缓存条目内的 hotOnly
         // 过滤随 5min 集合刷新自然兜底（60s TTL < 5min，无需联动失效）
         Set<Long> hotIds = venueLookupService.getHotVenueIds();
+        CityCentroidService.CityScope cityScope = cityCentroidService.cityScope(null, null, key.city());
+        Set<String> nearbyCities = cityScope.cities();
+        boolean cityScopeLimited = cityScope.limited();
+        List<Long> excludedUserIds = heatExclusionService.excludedUserIds();
         return switch (key.sortMode()) {
             case RECOMMENDED, DISTANCE -> venueRepository.searchRankedNoLocation(
                     key.city(), key.district(), key.status(), key.venueType(), key.keywordPattern(),
                     key.kwPrefixPattern(), null, key.tagPattern(),
-                    POSITIVE_REACTION_CODES, pointsProperties.heatWeight(), key.hotOnly(), hotIds, pageable);
+                    nearbyCities, cityScopeLimited, POSITIVE_REACTION_CODES, pointsProperties.heatWeight(), excludedUserIds,
+                    key.hotOnly(), hotIds, pageable);
             case HEAT -> venueRepository.searchHeat(
                     key.city(), key.district(), key.status(), key.venueType(), key.keywordPattern(),
                     null, key.tagPattern(),
-                    POSITIVE_REACTION_CODES, pointsProperties.heatWeight(), key.hotOnly(), hotIds, pageable);
+                    nearbyCities, cityScopeLimited, POSITIVE_REACTION_CODES, pointsProperties.heatWeight(), excludedUserIds,
+                    key.hotOnly(), hotIds, pageable);
             case NEWEST -> venueRepository.searchNewest(
                     key.city(), key.district(), key.status(), key.venueType(), key.keywordPattern(),
                     null, key.tagPattern(),
-                    key.hotOnly(), hotIds, pageable);
+                    nearbyCities, cityScopeLimited, key.hotOnly(), hotIds, pageable);
         };
     }
 

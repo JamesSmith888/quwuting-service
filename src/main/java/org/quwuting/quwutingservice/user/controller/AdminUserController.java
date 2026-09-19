@@ -61,10 +61,13 @@ public class AdminUserController {
     private final AdminUserBehaviorAnalyticsService behaviorAnalyticsService;
 
     /**
-     * 用户分页列表（GET /admin/users?page=&size=&keyword=&role=&city=&sort=）。
+     * 用户分页列表（GET /admin/users?page=&size=&keyword=&role=&city=&sort=&activeWithin=）。
      * keyword = 昵称模糊；role = 角色筛选（ADMIN/USER）；city = 城市精确匹配；
      * sort = 排序模式（LATEST_JOINED 默认 / POINTS_DESC / LAST_ACTIVE_DESC）；
-     * 全部可空/缺省。仅 ADMIN（requireAdmin）。
+     * activeWithin = 近期活跃筛选（2026-09-19，可空；仅支持 7/30 = 近 N 日（含今日）
+     * 有过主动行为，口径 = {@code UserStatsSql.ACTIVE_FACT_UNION}，<b>不含登录自动
+     * 打卡</b>，非法值 → 1007）；全部可空/缺省。仅 ADMIN（requireAdmin）。
+     * 列表行另带 {@code activeWithin7d}（行级「7 日活跃」标记，恒下发）。
      */
     @GetMapping
     public ApiResponse<Page<AdminUserItem>> list(
@@ -72,10 +75,11 @@ public class AdminUserController {
             @RequestParam(required = false) UserRole role,
             @RequestParam(required = false) String city,
             @RequestParam(required = false) UserSortMode sort,
+            @RequestParam(required = false) Integer activeWithin,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size) {
         UserContext.requireAdmin();
-        return ApiResponse.ok(adminUserService.list(keyword, role, city, sort, page, size));
+        return ApiResponse.ok(adminUserService.list(keyword, role, city, sort, activeWithin, page, size));
     }
 
     /**

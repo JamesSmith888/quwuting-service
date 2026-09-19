@@ -47,6 +47,7 @@ done
 # 有项目源副本的 Skill（源目录名 = 运行时目录名）
 MANAGED_SKILLS=(
   quwuting-venue-daily-sync
+  quwuting-venue-heat-metric
   quwuting-announcement-publish
   quwuting-bulletin-publish
   quwuting-venue-activity-publish

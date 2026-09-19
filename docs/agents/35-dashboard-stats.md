@@ -423,6 +423,32 @@ qwt_dance_records_v1），账目表即使用事实表——**禁为统计新建�
   否则 `behavior-analysis` 会被当成 `:id` 命中用户详情页（静默错页）；该页不标 `meta.module`
   （下钻页，不进设置页清单）。
 
+## 用户信息列表 · 近期活跃筛选与行级标记（2026-09-19）
+
+**背景**：admin-web「资料协作」模块更名为「**用户信息**」（模块主体 = 用户列表 + 画像 + 协作授权；
+详情页协作卡同步改「协作授权」）。运营反馈：统计条有「近 7 日活跃」总数，但看不出**哪些人**在活跃
+——列表行的「最近露面」含登录自动打卡（噪音大），排序「最近露面」会把只打开不互动的号排前面。
+
+**落地（全部复用既有权威口径，零新口径定义）**：
+
+- **口径**：近期活跃 = 近 N 日（含今日）内至少 1 次用户主动行为
+  （`UserStatsSql.ACTIVE_FACT_UNION` 12 表，**不含登录自动打卡**）——与统计条「近 7 日活跃」、
+  大盘「真实互动」、留存分析同一事实源；N ∈ {7, 30}（与顶卡同「含今日共 N 天」窗口算法）。
+- **后端**：`UserRepository.findIdsActiveSince(sinceDay)`（引用 `ACTIVE_FACT_UNION` + `USER_SCOPE`，
+  门禁 `UserStatsSqlMirrorTest` 新增一条断言锁定）；`GET /admin/users` 新增 `activeWithin` 参数
+  （仅 7/30，**非法值 → 1007 禁静默**），`AdminUserItem` 新增 `activeWithin7d`（badge 恒下发）。
+- **为什么不把活跃子查询嵌进列表 SQL**：列表分页有 JPQL 与原生 SQL 两种形态，JPQL 嵌不了原生
+  UNION 子查询，原生侧 `:param IS NULL OR x IN :param` 的空集合绑定是 MySQL `IN ()` 语法错误——
+  故取「**先查活跃 id 集合再 IN**」路径（活跃用户量级 ≪ 总用户数，一次查询筛选/标记两用），
+  分页/计数语义全部留在库内（禁内存分页）。
+- **active 族查询**：三排序各加一条 `findPageByFiltersActive*` 变体（与原查询唯一差异 =
+  一行 `AND u.id IN :activeIds`）；`:activeIds` 由 Service 保证**非空**（筛选后为空在 Service
+  短路返回空页，不进 SQL）。
+- **前端（admin-web）**：列表新增「活跃」筛选 chips（全部/近7日/近30日）+ 行级「7 日活跃」
+  success tag；badge 与 7 日筛选共用同一次 id 集合查询（不重复查库）。
+- **数字交叉验算**：统计条「近 7 日活跃」= 列表筛「近7日活跃」的分页总数（`totalElements`），
+  两者同窗同谓词。
+
 ## 后续规划（P1/P2，未实施）
 
 - 漏斗图：注册→打开→互动；游客→注册转化（NULL user 浏览 vs 注册量）监控分享引流。

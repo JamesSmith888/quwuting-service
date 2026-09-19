@@ -53,16 +53,20 @@ class BulletinReactionCodeTest {
     }
 
     /**
-     * 集合规模断言：既是产品契约（TG 式信息流的表态集合刻意收窄，不随目录膨胀——
-     * 快讯的 Picker 没有「展开全部」承载长列表），也是"误删一项"的哨兵。
-     * 2026-09-11 用户"表情太少" → 10 → 16 → 同日再提"还是太少" → 32（4 列 × 8 行满格）。
-     * 变更集合时同步改本断言 + 前端字典 + 47 号文档，属预期维护成本。
+     * 集合 = 共享目录全量（2026-09-19 起）：既锁"快讯域不再手工挑选子集"（历史教训：
+     * 手工子集 10 → 16 → 32 两次被用户反馈"太少"，门店列表 Picker 同期是 109 格），
+     * 也锁"同集同序"——顺序即 Picker 展示序，两端排序漂移会让同一条快讯在两个端
+     * 展示不同顺序的表情。
      */
     @Test
-    void dictionarySizeIsPinned() {
-        assertEquals(32, BulletinReactionCode.allCodes().size(),
-                "快讯表态字典为 32 项（4 列 × 8 行满格）；"
-                        + "增删请同步前端 constants/bulletin-reactions.ts 与 docs/agents/47-bulletins.md");
+    void dictionaryEqualsEmojiCatalog() {
+        List<String> catalogCodes = EmojiCatalog.allCodes();
+        assertEquals(catalogCodes, BulletinReactionCode.allCodes(),
+                "快讯表态字典应等于共享 emoji 目录全量且同序（前端 constants/bulletin-reactions.ts "
+                        + "同样派生自目录全量）；若业务上需要收窄子集，须同时改本类、前端字典、"
+                        + "本断言与 docs/agents/47-bulletins.md");
+        assertEquals(catalogCodes.size(), BulletinReactionCode.allCodes().size(),
+                "快讯表态字典规模 = 目录规模（当前 " + catalogCodes.size() + " 项）");
     }
 
     @Test
@@ -72,6 +76,8 @@ class BulletinReactionCodeTest {
         // 门店域业务 code 不得被快讯域接受（两域字典刻意不同，防「机车/收费偏高」类
         // 门店属性黑话从快讯接口写进来）
         assertFalse(BulletinReactionCode.isValid("HOT"), "门店业务 code 不属于快讯字典");
-        assertFalse(BulletinReactionCode.isValid("EMOJI_1F600"), "目录里存在但不在快讯集合内的 code 应被拒");
+        // 2026-09-19 起快讯集合 = 目录全量：目录内任意 code 均合法（旧断言曾要求
+        // EMOJI_1F600 被拒，那是"手工子集"时代的产物）
+        assertTrue(BulletinReactionCode.isValid("EMOJI_1F600"), "目录内的 code 应被快讯字典接受");
     }
 }

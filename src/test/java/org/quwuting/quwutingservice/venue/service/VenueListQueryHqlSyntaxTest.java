@@ -10,6 +10,8 @@ import org.hibernate.grammars.hql.HqlParser;
 import org.junit.jupiter.api.Test;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 /**
  * {@link VenueRepository} 列表 @Query 的 <b>HQL 语法级</b>校验（不依赖数据库）。
  * <p>
@@ -58,6 +60,68 @@ class VenueListQueryHqlSyntaxTest {
     void listQueryHqlParsesWithoutSyntaxErrors() {
         for (String query : QUERIES) {
             parseOrFail(query);
+        }
+    }
+
+    /**
+     * 全部 {@code @Query} SQL 文本（<b>含 nativeQuery</b>）的括号配平静态校验。
+     * <p>
+     * <b>为什么需要它（2026-09-19 生产事故根因）</b>：给 {@code findHotVenueIds} 的浏览子查询
+     * 追加「内部账号排除」谓词时，新写的
+     * {@code AND (vv.user_id IS NULL OR vv.user_id NOT IN :excludedUserIds)} 吃掉了原本用来
+     * 闭合 {@code (SELECT ...)} 与 {@code LN(...)} 的两个右括号，而补写时只补回一个 ——
+     * <b>少一个右括号</b>。后果：native SQL 无启动期校验（Hibernate 7 已移除
+     * {@code validate_native_queries}），只在首次执行时由 MySQL 报
+     * {@code SQLSyntaxErrorException}，表现为「首页热门筛选 / 列表接口整体 500」。
+     * <p>
+     * <b>为什么上面的 HQL 语法测试拦不住</b>：{@link #QUERIES} 覆盖的是 JPQL 列表查询，
+     * 而本缺陷在 {@code nativeQuery=true} 的两条查询里——两条路径的校验手段不同（JPQL 有
+     * grammar 可解析，native 只能靠真库）。
+     * <p>
+     * <b>本测试的覆盖方式</b>：反射读取全部 {@code @Query} 的 {@code value}/{@code countQuery}
+     * 文本（Spring 在启动时早已把 Java 字符串拼接完成为最终 SQL），对「去掉字符串字面量后」
+     * 的文本做括号配平断言。零成本（不加载 Spring 上下文、不连库），且**对 JPQL 与 native
+     * 一视同仁**——见 {@code VenueHotVenueIdsSqlTest} 补的语义层真库验证。
+     * <p>
+     * 局限：只覆盖「括号配平」这一缺陷类（正是本次事故的类别）；列名/别名/参数绑定类型
+     * 仍需真库验证。
+     */
+    @Test
+    void allQuerySqlTextsHaveBalancedParentheses() {
+        int checked = 0;
+        for (java.lang.reflect.Method method : VenueRepository.class.getDeclaredMethods()) {
+            org.springframework.data.jpa.repository.Query q =
+                    method.getAnnotation(org.springframework.data.jpa.repository.Query.class);
+            if (q == null) continue;
+            assertBalanced(method.getName() + "#value", q.value());
+            if (!q.countQuery().isBlank()) {
+                assertBalanced(method.getName() + "#countQuery", q.countQuery());
+            }
+            checked++;
+        }
+        assertTrue(checked >= 20, "应扫描到全部 @Query 方法（当前 " + checked + " 个，疑似反射口径失效）");
+    }
+
+    private static void assertBalanced(String label, String sql) {
+        int depth = 0;
+        boolean inLiteral = false;
+        for (int i = 0; i < sql.length(); i++) {
+            char c = sql.charAt(i);
+            if (c == '\'') {
+                // SQL 单引号字面量（'' 为转义的内嵌引号）——其中的括号不参与配平
+                inLiteral = !inLiteral;
+            } else if (!inLiteral && c == '(') {
+                depth++;
+            } else if (!inLiteral && c == ')') {
+                depth--;
+                if (depth < 0) {
+                    throw new AssertionError("[" + label + "] 出现多余的右括号（深度转负）\nSQL:\n" + sql);
+                }
+            }
+        }
+        if (depth != 0) {
+            throw new AssertionError("[" + label + "] 括号未配平：净差 " + depth
+                    + "（正 = 少写了右括号，负 = 多写了右括号）\nSQL:\n" + sql);
         }
     }
 

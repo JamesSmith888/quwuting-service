@@ -1,5 +1,7 @@
 package org.quwuting.quwutingservice.venuereaction.service;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.exception.BusinessException;
@@ -22,6 +24,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -67,6 +70,53 @@ public class VenueReactionService {
     private final OpsConfigService opsConfigService;
 
     /**
+     * toggle 写频控（2026-09-19 补，此前是三条用户行为写路径里唯一裸奔的一条）。
+     * <p>
+     * <b>为什么补</b>：浏览（{@code VenueViewService} 匿名 60s）与收藏
+     * （{@code FavoriteService} 3 次/60s）都有频控，Reaction 一条都没有——脚本连点可
+     * 无限写入（虽然 2026-09-19 起热度按<b>去重人数</b>计，连点已不能直接抬分，但写放大、
+     * 聚合缓存反复失效、以及"多选模式（开关关闭）下同一天堆多行"仍是可用面）。
+     * <p>
+     * <b>阈值为何是 12 而不是收藏的 3</b>：Reaction 的合法交互形态比收藏宽——
+     * ① 每日一票模式下"换票"（点 A→点 B→点回来）本就要数次写入；② 开关关闭（多选模式）
+     * 时用户可能在 Picker 里连续选多个 code（12 项常驻常用表情一把选完属正常操作）。
+     * 取 12/60s 覆盖正常一次挑选，同时把脚本连点压制到分钟级 12 次以内。
+     * <p>
+     * <b>命中后的语义 = 幂等忽略而非报错</b>：不抛异常（前端有乐观更新，报错会触发回滚抖动），
+     * 而是<b>读回该 code 的真实参与态</b>返回——客户端拿到的状态与服务端一致，不会因"忽略"
+     * 而出现按钮与数据不一致。与 FavoriteService「频控命中即幂等忽略」同族取向。
+     * <p>
+     * 内存单机近似（多实例下窗口放大，同既有三处频控）：目标是压制脚本连点，不是精确配额。
+     */
+    private static final int TOGGLE_RATE_LIMIT_PER_WINDOW = 12;
+    private static final long TOGGLE_RATE_LIMIT_SECONDS = 60;
+
+    private final Cache<String, Integer> reactionToggleLimiter = Caffeine.newBuilder()
+            .maximumSize(10_000)
+            .expireAfterWrite(TOGGLE_RATE_LIMIT_SECONDS, TimeUnit.SECONDS)
+            .build();
+
+    /** 频控 key：user:venue（同一用户对同一场所的 toggle 行为） */
+    private static String toggleKey(Long userId, Long venueId) {
+        return userId + ":" + venueId;
+    }
+
+    /**
+     * 写频控判定（调用即计数）：窗口内已达阈值 → 返回 true（本次点击幂等忽略）。
+     * 与 {@code FavoriteService.isToggleLimited} 同构——唯一差异是阈值（见常量注释）。
+     */
+    private boolean isToggleLimited(Long userId, Long venueId) {
+        String key = toggleKey(userId, venueId);
+        Integer count = reactionToggleLimiter.getIfPresent(key);
+        if (count != null && count >= TOGGLE_RATE_LIMIT_PER_WINDOW) {
+            log.debug("reaction toggle 频控忽略: userId={}, venueId={}", userId, venueId);
+            return true;
+        }
+        reactionToggleLimiter.put(key, (count != null ? count : 0) + 1);
+        return false;
+    }
+
+    /**
      * 切换 Reaction 参与状态（toggle：今日未参与→参与，今日已参与→取消）。
      * <p>
      * 每日一票模型（开关 {@link OpsConfigService#KEY_REACTION_DAILY_SINGLE} 开启，默认）：
@@ -90,6 +140,10 @@ public class VenueReactionService {
 
         LocalDate today = LocalDate.now();
         boolean dailySingle = opsConfigService.isEnabled(OpsConfigService.KEY_REACTION_DAILY_SINGLE, true);
+        // 写频控（2026-09-19）：命中则幂等忽略，读回真实参与态返回（不写库、不失效缓存）
+        if (isToggleLimited(userId, venueId)) {
+            return currentState(userId, venueId, code, today, dailySingle);
+        }
         ToggleReactionResult result = dailySingle
                 ? toggleSingleTicket(userId, venueId, code, today)
                 : toggleLegacy(userId, venueId, code, today);
@@ -105,6 +159,35 @@ public class VenueReactionService {
             }
         });
         return result;
+    }
+
+    /**
+     * 读取「该 code 当前是否已参与」的真值（频控命中时的只读返回路径，2026-09-19）。
+     * <p>
+     * <b>为什么不是恒 false</b>：前端有乐观更新层（{@code toggleReactionWithOptimistic}），
+     * 若在频控忽略时返回 {@code reacted=false}，用户会看到按钮从"已参与"弹回"未参与"——
+     * 而服务端数据其实还在。故此处<b>读回真值</b>：客户端拿到的状态与服务端一致。
+     * <p>
+     * 两种模式各自的真值口径（与写路径同源，不另立口径）：
+     * <ul>
+     *   <li>每日一票：当日票的 code 是否等于目标 code（换票后旧 code 即"未参与"）；</li>
+     *   <li>多选（开关关闭）：{@code (user, venue, code, today)} 行是否存在。</li>
+     * </ul>
+     * 只读（无写、无缓存失效），故不需要事务。
+     */
+    private ToggleReactionResult currentState(Long userId, Long venueId, String code, LocalDate today,
+                                              boolean dailySingle) {
+        if (dailySingle) {
+            boolean reacted = venueReactionRepository
+                    .findFirstByUserIdAndVenueIdAndReactionDateOrderByIdAsc(userId, venueId, today)
+                    .map(row -> row.getReactionCode().equals(code))
+                    .orElse(false);
+            return new ToggleReactionResult(reacted, null);
+        }
+        boolean reacted = venueReactionRepository
+                .findByUserIdAndVenueIdAndReactionCodeAndReactionDate(userId, venueId, code, today)
+                .isPresent();
+        return new ToggleReactionResult(reacted, null);
     }
 
     /**

@@ -56,6 +56,13 @@ class VenueHeatServiceTest {
     /** 2026-08-12 礼物化：VenueHeatService 构造器新增 @Lazy PointsService（礼物墙数据源） */
     @Mock
     private org.quwuting.quwutingservice.points.service.PointsService pointsService;
+    /**
+     * 2026-09-19 内部账号排除集合供给方：构造器新增依赖（ADMIN ∪ 运营配置名单）。
+     * 单测对排除集合本身不敏感（它只是传给仓库的 SQL 参数），故用 lenient 常量桩——
+     * 「排除集合非空」这一契约由 {@code HeatAccountExclusionService} 自己的实现保证。
+     */
+    @Mock
+    private HeatAccountExclusionService heatExclusionService;
 
     private VenueHeatService heatService;
 
@@ -64,7 +71,7 @@ class VenueHeatServiceTest {
     @BeforeEach
     void setUp() {
         heatService = new VenueHeatService(venueLookupService, venueRepository, venueStatusLogRepository,
-                tagInteractionRepository, pointsProperties, pointsService);
+                tagInteractionRepository, pointsProperties, heatExclusionService, pointsService);
         venue = new Venue();
         venue.setId(1L);
         venue.setStatus(VenueStatus.OPEN);
@@ -72,8 +79,9 @@ class VenueHeatServiceTest {
 
         when(venueLookupService.findById(1L)).thenReturn(venue);
         // 趋势 mega-query：无数据（generate_series 骨架由 SQL 保证连续，此处空列表即可）
+        // 2026-09-19 起多一个 excludedUserIds 参数（内部账号排除集合）
         when(venueRepository.countDailyTrends(anyLong(), any(), any(), any(), any(),
-                any(), any(), any(), any())).thenReturn(Collections.emptyList());
+                any(), any(), any(), any(), any())).thenReturn(Collections.emptyList());
         // 状态记录查询：默认无记录（各测试按需覆盖）
         when(venueStatusLogRepository.findTop5ByVenueIdAndCreatedAtAfterOrderByCreatedAtDesc(anyLong(), any()))
                 .thenReturn(Collections.emptyList());
@@ -81,11 +89,14 @@ class VenueHeatServiceTest {
 
     /** 基础 stubbing：热度 mega-query 计数器全零，各测试按需覆盖 */
     private void stubZeroCounters() {
-        when(venueRepository.countHeatCounters(anyLong(), any(), any(), any(), any(), any(), any(), any()))
+        // 2026-09-19 起多一个 viewRecentSince 参数（浏览时效窗口起点）+ excludedUserIds
+        when(venueRepository.countHeatCounters(anyLong(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(counters);
         when(counters.getPv()).thenReturn(0L);
         when(counters.getUv()).thenReturn(0L);
-        when(counters.getWeightedviews30d()).thenReturn(0.0);
+        when(counters.getViewuv30d()).thenReturn(0L);
+        when(counters.getViewuv7d()).thenReturn(0L);
+        when(counters.getViewanon30d()).thenReturn(0L);
         when(counters.getFavtotal()).thenReturn(0L);
         when(counters.getFavrecent()).thenReturn(0L);
         when(counters.getPosttotal()).thenReturn(0L);
@@ -174,7 +185,7 @@ class VenueHeatServiceTest {
         LocalDate d1 = LocalDate.now().minusDays(2);
         LocalDate d2 = LocalDate.now().minusDays(1);
         when(venueRepository.countDailyTrends(anyLong(), any(), any(), any(), any(),
-                any(), any(), any(), any())).thenReturn(List.of(
+                any(), any(), any(), any(), any())).thenReturn(List.of(
                 new VenueRepository.DailyTrendRow() {
                     @Override public LocalDate getDay() { return d1; }
                     @Override public Long getFavcount() { return 1L; }
@@ -226,22 +237,41 @@ class VenueHeatServiceTest {
     }
 
     @Test
-    void viewContributionIsLogCompressedOfWeightedViews() {
+    void viewContributionCountsDistinctVisitorsNotRawViews() {
         stubZeroCounters();
-        // 无浏览：加权浏览=0 → ln(1+0)=0，浏览贡献 0，简洁规则展示"浏览贡献 0"
+        // 口径回归：浏览项 = 近30天去重人数×0.3 + 近7天去重人数×0.4 + ln(1+匿名行数)×1
+        //（2026-09-19 二重构，取代 2026-08-27 的「来源加权人次 + ln 压缩」——旧口径实测
+        // 封顶仅 6.4 分，低于 1 次收藏的 8 分，等于让最稀疏的信源主导排序）。
         VenueHeatResponse resp0 = heatService.getHeat(1L);
         assertEquals(0L, resp0.heatScore(), "无浏览时浏览贡献为 0");
         assertTrue(resp0.formulaText().contains("浏览贡献 0"), "无浏览时简洁规则应展示浏览贡献 0");
 
-        // 加权浏览 100（如 200 次 LIST×0.5，或 100 次 OTHER）：ln(1+100)=4.615 → round=5
-        // 验证对数压缩语义——线性口径下 100 次浏览会贡献 100 分，压缩后仅 5 分，
-        // 头部店浏览量不再以线性差距碾压长尾门店（马太效应修复）。
-        when(counters.getWeightedviews30d()).thenReturn(100.0);
-        heatService.invalidate(1L); // 缓存刷新：同一 venueId 首次调用已缓存 0 浏览结果
+        // 近30天 100 人看过、近7天 20 人、匿名 50 行：
+        // 100×0.3 + 20×0.4 + ln(51)×1 = 30 + 8 + 3.93 = 41.93 → 42
+        when(counters.getViewuv30d()).thenReturn(100L);
+        when(counters.getViewuv7d()).thenReturn(20L);
+        when(counters.getViewanon30d()).thenReturn(50L);
+        heatService.invalidate(1L);
         VenueHeatResponse resp = heatService.getHeat(1L);
-        assertEquals(5L, resp.heatScore(), "浏览贡献 = round(ln(1+100)) = 5（对数压缩压制线性量级）");
-        assertTrue(resp.formulaText().contains("浏览贡献 5"), "简洁规则应展示压缩后的浏览贡献");
-        assertTrue(resp.formulaDetail().contains("100.0 → 5"), "完整规则应展示加权输入到压缩贡献的换算");
+        assertEquals(42L, resp.heatScore(), "浏览贡献 = round(100×0.3 + 20×0.4 + ln(51)) = 42");
+        assertTrue(resp.formulaText().contains("浏览贡献 42"), "简洁规则应展示人数口径的浏览贡献");
+        assertTrue(resp.formulaDetail().contains("100 人看过"), "完整规则应写明「有多少人看过」");
+    }
+
+    @Test
+    void anonymousViewContributionIsLogCompressedAgainstFlooding() {
+        stubZeroCounters();
+        // 匿名浏览不可去重（仅 60s 频控），故只给它 ln 压缩项：行数从 50 暴涨到 2000
+        // 时浏览贡献只多 ln(2001) − ln(51) = 7.60 − 3.93 ≈ 4 分——刷量无法买排序。
+        when(counters.getViewanon30d()).thenReturn(50L);
+        VenueHeatResponse respLow = heatService.getHeat(1L);
+        long low = respLow.heatScore();
+
+        when(counters.getViewanon30d()).thenReturn(2000L);
+        heatService.invalidate(1L);
+        long high = heatService.getHeat(1L).heatScore();
+
+        assertEquals(4L, high - low, "匿名行数 50 → 2000 只应带来约 4 分增量（对数封顶）");
     }
 
     @Test

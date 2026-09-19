@@ -77,6 +77,22 @@ public class OpsConfigService {
      */
     public static final String KEY_ANNOUNCEMENT_DATA_UPDATE_AUTO_OFFLINE_HOURS = "announcement.data_update.auto_offline_hours";
 
+    /**
+     * 热度统计「内部账号排除名单」（2026-09-19，V31 迁移插入默认行，值默认空）：
+     * 逗号分隔的 user id；命中的账号**不参与任何热度公式输入**（浏览/收藏/评分/正向反馈/
+     * 收到积分），也不进列表排序与热门判定。
+     * <p>
+     * 根因（生产实证）：热度公式的最高权重输入是「主动信号」（收藏×8 / 评分×8 / 反馈×3），
+     * 这类信号与到访无关、可零成本重复产出。2026-09-19「约翰（歌友会）」6 天登顶全国第 1，
+     * 97% 分数来自 15 个账号点击，其中 13 个是平台早期批量注册账号（含 ADMIN）；全网口径
+     * 14 个 id ≤ 20 的账号贡献 76% 反馈行 / 49% 收藏行——榜单度量的是内部点击而非用户人气。
+     * <p>
+     * 与 ADMIN 的关系：ADMIN 角色由代码侧**无条件派生**（客观字段，零配置）；本配置项只承载
+     * 「非 ADMIN 但同样是内部/测试」的账号——这类账号无法由任何客观字段推断，只能人工登记。
+     * 两部分在 {@code HeatAccountExclusionService} 合并为一个排除集合。
+     */
+    public static final String KEY_HEAT_EXCLUDED_USER_IDS = "heat.excluded.user.ids";
+
     private final OpsConfigRepository opsConfigRepository;
 
     /** 单键配置缓存（LoadingCache + Optional 承载"键不存在"——Caffeine 禁 null 值） */
