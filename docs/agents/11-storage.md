@@ -138,10 +138,11 @@ storage:
 
 ### RLS 上传白名单（2026-08-24 事故记录）
 
-`qwt-public` bucket 的匿名上传受 RLS 限制——`storage.objects` 上 `qwt-public insert anon` 策略只放行**白名单一级目录**（当前：`venue-covers / venue-photos / venue-qr / user-avatars / dancer-photos / dancer-avatars / dancer-contact-qr / claim-licenses / group-qr / dancer-videos`）。**前端直传走 anon key，凡路径前缀不在白名单一律被拒**——⚠️ **Supabase Storage 对 RLS 拒绝返回 HTTP 400**（响应体 `{"statusCode":"403","error":"Unauthorized","message":"new row violates row-level security policy","code":"AccessDenied"}`），前端 uploadToSupabase 非 200/201 报「上传失败（400）」——**排障时不要把 400 当参数错，先看响应体 code 是否 AccessDenied**；读（SELECT）对所有 anon 开放（bucket 公开读）。
+`qwt-public` bucket 的匿名上传受 RLS 限制——`storage.objects` 上 `qwt-public insert anon` 策略只放行**白名单一级目录**（当前：`venue-covers / venue-photos / venue-qr / user-avatars / dancer-photos / dancer-avatars / dancer-contact-qr / claim-licenses / group-qr / dancer-videos / app-feedbacks`）。**前端直传走 anon key，凡路径前缀不在白名单一律被拒**——⚠️ **Supabase Storage 对 RLS 拒绝返回 HTTP 400**（响应体 `{"statusCode":"403","error":"Unauthorized","message":"new row violates row-level security policy","code":"AccessDenied"}`），前端 uploadToSupabase 非 200/201 报「上传失败（400）」——**排障时不要把 400 当参数错，先看响应体 code 是否 AccessDenied**；读（SELECT）对所有 anon 开放（bucket 公开读）。
 
 - **新增 FileCategory 后必须同步在 Supabase 控制台更新该策略**（或 DDL 重建同名策略）——`FileCategory` 枚举与 RLS 白名单无自动联动，两侧是手工契约
 - **⚠️ DANCER_VIDEO 白名单补配（2026-08-24 事故：舞伴短视频上传 400）**：08-22 新增 `DANCER_VIDEO("dancer-videos")` 分类（前端 video-upload + 后端枚举/校验均已就绪），但 RLS 白名单漏配 `dancer-videos` → 视频直传全部 HTTP 400 `AccessDenied`（同 GROUP_QR 08-17 漏配同款三处同步遗漏，本次漏的是第 ② 处）。修复 = 控制台执行下文「RLS 白名单补配 SQL」加入 `dancer-videos`。**教训：新增 FileCategory 三处同步校验点不止枚举/前端，必须以「直传生产实测 200」为验收标准**（`curl -F file=@test.jpg` 直传新前缀，见下文验证）。
+- **⚠️ APP_FEEDBACK 白名单补配（2026-09-19 事故：意见反馈截图上传 400，第三次同型）**：08-28 新增 `APP_FEEDBACK("app-feedbacks")`（前端 feedback 页 image-upload + 后端枚举均就绪），RLS 白名单再次漏配 `app-feedbacks` → 用户截图直传全部 HTTP 400 `AccessDenied`（报错指纹与 08-24 完全一致）。修复 = 控制台执行 `scripts/fix_rls_app_feedbacks.sql`（同款三段式：核对/重建/验证 + curl 实测）。**三次同型事故后强约束：新增 FileCategory 的 PR 模板检查项 = 「RLS 白名单 SQL 已备 + 直传实测 200 截图」**。
 - **历史遗留前缀 `dancer-videos/`**（旧项目 tkyreautvukkwpwmisbg 时代存量，与现行分类同名不同源）：存量数据切新项目后未迁移，遇此类 URL 需人工转存到白名单目录并同步改写数据库 URL
 - **切 Supabase 项目（08-08）后存量 OLD 前缀 URL 全面清零**：全库扫描所有 `%url%` 列 `LIKE 'https://tkyreautvukkwpwmisbg%'`，先转存对象到新 bucket 同路径（保持路径则仅换域名；不在白名单的目录改存白名单目录），再 `replace` 改写前缀——**对象不存在时改写前缀会变成新 URL 裂图且 ImageContentValidator 下载 404 继续报 1005**
 
