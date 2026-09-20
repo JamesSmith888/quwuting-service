@@ -383,6 +383,55 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             """;
 
     /**
+     * 「有活动」筛选谓词（2026-09-20 新增，驱动首页筛选面板「营业活动」section）。
+     * <p>
+     * <b>口径 = 活动有效期覆盖今日</b>（{@code startDate <= today <= endDate}；ALWAYS 型
+     * 两日期皆为 null ⇒ 条件恒真）——即"这家店<b>今天</b>有活动"，<b>刻意不是"此刻命中
+     * 生效时段"</b>，三条理由：
+     * <ol>
+     *   <li><b>不制造第二份真值（决定性）</b>：「此刻命中」= {@code weekdayMask × windows ×
+     *       跨夜}的复合判定，其唯一实现是 {@code ActivityWindow.contains()}——49 号 §3 红线
+     *       明写「所有命中判定走 ActivityWindow.contains()，任何地方不得自写时间比较」。
+     *       把该判定写进 SQL 等于把<b>跨夜规则实现第二遍</b>（{@code close < open} 那一支最容易
+     *       写错、且错了不报错只静默不命中），正是本仓最贵的一类漂移（KW_MATCH 三处镜像的
+     *       教训）。日粒度只比较<b>日期</b>，与时段/星期/跨夜完全无关，不产生第二份真值。</li>
+     *   <li><b>与卡片口径同源，但只到"日粒度粗筛"这一层</b>：门店卡的「活动通知行」下发条件
+     *       本就是<b>日粒度</b>（49 号 §5.2「活动在当前日期范围内」而非"此刻正好命中时段"），
+     *       两者因此在主路径上重合——筛选结果里的每一行，卡片上基本都有那条活动通知行，
+     *       "什么时候能用"由通知行文案回答（「进行中」/「13:00 起」），筛选只回答"有没有"。
+     *       <b>⚠️ 不是严格同源</b>：卡片那一行的权威判据是
+     *       {@code ActivityStateResolver#resolve}（{@code weekdayMask × windows × 跨夜 ×
+     *       nextActiveDate}），SQL 表达不了（正因为表达不了才必须放这里）⇒ 两个方向都有
+     *       <b>有界</b>差（尾巴日 / 预热期），清单与订正见
+     *       {@code docs/agents/06-listing-and-stats.md}「与卡片活动行的关系」。</li>
+     *   <li><b>缓存友好</b>：无坐标列表视图走 60s 缓存（{@code VenueService#venueListCache}，
+     *       本参数已入缓存键）。日粒度在一天内稳定，与 60s TTL 无冲突；秒级事实进缓存必然
+     *       出现"缓存里说进行中、点进去已结束"（49 号 §5.2 正因此把列表标记拆成独立接口）。</li>
+     * </ol>
+     * <p>
+     * {@code deleted = false} 与 {@code status = PUBLISHED} 均与
+     * {@code VenueActivityService#badgeByVenueIds} 的查询条件同源
+     * （{@code findPublishedByVenueIds}：{@code deleted = false AND status = PUBLISHED}）——
+     * 卡片活动通知行的取数口径就是这两条，谓词少一条即「筛出来但卡片没有行」。
+     * 草稿 / 已下线 / <b>已删除</b>一律不算；{@code endDate >= CURRENT_DATE} 为<b>防抖兜底</b>——
+     * 过期下线由 30s 调度负责（判据 {@code endDate < today}，结束当天仍有效），
+     * 调度停摆时本谓词仍 fail-closed：宁可少返一家，也不给一个已经过期的活动。
+     * <p>
+     * {@code hasActivity = false} 时短路恒真（不筛选——默认口径不做隐式过滤，同 hotOnly / tag）。
+     * <p>
+     * <b>声明位置约束</b>：必须位于 {@link #LIST_FILTERS} 之前——接口字段按声明顺序初始化，
+     * Java 禁止初始化器中的向前引用（同 {@link #CITY_ONLY_VISIBILITY_PREDICATE}）。
+     */
+    String ACTIVITY_PREDICATE = """
+            AND (:hasActivity = false OR EXISTS (SELECT 1 FROM VenueActivity a
+                       WHERE a.venueId = v.id
+                         AND a.deleted = false
+                         AND a.status = org.quwuting.quwutingservice.venueactivity.enums.ActivityStatus.PUBLISHED
+                         AND (a.startDate IS NULL OR a.startDate <= CURRENT_DATE)
+                         AND (a.endDate IS NULL OR a.endDate >= CURRENT_DATE)))
+            """;
+
+    /**
      * 列表筛选条件（全部排序变体共用）。
      * 所有参数可空：null 表示不限制；keyword / tag 需调用方预先包装为 %xx%。
      * <p>
@@ -405,6 +454,12 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * （反向标签无"龙女"子串）；JSON 元素引号天然规避跨标签误匹配（"舞女"不含
      * "龙女"子串）。<b>已知边界</b>：未来若出现"禁龙女"类反向词会被误命中——
      * 当前标签规范无此类（见后端 AGENTS.md「标签筛选」），新增反向标签需同步本谓词。
+     * <p>
+     * {@code hasActivity}（2026-09-20 新增「有活动」筛选）：true 时仅保留<b>今天在活动有效期内</b>
+     * 的门店（EXISTS 子查询，口径与三条理由见 {@link #ACTIVITY_PREDICATE}）。它是<b>结果集约束</b>
+     * （同 {@link #CITY_ONLY_VISIBILITY_PREDICATE}）、与排序方式无关 ⇒ 必须放本片段而不是
+     * {@link #RADIUS_PREDICATE}（后者只有带坐标变体才拼接，放那里会出现"热度/最新排序筛了、
+     * 推荐排序没筛"）。使用本片段的查询方法必须声明该参数（boolean，禁 null，Service 层保证）。
      */
     String LIST_FILTERS = """
             WHERE v.deleted = false
@@ -420,6 +475,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
               AND (:tag IS NULL OR v.tags LIKE :tag)
               AND (:hotOnly = false OR v.id IN :hotIds)
             """
+            + ACTIVITY_PREDICATE
             + CITY_ONLY_VISIBILITY_PREDICATE;
 
     /**
@@ -737,6 +793,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                              @Param("excludedUserIds") List<Long> excludedUserIds,
                              @Param("hotOnly") boolean hotOnly,
                              @Param("hotIds") Set<Long> hotIds,
+                             @Param("hasActivity") boolean hasActivity,
                              Pageable pageable);
 
     /**
@@ -773,6 +830,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                        @Param("excludedUserIds") List<Long> excludedUserIds,
                                        @Param("hotOnly") boolean hotOnly,
                                        @Param("hotIds") Set<Long> hotIds,
+                                       @Param("hasActivity") boolean hasActivity,
                                        Pageable pageable);
 
     /**
@@ -807,6 +865,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                               @Param("cityScopeLimited") boolean cityScopeLimited,
                               @Param("hotOnly") boolean hotOnly,
                               @Param("hotIds") Set<Long> hotIds,
+                              @Param("hasActivity") boolean hasActivity,
                               Pageable pageable);
 
     /**
@@ -834,6 +893,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                            @Param("excludedUserIds") List<Long> excludedUserIds,
                            @Param("hotOnly") boolean hotOnly,
                            @Param("hotIds") Set<Long> hotIds,
+                           @Param("hasActivity") boolean hasActivity,
                            Pageable pageable);
 
     /**
@@ -865,6 +925,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                        @Param("excludedUserIds") List<Long> excludedUserIds,
                                        @Param("hotOnly") boolean hotOnly,
                                        @Param("hotIds") Set<Long> hotIds,
+                                       @Param("hasActivity") boolean hasActivity,
                                        Pageable pageable);
 
     /**
@@ -887,6 +948,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                              @Param("cityScopeLimited") boolean cityScopeLimited,
                              @Param("hotOnly") boolean hotOnly,
                              @Param("hotIds") Set<Long> hotIds,
+                             @Param("hasActivity") boolean hasActivity,
                              Pageable pageable);
 
     /**
@@ -913,6 +975,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                                          @Param("cityScopeLimited") boolean cityScopeLimited,
                                          @Param("hotOnly") boolean hotOnly,
                                          @Param("hotIds") Set<Long> hotIds,
+                                         @Param("hasActivity") boolean hasActivity,
                                          Pageable pageable);
 
     /**

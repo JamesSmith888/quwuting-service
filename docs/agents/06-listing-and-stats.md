@@ -105,6 +105,56 @@ Postgres 对无类型的 null 绑定参数推断为 `bytea`，JPQL 中 `radians(
 
 **匹配口径与已知边界**：`tags` 为 JSON 数组字符串列，子串 LIKE 命中「龙女可进」与「龙女」，**不命中**「禁龙」（无"龙女"子串）；JSON 元素引号天然规避跨标签误匹配（「舞女」不含"龙女"子串）。**已知边界**：未来若新增「禁龙女」类反向标签会被本谓词误命中（元素含"龙女"子串）——新增反向标签须同步本谓词（如排除 `NOT LIKE '%禁%'`）或改用精确元素匹配。LIKE 无索引，数据规模数百级无性能压力。
 
+### 「有活动」筛选（hasActivity，2026-09-20 新增，驱动小程序筛选面板「营业活动」section）
+
+`GET /venues` 新增可选参数 `hasActivity`：`true` = 仅返回**今天在活动有效期内**的门店。
+实现 = `VenueRepository.ACTIVITY_PREDICATE`（在 `LIST_FILTERS` 内追加，**7 个**排序/范围变体查询
+自动共享——`searchRanked` / `searchRankedNoLocation` / `searchNearest` / `searchHeat` /
+`searchHeatWithinRadius` / `searchNewest` / `searchNewestWithinRadius` 各自新增
+`@Param("hasActivity")`），Service 侧由 `VenueService.listVenues` → `dispatchListQuery` 透传
+（与 `hotOnly` 同构），并**必须入 `VenueListKey`**（否则"筛有活动"会命中未筛选的缓存页 = 串味）。
+
+```sql
+AND (:hasActivity = false OR EXISTS (SELECT 1 FROM VenueActivity a
+           WHERE a.venueId = v.id
+             AND a.deleted = false
+             AND a.status = ...ActivityStatus.PUBLISHED
+             AND (a.startDate IS NULL OR a.startDate <= CURRENT_DATE)
+             AND (a.endDate IS NULL OR a.endDate >= CURRENT_DATE)))
+```
+
+- **`deleted = false` + `status = PUBLISHED` 两句与卡片取数同源**：`badgeByVenueIds` 走的
+  `VenueActivityRepository.findPublishedByVenueIds` 判据就是这两条，谓词少一条即出现
+  **"筛出来但卡片没有活动行"**（2026-09-20 事故二修：初版漏 `deleted = false`）。
+
+- **口径 = 日粒度（有效期覆盖今日）**，⛔ **不是"此刻命中生效时段"**——决定性理由是
+  **不制造第二份真值**：「此刻命中」= `weekdayMask × windows × 跨夜` 的复合判定，唯一实现是
+  `ActivityWindow.contains()`（`49-venue-activities.md` §3 红线「任何地方不得自写时间比较」），
+  写进 SQL 等于把跨夜规则实现第二遍（`close < open` 那支最易错、错了静默不命中）。日粒度只比
+  **日期**，与时段/星期/跨夜无关。另两条：与前端门店卡「活动通知行」口径同源（该行出现条件本就是
+  日粒度 ⇒ 筛出来的每一行卡片上必然有活动行）；无坐标视图走 60s 缓存，日粒度一天内稳定、
+  秒级事实进缓存必然出现"筛出来点进去已结束"。
+- **挂 `LIST_FILTERS` 而不是 `RADIUS_PREDICATE`**：它是**结果集约束**（同
+  `CITY_ONLY_VISIBILITY_PREDICATE`）、与排序方式无关；`RADIUS_PREDICATE` 只有带坐标变体才拼接，
+  放那里会出现"热度/最新排序筛了、推荐排序没筛"。
+- **与卡片活动行的关系 = 日粒度粗筛，不是严格同源（2026-09-20 订正原注释的过度承诺）**：卡片那一行
+  的权威判据是 `ActivityStateResolver.resolve()`（`weekdayMask × windows × 跨夜 ×
+  nextActiveDate`），**SQL 无法表达**（这正是上面第一条不制造第二份真值的原因）⇒ 两个方向都有
+  **有界**差，使用/改动本谓词前必须知道：
+  - **筛出来但卡片无行**（尾巴）：`endDate = 今天` 且（今天不在 `weekdayMask` 内 或 今天的场次都已过且
+    之后无生效日）——最长 1 天，是"结束当天仍有效"（下线调度判据 `endDate < today`）与卡片
+    "无下一次则不下发"两条已定口径的交叉结果。
+  - **卡片有行但筛不出来**：预热期（`startDate > 今天`，resolver 给 `NOT_STARTED`，卡片行文案
+    「9月25日 起」）被 `startDate <= CURRENT_DATE` 挡住。**是否纳入待裁决**——纳入口径 = 删掉该子句
+    （谓词退化为"未彻底过期"，与 `findPublishedByVenueIds` 的日期观感一致）；保持现状 = "有活动"
+    严格回答"今天（含预热）之外、此刻就能拿到权益吗"。
+- **`endDate >= CURRENT_DATE` 是 fail-closed 兜底**：过期下线由 30s 调度负责（判据
+  `endDate < today`，结束当天仍有效），调度停摆时本谓词宁可少返一家，也不给已过期的活动。
+  ALWAYS 型两日期为 null ⇒ 条件恒真。
+- 不传 = 不过滤（默认口径不做隐式过滤，同 hot/tag/venueType）；管理端「平台门店」选择器
+  （`AdminVenueSyncReportController.searchVenues`）恒传 null。
+- 语义与展示分工见前端 `07-list-page.md` · 「有活动」筛选（进面板不进快捷位的三条判据）。
+
 ### 城市词表与筛选
 
 城市 / 区县按标准行政区划名（前端 `picker mode="region"` 产出，如"绍兴市"）**精确匹配**，写入与查询共用同一词表。禁止模糊匹配兜底——会掩盖写入端数据质量问题。存量脏数据走一次性清洗 SQL，不改查询逻辑。

@@ -15,13 +15,15 @@ import java.time.LocalDateTime;
  * 只在命中时才出现，会让列表页在一天中的大部分时间里对"这家店有活动"完全失声，
  * 而用户真正需要的是"现在没有的话，什么时候有"。
  * <p>
- * <b>两种语气的分工（一个状态只回答一个问题）</b>：
- * <ul>
- *   <li>{@code ACTIVE} → 前端渲染 {@code badgeLabel}（"买一送一"）—— 回答<b>能拿到什么</b>；</li>
- *   <li>其余三态 → 前端按 {@code nextChangeAt} 渲染时间（"13:00 起" / "明日 13:00" /
- *       "9月25日 起"）—— 回答<b>什么时候来</b>。</li>
- * </ul>
- * 前端不重算时间文案，只做 {@code nextChangeAt} 的一次减法（派生权威在后端，同域内一致）。
+ * <b>列表页那条通知行怎么读（2026-09-16 二期口径；chip 已废除）</b>：前端的
+ * {@code activityNoticeText} 统一渲染「{@code badgeLabel} · 状态或时间」——**两态同款**，
+ * 差异全在文字：{@code ACTIVE} → "买一送一 · 进行中"；其余三态 → "买一送一 · 13:00 起"。
+ * 所以 {@code badgeLabel} 与 {@code state}/{@code nextChangeAt} 必须**同时下发**：
+ * 前者回答"能拿什么"、后者回答"什么时候来"（旧 chip 只有一格宽，只能二选一）。
+ * 时间文案仍由前端按 {@code nextChangeAt} 做一次减法，派生权威在后端一处。
+ * <p>
+ * <b>2026-09-20：同一 venueId 下发的是一条数组</b>（按展示优先级排好，索引 0 最先轮播）
+ * ——那一行已支持多条轮播，所以"一个 chip 的位置"这个旧前提不再成立。
  *
  * @param state         当前态（NOT_STARTED / UPCOMING_TODAY / ACTIVE / ENDED_TODAY）
  * @param stateDisplay  状态展示名（无障碍朗读与兜底文案）

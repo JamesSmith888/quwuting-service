@@ -124,7 +124,7 @@ DRAFT ──publish──▶ PUBLISHED ──(end_date < today 强转 / 手动 o
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/venues/{venueId}/activities` | 门店可见活动（只认 PUBLISHED）。返回 `state` / `stateDisplay` / `nextChangeAt` / `windowsText` / `validityText` / `badgeLabel`（已按类别兜底）等**派生好的结果** |
-| GET | `/venues/activity-badges?venueIds=1,2,3` | 列表页批量标记，返回 `{venueId: {state, stateDisplay, nextChangeAt, badgeLabel}}`：**活动在日期范围内即下发**（与营业状态徽标同源——状态要在、语气降级），**已彻底过期的不下发键**；同店多条取一条，规则 `命中优先 → nextChangeAt 最近 → activityId 兜底`（与前端 `pickShareActivity` 必须一致） |
+| GET | `/venues/activity-badges?venueIds=1,2,3` | 列表页批量标记，返回 `{venueId: [{state, stateDisplay, nextChangeAt, badgeLabel}, ...]}`：**活动在日期范围内即下发**（与营业状态徽标同源——状态要在、语气降级），**已彻底过期的不下发键**；同店多条**按 `命中优先 → nextChangeAt 最近 → activityId 兜底` 排序后全量下发**（规则实现 `VenueActivityService.compareBadgePriority`，与前端 `compareSharePriority` / `pickShareActivity` 必须一致；2026-09-20 由"取一条"扩为"排多条"，判据逐条等价——列表页那一行已支持轮播） |
 | POST | `/venues/{venueId}/activities/{activityId}/checkin` | 打卡（幂等） |
 
 分享复用 `venueshare` 域既有端点（本域**不新增接口**，只加可空 `activityId` 字段）：

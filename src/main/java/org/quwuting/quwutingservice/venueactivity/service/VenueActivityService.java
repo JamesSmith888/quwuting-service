@@ -130,7 +130,7 @@ public class VenueActivityService {
 
     /**
      * 门店**列表页**批量打标：传入一批 venueId，返回
-     * venueId → {@link VenueActivityBadgeResponse}（**在该店日期范围内的活动**才出现）。
+     * venueId → {@link VenueActivityBadgeResponse} **列表**（**在该店日期范围内的活动**都出现）。
      * <p>
      * <b>下发条件（2026-09-16 口径修订）</b>：活动在**当前日期范围内**就下发，
      * **不再要求"此刻正好命中时段"**——与门店营业状态徽标同源：
@@ -141,18 +141,24 @@ public class VenueActivityService {
      * 唯一不下发的情形 = **已彻底过期**（有效期结束且无下一次）——那不是降级，
      * 是这条活动已经不存在（正常路径由 30s 调度强转 OFFLINE，此处仅防御）。
      * <p>
+     * <b>为什么是"列表"而不是"一条"（2026-09-20 改）</b>：列表页那一行已能轮播多条
+     * （同「最新上报」信号行的节奏）。只挑一条等于让第 2 条以后的活动在列表上**根本没有
+     * 出口**——用户只能在点进详情页之后才知道有两条。服务端负责**排序**（
+     * {@link #compareBadgePriority}，索引 0 = 最该先被看到的那条），客户端负责节奏，
+     * 判定权威仍只此一处。
+     * <p>
      * 为什么是独立接口而不是塞进门店列表响应：门店列表响应带 30s 公共字段缓存，
      * 而"此刻命中 / 下一次何时到"是**秒级**事实，混在一起会出现"缓存里说进行中、
      * 点进去已结束"；且活动是其他域的数据，挂在门店 DTO 上会让 04/05 号域文档
      * 被迫承载活动口径（跨域耦合）。
      */
     @Transactional(readOnly = true)
-    public Map<Long, VenueActivityBadgeResponse> badgeByVenueIds(Collection<Long> venueIds) {
+    public Map<Long, List<VenueActivityBadgeResponse>> badgeByVenueIds(Collection<Long> venueIds) {
         if (venueIds == null || venueIds.isEmpty()) {
             return Map.of();
         }
         LocalDateTime now = LocalDateTime.now();
-        Map<Long, VenueActivityBadgeResponse> badges = new HashMap<>();
+        Map<Long, List<VenueActivityBadgeResponse>> badges = new HashMap<>();
         List<VenueActivity> activities =
                 activityRepository.findPublishedByVenueIds(venueIds, ActivityStatus.PUBLISHED);
         for (VenueActivity activity : activities) {
@@ -160,40 +166,46 @@ public class VenueActivityService {
             if (view.state() == ActivityState.ENDED_TODAY && view.nextChangeAt() == null) {
                 continue;
             }
-            VenueActivityBadgeResponse candidate = new VenueActivityBadgeResponse(
-                    activity.getId(),
-                    activity.getBadgeLabel(),
-                    view.state(),
-                    view.state().getDisplayName(),
-                    view.nextChangeAt());
-            badges.merge(activity.getVenueId(), candidate,
-                    (kept, incoming) -> isBetterBadge(kept, incoming) ? kept : incoming);
+            badges.computeIfAbsent(activity.getVenueId(), key -> new ArrayList<>())
+                    .add(new VenueActivityBadgeResponse(
+                            activity.getId(),
+                            activity.getBadgeLabel(),
+                            view.state(),
+                            view.state().getDisplayName(),
+                            view.nextChangeAt()));
         }
+        badges.values().forEach(list -> list.sort(this::compareBadgePriority));
         return badges;
     }
 
     /**
-     * 同店多条活动时选哪一条上列表。
+     * 同店多条活动的**列表页展示顺序**：索引 0 = 最该先被看到的那条。
      * <p>
-     * 判据：列表页只有一个 chip 的位置——**"此刻命中"优先于"待会儿命中"**
-     * （前者直接回答"现在去就有"）；同为未命中则取**最近一次到来**的
-     * （与用户"什么时候去"的问法对齐）；仍并列用 activityId 兜底，
-     * 保证结果确定、不依赖查询或 Map 的顺序。
+     * 判据（2026-09-20 由"选一条"扩为"排多条"，规则本身一字未改）：
+     * **"此刻命中"优先于"待会儿命中"**（前者直接回答"现在去就有"）；
+     * 同为未命中则取**最近一次到来**的（与用户"什么时候去"的问法对齐）；
+     * 仍并列用 activityId 兜底，保证顺序确定、不依赖查询或 Map 的顺序。
+     * <p>
+     * <b>⚠️ 这是"两处镜像"的第 1 处</b>：小程序端
+     * {@code miniprogram/utils/venueActivity.ts} 的 {@code compareSharePriority} 是同一套
+     * 规则的第二份实现（Java 与 TS 无法共享代码，与别名域 KW_MATCH 三处镜像是同一类
+     * 约束）——**改这里必须同步改那里**，否则会出现"列表轮播首先讲的那条"与
+     * "分享出去讲的那条"不是同一条这种最难解释的不一致。
      */
-    private boolean isBetterBadge(VenueActivityBadgeResponse kept,
-                                  VenueActivityBadgeResponse incoming) {
-        if (kept.isActive() != incoming.isActive()) {
-            return kept.isActive();
+    private int compareBadgePriority(VenueActivityBadgeResponse a, VenueActivityBadgeResponse b) {
+        if (a.isActive() != b.isActive()) {
+            return a.isActive() ? -1 : 1;
         }
-        LocalDateTime keptAt = kept.nextChangeAt();
-        LocalDateTime incomingAt = incoming.nextChangeAt();
-        if (keptAt != null && incomingAt != null && !keptAt.isEqual(incomingAt)) {
-            return keptAt.isBefore(incomingAt);
+        LocalDateTime aAt = a.nextChangeAt();
+        LocalDateTime bAt = b.nextChangeAt();
+        // null = 不会自然变化 ⇒ 排在"有确定下次时刻"的后面（信息量更少）
+        if ((aAt == null) != (bAt == null)) {
+            return aAt != null ? -1 : 1;
         }
-        if ((keptAt == null) != (incomingAt == null)) {
-            return keptAt != null;
+        if (aAt != null && !aAt.isEqual(bAt)) {
+            return aAt.isBefore(bAt) ? -1 : 1;
         }
-        return kept.activityId() < incoming.activityId();
+        return Long.compare(a.activityId(), b.activityId());
     }
 
     /**

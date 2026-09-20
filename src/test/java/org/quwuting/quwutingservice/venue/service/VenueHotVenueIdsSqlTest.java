@@ -79,7 +79,14 @@ class VenueHotVenueIdsSqlTest {
                 2 /* 积分权重（与 PointsProperties 默认一致；本测试只验证 SQL 语义层） */,
                 // excludedUserIds（2026-09-19 内部账号排除）：同为恒非空契约（-1 哨兵）
                 java.util.List.of(-1L),
-                true, venueLookupService.getHotVenueIds(), PageRequest.of(0, 20));
+                true, venueLookupService.getHotVenueIds(),
+                // hasActivity（2026-09-20 新增「有活动」筛选，见 ACTIVITY_PREDICATE）：本测试
+                // 只验证「热门」谓词的语义层 ⇒ 恒 false（= 不过滤活动，同 VenueService 默认口径）。
+                // ⚠️ 新增共享谓词参数后，本调用点是"编译期就会被抓到"的那一处——ECJ（IDE）会
+                // 容忍这类错误继续运行，javac/`test-compile` 不会（2026-09-20 事故：本文件与
+                // VenueService 两处半径变体同时漏改，前者让 test-compile 直接失败）。
+                false,
+                PageRequest.of(0, 20));
         assertNotNull(page, "热门筛选列表查询应执行成功（参数绑定/谓词合法）");
         // 热门筛选语义：返回的每一家都必须在热门集合内
         Set<Long> hotIds = venueLookupService.getHotVenueIds();

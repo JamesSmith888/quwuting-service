@@ -108,6 +108,10 @@ public class VenueController {
      *   （如 tag=龙女 命中"龙女可进"/"龙女"标签门店，不命中"禁龙"反向标签）；与城市/状态/热门正交
      * venueType 可选（2026-09-13 新增，HALL/KTV/SONG_CLUB）：仅返回该类型门店，
      *   驱动首页「门店类型」快捷筛选；不传 = 不过滤（默认口径不做隐式过滤，同 hot/tag）。
+     * hasActivity 可选（2026-09-20 新增「有活动」筛选，驱动筛选面板「营业活动」section）：
+     *   true = 仅返回<b>今天在活动有效期内</b>的门店（日粒度 startDate ≤ 今日 ≤ endDate，
+     *   ALWAYS 型恒真）——刻意不是"此刻命中生效时段"，口径与三条理由见
+     *   VenueRepository#ACTIVITY_PREDICATE。不传 = 不过滤（默认口径不做隐式过滤）。
      */
     @GetMapping
     public ApiResponse<Page<VenueResponse>> listVenues(
@@ -123,12 +127,13 @@ public class VenueController {
             @RequestParam(required = false) Double radiusKm,
             @RequestParam(required = false) Boolean hot,
             @RequestParam(required = false) String tag,
+            @RequestParam(required = false) Boolean hasActivity,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size
     ) {
         return ApiResponse.ok(
                 venueService.listVenues(city, district, status, venueType, keyword, latitude, longitude,
-                        window, sort, radiusKm, hot, tag, page, size));
+                        window, sort, radiusKm, hot, tag, hasActivity, page, size));
     }
 
     /**

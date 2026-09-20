@@ -1,7 +1,7 @@
 {
   "source": "xianbao360",
   "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-09-18",
+  "updated": "2026-09-20",
   "entries": [
     {
       "city": "西安市",
@@ -3348,6 +3348,13 @@
       "venue_id": 1423,
       "kind": "exact",
       "note": "2026-09-18 用户贴表建档（湖北第五批：十堰首覆）；茅箭区邮电街销品茂5楼，19:00-02:00，SUSPENDED；十堰市首覆"
+    },
+    {
+      "city": "沈阳市",
+      "news_name": "新富合",
+      "platform_name": "新·合·富舞厅",
+      "kind": "typo",
+      "note": "2026-09-20 实证：市井慢时光摘要写作「新富合」（字序颠倒）⇒ keyword「新富合」0 命中、「新合富」命中 #1207。与 09-18「新合富」同一实体的第三种写法；已双写平台别名 venueId=1207 + 本字典条目"
     }
   ],
   "removed_duplicates": [

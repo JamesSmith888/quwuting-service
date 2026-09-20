@@ -38,18 +38,23 @@ public class VenueActivityController {
     }
 
     /**
-     * 门店列表页活动标记批量查询：返回 venueId → 标记（含当前态与下一次变化时刻）。
+     * 门店列表页活动标记批量查询：返回 venueId → 标记**列表**（含当前态与下一次变化时刻）。
      * <p>
      * <b>下发条件 = 活动在当前日期范围内</b>（不是"此刻正好命中时段"）——
      * 与门店营业状态徽标同源：「营业中 / 未到营业时间 → X HH:mm 开门」，
      * 状态要在、语气降级。未到时段时前端渲染时间（"13:00 起"），
      * 命中时段时渲染权益短标签（"买一送一"）。
      * <p>
+     * <b>为什么是数组（2026-09-20 改）</b>：列表页那一行已支持多条轮播（同「最新上报」
+     * 信号行的 4s 节奏），只下发一条会让第 2 条以后的活动在列表上没有任何出口。
+     * 顺序由服务端按 {@code compareBadgePriority} 排好（索引 0 最先展示），
+     * 客户端只消费顺序、不重排——运营调整优先级的能力不能落到客户端。
+     * <p>
      * **已彻底过期的活动不下发**（那不是降级，是这条活动已不存在）；
      * 无活动的门店不返回键，前端用"有没有这个键"直接决定渲染。
      */
     @GetMapping("/venues/activity-badges")
-    public ApiResponse<Map<Long, VenueActivityBadgeResponse>> activityBadges(
+    public ApiResponse<Map<Long, List<VenueActivityBadgeResponse>>> activityBadges(
             @RequestParam("venueIds") Collection<Long> venueIds) {
         return ApiResponse.ok(venueActivityService.badgeByVenueIds(venueIds));
     }
