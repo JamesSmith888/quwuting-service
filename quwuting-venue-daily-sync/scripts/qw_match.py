@@ -14,7 +14,7 @@ mentions JSON（Step 1 的产出，人工/LLM 提取，本脚本不解析原文�
 {
   "reportDate": "2026-09-14",
   "sources": ["xianbao360"],                 # ⚠️ 同一正文被转述 = 同一来源，不要写两个
-  "cityHeaderMap": {"江阴": "无锡市", ...},   # 县级 header → 母城（可选，不在映射里则按「X市」猜）
+  "cityHeaderMap": {"江阴": "无锡市", ...},   # header → 母城（**优先于**「X市」词表猜测；县级/区/方位都用它）
   "noListHeaders": ["扬中", "泰州"],          # 只出现城市名、未列门店的 header（可选，仅用于汇报）
   "mentions": [{"city": "成都", "name": "天涯", "note": ""}]
 }
@@ -144,7 +144,13 @@ def match_one(m, cities: set[str], by_city: dict, indexes: dict, header_map: dic
     alias_index, name_index, dict_entry, dict_uncertain, removed = indexes
     raw_city, name = m["city"], m["name"]
     ck = city_key(raw_city)
-    mapped = ck + "市" if ck + "市" in cities else header_map.get(raw_city)
+    # ⚠️ 人工声明的 header_map **优先**于「header+市」的词表猜测（2026-09-21 修正）。
+    #    反例实证：正文把西安「南郊」写成「南京」，而「南京市」是平台真实城市 ——
+    #    若让词表优先，12 条**西安**门店会被整批挂到南京市，且**同时造成两个方向的错**：
+    #    表③ 冒出 11 个假新店 + 西安市表⑤′ 多出 13 个假暂停候选。
+    #    ⇒ 判据：header_map 是「本轮人工核过的归一」，比机械拼「市」更可信。
+    mapped = header_map.get(raw_city) if raw_city in header_map else (
+        ck + "市" if ck + "市" in cities else None)
     if mapped not in cities:
         mapped = None
     rec = {"src_city": raw_city, "name": name, "note": m.get("note", ""),

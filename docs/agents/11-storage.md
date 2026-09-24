@@ -77,6 +77,11 @@ storage:
 - Secret 永不出后端；policy 限定精确 key，凭证泄露也只能写那一个对象，15min 过期；实例角色模式下 policy 附加 `["eq","$x-oss-security-token",token]` 条件；
 - 前端 formData：`key / policy / OSSAccessKeyId / signature / success_action_status=200`（实例角色模式加 `x-oss-security-token`）+ file（**file 必须为最后字段**，wx.uploadFile 与浏览器 FormData 均天然满足）；
 - 上传 URL = `https://{bucket}.{endpoint}`（虚拟主机式），publicUrl = host + `/` + uploadPath。
+- **⚠️ 2026-09-24 事故：admin-web 直传漏 `x-oss-security-token` → HTTP 403（双端同步遗漏，第四次同型）**：09-18 统一 STS 后 policy **恒**含 `["eq","$x-oss-security-token",token]` 条件（securityToken 非空即写入，`OssCredentialService` 两条来源都是 STS，故生产必然非空），PostObject 表单**必须**带该字段——否则 policy 校验失败（且 STS AK 无 token 本身也无权限）→ 403，响应体 `Code=AccessDenied`。admin-web `src/services/storage.ts` 系 09-04 自小程序迁移，只搬了五件套、漏 append 该字段 → 舞友之家（GroupChatManageView，`category=GROUP_QR`）与门店编辑页上传必然 403；小程序端 `services/storage.ts` 有该字段故不受影响。修复 = 表单在 `file`（**必须最后 append**）之前 append `x-oss-security-token`（token 非空时）。
+  - **防复发硬约束：直传表单字段变更 = 三端同步**（后端 policy/响应 + 小程序 `services/storage.ts` + admin-web `src/services/storage.ts`）；验收标准沿用 RLS 事故同款——**两个前端各实测直传 200**，只测小程序不算通过。
+  - **排障提示（403 必须看响应体 `Code`）**：`AccessDenied` = policy 字段缺失/不匹配或角色权限不足；`SignatureDoesNotMatch` = 签名算错；`InvalidPolicyDocument` = policy 结构非法或已过期；`RequestTimeTooSkewed` = 本机时钟偏移。前端已把 Code 写入错误消息与 console（旧版只抛裸状态码，无法区分根因）。
+  - **CORS 判别**：浏览器跨域 POST multipart/form-data 属 CORS 简单请求（无预检），bucket 未配 CORS 时表现为 fetch reject（TypeError / status 0）**而非 403**；能读到 403 即说明该来源已被 CORS 规则放行。
+  - **本地开发绕 CORS（2026-09-24）**：bucket CORS 白名单只登记生产后台域名，本地任何端口直传都会被拦（CORS error）。解法不是往白名单塞 localhost，而是 **dev 期由 vite 代理转发**——`vite.config.ts` 新增 `/oss-direct` → `https://{bucket}.{endpoint}`（rewrite 去前缀，`VITE_OSS_PROXY_TARGET` 可覆盖桶），admin-web `services/storage.ts` 在 `import.meta.env.DEV` 时用 `/oss-direct` 替代 `token.host`；生产仍直连 `token.host`，凭证/路径/publicUrl 两环境完全一致，仅入口不同——换端口、换机器都不再需要动控制台。
 
 **URL 白名单与内网校验（ImageContentValidator）**：
 - 白名单 = Supabase 前缀（projectUrl + legacyProjectUrls）+ OSS 前缀（`https://{bucket}.{endpoint}/`，**oss 配置完整即生效，与 provider 开关无关**——过渡期两代 URL 并存）；
