@@ -25,6 +25,11 @@ public class AuthService {
      * 首次登录自动注册，角色默认 USER（超管由数据库手动设置）。
      * 昵称不在登录链路获取（微信平台策略：jscode2session 仅返回 openid），
      * 由用户在"我"页面通过昵称编辑入口主动提交（POST /user/profile）。
+     * <p>
+     * 响应携带 {@code expiresIn}（秒）：客户端据此本地记录过期时刻并在失效前
+     * 主动静默续期——本接口同时是「首次登录」与「凭证过期后的续期」两条链路
+     * 的公共入口（续期不新增端点，因为微信 jscode2session 是随时可执行的静默
+     * 能力，见 docs/agents/03-auth-and-user.md）。
      */
     @Transactional
     public LoginResponse login(String code) {
@@ -34,7 +39,7 @@ public class AuthService {
                 .orElseGet(() -> createUser(openId));
 
         String token = jwtUtil.generateToken(user.getId(), user.getRole());
-        return new LoginResponse(token, userInfoMapper.toResponse(user));
+        return new LoginResponse(token, jwtUtil.getExpiresInSeconds(), userInfoMapper.toResponse(user));
     }
 
     private User createUser(String openId) {

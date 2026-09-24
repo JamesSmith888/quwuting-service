@@ -16,6 +16,8 @@
   new_candidates  表③ 新店候选（UNMATCHED，且未被守卫命中）——**只列不建**（红线 4）
   ref_only        表④ 命中且已 OPEN / 未覆盖城市
   suspend_items   表⑤ 关门候选（白名单差集 + 范围细化，已剔除守卫）——提交前请核对自检行
+  manual_annotated 人工权威标注（V25 人工锁 / 永久豁免）——**仅标注**，供汇报单列，
+                  门禁判定唯一实现在服务端（本地不过滤，提交后看返回体 skippedLocked/skippedExempt）
 
 ⚠️ 本脚本只算清单，**不写库**。全源一致门由 Agent 侧据此判定：
 - `reversal_auto`（EXACT/ALIAS + 平台 CEASED/SUSPENDED）= **表①，永远自动写库 + 自动发公告**
@@ -95,6 +97,23 @@ def main() -> int:
     mentioned = {r["venueId"] for r in res if r.get("venueId")}
     vm = {v["venueId"]: v for v in venues}
 
+    def manual_flags(v) -> dict:
+        """人工权威层级（V25）**仅用于标注**——门禁唯一实现在服务端，这里不参与任何过滤。
+
+        2026-09-24 新增：此前脚本只认「字典守卫」，库侧的人工锁（MANUAL + statusLockedUntil）
+        与永久豁免（dailySyncExempt）不出现在清单里 ⇒ 汇报时容易把「服务端将跳过的店」当成
+        「该暂停的店」，用户看到 `skippedExempt` 会以为是漏跑（08-17/09-17 都靠人工补记）。
+        字段来源 = export 自带，**null 时 key 直接不出现**（Jackson NON_NULL），别当成字段没实现。
+        """
+        f = {}
+        if v.get("statusSource") == "MANUAL":
+            f["manualLock"] = v.get("statusLockedUntil")
+        if v.get("dailySyncExempt"):
+            f["exempt"] = True
+            if v.get("syncNote"):
+                f["exemptNote"] = v["syncNote"]
+        return f
+
     reversal_auto, reversal_manual, ref_only, new_cands = [], [], [], []
     for r in res:
         v = vm.get(r.get("venueId")) if r.get("venueId") else None
@@ -105,14 +124,15 @@ def main() -> int:
             continue
         row = {"venueId": v["venueId"], "name": v["name"], "city": v["city"],
                "district": v.get("district"), "status": v["status"],
-               "news": f"{r['src_city']}·{r['name']}", "confidence": r["confidence"]}
+               "news": f"{r['src_city']}·{r['name']}", "confidence": r["confidence"],
+               **manual_flags(v)}
         if v["status"] in ("CEASED", "SUSPENDED"):
             (reversal_auto if r["confidence"] in ("EXACT", "ALIAS") else reversal_manual).append(row)
         else:
             ref_only.append(row)
 
-    suspend = [{"venueId": v["venueId"], "name": v["name"], "city": v["city"],
-                "district": v.get("district")}
+    suspend = [{**{"venueId": v["venueId"], "name": v["name"], "city": v["city"],
+                   "district": v.get("district")}, **manual_flags(v)}
                for v in venues
                if v["status"] == "OPEN" and v["city"] in covered and in_scope(v)
                and v["venueId"] not in mentioned and v["venueId"] not in guard_ids]
@@ -120,13 +140,19 @@ def main() -> int:
                              for v in venues
                              if v["status"] == "OPEN" and v["city"] in covered and in_scope(v)
                              and v["venueId"] not in mentioned and v["venueId"] in guard_ids]
+    # 人工权威标注（**标注用，不参与过滤**）：本轮清单/反转候选里带库侧锁或永久豁免的门店
+    annotated = [(x["venueId"], x["name"], x.get("manualLock"), x.get("exempt"), x.get("exemptNote"))
+                 for x in suspend + reversal_auto + reversal_manual
+                 if x.get("manualLock") or x.get("exempt")]
 
     out = {"reportDate": M.get("reportDate"), "sources": M.get("sources", []),
            "coveredCities": sorted(covered), "noListHeaders": M.get("noListHeaders", []),
            "reportedCountyDistricts": sorted(reported_county_districts),
            "reversal_auto": reversal_auto, "reversal_manual": reversal_manual,
            "new_candidates": new_cands, "ref_only_count": len(ref_only),
-           "suspend_items": suspend, "suspend_guard_dropped": suspend_guard_dropped}
+           "suspend_items": suspend, "suspend_guard_dropped": suspend_guard_dropped,
+           "manual_annotated": [{"venueId": i, "name": n, "manualLock": l, "exempt": e, "note": t}
+                                for i, n, l, e, t in annotated]}
     if args.out:
         json.dump(out, open(args.out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
@@ -151,6 +177,12 @@ def main() -> int:
     if suspend_guard_dropped:
         print(f"  守卫豁免剔除 {len(suspend_guard_dropped)} 家："
               f"{[s['name'] + '#' + str(s['venueId']) for s in suspend_guard_dropped]}")
+    print(f"\n🔒 人工权威标注（V25，**服务端将按锁/豁免跳过**，不参与本脚本过滤）{len(annotated)} 家：")
+    for vid, nm, lock, ex, note in annotated:
+        tag = "永久豁免" if ex else f"人工锁至 {str(lock)[:16]}"
+        print(f"  #{vid} {nm} —— {tag}{'（' + note + '）' if note else ''}")
+    if not annotated:
+        print("  （无）")
     print(f"\n自检：暂停规模应在 40–80 家量级；跑到几百家先查城市名归一与范围细化。")
     if args.out:
         print(f"→ 已落盘 {args.out}")

@@ -159,7 +159,7 @@ public class WebAuthService {
                 .orElseThrow(() -> new BusinessException(1003, "平台管理员账号不存在"));
         String token = jwtUtil.generateToken(admin.getId(), admin.getRole());
         log.info("[webauth] password login success: uid={}", admin.getId());
-        return new LoginResponse(token, userInfoMapper.toResponse(admin));
+        return new LoginResponse(token, jwtUtil.getExpiresInSeconds(), userInfoMapper.toResponse(admin));
     }
 
     // ---- 辅助 ----

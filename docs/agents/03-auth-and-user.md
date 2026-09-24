@@ -9,15 +9,39 @@
 
 ### 登录流程
 
-`POST /auth/login`（公开接口，无需 token）：接收微信 `wx.login()` 的 code → `WechatService` 调用微信 `jscode2session` 换取 openid → 查找/创建用户 → 签发 HS256 JWT（payload 含 sub=userId, role, exp）→ 返回 token + UserInfo。
+`POST /auth/login`（公开接口，无需 token）：接收微信 `wx.login()` 的 code → `WechatService` 调用微信 `jscode2session` 换取 openid → 查找/创建用户 → 签发 HS256 JWT（payload 含 sub=userId, role, exp）→ 返回 `token` + `expiresIn` + UserInfo。
+
+**响应必须携带 `expiresIn`（秒，OAuth2 `expires_in` 语义，2026-09-24 新增）**：客户端据此落盘本地过期时刻，从而能判断"凭证是否仍然有效"并在失效前主动静默续期。此前只返回 `token`，客户端无从预判，只能被动等某个请求 401 才发现掉线——这是「隔几天登录状态就过期且无法自动续期」的**契约缺口**。`expiresIn` 的唯一事实源 = `JwtUtil.getExpiresInSeconds()`（读 `jwt.expiry-days`），禁止在 Service/DTO 另写常量。
+
+`exp` 的单位契约：**epoch 毫秒**（非 RFC 7519 的 NumericDate 秒）。本项目 token 无第三方消费方（客户端不解析、不经 JWT 网关），毫秒与 `System.currentTimeMillis()` 同量纲、免换算；**对外契约一律用标准 `expiresIn`（秒）表达**——对外标准、对内简单。
+
+### 会话续期（2026-09-24 契约）
+
+**后端不提供 refresh token 端点**：`POST /auth/login` 同时承担「首次登录」与「凭证过期后续期」两条链路——微信 `jscode2session` 是随时可执行的静默能力（无授权弹窗），等价于一个"永远可用的续期凭证"，再引入 refresh token 只会多出轮换/撤销/存储一致性三类状态而收益为零。届时有端（如 Web 管理后台）需要治理会话时，判据与做法见前端仓 `docs/auth-and-user.md`「为什么不用 refresh token」。
+
+**因此 `/auth/login` 必须保持幂等可重入**：同一 openid 重复调用只应返回新 token 与同一用户，不得产生任何副作用（不得重复建号、不得累加计数）——`findByOpenIdAndDeletedFalse().orElseGet(createUser)` 的现状即满足，改动时须保持。
+
+### 401 重放安全契约（重要，禁止破坏）
+
+客户端在收到 401 后会**静默续期并重放原请求**（含 POST 写操作）。该重放之所以安全，依赖一条后端不变量：
+
+> **401 只可能由 `UserContext.requireAuth()` 抛出，而它必须是 Controller/Service 方法中
+> 任何副作用（写库、发消息、外部调用）与事务提交之前的第一个语句。**
+
+即：`requireAuth()` 抛 401 时，服务端从未执行过该请求的任何写操作，重放不会造成重复提交。
+新增写接口时**必须**把 `UserContext.requireAuth()` / `requireAdmin()` 放在方法首位——
+放在中间会让"401 之后其实已经写了一半"成为可能，届时客户端重放将产生重复副作用
+（且是静默发生的）。`@Transactional` 方法同理：鉴权在事务开始前完成。
+
+不满足此不变量的接口不能依赖客户端的 401 自愈，必须自行处理（当前**全仓无可例外接口**）。
 
 ### 请求鉴权（软鉴权模式）
 
 `AuthInterceptor` 拦截所有请求但**从不拦截**（`preHandle` 始终返回 `true`）：有 `Authorization: Bearer <token>` 时尝试解析 JWT → 校验签名和过期时间 → 查询用户 → 写入 `UserContext`（ThreadLocal）；token 缺失/无效/过期时视为匿名访问，请求继续。
 
 - 公开接口：直接读取 `UserContext.getCurrentUserId()`（未登录时为 `null`）
-- 需登录接口：Service 层显式调用 `UserContext.requireAuth()`，未登录时抛出 `AuthRequiredException` → `GlobalExceptionHandler` 返回 HTTP 401 + `{"code":1002, "message":"请先登录"}`
-- 需管理员接口：调用 `UserContext.requireAdmin()`（未登录 401，非管理员 403）
+- 需登录接口：Service 层显式调用 `UserContext.requireAuth()`，未登录时抛出 `AuthRequiredException` → `GlobalExceptionHandler` 返回 HTTP 401 + `{"code":1002, "message":"请先登录"}`。**401 = 唯一的"凭证失效"信号**，客户端据此续期重放（见上「401 重放安全契约」）——因此 401 不得用于表达"权限不足"等其它语义（非管理员一律走 `1003` + HTTP 200，见 `requireAdmin()`）
+- 需管理员接口：调用 `UserContext.requireAdmin()`（未登录 401，非管理员 403 业务码）
 - 请求结束后 `afterCompletion` 自动清除 ThreadLocal
 
 此设计适配黄页类产品：浏览无需登录，仅操作类接口（收藏、管理等）按需校验身份。

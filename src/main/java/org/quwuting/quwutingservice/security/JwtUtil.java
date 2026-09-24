@@ -13,6 +13,13 @@ import java.util.Base64;
 /**
  * 轻量 JWT 工具（HS256），无外部依赖。
  * Token 结构：base64url(header).base64url(payload).base64url(signature)
+ * <p>
+ * <b>exp 单位契约（重要）</b>：payload 的 {@code exp} 为 <b>epoch 毫秒</b>
+ * （非 RFC 7519 的 NumericDate 秒）。本项目 token 无任何第三方消费方
+ * （客户端不解析、不落标准库、不经过 JWT 网关），明文写入毫秒是刻意的：
+ * 与 {@code System.currentTimeMillis()} 同量纲，免去秒/毫秒换算这一层易错转换。
+ * <b>对外契约（HTTP 响应）一律用标准 OAuth2 语义的 {@code expiresIn}（秒）表达</b>，
+ * 见 {@link #getExpiresInSeconds()} 与 LoginResponse——对外标准、对内简单。
  */
 @Component
 public class JwtUtil {
@@ -33,6 +40,17 @@ public class JwtUtil {
         }
         this.secretBytes = secret.getBytes(StandardCharsets.UTF_8);
         this.expiryMs = expiryDays * 24L * 3600 * 1000;
+    }
+
+    /**
+     * token 有效期（秒，OAuth2 {@code expires_in} 语义）。
+     * <p>
+     * 登录响应下发它的唯一目的：让客户端知道**凭证何时失效**，从而能在失效前
+     * 主动静默续期，而不是等到某个请求 401 才发现（2026-09-24 会话续期根因修复）。
+     * 有效期配置的唯一事实源在本类，禁止在 Service/DTO 里另写一份常量。
+     */
+    public long getExpiresInSeconds() {
+        return expiryMs / 1000;
     }
 
     /** 生成 token，payload 包含 sub（userId）、role、exp（毫秒时间戳） */
