@@ -24,6 +24,11 @@
   # items 元素只需 {"venueId":123}——reportDate/sourceId/source 由脚本统一注入
   python3 qw_api.py status-suspend --base-url http://localhost:8080 --items '[...]' --report-date 2026-09-10
 
+  # 批量灌别名（低置信长尾的固定处置，2026-09-25 用户拍板；逐条幂等，同店同名复活/有效行跳过）
+  # ⚠️ alias 取值必须是「舞讯的原写法」——匹配器拿舞讯写法去别名域查表；灌后必须重跑 qw_match.py 回读
+  #    验证 via=alias-domain:*（仍非 EXACT ⇒ 别名写法本身不对）。详见 SKILL.md「低置信长尾 → 一律加别名」
+  python3 qw_api.py alias-import --base-url http://localhost:8080 --items '[{"venueId":978,"alias":"颐和"}]'
+
 token 获取顺序：--token 参数 > ADMIN_TOKEN 环境变量 > 缓存文件（默认 /tmp/qw_token.json，
 可用 QW_TOKEN_CACHE 覆盖）。`login` 成功即自动写缓存（0600）——**登录一次，后续命令免手工拼 token**。
 """
@@ -101,7 +106,7 @@ def _load_items(raw: str) -> list:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="去舞厅舞讯 Skill API 封装")
-    parser.add_argument("command", choices=["login", "export", "cities", "batch-create", "status-reverse", "status-suspend"])
+    parser.add_argument("command", choices=["login", "export", "cities", "batch-create", "status-reverse", "status-suspend", "alias-import"])
     parser.add_argument("--base-url", default="http://localhost:8080")
     parser.add_argument("--token", default=os.environ.get("ADMIN_TOKEN", ""))
     parser.add_argument("--password")
@@ -154,6 +159,17 @@ def main() -> int:
     if args.command == "batch-create":
         items = _load_items(args.items or "[]")
         data = _request(args.base_url, "POST", "/admin/venue-sync/venues/batch-create",
+                        token, {"items": items})
+        print(json.dumps(data, ensure_ascii=False))
+        return 0
+
+    if args.command == "alias-import":
+        # 低置信长尾的固定处置（2026-09-25 用户拍板）：舞讯写法因「平台店名后缀/写法与归一化词表
+        # 不匹配」而落 CONTAINED 时，一律加别名固化 —— 而非扩充 SUFFIX 全局词表（词表是全库杠杆，
+        # 别名是一店一行、可软删、且顺带让用户搜索命中）。判据与边界见 SKILL.md 同名小节。
+        # ⚠️ alias 取值必须是「舞讯的原写法」；灌后必须重跑 qw_match.py 回读验证 via=alias-domain:*。
+        items = _load_items(args.items or "[]")
+        data = _request(args.base_url, "POST", "/admin/venue-aliases/batch-import",
                         token, {"items": items})
         print(json.dumps(data, ensure_ascii=False))
         return 0

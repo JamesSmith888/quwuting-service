@@ -118,7 +118,8 @@ CEASED 而平台已 OPEN，用户投诉「明明营业却显示停业」，详�
   → `web-auth.password`（当前 `qwt-admin-dev-2026`）；生产走环境变量 `WEB_ADMIN_PASSWORD`，**不读文件**。
   登录一次即写 `/tmp/qw_token.json`，后续命令自动复用 —— 不必每条命令手拼 `export ADMIN_TOKEN`。
 - 辅助脚本 `scripts/qw_api.py`（Python3 标准库，零依赖）：`login` / `export` / `cities` /
-  `batch-create` / `status-reverse` / `status-suspend`。
+  `batch-create` / `status-reverse` / `status-suspend` / **`alias-import`**（别名灌库，
+  低置信长尾的固定处置，见 Step 4「低置信长尾 → 一律加别名」）。
 - 比对脚本 `scripts/qw_match.py`（2026-09-14 新增，同为零依赖）：**Step 2+3 的整套比对引擎**
   ——吃 `mentions JSON`（Step 1 产出）+ 自带全量 export 拉取，走「别名域 → 字典 → 规则层 → 三道兜底
   （含 keyword 交叉验证）」，落盘命中 JSON + 摘要。**别再每轮手写 matcher**（手写极易漏兜底、
@@ -377,6 +378,34 @@ POST /admin/venue-aliases/batch-import
 - **新别名 = 双写**：先平台 alias 域（运行时权威），再本 Skill 字典 entries（经验沉淀）。两层缺一不可。
 - 🚫 **主名括号禁令**：新增/更名一律禁止把别名写进主名括号——主名保持干净，别名走 `qwt_venue_aliases`
   （`updateVenue` 全量回填时同样注意：name 只放主名）。
+
+### 🔑 低置信长尾 → 一律加别名（2026-09-25 用户拍板，长期口径）
+
+**判据**：某舞讯写法因**平台店名后缀/写法与归一化词表不匹配**而落到低置信
+（`confidence=CONTAINED`，`via=fuzzy-prefix` / `contained:*`）——**同一形态连续出现 ≥2 轮，
+立即加别名固化**，不再挂表② 等用户逐条放行。
+
+- **典型成因**：平台店名带舞讯没有的品类后缀、或后缀是错字变体 ⇒ 第 3 层「去后缀精确」失效
+  ⇒ 一路退到第 5 层首二字兜底 ⇒ 只能判 CONTAINED。两个已闭环实证：
+  「颐和**音乐茶吧**」（词表有「音乐茶楼/音乐吧/音乐酒馆」但无「音乐茶吧」；09-18~09-25 **连挂 5 轮**）、
+  「K2**聚乐部**」（「俱乐部」的错字变体）。
+- ⛔ **不用「扩充 `SUFFIX` 全局词表」来解决**（用户 2026-09-25 拍板，推翻本 Skill 此前连续 4 轮
+  并列给出的「方案 A」）：词表是**全库杠杆**，加一个词会改变所有城市所有店的剥后缀行为；
+  别名是**一店一行、语义明确、可软删、可审计**，而且顺带让**用户搜索也命中**（`KW_MATCH` 别名分支）
+  + 详情页身份核验位——一个动作两个收益。⇒ **长尾一律走别名，词表保持稳定。**
+- **动作**（两行，必须回读验证）：
+  ```bash
+  python3 scripts/qw_api.py alias-import --items '[{"venueId":978,"alias":"颐和"}]'
+  python3 scripts/qw_match.py --mentions <m.json> --out <match.json>   # 重跑
+  ```
+  重跑后该条应变为 `via=alias-domain:<词>` / `confidence=EXACT`；**若仍非 EXACT ⇒ 别名写法本身不对**
+  （别名取值必须是**舞讯的原写法**，匹配器是拿舞讯写法去别名域查表，不是拿平台名去猜）。
+  升为 EXACT 后它自动进 **表①**（`M==S + 高置信`）⇒ 按既有口径**自动反转 + 自动发公告**，
+  无需再问用户（这就是「整改到位」的收口）。
+- **不要滥用**：别名只加**真实的身份写法**（简称/俗称/曾用名/错字），
+  🚫 **禁止**为「包含式误挂」补别名（那是匹配错误，应修匹配而不是固化错误）。
+- **维护量可控**：只有**被舞讯用简称点名的店**才需要加——「音乐茶吧」族 13 家里
+  实际只需要加被点名的 1 家（#978），不必一族全灌。
 
 > **数据更新公告联动**：batch-create / status-reverse 会触发后端自动生成「数据更新公告」
 > （SYSTEM，同日防重）；开关 `announcement.data_update.enabled` 默认 false，未开启不产生公告。

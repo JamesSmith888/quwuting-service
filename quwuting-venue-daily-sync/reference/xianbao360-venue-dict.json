@@ -1,7 +1,7 @@
 {
   "source": "xianbao360",
   "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-09-23",
+  "updated": "2026-09-25",
   "entries": [
     {
       "city": "西安市",
@@ -3370,6 +3370,22 @@
       "venue_id": 422,
       "kind": "variant",
       "note": "2026-09-23 实证：市井慢时光摘要与 xianbao360 正文均用**繁体**「櫻花」（金牛区），而平台为简体「樱花娱乐」；keyword「櫻花」0 命中、「樱花」命中 #422（成都市·金牛区，OPEN）。不修则同时造成两个方向的错：表③ 出现假新店「櫻花」+ 表⑤′ 出现真身 #422。09-21 舞厅百事通（简体「樱花」）已与 #422 对上，为同一实体的繁简两种写法。已双写平台别名 venueId=422 + 本字典条目"
+    },
+    {
+      "city": "嘉兴市",
+      "news_name": "颐和",
+      "platform_name": "颐和音乐茶吧",
+      "venue_id": 978,
+      "kind": "alias",
+      "note": "2026-09-25 实证：平台名「颐和音乐茶吧」而 SUFFIX 词表有「音乐茶楼/音乐吧/音乐酒馆」独无「音乐茶吧」⇒ 去后缀精确失效、退化为 fuzzy-prefix（首二字）判 CONTAINED，09-19/20/23/24/25 连挂 5 轮表②。按「低置信长尾一律加别名」长期口径处置（不扩全局词表）：已双写平台别名 venueId=978 + 本字典条目；重跑 via=alias-domain:颐和 / EXACT"
+    },
+    {
+      "city": "镇江市",
+      "news_name": "k2",
+      "platform_name": "K2聚乐部",
+      "venue_id": 1167,
+      "kind": "alias",
+      "note": "2026-09-25 实证：平台名把「俱乐部」写成「聚乐部」（错字变体，SUFFIX 剥不掉）⇒ 舞讯写「k2」落到 fuzzy-prefix 判 CONTAINED。按「低置信长尾一律加别名」长期口径处置：已双写平台别名 venueId=1167 + 本字典条目；重跑 via=alias-domain:k2 / EXACT"
     }
   ],
   "removed_duplicates": [
