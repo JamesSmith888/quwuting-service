@@ -15,7 +15,9 @@
   reversal_manual 表② 低置信（CONTAINED/FUZZY）→ 需 user 放行（提交时带 forceReversal:true）
   new_candidates  表③ 新店候选（UNMATCHED，且未被守卫命中）——**只列不建**（红线 4）
   ref_only        表④ 命中且已 OPEN / 未覆盖城市
-  suspend_items   表⑤ 关门候选（白名单差集 + 范围细化，已剔除守卫）——提交前请核对自检行
+  suspend_items   表⑤ 关门候选（白名单差集 + 范围细化，已剔除守卫与人工状态店）——提交前请核对自检行
+  suspend_manual_hold 人工状态店（statusSource=MANUAL）**已剔除、不自动提交**，需用户逐条决定
+                  （2026-09-27 P1 护栏：人工锁有期限，但「这店是人定的」不会过期 ⇒ 锁过期也不静默关）
   manual_annotated 人工权威标注（V25 人工锁 / 永久豁免）——**仅标注**，供汇报单列，
                   门禁判定唯一实现在服务端（本地不过滤，提交后看返回体 skippedLocked/skippedExempt）
 
@@ -107,6 +109,7 @@ def main() -> int:
         """
         f = {}
         if v.get("statusSource") == "MANUAL":
+            f["manualSource"] = True          # 人工最后一次设定（**参与过滤**，见 suspend_manual_hold）
             f["manualLock"] = v.get("statusLockedUntil")
         if v.get("dailySyncExempt"):
             f["exempt"] = True
@@ -131,11 +134,19 @@ def main() -> int:
         else:
             ref_only.append(row)
 
-    suspend = [{**{"venueId": v["venueId"], "name": v["name"], "city": v["city"],
-                   "district": v.get("district")}, **manual_flags(v)}
-               for v in venues
-               if v["status"] == "OPEN" and v["city"] in covered and in_scope(v)
-               and v["venueId"] not in mentioned and v["venueId"] not in guard_ids]
+    suspend_all = [{**{"venueId": v["venueId"], "name": v["name"], "city": v["city"],
+                       "district": v.get("district")}, **manual_flags(v)}
+                   for v in venues
+                   if v["status"] == "OPEN" and v["city"] in covered and in_scope(v)
+                   and v["venueId"] not in mentioned and v["venueId"] not in guard_ids]
+    # 人工护栏（2026-09-27 立规，P1）：statusSource=MANUAL 的门店**不进自动提交集**——
+    # 人工锁有期限（默认 OPEN 3 天 / 停业 7 天），锁过期后服务端门禁不再拦它，
+    # 但「这店的状态是人定的」这一事实并没有过期。若照常提交 = 用第三方舞讯静默推翻人工判断
+    # （实证：#1166 77音乐酒吧 09-23 人工置营业，锁 09-22 到期后落进当日暂停候选）。
+    # ⇒ 一律摘出进 `suspend_manual_hold`，由用户逐条决定「本次照关（写库后转 SYNC 回归自动）/
+    # 本次跳过」。这既不永久豁免（该店仍可被用户确认后回归自动处理），也不静默覆盖。
+    suspend = [s for s in suspend_all if not s.get("manualSource")]
+    suspend_manual_hold = [s for s in suspend_all if s.get("manualSource")]
     suspend_guard_dropped = [{"venueId": v["venueId"], "name": v["name"], "city": v["city"]}
                              for v in venues
                              if v["status"] == "OPEN" and v["city"] in covered and in_scope(v)
@@ -151,6 +162,7 @@ def main() -> int:
            "reversal_auto": reversal_auto, "reversal_manual": reversal_manual,
            "new_candidates": new_cands, "ref_only_count": len(ref_only),
            "suspend_items": suspend, "suspend_guard_dropped": suspend_guard_dropped,
+           "suspend_manual_hold": suspend_manual_hold,
            "manual_annotated": [{"venueId": i, "name": n, "manualLock": l, "exempt": e, "note": t}
                                 for i, n, l, e, t in annotated]}
     if args.out:
@@ -174,6 +186,13 @@ def main() -> int:
     print(f"\n表⑤ 暂停候选 {len(suspend)} 家 / {len({s['city'] for s in suspend})} 城")
     for c, n in Counter(s["city"] for s in suspend).most_common():
         print(f"  {c}（{n}）")
+    if suspend_manual_hold:
+        print(f"\n🖐 人工状态待确认（statusSource=MANUAL，**已剔除、不进自动提交集**）"
+              f"{len(suspend_manual_hold)} 家：")
+        for s in suspend_manual_hold:
+            print(f"  #{s['venueId']} {s['name']}（{s['city']}·{s.get('district')}）"
+                  f" 锁至 {str(s.get('manualLock'))[:16] if s.get('manualLock') else '（已过期）'}"
+                  f" —— 需用户决定：本次照关（写库后转 SYNC 回归自动）/ 本次跳过")
     if suspend_guard_dropped:
         print(f"  守卫豁免剔除 {len(suspend_guard_dropped)} 家："
               f"{[s['name'] + '#' + str(s['venueId']) for s in suspend_guard_dropped]}")
