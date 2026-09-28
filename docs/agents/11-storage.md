@@ -35,6 +35,16 @@
 
 上传路径格式：`{prefix}/{userId}/{uuid}.{ext}`（按用户隔离，UUID 保证唯一；**两套 provider 路径格式一致**，存量对象迁移保持路径不变）。
 
+**媒体类型 = 分类的一等属性（2026-09-28 mediaKind 解耦）**：每个分类显式声明允许的
+`MediaKind`（IMAGE / VIDEO），校验通道由「扩展名 → MediaKind → 分类是否允许」驱动
+（`StorageService#validateFile`），大小上限按 kind 取（图片 5MB / 视频 50MB）。
+**新增分类零改动 StorageService**——旧模型对 `== DANCER_VIDEO` 硬编码判断"是否视频"，
+新增视频分类必须改校验分支，漏改即静默走错通道（根因 = 把「路径前缀」与「媒体能力」
+两个正交维度塞进一个枚举）。锁：`FileCategoryMediaKindTest`（零依赖）。
+
+| OPERATION_MEDIA | `operation-media/` | 运营内容媒体（公告/快讯配图与短视频，2026-09-28；**图片 + 视频双通道**，扩展名自动分流） |
+
+
 ### 配置
 
 ```yaml

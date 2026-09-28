@@ -8,7 +8,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.UUID;
 
@@ -49,13 +48,13 @@ public class StorageService {
      */
     public UploadTokenResponse generateUploadToken(Long userId, FileCategory category,
                                                    String fileName, long fileSize) {
-        validateFile(category, fileName, fileSize);
+        MediaKind kind = validateFile(category, fileName, fileSize);
 
         String ext = extractExtension(fileName);
         String uploadPath = category.getPathPrefix() + "/" + userId + "/" + UUID.randomUUID() + ext;
 
         if (providerProps.isOss()) {
-            return generateOssTicket(uploadPath, fileSizeLimit(category));
+            return generateOssTicket(uploadPath, fileSizeLimit(kind));
         }
         String publicUrl = props.projectUrl() + "/storage/v1/object/public/" + props.bucket() + "/" + uploadPath;
         return new UploadTokenResponse(
@@ -117,17 +116,51 @@ public class StorageService {
         );
     }
 
-    /** 视频分类（2026-08-22 舞伴短视频）——校验走视频扩展名 + 独立大小上限通道 */
-    private static final java.util.Set<String> VIDEO_EXTENSIONS =
-            java.util.Set.of(".mp4", ".mov");
-
-    private static boolean isVideoCategory(FileCategory category) {
-        return category == FileCategory.DANCER_VIDEO;
+    /**
+     * 文件元信息校验（2026-09-28 mediaKind 解耦），返回判定出的媒体类型供大小上限取值：
+     * <ol>
+     *   <li>扩展名 → {@link MediaKind}（视频扩展名优先，其次部署配置的图片白名单）；</li>
+     *   <li>分类是否允许该 kind（{@link FileCategory#allows}，双通道分类如
+     *       OPERATION_MEDIA 图片视频皆可）；</li>
+     *   <li>大小上限按 kind 取（视频 50MB 通道 / 图片 5MB 通道）。</li>
+     * </ol>
+     * 旧模型对 {@code == DANCER_VIDEO} 硬编码判断"是否视频"，新增视频分类必须改本方法——
+     * 现在分类自带 allowedKinds，新增分类零改动。
+     *
+     * @return 判定出的媒体类型（generateUploadToken 据此取大小上限）
+     */
+    private MediaKind validateFile(FileCategory category, String fileName, long fileSize) {
+        if (fileName == null || fileName.isBlank()) {
+            throw new BusinessException(1005, "文件名不能为空");
+        }
+        if (fileSize <= 0) {
+            throw new BusinessException(1005, "文件大小无效");
+        }
+        String ext = extractExtension(fileName);
+        MediaKind kind = MediaKind.fromExtension(ext, imageExtensions())
+                .orElseThrow(() -> new BusinessException(1005,
+                        "不支持的文件类型，仅允许: " + String.join(", ", imageExtensions())
+                                + (category.allows(MediaKind.VIDEO)
+                                        ? "；视频仅允许: " + MediaKind.videoExtensionsLabel()
+                                        : "")));
+        if (!category.allows(kind)) {
+            // 扩展名本身合法（如 mp4），但该上传位不开放此媒体类型——给"上传位"级提示
+            throw new BusinessException(1005, kind == MediaKind.VIDEO
+                    ? "该上传位不支持视频文件"
+                    : "该上传位仅支持视频文件（" + MediaKind.videoExtensionsLabel() + "）");
+        }
+        long maxFileSize = fileSizeLimit(kind);
+        if (fileSize > maxFileSize) {
+            long maxMb = maxFileSize / (1024 * 1024);
+            throw new BusinessException(1005,
+                    (kind == MediaKind.VIDEO ? "视频大小不能超过 " : "文件大小不能超过 ") + maxMb + "MB");
+        }
+        return kind;
     }
 
-    /** 分类对应的大小上限（图片通道按 provider 取各自配置，默认同为 5MB；视频通道沿用 Supabase 配置） */
-    private long fileSizeLimit(FileCategory category) {
-        if (isVideoCategory(category)) {
+    /** 分类对应的大小上限（按媒体类型：视频走独立通道，图片按 provider 取各自配置，默认同为 5MB） */
+    private long fileSizeLimit(MediaKind kind) {
+        if (kind == MediaKind.VIDEO) {
             return props.videoMaxFileSize();
         }
         return providerProps.isOss() ? providerProps.oss().maxFileSize() : props.maxFileSize();
@@ -136,39 +169,6 @@ public class StorageService {
     /** 图片扩展名白名单（按 provider 取各自配置，默认一致） */
     private String[] imageExtensions() {
         return providerProps.isOss() ? providerProps.oss().allowedExtensions() : props.allowedExtensions();
-    }
-
-    private void validateFile(FileCategory category, String fileName, long fileSize) {
-        if (fileName == null || fileName.isBlank()) {
-            throw new BusinessException(1005, "文件名不能为空");
-        }
-        if (fileSize <= 0) {
-            throw new BusinessException(1005, "文件大小无效");
-        }
-        String ext = extractExtension(fileName);
-        if (isVideoCategory(category)) {
-            // 视频分类（2026-08-22 舞伴短视频）：视频扩展名 + 独立大小上限
-            if (fileSize > props.videoMaxFileSize()) {
-                long maxMb = props.videoMaxFileSize() / (1024 * 1024);
-                throw new BusinessException(1005, "视频大小不能超过 " + maxMb + "MB");
-            }
-            if (!VIDEO_EXTENSIONS.contains(ext)) {
-                throw new BusinessException(1005, "不支持的视频格式，仅允许: mp4, mov");
-            }
-            return;
-        }
-        long maxFileSize = fileSizeLimit(category);
-        if (fileSize > maxFileSize) {
-            long maxMb = maxFileSize / (1024 * 1024);
-            throw new BusinessException(1005, "文件大小不能超过 " + maxMb + "MB");
-        }
-        String[] extensions = imageExtensions();
-        boolean allowed = Arrays.stream(extensions)
-                .anyMatch(e -> e.equalsIgnoreCase(ext));
-        if (!allowed) {
-            throw new BusinessException(1005,
-                    "不支持的文件类型，仅允许: " + String.join(", ", extensions));
-        }
     }
 
     private String extractExtension(String fileName) {

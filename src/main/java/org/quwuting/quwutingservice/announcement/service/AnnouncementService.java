@@ -18,6 +18,9 @@ import org.quwuting.quwutingservice.announcement.enums.AnnouncementTouchLevel;
 import org.quwuting.quwutingservice.announcement.repository.AnnouncementReadRepository;
 import org.quwuting.quwutingservice.announcement.repository.AnnouncementRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.media.MediaAttachment;
+import org.quwuting.quwutingservice.media.MediaAttachments;
+import org.quwuting.quwutingservice.media.MediaAttachmentValidator;
 import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -78,6 +81,7 @@ public class AnnouncementService {
     private final AnnouncementReadRepository readRepository;
     private final UserRepository userRepository;
     private final OpsConfigService opsConfigService;
+    private final MediaAttachmentValidator mediaAttachmentValidator;
 
     // ── 用户端 ────────────────────────────────────────────────
 
@@ -144,7 +148,8 @@ public class AnnouncementService {
         boolean read = readRepository.existsByUserIdAndAnnouncementId(userId, id);
         return new AnnouncementDetailResponse(
                 a.getId(), a.getTitle(), a.getContent(), a.getCategory(), a.getSource(),
-                a.isPinned(), a.getPublishAt(), a.getPublishedAt(), read, a.getCreatedAt());
+                a.isPinned(), MediaAttachments.parseOrEmpty(a.getMediaJson()),
+                a.getPublishAt(), a.getPublishedAt(), read, a.getCreatedAt());
     }
 
     /** 标记已读（幂等：已读跳过；并发重复插入由唯一索引兜底 23505 静默） */
@@ -226,6 +231,7 @@ public class AnnouncementService {
         applyFields(a, request.title(), request.content(), request.category(),
                 resolveTouchLevel(request.touchLevel(), request.category()),
                 request.pinned() != null && request.pinned(), request.publishAt(), request.offlineAt());
+        applyMedia(a, request.media());
         a.setSource(AnnouncementSource.MANUAL); // 管理端创建恒 MANUAL（SYSTEM 走 createDataUpdateAnnouncement）
         a.setStatus(AnnouncementStatus.DRAFT);
         a.setOperatorId(adminId);
@@ -270,6 +276,8 @@ public class AnnouncementService {
                     resolveTouchLevel(request.touchLevel(), request.category()),
                     request.pinned() != null && request.pinned(), request.publishAt(), request.offlineAt());
         }
+        // 媒体附件幂等替换（两个状态分支共用：DRAFT 与 PUBLISHED 均可改附件）
+        applyMedia(a, request.media());
         a.setOperatorId(adminId);
         return toAdminResponse(announcementRepository.save(a));
     }
@@ -538,11 +546,25 @@ public class AnnouncementService {
         }
     }
 
+    /**
+     * 媒体附件落库（2026-09-28，唯一入口）：结构 + 内容双重校验后序列化；
+     * null / 空列表 → 置 {@code null}（幂等清空语义——编辑页始终提交当前完整
+     * 附件列表，漏传字段不会静默保留旧值，杜绝"以为删了实际还在"）。
+     * <p>
+     * 校验单点 = {@link MediaAttachmentValidator}（结构层 + 内容层 URL 白名单/
+     * 下载验图），跨仓约定"图片/视频 URL 落库字段必校验"由此落实。
+     */
+    private void applyMedia(Announcement a, List<MediaAttachment> media) {
+        mediaAttachmentValidator.validate(media);
+        a.setMediaJson(MediaAttachments.serialize(media));
+    }
+
     private AdminAnnouncementResponse toAdminResponse(Announcement a) {
         return new AdminAnnouncementResponse(
                 a.getId(), a.getTitle(), a.getContent(), a.getCategory(), a.getTouchLevel(),
                 a.getSource(), a.getScope(),
-                a.getStatus(), a.isPinned(), a.getPublishAt(), a.getOfflineAt(),
+                a.getStatus(), a.isPinned(), MediaAttachments.parseOrEmpty(a.getMediaJson()),
+                a.getPublishAt(), a.getOfflineAt(),
                 a.getPublishedAt(), a.getOfflinedAt(), a.getOperatorId(),
                 a.getCreatedAt(), a.getUpdatedAt());
     }

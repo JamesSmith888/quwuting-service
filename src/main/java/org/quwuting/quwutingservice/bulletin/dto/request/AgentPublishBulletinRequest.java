@@ -2,8 +2,10 @@ package org.quwuting.quwutingservice.bulletin.dto.request;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
+import org.quwuting.quwutingservice.media.MediaAttachment;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * Agent 一步发布快讯请求（POST /admin/bulletins/agent-publish，需 ADMIN）。
@@ -21,6 +23,8 @@ import java.time.LocalDateTime;
  *
  * @param publishAt 未来时刻 = 定时发布；缺省/null/过去时刻 = 立即发布
  * @param offlineAt 可选自动下线时间（须晚于当前时间）
+ * @param media     可选结构化媒体附件（2026-09-28）：与管理端同契约；注意 dedupKey
+ *                  命中幂等分支时<b>不改写任何字段</b>（含 media）——重跑 = 确保存在
  */
 public record AgentPublishBulletinRequest(
         @NotBlank(message = "快讯内容不能为空")
@@ -34,6 +38,8 @@ public record AgentPublishBulletinRequest(
 
         @Size(max = 64, message = "幂等键不能超过 64 字")
         String dedupKey,
+
+        List<MediaAttachment> media,
 
         LocalDateTime publishAt,
 

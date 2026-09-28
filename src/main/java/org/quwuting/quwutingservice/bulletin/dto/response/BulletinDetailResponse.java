@@ -1,5 +1,7 @@
 package org.quwuting.quwutingservice.bulletin.dto.response;
 
+import org.quwuting.quwutingservice.media.MediaAttachment;
+
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -10,7 +12,8 @@ import java.util.List;
  * 通道：分享卡片直达单条内容（带标题的分享文案 + 直达路径），比"落到信息流某处"更稳。
  * <p>
  * content = markdown 原文，小程序侧复用公告详情页的 towxml 渲染链路与
- * {@code venue://} 链接归一化（外链降级纯文本）；reactions 与列表口径一致
+ * {@code venue://} 链接归一化（外链降级纯文本）；media = 结构化媒体附件
+ * （2026-09-28，与列表口径一致）；reactions 与列表口径一致
  * （同一 DTO、同一聚合函数），保证两处展示绝不漂移；
  * viewCount 与列表口径一致（信息流展示即计），详情打开也会计一次浏览。
  */
@@ -20,6 +23,7 @@ public record BulletinDetailResponse(
         String content,
         String city,
         Long venueId,
+        List<MediaAttachment> media,
         LocalDateTime publishAt,
         LocalDateTime publishedAt,
         LocalDateTime createdAt,

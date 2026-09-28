@@ -17,6 +17,9 @@ import org.quwuting.quwutingservice.bulletin.dto.response.BulletinDetailResponse
 import org.quwuting.quwutingservice.bulletin.dto.response.BulletinFeedItemResponse;
 import org.quwuting.quwutingservice.bulletin.dto.response.BulletinReactionBadge;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.media.MediaAttachment;
+import org.quwuting.quwutingservice.media.MediaAttachments;
+import org.quwuting.quwutingservice.media.MediaAttachmentValidator;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
@@ -86,6 +89,7 @@ public class BulletinService {
     private final BulletinLookupService bulletinLookupService;
     private final BulletinReactionService bulletinReactionService;
     private final BulletinViewService bulletinViewService;
+    private final MediaAttachmentValidator mediaAttachmentValidator;
 
     // ── 用户端 ────────────────────────────────────────────────
 
@@ -195,6 +199,7 @@ public class BulletinService {
         Announcement a = bulletinLookupService.requirePublished(id);
         return new BulletinDetailResponse(
                 a.getId(), BulletinExcerpt.of(a.getContent()), a.getContent(), a.getCity(), a.getVenueId(),
+                MediaAttachments.parseOrEmpty(a.getMediaJson()),
                 a.getPublishAt(), a.getPublishedAt(), a.getCreatedAt(),
                 bulletinReactionService.badges(a.getId(), currentUserId),
                 bulletinViewService.countByBulletinId(a.getId()));
@@ -233,6 +238,7 @@ public class BulletinService {
         a.setStatus(AnnouncementStatus.DRAFT);
         a.setPublishAt(request.publishAt());
         a.setOfflineAt(request.offlineAt());
+        applyMedia(a, request.media());
         a.setOperatorId(adminId);
         return toAdminResponse(announcementRepository.save(a));
     }
@@ -269,6 +275,8 @@ public class BulletinService {
         }
         a.setCity(normalizeCity(request.city()));
         a.setVenueId(venueId);
+        // 媒体附件幂等替换（两个状态分支共用：DRAFT 与 PUBLISHED 均可改附件）
+        applyMedia(a, request.media());
         a.setOperatorId(adminId);
         return toAdminResponse(announcementRepository.save(a));
     }
@@ -362,6 +370,7 @@ public class BulletinService {
         a.setCity(normalizeCity(request.city()));
         a.setVenueId(validateVenueId(request.venueId()));
         a.setDedupKey(dedupKey);
+        applyMedia(a, request.media());
         a.setOperatorId(adminId);
         if (request.publishAt() != null && request.publishAt().isAfter(now)) {
             // 定时发布：写计划时间，状态保持 DRAFT，@Scheduled 到点强转
@@ -468,19 +477,32 @@ public class BulletinService {
         return venueId;
     }
 
-    /** 列表项映射：内容全文 + 该条的表态徽标 + 累计查看人数（列表页内联渲染所需的最小完整集合） */
+    /** 列表项映射：内容全文 + 结构化媒体附件 + 该条的表态徽标 + 累计查看人数（列表页内联渲染所需的最小完整集合） */
     private BulletinFeedItemResponse toFeedItem(Announcement a, List<BulletinReactionBadge> reactions,
                                                 Long viewCount) {
         return new BulletinFeedItemResponse(
                 a.getId(), BulletinExcerpt.of(a.getContent()), a.getContent(), a.getCity(), a.getVenueId(),
+                MediaAttachments.parseOrEmpty(a.getMediaJson()),
                 a.getPublishAt(), a.getCreatedAt(), reactions, viewCount);
     }
 
     private AdminBulletinResponse toAdminResponse(Announcement a) {
         return new AdminBulletinResponse(
                 a.getId(), BulletinExcerpt.of(a.getContent()), a.getContent(), a.getCity(), a.getVenueId(),
+                MediaAttachments.parseOrEmpty(a.getMediaJson()),
                 a.getDedupKey(), a.getSource(), a.getStatus(),
                 a.getPublishAt(), a.getOfflineAt(), a.getPublishedAt(), a.getOfflinedAt(),
                 a.getOperatorId(), a.getCreatedAt(), a.getUpdatedAt());
+    }
+
+    /**
+     * 媒体附件落库（2026-09-28）：与公告域 {@code AnnouncementService#applyMedia}
+     * 同语义（结构 + 内容双重校验 → 序列化；null / 空 = 幂等清空）。两域刻意各自
+     * 持有这个三行方法（同两域 validateSchedule 重复的 trade-off：接口契约独立演进），
+     * 但<b>校验与序列化单点在 media 包</b>——容错策略与上限口径绝不漂移。
+     */
+    private void applyMedia(Announcement a, List<MediaAttachment> media) {
+        mediaAttachmentValidator.validate(media);
+        a.setMediaJson(MediaAttachments.serialize(media));
     }
 }

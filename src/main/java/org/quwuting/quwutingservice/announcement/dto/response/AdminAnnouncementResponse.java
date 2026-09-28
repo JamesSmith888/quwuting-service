@@ -5,8 +5,10 @@ import org.quwuting.quwutingservice.announcement.enums.AnnouncementScope;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementSource;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementStatus;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementTouchLevel;
+import org.quwuting.quwutingservice.media.MediaAttachment;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 管理端公告项（GET /admin/announcements 列表 + GET /admin/announcements/{id} 详情，
@@ -18,6 +20,9 @@ import java.time.LocalDateTime;
  * <p>
  * {@code touchLevel}（触达等级，2026-09-15）= 是否计入用户未读的判据，编辑页
  * 必须回显——否则运营改一次正文就会把每日舞讯的档位悄悄改回默认 ALERT。
+ * <p>
+ * {@code media} = 结构化媒体附件（2026-09-28），编辑回显必需——编辑页按
+ * "完整列表幂等替换"提交，回显缺失会导致保存时静默清空附件。
  */
 public record AdminAnnouncementResponse(
         Long id,
@@ -29,6 +34,7 @@ public record AdminAnnouncementResponse(
         AnnouncementScope scope,
         AnnouncementStatus status,
         boolean pinned,
+        List<MediaAttachment> media,
         LocalDateTime publishAt,
         LocalDateTime offlineAt,
         LocalDateTime publishedAt,

@@ -5,8 +5,10 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementCategory;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementTouchLevel;
+import org.quwuting.quwutingservice.media.MediaAttachment;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 更新公告请求（POST /admin/announcements/{id}/update，需 ADMIN）。
@@ -21,6 +23,7 @@ import java.time.LocalDateTime;
  * </ul>
  * {@code touchLevel} 可空 = 按分类派生（同创建语义，见
  * {@link CreateAnnouncementRequest}）。
+ * {@code media} 可空 = 幂等替换（null / 空 = 清空附件），语义同创建（2026-09-28）。
  */
 public record UpdateAnnouncementRequest(
         @NotBlank(message = "标题不能为空")
@@ -37,6 +40,8 @@ public record UpdateAnnouncementRequest(
         AnnouncementTouchLevel touchLevel,
 
         Boolean pinned,
+
+        List<MediaAttachment> media,
 
         LocalDateTime publishAt,
 

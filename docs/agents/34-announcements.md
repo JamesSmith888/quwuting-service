@@ -226,6 +226,42 @@ SQL 用 NOT EXISTS 子查询派生（对齐站内信 unread-count 模式）。
 3. **写侧与读侧两处 SQL 必须同改**（见「未读数口径」同源声明）。
 4. **发布侧后果必须对运营可见**：管理端编辑页「用户提醒」控件（含后果文案）、列表「不打扰」标记。
 
+
+## 媒体附件（2026-09-28，V32 —— 媒体是事实，不再埋在正文里）
+
+**背景（根因，运营报障「admin 发布快讯/公告没有方便的图片/视频上传方式」）**，两层根因都不在上传按钮本身：
+
+1. **内容模型**：媒体以 markdown 字符串（`![](url)` / `<video src>`）埋在正文里——媒体不是"事实"，
+   无法单独替换/统计/回收，"带没带媒体"只能靠正则从正文猜（快讯 `MEDIA_IN_CONTENT_RE` 先例）；
+2. **存储模型**：`FileCategory` 全是业务域分类，没有运营内容媒体分类；视频能力还硬编码绑在
+   `DANCER_VIDEO` 一个枚举上（`isVideoCategory == DANCER_VIDEO`），新增任何视频分类都要改
+   `StorageService` 分支——把「路径前缀」与「媒体能力」两个正交维度塞进一个枚举的设计错误。
+
+**三层修复（系统性，防同类复发）**：
+
+1. **内容模型**：`qwt_announcements.media_json`（V32，varchar(4000) 存 JSON 串，与
+   `qwt_venues.business_hours` 同一模式）= 结构化附件数组 `[{type, url, poster?}]`。媒体是事实：
+   编辑页**整表幂等替换**（空列表 = 清空，漏传字段不会静默保留旧值）、可单独替换/统计；
+   正文 markdown 只承载文本，**历史外链图片保留渲染兼容（不迁移）**。
+2. **存储模型**：`FileCategory` 升级为「路径前缀 + 允许的媒体类型（`MediaKind` IMAGE/VIDEO）」，
+   校验通道由「扩展名 → kind → 分类是否允许」驱动；新增 `OPERATION_MEDIA`（图片 + 视频双通道，
+   按扩展名自动分流 5MB/50MB 上限）。**新增分类零改动 StorageService**。详见 11 号。
+3. **契约单点**：解析 / 序列化 / 结构校验收敛在 `media` 包 `MediaAttachments`（读侧容错：坏 JSON
+   → 空列表 + warn，绝不放大成页面 500；写侧严格：条数 ≤9 / 视频 ≤3 / https 强制 / JSON ≤4000）；
+   内容级 URL 校验走 `ImageContentValidator`（跨仓约定「图片/视频 URL 落库字段必校验」）——
+   **仅接受本应用存储白名单内地址**（外链失效会让附件卡变死块，比正文外链更糟；Agent 通道如需
+   第三方图，独立做「URL 转存」能力，不属本次）。
+
+**契约要点**：
+
+- 写路径：create / update（公告 + 快讯）与 agentPublish 三条都必须过 `MediaAttachmentValidator`
+  （结构层 + 内容层），在序列化落库之前；
+- 读路径：admin 响应、用户端公告详情、快讯信息流/详情全部下发 `media`（无附件 = 空数组）；
+  **admin 编辑回显必须含 media**——幂等替换语义下回显缺失 = 保存即静默清空附件；
+- Agent 通道与管理端同契约；dedupKey 命中幂等分支时**不改写 media**（与其它字段一致）；
+- 锁：`MediaAttachmentsTest` + `FileCategoryMediaKindTest`（零依赖，锁读写往返 / 容错 /
+  上限 / 分类 kind 声明完整性）。
+
 ## 数据更新公告触发链路（B 场景）
 
 

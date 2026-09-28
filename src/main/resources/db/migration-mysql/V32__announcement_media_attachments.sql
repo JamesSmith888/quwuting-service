@@ -1,0 +1,32 @@
+-- V32：公告/快讯「媒体附件」列（2026-09-28，方案见 docs/agents/34-announcements.md「媒体附件」、47-bulletins.md §7.3）
+--
+-- 背景（根因，运营报障「admin 发布快讯/公告没有方便的图片/视频上传方式，只能手写
+-- markdown 外链」）：
+--   媒体此前只能以 markdown 字符串（![](url) / <video src>）埋在正文里——
+--   · 媒体不是「事实」而是「正文里的文本」：无法单独替换/统计/回收，"这条带没带
+--     媒体"只能靠正则从正文猜（快讯 hasMedia 的 MEDIA_IN_CONTENT_RE 先例）；
+--   · 上传也无路可走：FileCategory 全是业务域分类（venue/dancer/group/feedback），
+--     没有运营内容媒体分类；视频能力还硬编码绑在 DANCER_VIDEO 一个枚举上
+--     （StorageService isVideoCategory == DANCER_VIDEO），新增任何视频分类都要改
+--     校验分支——漏改即静默走错通道。
+--
+-- 根因修复（系统性，防同类复发，三层）：
+--   1. 内容模型：媒体升级为结构化附件（本迁移 media_json），正文 markdown 只承载
+--      文本；markdown 外链图片保留渲染兼容（历史内容不迁移）。
+--   2. 存储模型：FileCategory 从「纯路径前缀」升级为「路径前缀 + 允许的媒体类型
+--      （MediaKind IMAGE/VIDEO）」——校验通道由 扩展名 → MediaKind → 分类是否允许
+--      驱动，新增分类零改动 StorageService；新增 FileCategory.OPERATION_MEDIA
+--      （图片 + 视频双通道）。
+--   3. 契约单点：附件的解析/序列化/结构校验收敛在 media 包 MediaAttachments
+--      （读侧容错、写侧严格，两域共用），内容级 URL 校验走既有
+--      ImageContentValidator（跨仓约定"图片/视频 URL 落库字段必校验"由此落实）。
+--
+-- 形态：varchar(4000) 存 JSON 串（与 qwt_venues.business_hours / tickets 同一模式：
+-- 变长结构化列表 → JSON 字符串列，服务端单点编解码；规避 Hibernate validate 对
+-- MySQL 原生 JSON 列的类型校验不确定性，见 V5 迁移注释）。条目上限：总数 ≤ 9、
+-- 视频 ≤ 3（MediaAttachments 结构校验强制），序列化后约 9 × 150 字符 << 4000。
+-- 两侧通用：公告与快讯共用 qwt_announcements 表（V18 先例），本列对两域同时生效；
+-- Agent 通道（/admin/bulletins/agent-publish）与管理端契约一致（幂等替换语义）。
+--
+ALTER TABLE qwt_announcements
+    ADD COLUMN media_json varchar(4000) NULL COMMENT '媒体附件 JSON（MediaAttachment 数组：type/url/poster；编解码单点 MediaAttachments）' AFTER content;

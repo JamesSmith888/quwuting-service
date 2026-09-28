@@ -1,5 +1,7 @@
 package org.quwuting.quwutingservice.bulletin.dto.response;
 
+import org.quwuting.quwutingservice.media.MediaAttachment;
+
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -22,10 +24,12 @@ import java.util.List;
  * 一次 IN + GROUP BY 聚合，无 N+1、无缓存）。
  * <p>
  * 仍<b>不含 read 字段</b>：快讯域有意不做已读回执（不进红点，新鲜度由时间戳表达）。
+ * media = 结构化媒体附件（2026-09-28）：气泡在正文 towxml 之后渲染附件块，
+ * {@code hasMedia} 宽度策略的事实源（历史 markdown 外链媒体仍由正文正则兜底）。
  *
  * @param id        快讯 id
  * @param excerpt   内容摘要（**派生只读**：本域无标题字段，见 BulletinExcerpt；仅供分享卡片标题 / aria 上下文）
- * @param content   Markdown 原文（前端 towxml 渲染；图片/视频走 markdown 原生语法）
+ * @param content   Markdown 原文（前端 towxml 渲染；markdown 外链媒体仅为历史内容兼容）
  * @param city      城市标签（可空）
  * @param venueId   关联门店 id（可空）
  * @param publishAt 生效时间（定时发布 = 计划生效时刻；列表节奏锚点）
@@ -39,6 +43,7 @@ public record BulletinFeedItemResponse(
         String content,
         String city,
         Long venueId,
+        List<MediaAttachment> media,
         LocalDateTime publishAt,
         LocalDateTime createdAt,
         List<BulletinReactionBadge> reactions,

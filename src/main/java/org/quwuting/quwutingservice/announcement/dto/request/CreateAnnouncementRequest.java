@@ -5,8 +5,10 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementCategory;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementTouchLevel;
+import org.quwuting.quwutingservice.media.MediaAttachment;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 创建公告请求（POST /admin/announcements/create，需 ADMIN）。
@@ -21,6 +23,11 @@ import java.time.LocalDateTime;
  * 设计成"可空 + 服务端派生"而非"必填"是为了让自动化发布链路（assistant / Skill
  * 直接调接口）不传该字段也能落在正确档位——每加一条发布通道就要求补参数，
  * 漏一处就复发"每日舞讯计入未读"的老问题。
+ * <p>
+ * {@code media} 可空（2026-09-28，docs/agents/34「媒体附件」）：结构化媒体附件
+ * （配图 / 短视频），服务端做结构 + 内容双重校验后序列化落库；<b>null / 空 =
+ * 无附件（幂等清空语义）</b>——编辑页始终提交当前完整附件列表。URL 仅接受
+ * 本应用存储白名单内地址（媒体是可管理资产，外链会失效成死块）。
  */
 public record CreateAnnouncementRequest(
         @NotBlank(message = "标题不能为空")
@@ -37,6 +44,8 @@ public record CreateAnnouncementRequest(
         AnnouncementTouchLevel touchLevel,
 
         Boolean pinned,
+
+        List<MediaAttachment> media,
 
         LocalDateTime publishAt,
 

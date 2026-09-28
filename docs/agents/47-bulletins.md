@@ -395,23 +395,32 @@ DRAFT --publish(立即/定时)--> PUBLISHED --offline / offlineAt 到点--> OFFL
 | `pages/bulletins` | **信息流**（tab 页）。一条快讯 = 一条**全宽白带**（左右撑满屏幕）+ 底部 16rpx 灰缝，带内按**消息**排版：正文（markdown）→ 表态行 → 尾部（查看人数 · 时间，居右）；触底分页；尾部免责声明（列表侧无「详情」入口，见 §7.4） |
 | `pages/bulletin-detail` | 分享落地。towxml 渲染 markdown + `normalizeAnnouncementLinks` 归一化 `venue://`；含同一套表态行与查看人数（2026-09-11） |
 
-### 7.3 内容渲染（图片 / 视频 / markdown / 动态）
+### 7.3 内容渲染（结构化媒体附件 + markdown 历史兼容，2026-09-28 改写）
 
-**全部走 markdown 原生语法，零新增字段**（管理端 bytemd 编辑器与 Agent 通道直接可用）：
+**媒体是结构化事实（2026-09-28 起），正文 markdown 只承载文本**（根因与契约见
+34 号「媒体附件」/ 11 号「mediaKind 解耦」；上轮「全部走 markdown、零新增字段」
+的一期结论随管理端直传落地一并退役）：
 
-| 类型 | 写法 | 小程序侧实现 |
+| 类型 | 载体 | 小程序侧实现 |
 |---|---|---|
 | 文本 / 列表 / 表格 / 代码 | markdown | towxml（与公告详情同一管线） |
-| 图片 | `![说明](图片地址)` | towxml `img` 组件（点击可预览大图） |
-| 视频 | `<video src="地址" poster="地址"></video>` | towxml `wxml` 白名单直通原生 `<video>` |
+| 图片 | 结构化附件 `media[{type:"IMAGE"}]` | `media-attachments` 组件预览网格（点击 `wx.previewImage` 大图） |
+| 视频 | 结构化附件 `media[{type:"VIDEO", poster?}]` | 组件内原生 `<video>` 内联播放（无封面走原生控件兜底） |
+| 历史外链媒体（不迁移） | 正文 markdown `![](url)` / `<video src>` | towxml `img` / 白名单直通原生 `<video>`（hasMedia 正则兜底） |
 | 门店锚点 | `[店名](venue://门店ID)` | `normalizeAnnouncementLinks` → 门店详情页（外链降级纯文本） |
 
+- **上传与契约**：管理端 `FileCategory.OPERATION_MEDIA`（图片 + 视频双通道）直传，
+  编辑页「媒体附件」区块（公告/快讯共用 `MediaAttachmentsField`）**幂等替换**提交
+  （空列表 = 清空）；接口契约 = `media` 数组——**admin 响应必须回显 media**，
+  否则保存即静默清空附件（幂等替换语义的反面教训，同 touchLevel 回显先例）。
+- **hasMedia 事实源 = 结构化附件**（`item.media`）；`MEDIA_IN_CONTENT_RE` 正则仅
+  兜底历史条目正文里手写的媒体语法，两者取或。
+- 附件组件的可交互节点统一带 `data-media="1"`，宿主 `onBandTap` 据此放行
+  （点击预览/播放，不弹消息菜单）——新增可交互节点必须同步该标记。
 - 读取链路复用公告详情踩过的两个 towxml 覆盖（本页 wxss 内已覆盖）：主题自带
   `text-align: justify`（中文两端对齐事故）→ 页面级改 `left`；`.h2w__main` 自带
   `margin/padding` → 归零（边距所有权归气泡容器）。
 - 一页多枚 towxml 实例（每条内容一枚）：覆盖规则是**页面级单类**，不逐条重复配置。
-- **待办（一期不做）**：管理端媒体**直传**（需新增 `FileCategory` + 上传入口）。
-  一期媒体 URL 由 Agent 外链或运营粘贴；只要 URL 可公开访问即可。
 
 ### 7.4 容器语言与排版：全宽白带 + 消息式（2026-09-10 三稿，**改写了二稿的气泡结论**）
 

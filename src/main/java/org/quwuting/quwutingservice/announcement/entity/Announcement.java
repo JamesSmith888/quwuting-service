@@ -50,6 +50,19 @@ public class Announcement extends BaseEntity {
     @Column(nullable = false)
     private String content;
 
+    /**
+     * 媒体附件 JSON（2026-09-28，docs/agents/34「媒体附件」/ 47 §7.3）：结构化配图
+     * 与短视频，<b>媒体是事实，不再埋在 markdown 正文里</b>（根因与形态说明见
+     * {@link org.quwuting.quwutingservice.media.MediaAttachments}）。
+     * <p>
+     * varchar 存 JSON 串 = 与 {@code qwt_venues.business_hours} / {@code tickets}
+     * 同一模式（变长结构化列表 → JSON 字符串列，服务端单点编解码；规避 Hibernate
+     * validate 对 MySQL 原生 JSON 列的类型校验不确定性，见 V5 迁移注释）。
+     * null = 无附件。
+     */
+    @Column(name = "media_json", length = 4000)
+    private String mediaJson;
+
     /** 分类（NOTICE 运营公告 / DATA_UPDATE 数据更新） */
     @Enumerated(EnumType.STRING)
     @Column(length = 32, nullable = false)
