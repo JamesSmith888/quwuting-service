@@ -11,7 +11,11 @@ import org.quwuting.quwutingservice.venue.enums.VenueType;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuepresence.dto.request.ReportPresenceRequest;
 import org.quwuting.quwutingservice.venuepresence.dto.response.PresenceReportResponse;
+import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceConsentStats;
 import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceStats;
+import org.quwuting.quwutingservice.venuepresence.entity.VenuePresenceConsent;
+import org.quwuting.quwutingservice.venuepresence.enums.ConsentSource;
+import org.quwuting.quwutingservice.venuepresence.repository.VenuePresenceConsentRepository;
 import org.quwuting.quwutingservice.venuepresence.repository.VenuePresencePingRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -36,8 +40,9 @@ import java.util.concurrent.TimeUnit;
  * （{@link #HIT_RADIUS_M} / {@link #HIT_MAX_ACCURACY_M} / {@link #NEARBY_RADIUS_M}）
  * 全部在查询侧判定——门店坐标是人工选点（10~30m 误差），阈值定错时历史数据可回溯。
  * <p>
- * <b>隐私红线</b>：本域数据面 = (venueId, distanceM, accuracyM) 三个标量，
- * 用户经纬度在协议上不存在（端侧经 /venues/nearby 取服务端算好的距离后原样回传）。
+ * <b>隐私红线</b>：本域数据面 = (venueId, distanceM, accuracyM) 三个标量 +
+ * 开关偏好布尔（V34，consent 流水——不含任何位置信息），用户经纬度在协议上
+ * 不存在（端侧经 /venues/nearby 取服务端算好的距离后原样回传）。
  * <p>
  * <b>信任边界</b>：distance_m 是端侧自报值，服务端不复算（复算需要坐标，与红线冲突）。
  * 防刷面 = 伪造 distance 刷「到访」；缓解 = 15 分钟桶幂等（本表唯一约束）+ 每用户
@@ -98,6 +103,7 @@ public class VenuePresenceService {
     private static final long WRITE_RATE_WINDOW_MS = 60_000L;
 
     private final VenuePresencePingRepository pingRepository;
+    private final VenuePresenceConsentRepository consentRepository;
     private final VenueRepository venueRepository;
     private final OpsConfigService opsConfigService;
 
@@ -143,7 +149,57 @@ public class VenuePresenceService {
         // UTC epoch 分钟派生，与时区无关（V33 迁移头注 §防刷与幂等）
         long bucket = System.currentTimeMillis() / 60_000L / WRITE_WINDOW_MINUTES;
         pingRepository.upsertInBucket(userId, venueId, bucket, distanceM, accuracyM, LocalDateTime.now());
+        // 默认态确立（V34）：授权模型 09-29 四轮改版为「默认开启」——首次采集触达
+        // 即补记出厂态，使「默认开启人群」进入 admin 开关统计（无用户动作、无弹窗）
+        consentRepository.insertDefaultIfAbsent(userId, LocalDateTime.now());
         return new PresenceReportResponse(true, null);
+    }
+
+    /**
+     * 记录一次用户手动开关变更（POST /venues/presence-consent 的实现）。
+     * 「我的-设置」拨动开关时 fire-and-forget 上报；每次变更插一行 USER 流水
+     * （不 upsert——保留变更历史才能回答「近期变更热度」；当前态由查询侧
+     * 「每用户最新一条」口径派生）。enabled 为 null（缺字段）按 1022 拒绝，
+     * 禁猜默认值。
+     */
+    @Transactional
+    public void recordConsent(Long userId, Boolean enabled) {
+        if (enabled == null) {
+            throw new BusinessException(1022, "缺少开关状态");
+        }
+        VenuePresenceConsent consent = new VenuePresenceConsent();
+        consent.setUserId(userId);
+        consent.setEnabled(enabled);
+        consent.setSource(ConsentSource.USER);
+        // created_at/updated_at 由 BaseEntity 的 @CreationTimestamp/@UpdateTimestamp 托管
+        consentRepository.save(consent);
+    }
+
+    /**
+     * 开关统计（admin 门店列表页头）。当前态 = 每用户最新一条 consent 行；
+     * 「默认开启」= 最新态仍是 DEFAULT 来源（从未手动改过设置）。数据量级 =
+     * 用户数 × 变更次数（千级行），native 窗口函数一条 SQL 出分布，见
+     * {@code VenuePresenceConsentRepository#countLatestByEnabledAndSource}。
+     */
+    public VenuePresenceConsentStats consentStats() {
+        long enabledUsers = 0;
+        long disabledUsers = 0;
+        long defaultUsers = 0;
+        for (Object[] row : consentRepository.countLatestByEnabledAndSource()) {
+            boolean enabled = Boolean.TRUE.equals(row[0]);
+            boolean isDefault = ConsentSource.DEFAULT.name().equals(String.valueOf(row[1]));
+            long users = ((Number) row[2]).longValue();
+            if (enabled) {
+                enabledUsers += users;
+                if (isDefault) {
+                    defaultUsers += users;
+                }
+            } else {
+                disabledUsers += users;
+            }
+        }
+        long changes30d = consentRepository.countUserChangesSince(LocalDateTime.now().minusDays(30));
+        return new VenuePresenceConsentStats(enabledUsers, disabledUsers, defaultUsers, changes30d);
     }
 
     /**

@@ -3,6 +3,7 @@ package org.quwuting.quwutingservice.venuepresence.controller;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceConsentStats;
 import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceStats;
 import org.quwuting.quwutingservice.venuepresence.service.VenuePresenceService;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -37,5 +38,19 @@ public class AdminVenuePresenceController {
     public ApiResponse<VenuePresenceStats> stats(@PathVariable Long venueId) {
         UserContext.requireAdmin();
         return ApiResponse.ok(venuePresenceService.statsFor(venueId));
+    }
+
+    /**
+     * 到店足迹开关统计（仅 ADMIN，2026-09-29 四轮 V34）。
+     * GET /admin/venues/presence-consent-stats
+     * <p>
+     * 当前态分布（每用户最新一条 consent 行）：启用 / 关闭去重用户数 +
+     * 其中「从未手动改过设置」的默认开启人数 + 近 30 天手动变更次数。
+     * 全局口径（非门店维度），admin-web 门店列表页头展示。
+     */
+    @GetMapping("/presence-consent-stats")
+    public ApiResponse<VenuePresenceConsentStats> consentStats() {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(venuePresenceService.consentStats());
     }
 }

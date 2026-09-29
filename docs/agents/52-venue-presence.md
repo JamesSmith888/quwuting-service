@@ -47,6 +47,9 @@ presence 只是在拿到新 fix 后顺带做一次 nearby 判定 + 一条上报�
   人工选点（10~30m 误差），阈值定错时历史数据可回溯，无需重采。
 - 索引：`(venue_id, created_at)`（admin 聚合）、`(user_id, created_at)`（异常排查/打标回溯）。
 - 时间戳 Java 传 `LocalDateTime.now()`（JVM 北京时间，禁 DB now()——V59 同款事故）。
+- **V34 `qwt_venue_presence_consents`（开关状态流水）**：每行一次状态确立
+  （DEFAULT=默认态确立 / USER=用户手动变更），当前态 = 每用户最新一条；
+  授权模型与统计口径见 §5「用户级授权」。
 
 ## 4. 口径参数与判据
 
@@ -81,18 +84,34 @@ admin 展示文案同步发版；② 管理端开关控件承载不了数值语�
 无坐标门店显式拒绝 + admin 侧距离分布观察。**若未来要把到访数据用于任何有利益
 关联的场合（排序/积分），必须先重新评估本节**——这是当前形态的明确边界。
 
-用户级授权（consent）同属本边界：**端上先问后采**（首次命中、落库前 `wx.showModal`
-一次；拒绝 = 端上持久记住、永不再弹，详见采集端 52 号 §3.5），服务端不感知、
-不验证 consent 状态——拒绝 = 端上根本不发请求。若未来把到访数据用于有利益关联
-的场合，consent 也必须升级为服务端可验证（与 distance 复算一并评估）。
+用户级授权（consent，V34）——09-29 四轮改版后服务端**可观测偏好**（不再是
+纯端上私有，但仍不含任何位置信息）：
+
+- **模型 = 默认开启 + 常驻开关 + 手动开启提醒**（详见采集端 52 号 §3.5）：
+  未选择 = 采集开启；关闭立即停采（端上判定）；开关只存端上 `presence_consent`。
+- **服务端感知面 = 状态确立流水**（`qwt_venue_presence_consents`，V34）：
+  ① USER 行——「我的-设置」拨动开关时端上 fire-and-forget 上报
+  `POST /venues/presence-consent`（body `{enabled}`，每次一行，不幂等去重）；
+  ② DEFAULT 行——首次采集 ping 时该用户无任何 consent 行则补一条
+  enabled=true（`INSERT ... WHERE NOT EXISTS` 单语句，最少 DB 往返；并发窗口
+  双写无害，统计口径吸收）。
+- **admin 统计**（`GET /admin/venues/presence-consent-stats`，门店列表页头展示）：
+  当前态 = 每用户最新一条（native 窗口函数，`ROW_NUMBER` 按 created_at DESC,
+  id DESC）；启用 / 关闭去重用户数 + 其中「从未手动改过设置」的默认开启人数
+  （最新态 source=DEFAULT）+ 近 30 天 USER 变更次数。
+- **信任边界不变量**：consent 流水是 admin 统计输入，**不反哺采集行为**（采集
+  与否只由端上开关决定）；若未来要服务端强制执行 consent（如关闭者发 ping 直接
+  拒收），属信任模型升级，须与「distance 复算」一并评估。
 
 ## 6. 接口清单
 
 | 接口 | 鉴权 | 说明 |
 |---|---|---|
-| `POST /venues/{venueId}/presence` | requireAuth | body `{distanceMeters, accuracyMeters?}`；桶幂等；开关关闭返回 `accepted=false(DISABLED)` 而非报错；错误码 **1022**（门店不存在 / 不参与采集 / 参数越界 / 频控） |
+| `POST /venues/{venueId}/presence` | requireAuth | body `{distanceMeters, accuracyMeters?}`；桶幂等；开关关闭返回 `accepted=false(DISABLED)` 而非报错；错误码 **1022**（门店不存在 / 不参与采集 / 参数越界 / 频控）；**同时触发默认态确立**（该用户无 consent 行则补 DEFAULT 行，V34） |
+| `POST /venues/presence-consent` | requireAuth | 开关状态上报（V34）：body `{enabled}`，每次变更插一行 USER 流水；fire-and-forget，客户端失败静默 |
 | `GET /admin/venues` | requireAdmin | 管理端门店列表（无业务裁剪全量分页，`AdminVenueQueryService` + `VenueRepository.findAdminPage`）；行内带 `visitUsers30d` 批量注入；status 经 `WireEnums.parse` 宽容解析（非法 = 不筛） |
 | `GET /admin/venues/{id}/presence` | requireAdmin | 单店到访统计（口径参数随响应回显，admin 展示必须与数值同屏；DTO 全字段 `@JsonInclude(ALWAYS)`——non_null 全局策略会删 null，35 号教训） |
+| `GET /admin/venues/presence-consent-stats` | requireAdmin | 开关统计（V34）：启用 / 关闭去重用户数 + 默认开启未改设置人数 + 近 30 天手动变更次数；admin-web 门店列表页头展示 |
 
 admin-web 门店基础信息详情复用既有公开 `GET /venues/{id}`（该响应无 venueType——
 管理列表行的类型来自本清单第二个接口，两处字段面不同是有意的）。
