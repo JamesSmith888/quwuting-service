@@ -10,6 +10,11 @@ import org.quwuting.quwutingservice.user.dto.response.ClaimSummary;
 import org.quwuting.quwutingservice.user.dto.response.DemandSummary;
 import org.quwuting.quwutingservice.user.dto.response.PointsSummary;
 import org.quwuting.quwutingservice.user.dto.response.ReportSummary;
+import org.quwuting.quwutingservice.user.dto.response.TopVenue;
+import org.quwuting.quwutingservice.user.repository.UserBehaviorEvent;
+import org.quwuting.quwutingservice.user.repository.UserBehaviorRepository;
+import org.quwuting.quwutingservice.venue.entity.Venue;
+import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venueclaim.repository.VenueClaimRepository;
 import org.quwuting.quwutingservice.venuefeedback.enums.ReportStatus;
 import org.quwuting.quwutingservice.venuefeedback.repository.VenueFeedbackRepository;
@@ -20,7 +25,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -62,6 +70,30 @@ public class AdminUserStatsService {
     private final VenueFeedbackRepository feedbackRepository;
     private final StatusReportRepository statusReportRepository;
     private final VenueClaimRepository claimRepository;
+    private final UserBehaviorRepository behaviorRepository;
+    private final VenueRepository venueRepository;
+
+    /**
+     * 「常去门店」窗口（近 90 天，含今日）：太短（7 天）绝大多数用户只有零星动作、
+     * 认不出人，太长则把早已不去的店也算进来——90 天是「还记得、也还没过期」的量级。
+     */
+    private static final int VENUE_AFFINITY_WINDOW_DAYS = 90;
+
+    /**
+     * 产生「常去门店」的最小动作次数：<b>1 次是偶然，不是身份标签</b>。
+     * 把一次浏览渲染成「常去 XX」会让运营据此错误归类，故阈值在后端判、
+     * 未达阈值一律下发 null（前端零口径，见 {@link TopVenue}）。
+     */
+    private static final long MIN_VENUE_AFFINITY_COUNT = 2;
+
+    /**
+     * 门店维度事件码（<b>由行为目录派生，禁止手写清单</b>）：
+     * 手写清单的代价是以后新增一个门店类事件时会静默漏掉它，且没有任何告警。
+     */
+    private static final List<String> VENUE_EVENT_CODES = Arrays.stream(UserBehaviorEvent.values())
+            .filter(event -> event.refKind() == UserBehaviorEvent.RefKind.VENUE)
+            .map(UserBehaviorEvent::code)
+            .toList();
 
     // ── 积分账户（余额 + 累计收支 + 流水条数） ────────────────────────────────
 
@@ -240,6 +272,68 @@ public class AdminUserStatsService {
         mergeLatest(latest, toTimeMap(demandRecordRepository.findLatestGroupByUserIds(userIds)));
         mergeLatest(latest, toTimeMap(checkinRepository.findLatestGroupByUserIds(userIds)));
         return latest;
+    }
+
+    // ── 常去门店（辨认维度，2026-09-29） ──────────────────────────────────────
+
+    /**
+     * 批量「最常去的门店」——<b>管理端辨认匿名用户的描述性身份</b>：
+     * 窗口内该用户动作次数最多的那家门店；未达 {@link #MIN_VENUE_AFFINITY_COUNT}
+     * 或门店已软删 → 该用户不在结果 Map 里（前端收到 null 即不渲染）。
+     * <p>
+     * <b>为什么它能辨认人</b>：平台 98% 的用户昵称仍是注册默认值，昵称零辨认力；
+     * 而「常去 XX 舞厅的那个人」是运营真正记得住、也能在沟通里指代的描述。
+     * 它与 {@link #lastSeenFor} 同签名风格（批量、单用户复用、空集合返回空 Map），
+     * 列表与详情自动同时获得。
+     * <p>
+     * <b>事件范围刻意包含非活跃档</b>（认领 / 上报暂停）：辨认要的是「他对哪家店
+     * 有过动作」，不是「他算不算活跃」——一个只认领过门店、从没浏览过的人，
+     * 恰恰是最需要被认出来的那类（门店维护者）。
+     *
+     * @return userId → TopVenue；不含无符合条件的用户
+     */
+    @Transactional(readOnly = true)
+    public Map<Long, TopVenue> topVenuesFor(Collection<Long> userIds) {
+        if (userIds.isEmpty()) {
+            return Map.of();
+        }
+        LocalDate sinceDay = LocalDate.now().minusDays(VENUE_AFFINITY_WINDOW_DAYS - 1L);
+        Map<Long, long[]> best = new HashMap<>();
+        for (UserBehaviorRepository.VenueAffinityRow row :
+                behaviorRepository.listVenueAffinityByUserIds(userIds, sinceDay, VENUE_EVENT_CODES)) {
+            Long userId = row.getUserId();
+            Long venueId = row.getRefId();
+            if (userId == null || venueId == null) {
+                continue;
+            }
+            long cnt = row.getCnt() == null ? 0L : row.getCnt();
+            long[] cur = best.get(userId);
+            if (cur == null || cnt > cur[1] || (cnt == cur[1] && venueId < cur[0])) {
+                best.put(userId, new long[]{venueId, cnt});
+            }
+        }
+        Map<Long, long[]> qualified = new HashMap<>();
+        best.forEach((userId, arr) -> {
+            if (arr[1] >= MIN_VENUE_AFFINITY_COUNT) {
+                qualified.put(userId, arr);
+            }
+        });
+        if (qualified.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, Venue> venues = venueRepository
+                .findByIdInAndDeletedFalse(new ArrayList<>(
+                        qualified.values().stream().map(arr -> arr[0]).toList()))
+                .stream()
+                .collect(Collectors.toMap(Venue::getId, Function.identity(), (a, b) -> a, HashMap::new));
+        Map<Long, TopVenue> result = new HashMap<>();
+        qualified.forEach((userId, arr) -> {
+            Venue venue = venues.get(arr[0]);
+            if (venue != null) {
+                result.put(userId, new TopVenue(venue.getId(), venue.getName(), venue.getCity(), arr[1]));
+            }
+        });
+        return result;
     }
 
     private static void mergeLatest(Map<Long, LocalDateTime> acc, Map<Long, LocalDateTime> src) {

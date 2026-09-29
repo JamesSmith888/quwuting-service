@@ -52,5 +52,13 @@ public record AdminUserDetailResponse(
         CheckinSummary checkin,
         /** 微信审核账号标记（2026-09-09 V17；true = 管理端统计口径已排除该账号，
          *  详情页提供标记/取消操作 POST /admin/users/{id}/wechat-review） */
-        boolean wechatReview
+        boolean wechatReview,
+        // ── 辨认维度（2026-09-29：匿名用户在管理端的可辨认性；与列表同口径） ──────
+        /** 稳定用户代号（如 {@code U#00472}），由 id 派生、终身不变
+         *  （语义与 {@link AdminUserItem#userCode()} 完全一致） */
+        String userCode,
+        /** nickname 是否为用户自己起的（false = 仍是注册默认值或空） */
+        boolean nicknameCustom,
+        /** 最常去的门店（描述性身份；无或未达阈值 = null，见 {@link TopVenue}） */
+        TopVenue topVenue
 ) {}

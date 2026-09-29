@@ -55,5 +55,22 @@ public record AdminUserItem(
          *  前端渲染行级「7 日活跃」标记，与「最近露面」严格区分两个概念） */
         boolean activeWithin7d,
         /** 微信审核账号标记（2026-09-09 V17；true = 管理端统计口径已排除该账号） */
-        boolean wechatReview
+        boolean wechatReview,
+        // ── 辨认维度（2026-09-29：匿名用户在管理端的可辨认性） ──────────────────
+        /**
+         * 稳定用户代号（如 {@code U#00472}），由 {@code id} 派生，<b>终身不变</b>。
+         * 平台 98% 用户从未改过昵称，昵称没有辨认力；代号是运营在沟通、工单、
+         * 排查中指代一个账号的唯一凭据。与 {@link #id} 一一对应但<b>不是</b> id：
+         * 代号是对外可念出的形式（含前导零、定长），id 是库内主键。
+         */
+        String userCode,
+        /**
+         * nickname 是否为用户自己起的（false = 仍是注册默认值或空）。
+         * <b>前端据此决定列表主标题显示什么</b>：自定义昵称优先显示昵称、
+         * 否则显示 {@link #userCode}——判据由后端权威下发，
+         * <b>禁止前端再写一份「默认昵称」字面量</b>（那会让两个端口径漂移）。
+         */
+        boolean nicknameCustom,
+        /** 最常去的门店（描述性身份；无或未达阈值 = null，见 {@link TopVenue}） */
+        TopVenue topVenue
 ) {}

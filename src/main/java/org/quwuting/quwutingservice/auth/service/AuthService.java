@@ -7,6 +7,7 @@ import org.quwuting.quwutingservice.security.JwtUtil;
 import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.mapper.UserInfoMapper;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
+import org.quwuting.quwutingservice.user.service.UserCode;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -45,7 +46,8 @@ public class AuthService {
     private User createUser(String openId) {
         User user = new User();
         user.setOpenId(openId);
-        user.setNickname("微信用户");
+        // 默认昵称的唯一权威（注册写入与管理端「是否自定义昵称」判定同值，见 UserCode）
+        user.setNickname(UserCode.DEFAULT_NICKNAME);
         log.info("New user registered: openId={}", openId);
         return userRepository.save(user);
     }

@@ -7,6 +7,7 @@ import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -110,6 +111,31 @@ public interface UserBehaviorRepository extends Repository<User, Long> {
     interface UserJoinedRow {
         Long getUserId();
         LocalDate getJoinedDay();
+    }
+
+    /**
+     * 批量「用户 × 门店」动作计数行（2026-09-29；常去门店 Top1 的数据源，
+     * 服务层 {@code AdminUserStatsService#topVenuesFor} 再按 cnt 取每用户最大者）。
+     * <p>
+     * <b>为什么按 (user, venue) 分组再由 Java 取 Top1，而不是 SQL 里窗口函数取</b>：
+     * 一页只有 20 个用户，分组结果 = 用户数 × 人均去过的门店数（实测个位数），
+     * 内存取最大值远比在 UNION 18 张表的结果集上再套一层窗口函数清楚；
+     * 且并列时的次序规则（次數多者优先、相同则门店 id 小者优先，保证稳定可复现）
+     * 在 Java 里是一行比较，在 SQL 里要写 {@code ROW_NUMBER() OVER (... ORDER BY cnt DESC, ref_id)}。
+     */
+    interface VenueAffinityRow {
+        Long getUserId();
+        /**
+         * 门店 id（事实集的 {@code ref_id}）。
+         * <b>只在 {@code event_type} 属于门店维度事件时才有意义</b>——
+         * {@link UserBehaviorSql#EVENT_DETAIL_UNION} 的 {@code ref_id} 按事件类型分别
+         * 装的是门店 / 舞伴 / 招工 / 公告 id，故调用方<b>必须</b>传
+         * {@code :venueEventTypes} 过滤（取值由 {@link UserBehaviorEvent#refKind()}
+         * == {@code VENUE} 派生，<b>禁止手写事件码清单</b>——新增门店类事件时
+         * 手写清单会静默漏掉它）。
+         */
+        Long getRefId();
+        Long getCnt();
     }
 
     // ── 单用户：轨迹（一条时间线） ──────────────────────────────────────────────
@@ -275,4 +301,32 @@ public interface UserBehaviorRepository extends Repository<User, Long> {
             FROM qwt_users u
             WHERE""" + " " + UserStatsSql.USER_SCOPE + " ", nativeQuery = true)
     List<UserJoinedRow> listRealUserJoinedDays();
+
+    // ── 批量：用户 × 门店 亲密度（辨认维度，2026-09-29） ────────────────────────
+
+    /**
+     * 批量「用户 → 各门店动作次数」（窗口内，一次查询覆盖一页用户）。
+     * <p>
+     * <b>本查询刻意不做用户范围过滤</b>（不加 {@link UserStatsSql#USER_SCOPE}）：
+     * 与 {@link #listTimeline} / {@link #listUserEvents} 同族判据（2026-09-14
+     * 「明细端点不做用户表口径过滤」）——运营要能对<b>任意</b>账号做取证式查看，
+     * 包括 ADMIN 运营号与被标记账号；辨认维度漏掉这些人反而正是要排查的对象。
+     *
+     * @param venueEventTypes 门店维度事件码集合（由 {@link UserBehaviorEvent#refKind()}
+     *                        == {@code VENUE} 派生；空集合 = 无匹配，由调用方保证非空）
+     */
+    @Query(value = """
+            SELECT e.user_id AS userId,
+                   e.ref_id AS refId,
+                   COUNT(*) AS cnt
+            FROM (""" + " " + UserBehaviorSql.EVENT_DETAIL_UNION + " " + """
+            ) e
+            WHERE e.user_id IN (:userIds)
+              AND e.ref_id IS NOT NULL
+              AND e.event_type IN (:venueEventTypes)
+            GROUP BY e.user_id, e.ref_id
+            """, nativeQuery = true)
+    List<VenueAffinityRow> listVenueAffinityByUserIds(@Param("userIds") Collection<Long> userIds,
+                                                      @Param("sinceDay") LocalDate sinceDay,
+                                                      @Param("venueEventTypes") Collection<String> venueEventTypes);
 }

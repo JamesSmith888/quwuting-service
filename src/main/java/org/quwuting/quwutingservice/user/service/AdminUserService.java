@@ -12,11 +12,13 @@ import org.quwuting.quwutingservice.user.dto.response.ClaimSummary;
 import org.quwuting.quwutingservice.user.dto.response.DemandSummary;
 import org.quwuting.quwutingservice.user.dto.response.PointsSummary;
 import org.quwuting.quwutingservice.user.dto.response.ReportSummary;
+import org.quwuting.quwutingservice.user.dto.response.TopVenue;
 import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.enums.UserRole;
 import org.quwuting.quwutingservice.user.enums.UserSortMode;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -27,6 +29,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -53,6 +56,9 @@ public class AdminUserService {
 
     /** 无昵称用户的展示占位（与 UserPublicService 同口径，管理端列表可读性） */
     private static final String NICKNAME_FALLBACK = "舞友";
+
+    // 代号 / 默认昵称判定已集中到 UserCode（注册写入、列表展示、详情展示、
+    // 搜索解析四处同值——散落会导致改了默认值却漏改判定，见 UserCode 类注释）。
 
     /** 统计概览「近 7 日活跃」窗口（含今日）——与数据看板顶卡、留存分析同窗口 */
     private static final int ACTIVE_DAYS = 7;
@@ -91,11 +97,16 @@ public class AdminUserService {
                         LocalDate.now().minusDays(ACTIVE_WINDOW_30D - 1L));
                 default -> throw new BusinessException(1007, "activeWithin 仅支持 7 或 30");
             };
-            if (activeFilterIds.isEmpty()) {
-                return Page.empty(pageable);
-            }
-        }
-        Page<User> users = switch (sort == null ? UserSortMode.LATEST_JOINED : sort) {
+              if (activeFilterIds.isEmpty()) {
+                  return Page.empty(pageable);
+              }
+          }
+          // 代号精确命中（U#00472 → id）：解析成单个用户直接返回，不进列表 SQL
+          Long codeUserId = UserCode.parse(kw);
+          if (codeUserId != null) {
+              return codeUserPage(codeUserId, role, city, activeFilterIds, page, pageable, active7dIds);
+          }
+          Page<User> users = switch (sort == null ? UserSortMode.LATEST_JOINED : sort) {
             case POINTS_DESC -> activeFilterIds != null
                     ? userRepository.findPageByFiltersActiveOrderByPoints(kw, role, city, activeFilterIds, pageable)
                     : userRepository.findPageByFiltersOrderByPoints(kw, role, city, pageable);
@@ -109,16 +120,64 @@ public class AdminUserService {
                     ? userRepository.findPageByFiltersActive(kw, role, city, activeFilterIds, pageable)
                     : userRepository.findPageByFilters(kw, role, city, pageable);
         };
-        List<Long> userIds = users.getContent().stream().map(User::getId).toList();
-        Map<Long, Long> balances = toMap(pointsAccountRepository.findBalancesByUserIds(userIds));
-        Map<Long, ContributionService.ContributionAggregate> contributions =
-                contributionService.aggregatesFor(userIds);
-        Map<Long, DemandSummary> demands = statsService.demandSummaries(userIds);
-        Map<Long, LocalDateTime> lastSeen = statsService.lastSeenFor(userIds, profileUpdatedAt(users.getContent()));
-        return users.map(u -> toItem(u, balances.getOrDefault(u.getId(), 0L),
-                contributions.get(u.getId()), demands.get(u.getId()), lastSeen.get(u.getId()),
-                active7dIds.contains(u.getId())));
-    }
+          return new PageImpl<>(toItems(users.getContent(), active7dIds), pageable,
+                  users.getTotalElements());
+      }
+
+      /**
+       * 一页用户 → 列表行（批量聚合一次覆盖，避免 N+1）：余额 / 贡献 / 需求单 /
+       * 最近露面 / 常去门店 五个维度各一次 GROUP BY（集合 = 1 时即详情页复用）。
+       */
+      private List<AdminUserItem> toItems(List<User> users, Set<Long> active7dIds) {
+          List<Long> userIds = users.stream().map(User::getId).toList();
+          Map<Long, Long> balances = toMap(pointsAccountRepository.findBalancesByUserIds(userIds));
+          Map<Long, ContributionService.ContributionAggregate> contributions =
+                  contributionService.aggregatesFor(userIds);
+          Map<Long, DemandSummary> demands = statsService.demandSummaries(userIds);
+          Map<Long, LocalDateTime> lastSeen = statsService.lastSeenFor(userIds, profileUpdatedAt(users));
+          Map<Long, TopVenue> topVenues = statsService.topVenuesFor(userIds);
+          return users.stream()
+                  .map(u -> toItem(u, balances.getOrDefault(u.getId(), 0L),
+                          contributions.get(u.getId()), demands.get(u.getId()),
+                          lastSeen.get(u.getId()), topVenues.get(u.getId()),
+                          active7dIds.contains(u.getId())))
+                  .toList();
+      }
+
+      /**
+       * 代号精确查找（keyword 形如 {@code U#00472}）：直接按 id 取单个用户，
+       * 命中则包成单元素页。<b>刻意不改列表 SQL</b>——六条排序/筛选变体各加一个
+       * {@code OR u.id = :id} 分支会让签名与 {@code UserStatsSqlMirrorTest}
+       * 的反射断言一起膨胀，而代号查找本就是「找一个具体的人」，不需要排序分页。
+       * <p>
+       * 仍要过三道筛选（role / city / 活跃窗口）：代号只是定位方式，不是绕过筛选的
+       * 后门——筛「近 7 日活跃」时查一个 30 天没动过的号，就该查不到。
+       */
+      private Page<AdminUserItem> codeUserPage(Long userId, UserRole role, String city,
+                                               Collection<Long> activeFilterIds, int page,
+                                               PageRequest pageable, Set<Long> active7dIds) {
+          if (page > 0) {
+              return Page.empty(pageable); // 单元素只有第一页
+          }
+          Optional<User> found = userRepository.findByIdAndDeletedFalse(userId)
+                  .filter(u -> role == null || u.getRole() == role)
+                  .filter(u -> city == null || city.equals(u.getCity()))
+                  .filter(u -> activeFilterIds == null || activeFilterIds.contains(u.getId()));
+          if (found.isEmpty()) {
+              return Page.empty(pageable);
+          }
+          List<AdminUserItem> content = toItems(List.of(found.get()), active7dIds);
+          return new PageImpl<>(content, pageable, content.size());
+      }
+
+      /**
+       * 昵称是否为用户自己起的（false = 空或仍是注册默认值 {@link UserCode#DEFAULT_NICKNAME}）。
+       * 判据留在后端：前端拿到这个布尔决定「主标题显示昵称还是代号」，
+       * 不必在前端再写一份默认昵称字面量（那必然与后端漂移）。
+       */
+      private static boolean isNicknameCustom(User user) {
+          return UserCode.isCustomNickname(user);
+      }
 
     /**
      * 用户详情（GET /admin/users/{id}，仅 ADMIN）：公开资料 + 积分账户收支 +
@@ -138,27 +197,31 @@ public class AdminUserService {
         CheckinSummary checkin = statsService.checkinSummary(id);
         LocalDateTime lastSeen = statsService.lastSeenFor(ids, profileUpdatedAt(List.of(user)))
                 .getOrDefault(id, null);
-        long joinedDays = joinedDays(user);
-        String nickname = displayName(user);
-        return new AdminUserDetailResponse(
-                id,
-                nickname,
-                user.getAvatarUrl(),
-                user.getRole(),
-                joinedDays,
-                user.getCreatedAt(),
-                user.getAge(),
-                user.getGender(),
-                user.getCity(),
-                lastSeen,
-                points,
-                contributionService.briefFor(id),
-                demand,
-                reports,
-                claims,
-                checkin,
-                Boolean.TRUE.equals(user.getWechatReview()));
-    }
+          long joinedDays = joinedDays(user);
+          String nickname = displayName(user);
+          TopVenue topVenue = statsService.topVenuesFor(ids).getOrDefault(id, null);
+          return new AdminUserDetailResponse(
+                  id,
+                  nickname,
+                  user.getAvatarUrl(),
+                  user.getRole(),
+                  joinedDays,
+                  user.getCreatedAt(),
+                  user.getAge(),
+                  user.getGender(),
+                  user.getCity(),
+                  lastSeen,
+                  points,
+                  contributionService.briefFor(id),
+                  demand,
+                  reports,
+                  claims,
+                  checkin,
+                  Boolean.TRUE.equals(user.getWechatReview()),
+                  UserCode.format(id),
+                  isNicknameCustom(user),
+                  topVenue);
+      }
 
     /**
      * 统计概览（GET /admin/users/stats）：总用户 / 今日新增 / 管理员 / 近 7 日活跃。
@@ -188,7 +251,7 @@ public class AdminUserService {
     private AdminUserItem toItem(User user, long pointsBalance,
                                  ContributionService.ContributionAggregate agg,
                                  DemandSummary demand, LocalDateTime lastSeenAt,
-                                 boolean activeWithin7d) {
+                                 TopVenue topVenue, boolean activeWithin7d) {
         return new AdminUserItem(
                 user.getId(),
                 displayName(user),
@@ -206,7 +269,10 @@ public class AdminUserService {
                 demand != null ? demand.fulfilled() : 0,
                 lastSeenAt,
                 activeWithin7d,
-                Boolean.TRUE.equals(user.getWechatReview()));
+                Boolean.TRUE.equals(user.getWechatReview()),
+                UserCode.format(user.getId()),
+                isNicknameCustom(user),
+                topVenue);
     }
 
     /**

@@ -51,6 +51,7 @@ MANAGED_SKILLS=(
   quwuting-announcement-publish
   quwuting-bulletin-publish
   quwuting-venue-activity-publish
+  quwuting-git-sync
 )
 
 RSYNC_EXCLUDES=(--exclude=.DS_Store --exclude=__pycache__ --exclude=*.pyc)
