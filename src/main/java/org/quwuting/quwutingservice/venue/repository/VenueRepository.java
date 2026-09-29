@@ -1058,6 +1058,57 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
     }
 
     /**
+     * 搜索结果城市分面（2026-09-29，docs/agents/35-venue-search.md「搜索结果城市快捷过滤」）：
+     * 「当前关键词 + 当前其它筛选」命中的门店按城市分组计数，供搜索框下方的城市快捷
+     * 过滤 chips 取数。
+     * <p>
+     * <b>{@code :city} 恒传 null（本查询的分面语义）</b>——chips 的候选集必须是
+     * <b>关键词级全集</b>，不能是「当前结果」的城市：
+     * <ul>
+     *   <li>结果页只有 20 条，按城市切片后 chips 会漏掉分页外的城市（假阴性：用户以为
+     *       「成都没有」）；</li>
+     *   <li>计数必须来自全量命中（否则「上海市 8」实为 50 = 假数字）；</li>
+     *   <li>若 chips 由「被它自己过滤后的结果」派生，选中某城市后 chips 只剩该城
+     *       ⇒ <b>自我坍塌</b>，用户再也切不回其它城市。</li>
+     * </ul>
+     * 判据与 09-20「有活动」同源：<b>筛选器不得基于被自己过滤后的结果派生</b>。
+     * <p>
+     * <b>结果集谓词复用 {@link #LIST_FILTERS}（同一份真值）</b>——chips 上的城市与计数
+     * 必须与「点了该 chip 之后列表真的有结果」一致（含 status / venueType / tag /
+     * hotOnly / hasActivity 全部维度）。写第二套谓词必然漂移（KW_MATCH 三处镜像的
+     * 教训），故本查询只把 city 钉死为 null、其余参数原样透传。
+     * <p>
+     * {@code cityScopeLimited}/{@code nearbyCities}（城市级门店可见性）由调用方按
+     * 「无参考点」传入（{@code cityScope(null, null, null)}）——与搜索态列表请求在
+     * 未选城市时同源；选城市后两者都因 {@code :keyword IS NOT NULL} 短路恒真，等价。
+     * <p>
+     * 多词（{@code filterIds} 白名单）与单词（{@code keyword} LIKE）两条通道与
+     * {@code listVenues} 完全一致（拆词在 Service 层，见
+     * {@code VenueService#listCityFacets}）。
+     */
+    @Query("""
+            SELECT v.city AS city, COUNT(v) AS venueCount
+            FROM Venue v
+            """
+            + LIST_FILTERS + """
+            GROUP BY v.city
+            ORDER BY COUNT(v) DESC, v.city ASC
+            """)
+    List<CityCountProjection> countCitiesByFilters(
+            @Param("city") String city,
+            @Param("district") String district,
+            @Param("status") VenueStatus status,
+            @Param("venueType") VenueType venueType,
+            @Param("keyword") String keyword,
+            @Param("filterIds") Set<Long> filterIds,
+            @Param("tag") String tag,
+            @Param("hotOnly") boolean hotOnly,
+            @Param("hotIds") Set<Long> hotIds,
+            @Param("hasActivity") boolean hasActivity,
+            @Param("cityScopeLimited") boolean cityScopeLimited,
+            @Param("nearbyCities") Set<String> nearbyCities);
+
+    /**
      * 热度读模型：单场所全部"单值计数器"的跨表合并投影（供 VenueHeatService.getHeat 使用）。
      * <p>
      * getter 类型约定：TIMESTAMP 列（lateststatuslogtime / latestreporttime）必须声明为
@@ -1579,4 +1630,31 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
         /** 该城市已有坐标门店的经度均值 */
         Double getLongitude();
     }
+
+    /**
+     * 管理端门店列表分页（2026-09-29，V33 到访域配套；消费方唯一 =
+     * {@code AdminVenueQueryService}）。
+     * <p>
+     * 与公开列表 {@code searchRanked} 系列的本质区别：**无业务裁剪**——公开列表
+     * 受热度排序/可见性谓词（RADIUS_PREDICATE / CITY_ONLY_VISIBILITY_PREDICATE /
+     * 零行为守卫）约束，面向「帮用户选店」；管理列表面向「运营盘点全量资产」，
+     * 只按显式筛选条件过滤（城市 / 状态 / 名称关键词），不排序不打分、固定 id
+     * 倒序（新收录在前，运营最常核对新店）。**禁**把本查询挂进 LIST_FILTERS 或
+     * venueListCache——管理列表低频、必须实时、与用户端缓存生命周期无关。
+     * <p>
+     * keyword 已由调用方做 LIKE 转义与小写化（06 号 §LIKE 字面转义 ESCAPE 同款
+     * 约定，转义点在 Service 单侧，本查询不重复处理）。
+     */
+    @Query("""
+            SELECT v FROM Venue v
+            WHERE v.deleted = false
+              AND (:city IS NULL OR v.city = :city)
+              AND (:status IS NULL OR v.status = :status)
+              AND (:keyword IS NULL OR LOWER(v.name) LIKE CONCAT('%', :keyword, '%'))
+            ORDER BY v.id DESC
+            """)
+    Page<Venue> findAdminPage(@Param("city") String city,
+                              @Param("status") VenueStatus status,
+                              @Param("keyword") String keyword,
+                              Pageable pageable);
 }

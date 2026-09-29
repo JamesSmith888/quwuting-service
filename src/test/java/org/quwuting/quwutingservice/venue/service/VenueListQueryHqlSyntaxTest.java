@@ -54,6 +54,12 @@ class VenueListQueryHqlSyntaxTest {
             // 补 newest 排序（无距离项、无 HEAT_SCORE）
             "SELECT v FROM Venue v\n" + VenueRepository.LIST_FILTERS
                     + " ORDER BY v.createdAt DESC, v.id DESC",
+            // countCitiesByFilters（2026-09-29 搜索结果城市分面）：LIST_FILTERS + 分组聚合。
+            // 与上面四条共用同一份 LIST_FILTERS ⇒ 谓词片段的任何语法性回归都会被本数组
+            // 的任何一条命中；本条额外覆盖「聚合 + GROUP BY + 别名排序」这一形态。
+            "SELECT v.city AS city, COUNT(v) AS venueCount\nFROM Venue v\n"
+                    + VenueRepository.LIST_FILTERS
+                    + "\nGROUP BY v.city\nORDER BY COUNT(v) DESC, v.city ASC",
     };
 
     @Test

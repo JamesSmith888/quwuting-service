@@ -146,6 +146,29 @@ public class VenueController {
     }
 
     /**
+     * 搜索结果城市分面（2026-09-29，docs/agents/35-venue-search.md「搜索结果城市快捷过滤」）
+     * GET /venues/city-facets?keyword=帝豪&status=&venueType=&tag=&hot=&hasActivity=
+     * <p>
+     * 「该关键词（叠加当前其它筛选）命中的门店分布在哪些城市、各多少家」——供搜索框
+     * 下方的城市快捷过滤 chips 取数。<b>刻意不接受 {@code city} 参数</b>：分面必须是
+     * 关键词级全集（否则选中某城市后 chips 只剩它自己 = 自我坍塌，用户切不回其它城市）。
+     * 路由与 /cities、/suggest 同模式（字面量路径优先于 /{id} 变量匹配）。
+     * <p>
+     * keyword 空白 → 空列表（无词时的城市语义归 {@code GET /venues/cities}，两者不混用）。
+     * 计数含停业/暂停门店（搜索只承诺匹配不承诺状态，与 GET /venues 同源）。
+     */
+    @GetMapping("/city-facets")
+    public ApiResponse<List<CityStatsResponse>> listCityFacets(
+            @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) VenueStatus status,
+            @RequestParam(required = false) VenueType venueType,
+            @RequestParam(required = false) Boolean hot,
+            @RequestParam(required = false) String tag,
+            @RequestParam(required = false) Boolean hasActivity) {
+        return ApiResponse.ok(venueService.listCityFacets(keyword, status, venueType, hot, tag, hasActivity));
+    }
+
+    /**
      * 门店基础数据离线快照（2026-09-08 弱网离线韧性，docs/agents/36-offline-resilience.md）
      * GET /venues/snapshot?since=yyyy-MM-dd HH:mm:ss
      * <p>

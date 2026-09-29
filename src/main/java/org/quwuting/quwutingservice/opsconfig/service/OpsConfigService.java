@@ -93,6 +93,19 @@ public class OpsConfigService {
      */
     public static final String KEY_HEAT_EXCLUDED_USER_IDS = "heat.excluded.user.ids";
 
+    /**
+     * 到访痕迹「采集总开关」（2026-09-29，V33 迁移插入默认行 true；
+     * 文档 = docs/agents/52-venue-presence.md）：关闭后 POST /venues/{id}/presence
+     * 返回 accepted=false(DISABLED)——客户端 fire-and-forget 静默，不再有新数据
+     * 进库；历史数据保留。用途 = 隐私争议/提审期一键停采。
+     * <p>
+     * ⚠️ 命中半径/精度门槛/附近半径是统计口径参数，**刻意不进 opsconfig**——
+     * 口径变更应与 52 号文档和 admin 展示文案同步发版；且管理端开关控件承载不了
+     * 数值语义（数值会被渲染成「已开启/已关闭」，界面撒谎），判据见 52 号文档
+     * §「口径参数为什么不进 opsconfig」。
+     */
+    public static final String KEY_PRESENCE_COLLECT_ENABLED = "presence.collect.enabled";
+
     private final OpsConfigRepository opsConfigRepository;
 
     /** 单键配置缓存（LoadingCache + Optional 承载"键不存在"——Caffeine 禁 null 值） */

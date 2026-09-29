@@ -163,6 +163,28 @@ AND (:hasActivity = false OR EXISTS (SELECT 1 FROM VenueActivity a
 
 `GET /venues/cities` → `List<CityStatsResponse(city, venueCount)>`，按场所数倒序，供前端"热门城市"数据驱动展示。注意路由：字面量 `/venues/cities` 与路径变量 `/venues/{id}` 共存时 Spring 优先匹配字面量，无需特殊处理。
 
+### 搜索结果城市分面（city-facets，2026-09-29 新增）
+
+`GET /venues/city-facets?keyword=&status=&venueType=&tag=&hot=&hasActivity=` → 同一
+`CityStatsResponse` 列表，语义 = **「该关键词（叠加当前其它筛选）命中的门店分布在哪些
+城市、各多少家」**，驱动小程序搜索框下方的城市快捷过滤 chips（前端口径见
+`quwuting/docs/agents/35-venue-search.md`「搜索结果城市快捷过滤」）。
+
+- **与 `/venues/cities` 语义严格分离**：那个是「平台有哪些城市」（城市选择器数据源，
+  `@Cacheable` 5min）；本接口是「这次搜索命中了哪些城市」（`cityFacetCache` 60s）。
+  keyword 空白 → 空列表（无词时的城市语义归 `/venues/cities`，两者不可混用）。
+- **刻意不接受 `city` 参数**（查询里恒传 null）：chips 的候选集必须是**关键词级全集**。
+  若按当前结果切片派生会三重失效——① 一页 20 条漏掉分页外的城市（假阴性）；
+  ② 切片计数是假数字；③ **由被自己过滤后的结果派生 ⇒ 选中某城后 chips 只剩该城
+  = 自我坍塌**，用户切不回去。判据：**筛选器不得基于被自己过滤后的结果派生。**
+- **结果集谓词复用 `LIST_FILTERS`**（只把 city 钉死为 null，其余参数原样透传）——
+  chips 上的城市与计数必须与「点了之后列表真的有结果」一致；写第二套谓词必然漂移
+  （KW_MATCH 三处镜像的教训）。`countCitiesByFilters` 已入
+  `VenueListQueryHqlSyntaxTest.QUERIES`（HQL 语法层守卫）。
+- 计数含停业/暂停门店（与 `listVenues` 同源：搜索只承诺匹配不承诺状态）。
+- 缓存 = 60s Caffeine（仅单串关键词；多词 `filterIds` 恒实时，与列表缓存同款判定）；
+  写路径随 `invalidateVenueListCache()` 一并逐出（否则「chip 写着 12 家、点进去 11 家」）。
+
 ### 热门场所标记（VenueResponse.isHot）
 
 `VenueResponse` 新增 `isHot` 字段（boolean），标记该场所在同城市中属于热门场所。

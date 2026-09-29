@@ -284,6 +284,33 @@ public class VenueService {
     ) {}
 
     /**
+     * 搜索结果城市分面缓存（2026-09-29，与 {@link #venueListCache} 同族语义）。
+     * <p>
+     * 分面查询 = 关键词 LIKE 全扫 + GROUP BY（无索引、数据千级，单次毫秒级），但输入
+     * 即搜（350ms 防抖）每改一次词都会打一次；而列表主查询在单关键词下走 60s 缓存
+     * ⇒ 不缓存的分面会<b>反过来成为搜索链路上最重的一跳</b>。故同配 60s TTL +
+     * 写路径显式失效（{@link #invalidateVenueListCache} 一并逐出）。
+     * <p>
+     * <b>入缓存的条件 = 单串关键词（{@code filterIds == null}）</b>：多词 AND 的白名单
+     * 集合与请求强耦合、基数不可控，恒实时查询（与列表主查询同款判定）。
+     * hotIds（5min 全局集合）不入键，由 60s TTL 自然兜底（同 venueListCache）。
+     */
+    private final LoadingCache<CityFacetKey, List<CityStatsResponse>> cityFacetCache = Caffeine.newBuilder()
+            .maximumSize(128)
+            .expireAfterWrite(60, TimeUnit.SECONDS)
+            .build(this::loadCityFacets);
+
+    /** 城市分面缓存键（不可变参数指纹，见 {@link #cityFacetCache}；不含 city——分面恒全国） */
+    private record CityFacetKey(
+            String keywordPattern,
+            VenueStatus status,
+            VenueType venueType,
+            String tagPattern,
+            boolean hotOnly,
+            boolean hasActivity
+    ) {}
+
+    /**
      * 城市级类型地址落库策略（2026-09-13 歌友会品类）：写路径主动清除精确地址。
      * <p>
      * <b>为什么写侧也要清</b>：读侧 {@code VenueResponseMapper} 已做脱敏，但只要库里存着
@@ -1495,6 +1522,9 @@ public class VenueService {
      */
     public void invalidateVenueListCache() {
         venueListCache.invalidateAll();
+        // 城市分面（搜索态 chips 数据源）与列表同源：门店增删改会同时改变「某城市命中几
+        // 家」，不逐出会出现「chip 写着 12 家、点进去 11 家」。与列表同 TTL 同族语义。
+        cityFacetCache.invalidateAll();
     }
 
     /** 有场所的城市列表（按场所数倒序），供前端热门城市选择。
@@ -1505,6 +1535,76 @@ public class VenueService {
     @Transactional(readOnly = true)
     public List<CityStatsResponse> listCityStats() {
         return venueRepository.findCityStats().stream()
+                .map(p -> new CityStatsResponse(p.getCity(), p.getVenueCount()))
+                .toList();
+    }
+
+    /**
+     * 搜索结果城市分面（2026-09-29，GET /venues/city-facets）：关键词命中的门店按城市
+     * 分组计数，驱动搜索框下方的「城市快捷过滤」chips
+     * （前端与口径见 {@code docs/agents/35-venue-search.md}「搜索结果城市快捷过滤」）。
+     * <p>
+     * <b>契约（三条，缺一即错）</b>：
+     * <ol>
+     *   <li><b>只为搜索态服务</b>：{@code keyword} 空白 → 返回空列表（无关键词时城市
+     *       选择的语义是 {@link #listCityStats()} 的「有门店的城市」，两者不可混用——
+     *       混用会让 chips 在无词时变成全国城市榜）；</li>
+     *   <li><b>分面恒不含 city 过滤</b>：候选集是关键词级全集，否则 chips 会自我坍塌
+     *       （选中某城后只剩该城、切不回去）——详见
+     *       {@link org.quwuting.quwutingservice.venue.repository.VenueRepository#countCitiesByFilters}；</li>
+     *   <li><b>与列表同一套关键词/筛选口径</b>：拆词、转义、多词交集、tag 包装全部复用
+     *       {@link #listVenues} 的同一段逻辑（本方法是它的分面孪生），保证「chip 上写着
+     *       上海市 12」⇔「点了真的有 12 家」。</li>
+     * </ol>
+     * 计数含停业/暂停门店（结果口径 = 搜索只承诺「匹配」不承诺「状态」，与
+     * {@link #listVenues} 一致）——分面的数字必须等于点进去之后的条数。
+     */
+    @Transactional(readOnly = true)
+    public List<CityStatsResponse> listCityFacets(String keyword, VenueStatus status, VenueType venueType,
+                                                  Boolean hot, String tag, Boolean hasActivity) {
+        List<String> searchTerms = splitRawSearchTerms(keyword).stream()
+                .map(VenueService::escapeLikeLiteral).toList();
+        if (searchTerms.isEmpty()) {
+            return List.of(); // 契约 ①：无关键词不提供分面
+        }
+        String tagPattern = StringUtils.hasText(tag) ? "%" + tag.trim() + "%" : null;
+        boolean hotOnly = Boolean.TRUE.equals(hot);
+        boolean hasActivityOnly = Boolean.TRUE.equals(hasActivity);
+        if (searchTerms.size() == 1) {
+            String keywordPattern = "%" + searchTerms.get(0) + "%";
+            return cityFacetCache.get(new CityFacetKey(
+                    keywordPattern, status, venueType, tagPattern, hotOnly, hasActivityOnly));
+        }
+        // 多词 AND：白名单交集（与 listVenues 同款），交集空 → 无分面
+        Set<Long> filterIds = intersectKeywordIds(searchTerms);
+        if (filterIds.isEmpty()) {
+            return List.of();
+        }
+        return queryCityFacets(null, filterIds, status, venueType, tagPattern, hotOnly, hasActivityOnly);
+    }
+
+    /** 城市分面缓存 loader（经 {@link #cityFacetCache} 调用，勿直接调用） */
+    private List<CityStatsResponse> loadCityFacets(CityFacetKey key) {
+        return queryCityFacets(key.keywordPattern(), null, key.status(), key.venueType(),
+                key.tagPattern(), key.hotOnly(), key.hasActivity());
+    }
+
+    /**
+     * 城市分面查询（单词 / 多词两条通道的唯一出口）。
+     * <b>{@code city} 恒 null</b>——分面语义见 {@link #listCityFacets} 契约 ②；
+     * 城市级门店可见性按「无参考点」取值（与搜索态未选城市时的列表请求同源，
+     * 且 {@code :keyword IS NOT NULL} 会让该谓词短路恒真，选城市前后等价）。
+     * 城市名为空的脏行直接丢弃（chip 无名字可渲染）。
+     */
+    private List<CityStatsResponse> queryCityFacets(String keywordPattern, Set<Long> filterIds,
+                                                    VenueStatus status, VenueType venueType,
+                                                    String tagPattern, boolean hotOnly, boolean hasActivity) {
+        CityCentroidService.CityScope cityScope = cityCentroidService.cityScope(null, null, null);
+        Set<Long> hotIds = venueLookupService.getHotVenueIds();
+        return venueRepository.countCitiesByFilters(null, null, status, venueType, keywordPattern, filterIds,
+                        tagPattern, hotOnly, hotIds, hasActivity, cityScope.limited(), cityScope.cities())
+                .stream()
+                .filter(p -> StringUtils.hasText(p.getCity()))
                 .map(p -> new CityStatsResponse(p.getCity(), p.getVenueCount()))
                 .toList();
     }

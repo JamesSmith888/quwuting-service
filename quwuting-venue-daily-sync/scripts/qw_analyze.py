@@ -15,7 +15,9 @@
   reversal_manual 表② 低置信（CONTAINED/FUZZY）→ 需 user 放行（提交时带 forceReversal:true）
   new_candidates  表③ 新店候选（UNMATCHED，且未被守卫命中）——**只列不建**（红线 4）
   ref_only        表④ 命中且已 OPEN / 未覆盖城市
-  suspend_items   表⑤ 关门候选（白名单差集 + 范围细化，已剔除守卫与人工状态店）——提交前请核对自检行
+  suspend_items   表⑤ 关门候选（白名单差集 + 范围细化，已剔除守卫、人工状态店、**疑似同店**）——提交前请核对自检行
+  suspend_suspect_hold 🛡 **疑似同店（被点名但匹配没挂上）⇒ 暂停方向保守剔除**，不进提交集；
+                  由 Agent 判是否 `alias-import` 固化（实现与 qw_ms.py 共用）
   suspend_manual_hold 人工状态店（statusSource=MANUAL）**已剔除、不自动提交**，需用户逐条决定
                   （2026-09-27 P1 护栏：人工锁有期限，但「这店是人定的」不会过期 ⇒ 锁过期也不静默关）
   manual_annotated 人工权威标注（V25 人工锁 / 永久豁免）——**仅标注**，供汇报单列，
@@ -34,7 +36,13 @@ import argparse
 import json
 import os
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
+
+# ── 暂停方向数据护栏：与双源版 qw_ms.py **共用同一份实现**（2026-09-29 固化） ──
+# 为什么共用而不是各写一份：护栏口径必须与双源日**完全一致**，否则单源/双源两条链路
+# 会在同一形态上给出不同结论（本轮实证：单源版有 P1 人工护栏、双源版没有 ⇒ 静默缺口）。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from qw_ms import suspects_of  # noqa: E402
 
 DEFAULT_DICT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                              "..", "reference", "xianbao360-venue-dict.json"))
@@ -147,6 +155,24 @@ def main() -> int:
     # 本次跳过」。这既不永久豁免（该店仍可被用户确认后回归自动处理），也不静默覆盖。
     suspend = [s for s in suspend_all if not s.get("manualSource")]
     suspend_manual_hold = [s for s in suspend_all if s.get("manualSource")]
+
+    # 🛡 暂停方向数据护栏（2026-09-29 固化）：疑似「被点名但匹配没挂上」⇒ 不做暂停推断
+    city_mentions = defaultdict(list)
+    for r in res:
+        if r.get("platform_city"):
+            city_mentions[r["platform_city"]].append(r)
+    vm_all = {v["venueId"]: v for v in venues}
+    suspect_hold, kept = [], []
+    for s in suspend:
+        strong, weak = suspects_of(vm_all[s["venueId"]], city_mentions)
+        if strong:
+            suspect_hold.append({**s, "suspects": strong,
+                                 "why": "疑似同店（匹配漏判）⇒ 暂停方向保守剔除"})
+        else:
+            if weak:
+                s["suspect_hints"] = weak
+            kept.append(s)
+    suspend = kept
     suspend_guard_dropped = [{"venueId": v["venueId"], "name": v["name"], "city": v["city"]}
                              for v in venues
                              if v["status"] == "OPEN" and v["city"] in covered and in_scope(v)
@@ -163,6 +189,7 @@ def main() -> int:
            "new_candidates": new_cands, "ref_only_count": len(ref_only),
            "suspend_items": suspend, "suspend_guard_dropped": suspend_guard_dropped,
            "suspend_manual_hold": suspend_manual_hold,
+           "suspend_suspect_hold": suspect_hold,
            "manual_annotated": [{"venueId": i, "name": n, "manualLock": l, "exempt": e, "note": t}
                                 for i, n, l, e, t in annotated]}
     if args.out:
@@ -196,6 +223,20 @@ def main() -> int:
     if suspend_guard_dropped:
         print(f"  守卫豁免剔除 {len(suspend_guard_dropped)} 家："
               f"{[s['name'] + '#' + str(s['venueId']) for s in suspend_guard_dropped]}")
+    if suspect_hold:
+        print(f"\n🛡 疑似同店 · 暂停方向保守剔除 {len(suspect_hold)} 家"
+              f"（**被点名但匹配没挂上** ⇒ 不做暂停推断；由 Agent 判是否加别名）：")
+        for x in suspect_hold:
+            ev = "；".join(f"「{s['news']}」[{s['src_city']}/{s['conf']}] 相似={s['ratio']}（{s['why']}）"
+                           for s in x["suspects"])
+            print(f"  #{x['venueId']} {x['name']}（{x['city']}·{x.get('district')}） ← {ev}")
+    hinted = [x for x in suspend if x.get("suspect_hints")]
+    if hinted:
+        print(f"\n🔎 弱相似提示（**仍提交**，需 Agent 逐条判）{len(hinted)} 家：")
+        for x in hinted:
+            ev = "；".join(f"「{s['news']}」[{s['src_city']}/{s['conf']}] 相似={s['ratio']}"
+                           for s in x["suspect_hints"])
+            print(f"  #{x['venueId']} {x['name']}（{x['city']}） ← {ev}")
     print(f"\n🔒 人工权威标注（V25，**服务端将按锁/豁免跳过**，不参与本脚本过滤）{len(annotated)} 家：")
     for vid, nm, lock, ex, note in annotated:
         tag = "永久豁免" if ex else f"人工锁至 {str(lock)[:16]}"
