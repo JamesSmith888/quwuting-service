@@ -117,6 +117,20 @@ CEASED 而平台已 OPEN，用户投诉「明明营业却显示停业」，详�
 ## 前置条件
 
 - 后端地址 `BASE_URL`（本地 http://localhost:8080；切生产前必须问用户）。
+- 🆘 **后端未就绪时的恢复路径（2026-09-30 实证固化）**：本地 develop 实例偶发**挂起不自愈**
+  —— 现象：某次写请求（实证 `alias-import`）超时后，`localhost:8080` **TCP 可连但 HTTP 70s+ 无响应**，
+  连公开端点 `/venues/cities` 也一样，等 2~3 分钟不恢复 ⇒ **只能重启**。重启要点：
+  1. 先确认无监听：`lsof -nP -iTCP:8080 -sTCP:LISTEN`；
+  2. **必须显式指定端口**：`./mvnw spring-boot:run -Dspring-boot.run.profiles=mysql
+     -Dspring-boot.run.arguments=--server.port=8080`
+     —— 沙箱会向子进程注入 `SERVER_PORT`（指向其内部代理端口，实测 55159），不加此参数会**绑错端口**，
+     表现为 curl 直连拿到沙箱 Express 代理的 `401 AUTH_REQUIRED`；
+  3. **不要用 `nohup ... &`**（进程随命令结束被回收，日志停在启动中途）⇒ 用后台持续任务方式拉起；
+  4. 启动 20~60s 就绪，轮询 `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/venues/cities` 到 200；
+  5. ⚠️ **启动会顺带执行 Flyway 迁移与调度器**（本地 `db/migration-mysql` 领先生产时会把迁移写进
+     **生产库**；调度器 = 公告发布/下线、活动过期、`expected_open_date` 兑现）——动手前先核对迁移版本；
+  6. ⚠️ **`/tmp` 可能被重置**：`/tmp/qw_token.json` 与中间产物会消失 ⇒ 先 `qw_api.py login` 重登，
+     mentions/match/export 按需重建（脚本可重跑，代价低）。
 - 管理凭据：`WEB_ADMIN_PASSWORD` 对应的账号密码（后端 `web-auth.username` 默认 admin），走
   `POST /web-auth/password-login` 换 JWT，再以 Bearer 调 `/admin/**`。
   📍 **本地 develop 密码落点（别再翻仓库找）**：`quwuting-service/src/main/resources/application-mysql.yaml`
@@ -647,3 +661,8 @@ POST /admin/venue-aliases/batch-import
   （属正常保护）。CLOSED/RENOVATING 本身不在两个舞讯通道的作用域内，天然不受影响。
 - **门店删除/清理重复**：后端**无门店删除接口**（项目禁 PUT/DELETE）——Agent 识别到同名同址重复
   条目时**不代删、不自动反转**，呈「疑似重复」交用户决策；字典 `removed_duplicates` 仅登记用户已删确认的店。
+- **`status-reverse` / `status-suspend` 报「需要 --report-date YYYY-MM-DD」**：`--report-date` 是
+  **顶层参数**（每个 item 里写同样的字段不算数）——2026-09-30 实证踩坑，命令末尾补 `--report-date 2026-09-30` 即可。
+- **写库后必须做「全量 export 逐店 diff」**：只报接口返回的 `total/suspended` **不够**——
+  接口成功 ≠ 范围正确。diff 条数须 = 应变更条数（反转数 + 实际置暂停数），且门店总数不变、
+  「无名单 header 城市」零变更。2026-09-30 实证：diff=12（7+5）、总数恒 1302、发公告前即闭环。

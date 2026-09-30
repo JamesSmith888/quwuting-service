@@ -1,7 +1,7 @@
 {
   "source": "xianbao360",
   "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-09-29",
+  "updated": "2026-09-30",
   "entries": [
     {
       "city": "西安市",
@@ -3850,6 +3850,54 @@
       "venue_id": 1480,
       "kind": "exact",
       "note": "2026-09-29 用户贴表建档（第7波）。鹤城区城中街道迎丰西路新天地城市广场2楼248号(怀化大厦旁)，19:30-02:00，OPEN 营业中，tags=龙女可进。公告去装饰 emoji 后落「十二生肖莎舞火爆营业中」"
+    },
+    {
+      "city": "西安市",
+      "news_name": "金苹果",
+      "platform_name": "金苹果演艺厅",
+      "venue_id": 211,
+      "kind": "alias",
+      "note": "2026-09-30 低置信长尾别名双写（09-25 口径）：舞讯用简称、平台名带品类后缀（演艺厅/舞吧/音乐酒吧/音乐茶吧/茶吧）⇒ 匹配落 CONTAINED。平台 alias 域已 alias-import，重跑回读改判 EXACT（via=alias-domain）。同日该店由 SUSPENDED/CEASED 反转 OPEN。"
+    },
+    {
+      "city": "咸阳市",
+      "news_name": "金莎",
+      "platform_name": "金莎舞吧",
+      "venue_id": 785,
+      "kind": "alias",
+      "note": "2026-09-30 低置信长尾别名双写（09-25 口径）：舞讯用简称、平台名带品类后缀（演艺厅/舞吧/音乐酒吧/音乐茶吧/茶吧）⇒ 匹配落 CONTAINED。平台 alias 域已 alias-import，重跑回读改判 EXACT（via=alias-domain）。同日该店由 SUSPENDED/CEASED 反转 OPEN。"
+    },
+    {
+      "city": "镇江市",
+      "news_name": "繁花",
+      "platform_name": "繁花音乐酒吧",
+      "venue_id": 891,
+      "kind": "alias",
+      "note": "2026-09-30 低置信长尾别名双写（09-25 口径）：舞讯用简称、平台名带品类后缀（演艺厅/舞吧/音乐酒吧/音乐茶吧/茶吧）⇒ 匹配落 CONTAINED。平台 alias 域已 alias-import，重跑回读改判 EXACT（via=alias-domain）。同日该店由 SUSPENDED/CEASED 反转 OPEN。"
+    },
+    {
+      "city": "杭州市",
+      "news_name": "迪乐汇",
+      "platform_name": "迪乐汇音乐酒吧",
+      "venue_id": 353,
+      "kind": "alias",
+      "note": "2026-09-30 低置信长尾别名双写（09-25 口径）：舞讯用简称、平台名带品类后缀（演艺厅/舞吧/音乐酒吧/音乐茶吧/茶吧）⇒ 匹配落 CONTAINED。平台 alias 域已 alias-import，重跑回读改判 EXACT（via=alias-domain）。同日该店由 SUSPENDED/CEASED 反转 OPEN。"
+    },
+    {
+      "city": "杭州市",
+      "news_name": "芳正",
+      "platform_name": "芳正音乐茶吧",
+      "venue_id": 324,
+      "kind": "alias",
+      "note": "2026-09-30 低置信长尾别名双写（09-25 口径）：舞讯用简称、平台名带品类后缀（演艺厅/舞吧/音乐酒吧/音乐茶吧/茶吧）⇒ 匹配落 CONTAINED。平台 alias 域已 alias-import，重跑回读改判 EXACT（via=alias-domain）。同日该店由 SUSPENDED/CEASED 反转 OPEN。"
+    },
+    {
+      "city": "杭州市",
+      "news_name": "右西",
+      "platform_name": "右西茶吧",
+      "venue_id": 360,
+      "kind": "alias",
+      "note": "2026-09-30 低置信长尾别名双写（09-25 口径）：舞讯用简称、平台名带品类后缀（演艺厅/舞吧/音乐酒吧/音乐茶吧/茶吧）⇒ 匹配落 CONTAINED。平台 alias 域已 alias-import，重跑回读改判 EXACT（via=alias-domain）。同日该店由 SUSPENDED/CEASED 反转 OPEN。"
     }
   ],
   "removed_duplicates": [

@@ -21,6 +21,7 @@ import org.quwuting.quwutingservice.venue.enums.ViewSource;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueService;
 import org.quwuting.quwutingservice.venue.service.VenueViewService;
+import org.quwuting.quwutingservice.venue.service.RegionService;
 import org.springframework.data.domain.Page;
 import org.springframework.web.bind.annotation.*;
 
@@ -34,6 +35,7 @@ public class VenueController {
     private final VenueService venueService;
     private final VenueHeatService venueHeatService;
     private final VenueViewService venueViewService;
+    private final RegionService regionService;
 
     /**
      * 新增场所（仅管理员）
@@ -166,6 +168,25 @@ public class VenueController {
             @RequestParam(required = false) String tag,
             @RequestParam(required = false) Boolean hasActivity) {
         return ApiResponse.ok(venueService.listCityFacets(keyword, status, venueType, hot, tag, hasActivity));
+    }
+
+    /**
+     * 标准行政区划名录（2026-09-30，MySQL V35）
+     * GET /venues/regions
+     * <p>
+     * 「哪些词是地名」的权威全集（省 / 地级 / 县级市三级，规范名带后缀），供搜索
+     * <b>零结果语义分诊</b>在端上判定「用户搜的是不是一个还没收录的地方」——
+     * 没有它，「合肥」「安徽」这类<b>不带后缀</b>的词与门店名同形，无法自证，
+     * 只能被当成门店名（界面说「换个关键词」= 把责任推给用户）。
+     * <p>
+     * <b>契约</b>：只下发名字，不含层级（端上只做等值判定，不需要层级）；
+     * <b>取不到时返回空数组</b>而不是报错——端上据此回退形态判据（本次改动前的行为），
+     * 降级方向有界（见 {@code RegionService} 类注释）。与 {@code GET /venues/cities}
+     * 严格区分：那个是「有门店的城市」，这个是「有哪些地名」。
+     */
+    @GetMapping("/regions")
+    public ApiResponse<List<String>> listRegions() {
+        return ApiResponse.ok(regionService.regionNames());
     }
 
     /**
