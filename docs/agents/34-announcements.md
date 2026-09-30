@@ -87,15 +87,29 @@ SQL 用 NOT EXISTS 子查询派生（对齐站内信 unread-count 模式）。
 > 遵守项目 HTTP 约定：**仅 GET 和 POST，禁 PUT/PATCH/DELETE**。管理端写操作一律
 > POST action 风格。管理端鉴权 = `UserContext.requireAdmin()`（AdminVenueSync* 先例）。
 
-### 用户端（小程序，需登录）
+### 用户端（小程序；**读接口匿名可读**，用户级态接口需登录）
+
+> **2026-09-30 变更（微信审核失败根因修复）**：`GET /announcements` 与
+> `GET /announcements/{id}` 由 `requireAuth()` 改为 `UserContext.getCurrentUserId()`
+> （可空）——未登录时 `read` / `unread` 恒 `false`（`AnnouncementService#listVisible` /
+> `#detail` 内显式判空，不在仓储层构造"不存在的身份"的 SQL 分支）；而
+> `unread-count` / `{id}/read` / `read-all` **保持需登录**（三者都以 userId 为唯一键，
+> 匿名既无可读也无可写的对象）。
+>
+> **缘由**：客户端在 `onLoad` 用**同步**凭证快照做整页门禁，而凭证由 `app.onLaunch`
+> 的静默登录**异步**换取 ⇒ 冷启动首帧快照必然为空，公告中心一进即「请先登录后查看公告」，
+> 命中审核规则「未浏览体验功能服务，即要求授权登录」（2026-09-30 审核失败实证）。
+> 同一批还修了客户端 `pages/announcement-detail` 的 `onLoad await ensureLogin()`
+> （无凭证时**直接弹确认框**，而该页是分享卡片落点）。客户端契约见小程序仓
+> `services/auth.ts`「首屏登录判据」+ `check:first-paint-auth`。
 
 | 接口 | 说明 |
 |------|------|
-| GET /announcements | 列表（分页倒序；pinned 优先；**read 已读事实 + unread 未读债务** 双布尔派生；含 category/source 标签）。**可选 `pinned` 过滤参数**（2026-09-05）：`true` = 仅置顶（首页公告栏数据源）；不传 = 全量（公告中心） |
-| GET /announcements/unread-count | 未读数（我的页入口徽标数据源；**口径 = 需触达（ALERT）的可见未读公告**，2026-09-15 收敛） |
-| GET /announcements/{id} | 详情（返回 markdown 原文 + 元信息；已下线/已删 → 404） |
-| POST /announcements/{id}/read | 标记已读（幂等；详情页打开即调） |
-| POST /announcements/read-all | **全部已读**（2026-09-15）：一次收敛全部未读的 ALERT 公告，幂等；返回收敛后的未读数 |
+| GET /announcements | 列表（分页倒序；pinned 优先；**read 已读事实 + unread 未读债务** 双布尔派生；含 category/source 标签）。**匿名可读**（两布尔恒 false）。**可选 `pinned` 过滤参数**（2026-09-05）：`true` = 仅置顶（首页公告栏数据源）；不传 = 全量（公告中心） |
+| GET /announcements/unread-count | 未读数（我的页入口徽标数据源；**口径 = 需触达（ALERT）的可见未读公告**，2026-09-15 收敛）。**需登录** |
+| GET /announcements/{id} | 详情（返回 markdown 原文 + 元信息；已下线/已删 → 404）。**匿名可读** |
+| POST /announcements/{id}/read | 标记已读（幂等；详情页打开即调）。**需登录** |
+| POST /announcements/read-all | **全部已读**（2026-09-15）：一次收敛全部未读的 ALERT 公告，幂等；返回收敛后的未读数。**需登录** |
 
 > **列表响应为什么要有 `read` 和 `unread` 两个布尔**（2026-09-15）：`read` = 已读回执事实
 > （用户是否打开过详情）；`unread` = 是否构成未读债务（ALERT 且无回执）。SILENT 公告

@@ -53,6 +53,7 @@ MANAGED_SKILLS=(
   quwuting-venue-activity-publish
   quwuting-git-sync
   quwuting-prod-readonly-diagnosis
+  quwuting-audit-rejection-triage
 )
 
 RSYNC_EXCLUDES=(--exclude=.DS_Store --exclude=__pycache__ --exclude=*.pyc)

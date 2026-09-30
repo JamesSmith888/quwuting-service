@@ -20,7 +20,23 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 行业快讯用户端接口（2026-09-10，docs/agents/47-bulletins.md，需登录）。
+ * 行业快讯用户端接口（2026-09-10，docs/agents/47-bulletins.md）。
+ * <p>
+ * <b>匿名可读、表态需登录</b>（2026-09-30 审核根因修复）：
+ * 读接口（列表 {@link #list} / 详情 {@link #detail}）走
+ * {@link UserContext#getCurrentUserId()}——未登录返回 null，匿名用户可完整浏览内容；
+ * 写接口（表态 {@link #toggleReaction}）仍 {@link UserContext#requireAuth()}。
+ * <p>
+ * <b>为什么读接口不能再要求登录</b>：此前读接口统一 requireAuth，客户端又用<b>同步</b>
+ * 的本地凭证快照做首屏门禁，而凭证由 {@code app.onLaunch} 的静默登录<b>异步</b>换取
+ * ——冷启动首帧两者同帧，快照必然为空，页面便把"判据尚未就绪"当成了"用户未登录"，
+ * 于是<b>打开小程序一进快讯页就拦登录</b>，命中审核规则「不得未经体验功能服务即要求
+ * 用户授权登录」（2026-09-30 审核失败实证；客户端侧修复见 miniprogram/services/auth.ts
+ * 「首屏登录判据」节与 scripts/check-first-paint-auth.py）。
+ * <p>
+ * <b>合规前提不变</b>：快讯内容全部由平台代发（用户侧零内容写接口），不含任何用户生成
+ * 内容——个人主体不得出现「用户自行生成内容的发布/分享/交流」这条红线不受影响；匿名
+ * 可读的是<b>平台自己的公开行业资讯</b>，不新增 UGC 面。
  * <p>
  * <b>内容只读、表态可写</b>（2026-09-10 二次定稿）：
  * <ul>
@@ -63,6 +79,9 @@ public class BulletinController {
      * <p>
      * 每项含 content 全文与 reactions 徽标——列表页内联渲染全文（TG 频道式气泡流）。
      * 个人表态（reactedByMe）随列表下发，避免前端二次请求。
+     * <p>
+     * <b>匿名可读</b>（2026-09-30）：未登录时 userId 为 null，个人表态恒 false，
+     * 内容照常下发（缘由见类头注）。
      */
     @GetMapping
     public ApiResponse<Page<BulletinFeedItemResponse>> list(
@@ -70,17 +89,21 @@ public class BulletinController {
             @RequestParam(defaultValue = "20") int size,
             @RequestParam(required = false) Long beforeId,
             @RequestParam(required = false) Long fromId) {
-        Long userId = UserContext.requireAuth();
+        Long userId = UserContext.getCurrentUserId();
         if (beforeId != null || fromId != null) {
             return ApiResponse.ok(bulletinService.listByCursor(beforeId, fromId, size, userId));
         }
         return ApiResponse.ok(bulletinService.listVisible(page, size, userId));
     }
 
-    /** 快讯详情（markdown 原文 + 表态徽标；已下线/已删 → 404）。长文深读与分享落地通道 */
+    /**
+     * 快讯详情（markdown 原文 + 表态徽标；已下线/已删 → 404）。长文深读与分享落地通道。
+     * <p>
+     * <b>匿名可读</b>（2026-09-30）：未登录时 reactedByMe 恒 false（缘由见类头注）。
+     */
     @GetMapping("/{id}")
     public ApiResponse<BulletinDetailResponse> detail(@PathVariable Long id) {
-        Long userId = UserContext.requireAuth();
+        Long userId = UserContext.getCurrentUserId();
         return ApiResponse.ok(bulletinService.detail(id, userId));
     }
 
@@ -90,6 +113,9 @@ public class BulletinController {
      * <p>
      * 路由形状与门店域 {@code /venues/{venueId}/reactions/{code}} 保持一致（code 走路径，
      * 无请求体）——同一类交互两端同一形态，前端/联调无需在两套约定间切换。
+     * <p>
+     * <b>本接口仍是登录门禁</b>（2026-09-30 明示）：表态是用户级写操作，必须有稳定身份
+     * （「一人一票」的唯一键就落在 userId 上）。匿名放开的是<b>读</b>，不是写。
      */
     @PostMapping("/{id}/reactions/{code}")
     public ApiResponse<BulletinReactionToggleResult> toggleReaction(@PathVariable Long id,
@@ -105,11 +131,18 @@ public class BulletinController {
      * 口径 = <b>信息流展示即计</b>（docs/agents/47「九、浏览统计」）：信息流每成功加载
      * 一页即把该页条目 id 一次性上报，服务端按 (bulletin_id, user_id, view_date) 去重
      * （同一用户同一条同一天只计 1 次），前端失败静默不重试——计数埋点不阻塞内容展示。
-     * 需登录（快讯接口全部登录门禁，userId 恒非空）。空集合/重复 id 由服务端去重收敛。
+     * <p>
+     * <b>匿名可读放开后本接口不再强制登录</b>（2026-09-30）：未登录时 userId 为 null，
+     * 由 {@link BulletinViewService#recordViews} 内的**同一处**空值守卫静默跳过——浏览
+     * 计数需要稳定身份做去重，匿名浏览不计入。这里刻意不写 {@code requireAuth()}：那会
+     * 让匿名客户端的一次 fire-and-forget 上报拿到 401（白跑一次续期尝试），而计数埋点
+     * 不该有任何可观测副作用。
+     * <p>
+     * 空集合/重复 id 由服务端去重收敛。
      */
     @PostMapping("/views")
     public ApiResponse<Void> recordViews(@RequestBody(required = false) BulletinViewsRequest request) {
-        Long userId = UserContext.requireAuth();
+        Long userId = UserContext.getCurrentUserId();
         bulletinViewService.recordViews(request != null ? request.ids() : null, userId);
         return ApiResponse.ok(null);
     }

@@ -87,7 +87,11 @@ public class AnnouncementService {
 
     /**
      * 可见公告列表（PUBLISHED + 已生效，pinned 优先倒序；read/unread 批量派生）。
+     * <p>
+     * <b>匿名可读</b>（2026-09-30，与快讯域同源）：{@code userId} 允许为 null（未登录），
+     * 此时逐条 read/unread 恒 false——首页公告条与公告中心都无需登录即可渲染。
      *
+     * @param userId 当前用户 id；<b>可为 null</b>（匿名）
      * @param pinned null = 全量（公告中心）；true = 仅置顶（首页公告栏数据源，
      *               2026-09-05 契约：非置顶公告不进首页，只在公告中心出现）
      */
@@ -101,7 +105,10 @@ public class AnnouncementService {
         Page<Announcement> result = announcementRepository.findVisiblePage(
                 null, AnnouncementCategory.FLASH, AnnouncementStatus.PUBLISHED,
                 LocalDateTime.now(), pinned, pageable);
-        Set<Long> readIds = result.isEmpty()
+        // 匿名（userId == null）没有回执可查 ⇒ 直接空集，逐条 read/unread 恒 false。
+        // 守卫写在这里而不是仓储层：「匿名不存在已读回执」是**领域事实**，由服务层表达；
+        // 仓储不必为一种不存在的身份构造 SQL 分支（也避免 IN () 空集语义泄漏到查询层）。
+        Set<Long> readIds = result.isEmpty() || userId == null
                 ? Set.of()
                 : announcementRepository.findReadAnnouncementIds(
                         userId, result.getContent().stream().map(Announcement::getId).collect(Collectors.toList()));
@@ -141,11 +148,16 @@ public class AnnouncementService {
         return a.getTouchLevel() != AnnouncementTouchLevel.SILENT && !readIds.contains(a.getId());
     }
 
-    /** 公告详情（已下线/已软删 → 404；不自动标已读，由前端调 markRead） */
+    /**
+     * 公告详情（已下线/已软删 → 404；不自动标已读，由前端调 markRead）。
+     * <p>
+     * <b>匿名可读</b>（2026-09-30）：{@code userId} 允许为 null，此时 {@code read} 恒 false
+     * ——匿名用户没有回执，也就不存在"已读"这个事实。
+     */
     @Transactional(readOnly = true)
     public AnnouncementDetailResponse detail(Long userId, Long id) {
         Announcement a = findPublished(id);
-        boolean read = readRepository.existsByUserIdAndAnnouncementId(userId, id);
+        boolean read = userId != null && readRepository.existsByUserIdAndAnnouncementId(userId, id);
         return new AnnouncementDetailResponse(
                 a.getId(), a.getTitle(), a.getContent(), a.getCategory(), a.getSource(),
                 a.isPinned(), MediaAttachments.parseOrEmpty(a.getMediaJson()),

@@ -104,6 +104,11 @@ public class BulletinService {
      * <b>每项携带 content 全文与 reactions 徽标</b>（2026-09-10 信息流改造）：
      * 列表页内联渲染全文，故正文必须随列表下发；表态按整页 id 一次批量聚合
      * （两条 IN 查询，无 N+1、无缓存）。
+     * <p>
+     * <b>匿名可读</b>（2026-09-30，审核根因修复）：{@code currentUserId} 允许为 null
+     * （未登录）——{@link BulletinReactionService#batchBadges} 已按"无身份"分支处理
+     * （不查个人表态 ⇒ reactedByMe 恒 false），{@link BulletinViewService} 亦有同一处
+     * 空值守卫，故本方法自身无需任何额外分支（判据单点在下游，不在读路径分叉）。
      */
     @Transactional(readOnly = true)
     public Page<BulletinFeedItemResponse> listVisible(int page, int size, Long currentUserId) {
@@ -120,7 +125,7 @@ public class BulletinService {
     }
 
     /**
-     * 游标取页（2026-09-14「尾部优先」改造，docs/agents/47 §4.1；需登录）。
+     * 游标取页（2026-09-14「尾部优先」改造，docs/agents/47 §4.1；<b>匿名可读</b> 2026-09-30）。
      * <p>
      * <b>为什么快讯要游标而不是页码</b>：信息流是时间正序、最新沉底，而「记住已读位置 +
      * 自动定位到未读」要求首屏直接拿到<b>最新的</b>一屏——页码模型下"最新一页"必须先

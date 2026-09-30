@@ -29,8 +29,11 @@ import java.util.Set;
  * <p>
  * 与门店域 {@code VenueViewService} 的差异：
  * <ul>
- *   <li><b>无匿名路径</b>：快讯接口全部需登录，上报端点同样鉴权，userId 恒非空，
- *       不需要门店那套匿名 IP 频控（Caffeine limiter）；</li>
+ *   <li><b>匿名不计数</b>（2026-09-30 起）：快讯**读接口**已放开匿名（一进小程序即可浏览
+ *       ——审核要求「不得未经体验功能服务即要求登录」），但**计数**需要稳定身份做
+ *       (bulletin_id, user_id, view_date) 去重，匿名没有 user_id 可用 ⇒ 未登录上报在
+ *       {@link #recordViews} 内静默跳过。与门店域的「匿名 IP 频控」是两种解法：门店要的是
+ *       "匿名也算一次访问"，快讯要的是"没有身份就不算"，因此不引入 Caffeine limiter；</li>
  *   <li><b>无 source 维度</b>：快讯只有信息流一个展示入口，不按来源归因分列；</li>
  *   <li><b>无热度缓存失效</b>：快讯域没有热度统计，浏览数不需要联动逐出任何缓存。</li>
  * </ul>
@@ -46,9 +49,12 @@ public class BulletinViewService {
      * 批量记录一次展示浏览（信息流每加载一页调用一次；fire-and-forget 语义由接口层/前端
      * 承担）。按 (bulletin_id, user_id, view_date) 去重：同日重复上报 ON DUPLICATE KEY
      * DO NOTHING，不影响计数。恒 1 次 DB 往返。
+     * <p>
+     * <b>userId 为 null（匿名）时整体 no-op</b>——本函数是全应用唯一的"匿名浏览不计数"
+     * 判据点（接口层不再 requireAuth，也不在别处再判一次空）。
      *
      * @param bulletinIds 本页展示的快讯 id 集合（去重后写入；null/空 = no-op）
-     * @param userId      当前用户（接口层已鉴权，恒非空）
+     * @param userId      当前用户；<b>可为 null</b>（匿名 ⇒ 直接返回，不计数）
      */
     @Transactional
     public void recordViews(List<Long> bulletinIds, Long userId) {

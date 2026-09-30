@@ -209,7 +209,23 @@ CREATE INDEX qwt_idx_br_bulletin ON qwt_bulletin_reactions (bulletin_id, deleted
 
 ## 四、接口契约
 
-### 4.1 用户端（需登录）
+### 4.1 用户端（**读接口匿名可读**，表态需登录）
+
+> **2026-09-30 变更（微信审核失败根因修复）**：`GET` 两个读接口由
+> `UserContext.requireAuth()` 改为 `UserContext.getCurrentUserId()`（可空）——
+> 匿名用户可完整浏览内容，`reactedByMe` 恒 `false`；`POST /{id}/reactions/{code}`
+> **仍 `requireAuth`**（表态的「一人一票」唯一键落在 userId 上）；
+> `POST /views` 也不再强制登录，但**匿名不计数**（无 user_id 无法按
+> `(bulletin_id, user_id, view_date)` 去重）——判空落在
+> `BulletinViewService.recordViews` 的**同一处**守卫，接口层不再 `requireAuth`
+> （否则匿名客户端的一次 fire-and-forget 会上来吃一个 401）。
+>
+> **缘由**：客户端在 `onLoad` 用**同步**凭证快照做首屏门禁，而凭证由 `app.onLaunch`
+> 的静默登录**异步**换取 ⇒ 冷启动首帧快照必然为空，页面把"判据还没就绪"当成
+> "用户未登录"，**一进快讯页即登录墙且永不自愈**——命中审核规则「未浏览体验功能
+> 服务，即要求用户授权登录」（2026-09-30 审核失败实证，审核员为全新设备必中）。
+> 合规前提不变：快讯全部由平台代发，匿名可读不新增 UGC 面（§1.3）。
+> 客户端侧契约见小程序仓 `services/auth.ts`「首屏登录判据」+ `check:first-paint-auth`。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -541,7 +557,7 @@ DRAFT --publish(立即/定时)--> PUBLISHED --offline / offlineAt 到点--> OFFL
 | 列 | 类型 | 说明 |
 |---|---|---|
 | `bulletin_id` | bigint | 快讯 id（`qwt_announcements` 中 `category='FLASH'` 的条目） |
-| `user_id` | bigint | 浏览者（快讯接口全部登录门禁，恒非空，无匿名路径） |
+| `user_id` | bigint | 浏览者（**匿名不上报**：读接口已于 2026-09-30 放开匿名，但计数需要稳定身份做去重 ⇒ 未登录上报在 `BulletinViewService.recordViews` 内由**同一处**空值守卫静默跳过，落库行恒非空；接口层刻意不再 `requireAuth`，避免匿名客户端为埋点白吃一次 401） |
 | `view_date` | date | 浏览日期（去重粒度：每人每条每天 1 次） |
 
 唯一键 `qwt_uk_bv_user_bulletin_date (bulletin_id, user_id, view_date)`；索引
@@ -559,7 +575,10 @@ DRAFT --publish(立即/定时)--> PUBLISHED --offline / offlineAt 到点--> OFFL
 - **前端指纹纳入 viewCount**：展示文案随列表下发后，`feedFingerprint` 必须覆盖
   `viewCount`，否则浏览数变化时静默收敛会因"指纹相等"跳过重渲染、数字永远停留在
   快照值（同一用户同日重复上报被去重，正常场景刷新不抖动）。
-- **与门店域差异**：无 source 维度（信息流只有一个展示入口）、无匿名频控（恒登录）、
+- **与门店域差异**：无 source 维度（信息流只有一个展示入口）、**匿名不计数**
+  （2026-09-30：读接口已放开匿名，但计数需要稳定身份做 `(bulletin_id, user_id, view_date)`
+  去重 ⇒ 未登录上报在 `recordViews` 内静默跳过；与门店域的「匿名 IP 频控」是两种解法——
+  门店要"匿名也算一次访问"，快讯要"没有身份就不算"，故不引入 Caffeine limiter）、
   无热度缓存失效（快讯域无热度统计）。
 
 ## 十、红线汇总
