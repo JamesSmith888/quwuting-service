@@ -1,0 +1,186 @@
+src/main/resources/application.yaml
+  s_8f6d7c495cb7e6::t_3112857780ee26 4-8,10-15,21,24,26,39,53-61,65,67,69-70,77-85,115-118
+src/main/java/org/quwuting/quwutingservice/venue/dailyopening/dto/request/ApplyVenueSuspendBatchRequest.java
+  s_8f6d7c495cb7e6::t_44fc9af46dac17 18-25,30-35
+src/test/java/org/quwuting/quwutingservice/spend/SpendEntryLimitsMirrorTest.java
+  s_8f6d7c495cb7e6::t_5fd3fddf4f44ab 1-57
+src/main/java/org/quwuting/quwutingservice/common/web/HealthController.java
+  s_8f6d7c495cb7e6::t_b5d57e286941a9 1-32
+src/test/java/org/quwuting/quwutingservice/venue/service/GeocodeServiceReverseTest.java
+  s_8f6d7c495cb7e6::t_158bc933423fd8 1-66
+docs/agents/47-bulletins.md
+  s_8f6d7c495cb7e6::t_5ce854c7e0a1d5 120-133
+src/test/java/org/quwuting/quwutingservice/venue/change/VenueFactWritersPublishChangeTest.java
+  s_8f6d7c495cb7e6::t_b86aeef0a5632e 1-151
+src/main/java/org/quwuting/quwutingservice/venue/service/VenueHeatService.java
+  s_8f6d7c495cb7e6::t_be7c43c09666cb 213-214,216-218,221-223
+  s_8f6d7c495cb7e6::t_517030fb4c32cd 19-22,215,219-220
+src/test/java/org/quwuting/quwutingservice/geo/tencent/TencentLbsClientTest.java
+  s_8f6d7c495cb7e6::t_05ba71336954ce 1-95
+src/main/java/org/quwuting/quwutingservice/venue/service/VenueAliasService.java
+  s_8f6d7c495cb7e6::t_3bf705abedf31e 15-16,23,26,44-45,57,106,124,131,160,167,181
+src/test/java/org/quwuting/quwutingservice/bulletin/policy/BulletinContentPolicyTest.java
+  s_8f6d7c495cb7e6::t_ad392b8aaa1ff9 15-16,20-21,51-57,59,65
+  s_8f6d7c495cb7e6::t_25b7a56a4ec35b 1-14,17-19,22-50,58,60-64,66-73
+src/main/java/org/quwuting/quwutingservice/venue/dailyopening/dto/response/BatchSuspendResult.java
+  s_8f6d7c495cb7e6::t_8fcf912baa01c6 18-20,29-31
+docs/agents/14-deployment-and-schema.md
+  s_8f6d7c495cb7e6::t_b58c4c7360f08e 75-76,78-88,156-160
+src/main/java/org/quwuting/quwutingservice/geo/tencent/TencentLbsClient.java
+  s_8f6d7c495cb7e6::t_f0b9fd5fbad18d 8,74
+  s_8f6d7c495cb7e6::t_7cd77fa4d24d8e 1-7,9-73,75-177
+src/main/java/org/quwuting/quwutingservice/venue/change/VenueFactsChangedEvent.java
+  s_8f6d7c495cb7e6::t_4e14cbee379c13 1-33
+src/main/java/org/quwuting/quwutingservice/common/ratelimit/FailedAttemptLimiter.java
+  s_8f6d7c495cb7e6::t_5fb0aefcb6b1c6 1-49
+src/main/java/org/quwuting/quwutingservice/venueactivity/repository/VenueActivityRepository.java
+  s_8f6d7c495cb7e6::t_dafd2b1b700c32 64,69-73,76,81-83
+src/main/resources/application-prod.yaml
+  s_8f6d7c495cb7e6::t_3112857780ee26 35-36
+src/main/java/org/quwuting/quwutingservice/common/tx/TransactionBoundaryGuard.java
+  s_8f6d7c495cb7e6::t_4b1dd7bb9cd627 1-73
+src/main/java/org/quwuting/quwutingservice/storage/ImageContentValidator.java
+  s_8f6d7c495cb7e6::t_3a773bacd8fa92 6,214
+src/main/java/org/quwuting/quwutingservice/venue/dailyopening/dto/response/SuspendCityImpact.java
+  s_8f6d7c495cb7e6::t_880011e761fc96 1-21
+docs/agents/13-code-standards.md
+  s_8f6d7c495cb7e6::t_ffbb12add71220 206-233,282
+src/main/java/org/quwuting/quwutingservice/venue/change/VenueFactChange.java
+  s_8f6d7c495cb7e6::t_b93d9241f97469 1-45
+src/main/java/org/quwuting/quwutingservice/geo/controller/GeoController.java
+  s_8f6d7c495cb7e6::t_6fbdaed22089e7 20-23,33
+docs/agents/33-venue-sync-skill.md
+  s_8f6d7c495cb7e6::t_cec986e4a8e703 96,103-121
+src/main/java/org/quwuting/quwutingservice/spend/service/SpendService.java
+  s_8f6d7c495cb7e6::t_bbf1e812f75f35 5,126,128-129,150-152,157,160-163
+  s_8f6d7c495cb7e6::t_e4256f9fc40913 113,138-141,149,153-156,158-159,176
+src/main/java/org/quwuting/quwutingservice/exception/ExternalServiceUnavailableException.java
+  s_8f6d7c495cb7e6::t_6b4092822d140c 1-46
+src/main/java/org/quwuting/quwutingservice/venue/dailyopening/service/SuspendBlastRadiusGuard.java
+  s_8f6d7c495cb7e6::t_b9f55c69867990 1-148
+src/main/java/org/quwuting/quwutingservice/common/db/DbConstraintViolations.java
+  s_8f6d7c495cb7e6::t_5dcdc3191a1824 12,17-19
+  s_8f6d7c495cb7e6::t_48636fe35eb1f7 24-30,34-37,39
+src/main/java/org/quwuting/quwutingservice/venue/service/GeocodeService.java
+  s_8f6d7c495cb7e6::t_55d3e64d9c7ed3 123-124
+  s_8f6d7c495cb7e6::t_4066990f83578b 3-4,6-10,18,21,23-26,35-43,45-53,56-62,76-77,79-82,85-86,91,95,100,110,112-120,130-131,137-158
+src/main/java/org/quwuting/quwutingservice/config/RequestTimingFilter.java
+  s_8f6d7c495cb7e6::t_fe66df1856c6b5 8,21-22,29-30,61-63,66-67
+src/main/java/org/quwuting/quwutingservice/webauth/service/WebAuthService.java
+  s_8f6d7c495cb7e6::t_d5e2da46d72c99 106-112,115-116
+  s_8f6d7c495cb7e6::t_5667b61e9b4d75 7-8,20,28,80-102,186-190,193-195,198
+src/main/java/org/quwuting/quwutingservice/venue/service/VenueService.java
+  s_8f6d7c495cb7e6::t_aba602c3c77abd 58-60,68-69,393-394,501-502
+  s_8f6d7c495cb7e6::t_b3291f4c4835f2 171-176
+  s_8f6d7c495cb7e6::t_090a1b053931c5 207,239,297,528,1008,1355
+  s_8f6d7c495cb7e6::t_f2b991d73314c3 540,561-563
+  s_8f6d7c495cb7e6::t_a56e70ac87240e 758,782,795,819,849,879,888,893
+  s_8f6d7c495cb7e6::t_3b6643486f77b2 1018-1025,1027-1031
+  s_8f6d7c495cb7e6::t_01b0abe610885c 597,623,666-667
+scripts/check-tracked-secrets.py
+  s_8f6d7c495cb7e6::t_f360d3d69a8d10 75-76
+  s_8f6d7c495cb7e6::t_eea8ee8ea8e0c4 1-74,77-108
+src/main/java/org/quwuting/quwutingservice/venue/repository/VenueRepository.java
+  s_8f6d7c495cb7e6::t_fa60447aa76a48 19,87
+  s_8f6d7c495cb7e6::t_5f9c7fb8cdff4a 79-86,88-89
+quwuting-venue-daily-sync/SKILL.md
+  s_8f6d7c495cb7e6::t_f4664b99feeaa2 449-460,681
+quwuting-bulletin-publish/SKILL.md
+  s_8f6d7c495cb7e6::t_5ce854c7e0a1d5 46-51
+src/main/java/org/quwuting/quwutingservice/wxsubscribe/service/WxSubscribeSendService.java
+  s_8f6d7c495cb7e6::t_7343e19b28f7a4 4,147-149
+docs/agents/03-auth-and-user.md
+  s_8f6d7c495cb7e6::t_db16fd626f79b1 22-26
+src/main/java/org/quwuting/quwutingservice/venue/change/VenueChangePublisher.java
+  s_8f6d7c495cb7e6::t_71b7cff9d9f357 1-52
+src/test/java/org/quwuting/quwutingservice/venue/dailyopening/service/DailyOpeningServiceSuspendTest.java
+  s_8f6d7c495cb7e6::t_6409064eb8312f 1-167
+src/main/resources/db/migration-mysql/V36__safety_guard_ops_config.sql
+  s_8f6d7c495cb7e6::t_ad392b8aaa1ff9 4-22
+  s_8f6d7c495cb7e6::t_905f2b1deea931 1-3
+quwuting-venue-daily-sync/scripts/qw_api.py
+  s_8f6d7c495cb7e6::t_76a76cc9f68637 25-28
+  s_8f6d7c495cb7e6::t_3f6af2e105179d 125-129,210-216,218
+deploy/deploy.sh
+  s_8f6d7c495cb7e6::t_10a0f2c546335e 5,36-40,192-194,226-244
+src/main/java/org/quwuting/quwutingservice/auth/service/WechatService.java
+  s_8f6d7c495cb7e6::t_767f6503c93a86 4,70,84-85,131,143-144,167
+src/main/resources/content-policy/bulletin-forbidden-terms.txt
+  s_8f6d7c495cb7e6::t_0c5456128b2428 1-68
+src/main/java/org/quwuting/quwutingservice/venue/dailyopening/service/DailyOpeningService.java
+  s_8f6d7c495cb7e6::t_17fb3a16408dea 12,16-17,30,33,84-87,168,170,222-224,226-228,233-234,236,241-242,244-245,247,261-270,272-291,297,300,303,305-306,308-316,318-320,322,324-326
+  s_8f6d7c495cb7e6::t_0eff7bda6efa73 209-213
+src/main/java/org/quwuting/quwutingservice/venuesync/service/VenueSyncDataService.java
+  s_8f6d7c495cb7e6::t_52816c528e009f 13-14,61-62,124,163,172-173,175
+docs/agents/40-spend-ledger.md
+  s_8f6d7c495cb7e6::t_db16fd626f79b1 54-62
+src/test/java/org/quwuting/quwutingservice/spend/service/SpendServiceTest.java
+  s_8f6d7c495cb7e6::t_e8b25b3d3bcf03 8
+  s_8f6d7c495cb7e6::t_9b01bb6bd5cbdb 157-202
+.gitignore
+  s_8f6d7c495cb7e6::t_3fd5736ca08b21 36-40,45-49
+docs/agents/16-ops-config.md
+  s_8f6d7c495cb7e6::t_52de44f5f8f707 31-32,65-76
+src/main/java/org/quwuting/quwutingservice/venue/service/AmapVenuePhotoSyncService.java
+  s_8f6d7c495cb7e6::t_920dd19b31cb92 8-9,83,277,364
+  s_8f6d7c495cb7e6::t_7cc9b021db744b 275-276
+docs/agents/12-api-conventions.md
+  s_8f6d7c495cb7e6::t_6ac61d9f8f0dd4 65-67,70-87,102-113,116-120,125,127-130
+docs/agents/29-performance.md
+  s_8f6d7c495cb7e6::t_7013eb0f9153a6 1-4,43,53-74
+src/main/java/org/quwuting/quwutingservice/common/web/LogRedaction.java
+  s_8f6d7c495cb7e6::t_d726d84516996c 1-69
+src/main/java/org/quwuting/quwutingservice/bulletin/service/BulletinService.java
+  s_8f6d7c495cb7e6::t_dca78d89bbf807 5,95,430-433,435,443
+  s_8f6d7c495cb7e6::t_267a7971fb8d64 94,434
+src/main/java/org/quwuting/quwutingservice/bulletin/policy/BulletinContentPolicy.java
+  s_8f6d7c495cb7e6::t_267a7971fb8d64 4-5,19,34-40,46-48,54-58,61,66,69,71-73
+  s_8f6d7c495cb7e6::t_c9d8dbaf238eb4 1-3,6-18,20-33,41-45,49-53,59-60,62-65,67-68,70,74-117
+src/main/java/org/quwuting/quwutingservice/venueactivity/service/VenueActivityService.java
+  s_8f6d7c495cb7e6::t_dafd2b1b700c32 8-9,89-90,324,340,352,367-369,374-377,379-386
+src/main/java/org/quwuting/quwutingservice/auth/service/AuthService.java
+  s_8f6d7c495cb7e6::t_7cc9b021db744b 69-72
+  s_8f6d7c495cb7e6::t_0d45590293010e 6,12,35-41,47,53-61
+src/main/java/org/quwuting/quwutingservice/venue/change/VenueSharedCacheInvalidator.java
+  s_8f6d7c495cb7e6::t_fbae3b14577bf7 1-44
+src/main/java/org/quwuting/quwutingservice/venuesync/service/VenueGuardAdminService.java
+  s_8f6d7c495cb7e6::t_083e3d18d681db 15,39
+  s_8f6d7c495cb7e6::t_920dd19b31cb92 9-10,65,72,75,89,96,99
+src/test/java/org/quwuting/quwutingservice/common/CommonGuardsTest.java
+  s_8f6d7c495cb7e6::t_adb28dd38bc83d 1-77
+src/main/java/org/quwuting/quwutingservice/venueclaim/service/VenueClaimService.java
+  s_8f6d7c495cb7e6::t_9ed5c56069bb6e 13-14,78-79,222-224
+AGENTS.md
+  s_8f6d7c495cb7e6::t_0ce1294581b446 9,13-14,16,18-21,24-25,45-46,53
+src/main/java/org/quwuting/quwutingservice/common/web/ClientIpResolver.java
+  s_8f6d7c495cb7e6::t_9c72f2ffc8a9c5 9-15,17-21
+src/main/java/org/quwuting/quwutingservice/spend/SpendEntryLimits.java
+  s_8f6d7c495cb7e6::t_065c2836a82751 1-39
+src/test/java/org/quwuting/quwutingservice/venue/change/VenueChangeEventTest.java
+  s_8f6d7c495cb7e6::t_e7820c5a0ff706 1-65
+src/main/java/org/quwuting/quwutingservice/exception/GlobalExceptionHandler.java
+  s_8f6d7c495cb7e6::t_5092699a463bfb 8,20-22,55-59,66,70-82
+src/main/java/org/quwuting/quwutingservice/spend/entity/SpendEntryEntity.java
+  s_8f6d7c495cb7e6::t_bbf1e812f75f35 3,44,52,73,81
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.45-trip",
+  "base_commit_sha": "29e320416bc7647313fc220788ffc4a9ef5c2ad9",
+  "prompts": {},
+  "humans": {
+    "h_fbb9b8e239a0dd": {
+      "author": "James Smith(杨鑫) <xin.y@trip.com>"
+    }
+  },
+  "sessions": {
+    "s_8f6d7c495cb7e6": {
+      "agent_id": {
+        "tool": "kiro-cli",
+        "id": "9ac58f47-1393-4d29-aef3-167448e670d0",
+        "model": "claude-opus-5.5"
+      },
+      "human_author": "James Smith(杨鑫) <xin.y@trip.com>"
+    }
+  }
+}
