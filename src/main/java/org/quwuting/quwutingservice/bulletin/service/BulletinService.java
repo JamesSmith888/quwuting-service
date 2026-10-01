@@ -2,6 +2,7 @@ package org.quwuting.quwutingservice.bulletin.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.bulletin.policy.BulletinContentPolicy;
 import org.quwuting.quwutingservice.announcement.entity.Announcement;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementCategory;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementSource;
@@ -90,6 +91,8 @@ public class BulletinService {
     private final BulletinReactionService bulletinReactionService;
     private final BulletinViewService bulletinViewService;
     private final MediaAttachmentValidator mediaAttachmentValidator;
+    /** 内容红线（只写服务可得性，禁写原因/事件经过；2026-10-01 服务端能力，受运营开关控制、默认关闭） */
+    private final BulletinContentPolicy bulletinContentPolicy;
 
     // ── 用户端 ────────────────────────────────────────────────
 
@@ -424,9 +427,12 @@ public class BulletinService {
     }
 
     /**
-     * 内容安全基础校验（同公告域口径）：快讯正文是 markdown 原文，不做
-     * TextSanitizer 清洗（避免误伤 markdown 语法），仅拦截最危险的脚本/iframe
-     * 原始标签；渲染侧由小程序 towxml 白名单兜底。
+     * 内容校验（create / update / agentPublish 三条写路径唯一必经点）：
+     * <ol>
+     *   <li>标签安全：快讯正文是 markdown 原文，不做 TextSanitizer 清洗（避免误伤 markdown
+     *       语法），仅拦截最危险的脚本/iframe 原始标签；渲染侧由小程序 towxml 白名单兜底；</li>
+     *   <li>内容红线：{@link BulletinContentPolicy}（开关开启时，命中原因/事件/负面词 ⇒ 1035）。</li>
+     * </ol>
      */
     private void validateContent(String content) {
         if (content == null) return;
@@ -434,6 +440,7 @@ public class BulletinService {
         if (lower.contains("<script") || lower.contains("<iframe")) {
             throw new BusinessException(400, "快讯内容包含不允许的标签");
         }
+        bulletinContentPolicy.check(content);
     }
 
     /**

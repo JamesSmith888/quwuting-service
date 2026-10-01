@@ -5,6 +5,8 @@ import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
+import org.quwuting.quwutingservice.venue.change.VenueChangePublisher;
+import org.quwuting.quwutingservice.venue.change.VenueFactChange;
 import org.quwuting.quwutingservice.venueactivity.dto.ActivityStateView;
 import org.quwuting.quwutingservice.venueactivity.dto.ActivityWindow;
 import org.quwuting.quwutingservice.venueactivity.dto.request.ActivityRequest;
@@ -84,6 +86,8 @@ public class VenueActivityService {
      * 让活动域反向持有事件写入权才会造成真耦合；这里只查不回写，且仅服务于 admin。
      */
     private final VenueShareRepository venueShareRepository;
+    /** 门店事实变更声明（活动是「有活动」筛选与列表活动行的载体，2026-10-01） */
+    private final VenueChangePublisher venueChangePublisher;
 
     /**
      * 管理端一个活动的四个计数，打包传递。
@@ -317,6 +321,7 @@ public class VenueActivityService {
         activity.setStatus(Boolean.TRUE.equals(request.publish())
                 ? ActivityStatus.PUBLISHED : ActivityStatus.DRAFT);
         VenueActivity saved = activityRepository.save(activity);
+        venueChangePublisher.publish(VenueFactChange.ACTIVITY, venueId);
         log.info("[venue-activity] 创建活动 id={} venueId={} status={}",
                 saved.getId(), venueId, saved.getStatus());
         return getForAdmin(saved.getId());
@@ -332,6 +337,7 @@ public class VenueActivityService {
             activity.setStatus(ActivityStatus.PUBLISHED);
         }
         activityRepository.save(activity);
+        venueChangePublisher.publish(VenueFactChange.ACTIVITY, activity.getVenueId());
         log.info("[venue-activity] 更新活动 id={} status={}", id, activity.getStatus());
         return getForAdmin(id);
     }
@@ -343,6 +349,7 @@ public class VenueActivityService {
                 .orElseThrow(() -> new BusinessException(CODE_ACTIVITY_NOT_FOUND, "活动不存在"));
         activity.setStatus(ActivityStatus.OFFLINE);
         activityRepository.save(activity);
+        venueChangePublisher.publish(VenueFactChange.ACTIVITY, activity.getVenueId());
         log.info("[venue-activity] 手动下线 id={}", id);
         return getForAdmin(id);
     }
@@ -357,19 +364,26 @@ public class VenueActivityService {
      * 枚举排除而不是判 {@code endDate IS NULL}：枚举是显式契约，判空是隐式的，
      * 后者会在业务演进时被悄悄改掉语义。
      * <p>
-     * 与公告域 {@code processScheduledTransitions} 完全同款：批量 UPDATE、
-     * 零业务副作用、转换数 >0 才记日志。到点后 ≤30s 内强转，
-     * 用户端因此永远不会看到过期活动（"单点状态机"，不做查询时过滤）。
+     * 到点后 ≤30s 内强转，用户端因此永远不会看到过期活动（"单点状态机"，不做查询时过滤）。
+     * 转换后声明所属门店事实变更（2026-10-01）——此前批量 UPDATE 不失效列表缓存，
+     * 「有活动」筛选在活动结束后仍会命中至多 60s。
      */
     @Scheduled(fixedDelay = 30_000)
     @Transactional
     public void processScheduledTransitions() {
-        int offlined = activityRepository.expireDue(
-                ActivityStatus.PUBLISHED, ActivityStatus.OFFLINE,
-                List.of(ActivityOuterSchedule.DATE_RANGE), LocalDate.now());
-        if (offlined > 0) {
-            log.info("[venue-activity] scheduled expire: offlined={}", offlined);
+        List<VenueActivity> due = activityRepository.findDue(
+                ActivityStatus.PUBLISHED, List.of(ActivityOuterSchedule.DATE_RANGE), LocalDate.now());
+        if (due.isEmpty()) {
+            return;
         }
+        Set<Long> venueIds = new LinkedHashSet<>();
+        for (VenueActivity activity : due) {
+            activity.setStatus(ActivityStatus.OFFLINE);
+            venueIds.add(activity.getVenueId());
+        }
+        activityRepository.saveAll(due);
+        venueChangePublisher.publish(VenueFactChange.ACTIVITY, venueIds);
+        log.info("[venue-activity] scheduled expire: offlined={} venues={}", due.size(), venueIds);
     }
 
     // ── 内部工具 ──────────────────────────────────────────────

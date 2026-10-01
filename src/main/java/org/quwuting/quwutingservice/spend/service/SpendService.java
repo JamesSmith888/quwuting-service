@@ -2,6 +2,7 @@ package org.quwuting.quwutingservice.spend.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.spend.SpendEntryLimits;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.spend.dto.SpendEntriesResponse;
 import org.quwuting.quwutingservice.spend.dto.SpendEntryItem;
@@ -109,7 +110,7 @@ public class SpendService {
     }
 
     /** 校验通过后的枚举取值（避免"校验一遍、落库再解析一遍"的两处口径） */
-    private record NormalizedEntry(SpendCategory category, SpendSource source,
+    private record NormalizedEntry(BigDecimal amount, SpendCategory category, SpendSource source,
                                    SpendDirection direction) {
     }
 
@@ -122,14 +123,20 @@ public class SpendService {
     private NormalizedEntry normalize(SpendEntryItem item) {
         if (item == null
                 || item.clientEntryId() == null || item.clientEntryId().isBlank()
-                || item.clientEntryId().length() > 32
+                || item.clientEntryId().length() > SpendEntryLimits.CLIENT_ENTRY_ID_MAX_LENGTH
                 || item.amount() == null || item.amount().compareTo(BigDecimal.ZERO) <= 0
+                || exceeds(item.sourceRefId(), SpendEntryLimits.SOURCE_REF_ID_MAX_LENGTH)
+                || exceeds(item.venueName(), SpendEntryLimits.VENUE_NAME_MAX_LENGTH)
                 || item.ts() <= 0) {
             return null;
         }
         SpendCategory category = WireEnums.parse(SpendCategory.class, item.category());
         SpendSource source = WireEnums.parse(SpendSource.class, item.source());
         if (category == null || source == null) {
+            return null;
+        }
+        BigDecimal amount = toColumnScale(item.amount());
+        if (amount.compareTo(SpendEntryLimits.AMOUNT_MAX) > 0 || amount.signum() <= 0) {
             return null;
         }
         // 方向缺省 = EXPENSE（存量/老客户端语义，兼容收敛）；非空但不可识别 → 整条判非法
@@ -139,7 +146,21 @@ public class SpendService {
         if (direction == null) {
             return null;
         }
-        return new NormalizedEntry(category, source, direction);
+        return new NormalizedEntry(amount, category, source, direction);
+    }
+
+    /**
+     * 金额归一到列精度（2 位小数，四舍五入——与 decimal(10,2) 落库时的取舍一致，显式化只是
+     * 让「校验的值」与「存下的值」是同一个数）。客户端表达式求和可能带浮点尾差
+     * （0.1+0.2 = 0.30000000000000004），按位数拒绝会误伤正常账目，故只在上限处拒绝：
+     * 超上限即逐条判非法，绝不让落库异常回滚整批（毒丸根因见 {@link SpendEntryLimits}）。
+     */
+    private static BigDecimal toColumnScale(BigDecimal amount) {
+        return amount.setScale(SpendEntryLimits.AMOUNT_SCALE, RoundingMode.HALF_UP);
+    }
+
+    private static boolean exceeds(String value, int maxLength) {
+        return value != null && value.length() > maxLength;
     }
 
     private void upsert(Long userId, SpendEntryItem item, NormalizedEntry normalized) {
@@ -152,7 +173,7 @@ public class SpendService {
                     return fresh;
                 });
         entity.setTs(toLocalDateTime(item.ts()));
-        entity.setAmount(item.amount());
+        entity.setAmount(normalized.amount());
         entity.setCategory(normalized.category());
         entity.setSource(normalized.source());
         entity.setDirection(normalized.direction());

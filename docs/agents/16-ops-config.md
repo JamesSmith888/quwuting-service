@@ -28,7 +28,8 @@
 | updated_at | timestamp(6) 可空 | 最近修改时刻 |
 
 **键即代码契约**：新增配置键必须同时——① Flyway 迁移插入默认行；②
-`OpsConfigService` 定义常量；③ 前端 `services/opsConfig.ts` + 管理页描述表登记。
+消费方定义常量（`OpsConfigService` 或属主服务，如 `VenueStatusGuardService` / `SuspendBlastRadiusGuard`）；
+③ admin-web `src/services/opsConfig.ts` 的 `OPS_CONFIG_META` 登记（含 `kind`，见下「值类型」）。
 **管理端只能改值不能造键**（`setValue` 校验 key 已存在，抛 1016）——防止手滑造出
 无人消费的配置。
 
@@ -60,6 +61,19 @@
 见[前端 AGENTS.md](../../quwuting/AGENTS.md) · 「运营配置」：`services/opsConfig.ts`
 （公开读 + 管理端读写 + 会话内缓存 + 单飞）、乐观层默认值语义（缓存未就绪时
 用代码侧默认，服务端 toggle 响应 reconcile 兜底）。
+
+## 值类型与管理端控件（2026-10-01）
+
+- 配置值有三种类型：`boolean`（`isEnabled`）/ `integer`（`getInt`）/ `text`（`getValue`）。admin-web
+  `OPS_CONFIG_META` 每个键必须声明 `kind`（integer 另含 `min / max / unit`），管理页据此渲染**开关**或
+  **输入框 + 保存**。
+- **根因**：旧管理页把所有键都渲染成开关——数值键（人工锁天数等）显示「已关闭」，点一下就把 `3` 覆写成
+  `'true'`，后端 `getInt` 解析失败静默退回代码默认值，运营以为在「开关」，实际是在破坏配置。
+- 当前键清单（迁移 = 默认值来源）：`reaction.daily.single`、`dancer.recognition.daily.single`、
+  `dancer.contact.daily.free`、`announcement.data_update.{enabled,template,auto_offline_hours}`、
+  `heat.excluded.user.ids`、`presence.collect.enabled`、`venue.status_lock.{enabled,human_open_days,
+  human_closed_days}`（V25）、**`venue.suspend_guard.{min_count,max_ratio_percent}`（V36，批量暂停熔断，
+  见 33 号）**、**`bulletin.content_redline.enabled`（V36，快讯红线，默认 false，见 47 号 §1.2）**。
 
 ## 长期规则
 

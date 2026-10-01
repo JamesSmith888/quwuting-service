@@ -51,6 +51,15 @@
    （本次没有做，代价是一天）。
 3. **契约漂移要在两侧各留一道机器门禁**：服务端侧靠单测断言"小写/混合大小写必须被接受"
    （`SpendServiceTest`），客户端侧靠跨仓协议门禁；只留一侧都拦不住另一侧先改。
+4. **校验必须与存储一样窄（2026-10-01 毒丸修复）**：旧校验只覆盖「金额 > 0 / ts > 0 / id ≤ 32」，
+   而真正的约束在 DDL（`amount decimal(10,2)`、`venue_name varchar(100)`、`source_ref_id varchar(32)`）。
+   校验比存储宽 ⇒ 越界条目通过校验、落库时抛异常 ⇒ **整批事务回滚 500** ⇒ 客户端「本地为源」重放同一批 ⇒
+   该设备之后的账目**永远上不了云**，本地却一切正常。现在：约束唯一声明处 `spend/SpendEntryLimits`
+   （实体 `@Column` 与 `normalize()` 共用；`SpendEntryLimitsMirrorTest` 与 V16 DDL 逐项比对），越界一律
+   **逐条**进 `rejectedIds`、绝不抛异常拖垮整批；金额先按列精度四舍五入到 2 位再校验（客户端表达式求和的
+   浮点尾差是正常账目，不能因小数位多被拒），四舍五入后为 0 判非法。客户端协议常量
+   `constants/spendWire.ts SPEND_AMOUNT_MAX` 由 `check:protocol` 与 `SpendEntryLimits.AMOUNT_MAX` 比对，
+   记账键盘的整数位上限由它派生。
 
 ## 文件
 

@@ -16,6 +16,10 @@ import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuereaction.ReactionCode;
 import org.quwuting.quwutingservice.venuestatusreport.dto.response.ActiveReportSummary;
 import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportService;
+import org.quwuting.quwutingservice.venue.change.VenueChangePublisher;
+import org.quwuting.quwutingservice.venue.change.VenueFactsChangedEvent;
+import org.springframework.transaction.event.TransactionPhase;
+import org.springframework.transaction.event.TransactionalEventListener;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -203,6 +207,18 @@ public class VenueHeatService {
      */
     public void invalidate(Long venueId) {
         heatCache.invalidate(venueId);
+    }
+
+    /**
+     * 门店事实变更后的热度失效（2026-10-01）：status / 状态日志是热度响应的输出
+     * （currentStatus / currentStatusDays / 状态可信度），门店事实写路径经
+     * {@link VenueChangePublisher} 声明后，
+     * 提交后在此逐店失效——写路径不再各自记得调用 {@link #invalidate}。
+     * 用户行为信号（收藏/浏览/表情等）仍直接调用 {@link #invalidate}（它们不是门店事实）。
+     */
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
+    public void onVenueFactsChanged(VenueFactsChangedEvent event) {
+        heatCache.invalidateAll(event.venueIds());
     }
 
     /**

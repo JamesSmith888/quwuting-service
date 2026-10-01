@@ -3,7 +3,6 @@ package org.quwuting.quwutingservice.venueclaim.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.text.TextSanitizer;
-import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.resourceaccess.service.ResourceGrantService;
 import org.quwuting.quwutingservice.security.UserContext;
@@ -11,15 +10,14 @@ import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
-import org.quwuting.quwutingservice.venue.service.VenueService;
+import org.quwuting.quwutingservice.venue.change.VenueChangePublisher;
+import org.quwuting.quwutingservice.venue.change.VenueFactChange;
 import org.quwuting.quwutingservice.venueclaim.dto.request.CreateVenueClaimRequest;
 import org.quwuting.quwutingservice.venueclaim.dto.response.AdminVenueClaimResponse;
 import org.quwuting.quwutingservice.venueclaim.dto.response.VenueClaimResponse;
 import org.quwuting.quwutingservice.venueclaim.entity.VenueClaim;
 import org.quwuting.quwutingservice.venueclaim.enums.ClaimStatus;
 import org.quwuting.quwutingservice.venueclaim.repository.VenueClaimRepository;
-import org.springframework.cache.Cache;
-import org.springframework.cache.CacheManager;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -76,11 +74,9 @@ public class VenueClaimService {
     private final VenueRepository venueRepository;
     private final UserRepository userRepository;
     private final ResourceGrantService resourceGrantService;
-    private final CacheManager cacheManager;
     private final tools.jackson.databind.ObjectMapper objectMapper;
-    /** 详情公共部分缓存失效（2026-08-13：认领审批后 claimed 快照立即重算；无循环依赖——
-     *  VenueService 依赖本模块的 repository 而非本 service） */
-    private final VenueService venueService;
+    /** 门店事实变更声明（认领审批后实体 claimedBy / 详情 claimed 快照立即重算，见 VenueChangePublisher） */
+    private final VenueChangePublisher venueChangePublisher;
     /** 图片内容校验（2026-08-12 恶意文件防线：营业执照图片 URL 落库前做内容级校验） */
     private final org.quwuting.quwutingservice.storage.ImageContentValidator imageValidator;
 
@@ -223,18 +219,9 @@ public class VenueClaimService {
             claim.setHandleNote(TextSanitizer.sanitize(handleNote));
         }
         venueClaimRepository.save(claim);
-        // 场所实体缓存失效：claimed_by 变更后详情接口 canManage 需立即重算
-        // （60s TTL 内旧 claimedBy 会让认领人看到 false 的管理入口）。
-        // key = venueId（venue 缓存唯一键约定，见 VenueService @CacheEvict key="#id"）；
-        // 显式 CacheManager.evict 而非 @CacheEvict——key 依赖事务内查询结果，
-        // 无法在方法签名 SpEL 表达。
-        Cache cache = cacheManager.getCache(CacheConfig.CACHE_VENUE);
-        if (cache != null) {
-            cache.evict(claim.getVenueId());
-        }
-        // 详情公共部分缓存失效（claimed 快照，2026-08-13）：认领审批后
-        // 「认领舞厅」菜单项禁用态需立即生效（30s refresh 兜底太慢，显式失效）
-        venueService.invalidateDetailPublic(claim.getVenueId());
+        // claimed_by 变更：实体缓存（canManage 计算）与详情 claimed 快照须在提交后立即重算
+        // （60s TTL 内旧 claimedBy 会让认领人看不到管理入口）
+        venueChangePublisher.publish(VenueFactChange.CLAIM, claim.getVenueId());
         log.info("venue claim approved: claimId={}, venueId={}, newClaimedBy={}, adminId={}",
                 claimId, claim.getVenueId(), claim.getUserId(), adminId);
     }

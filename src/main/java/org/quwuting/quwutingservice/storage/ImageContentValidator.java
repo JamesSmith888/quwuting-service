@@ -3,6 +3,7 @@ package org.quwuting.quwutingservice.storage;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.common.tx.TransactionBoundaryGuard;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.springframework.stereotype.Component;
 
@@ -210,6 +211,7 @@ public class ImageContentValidator {
      * 避免旧逻辑「下载失败也缓存 false」把瞬时故障固化 10 分钟）。
      */
     private Boolean attemptDownload(String fetchUrl, long maxBytes) {
+        TransactionBoundaryGuard.warnIfInTransaction("storage.validateDownload", ImageContentValidator.class);
         try {
             HttpRequest request = HttpRequest.newBuilder(URI.create(fetchUrl))
                     .timeout(Duration.ofSeconds(10))

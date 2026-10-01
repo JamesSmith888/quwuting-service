@@ -16,6 +16,7 @@ import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -73,6 +74,18 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 避免逐条 LIKE 查询。一城量级几十家，全量加载成本可接受。
      */
     List<Venue> findByCityAndDeletedFalse(String city);
+
+    /**
+     * 按城市统计指定状态的有效门店数（2026-10-01，批量置暂停「影响面熔断」的分母）：
+     * 返回 [city, count] 行，只覆盖入参城市。批量写库前一次查询，避免逐城往返。
+     */
+    @Query("""
+            SELECT v.city, COUNT(v) FROM Venue v
+            WHERE v.deleted = false AND v.status = :status AND v.city IN :cities
+            GROUP BY v.city
+            """)
+    List<Object[]> countByCityInAndStatus(@Param("cities") Collection<String> cities,
+                                          @Param("status") VenueStatus status);
 
     /**
      * 附近门店（2026-09-09 消费账本域门店自动关联，docs/agents/44-spend-ledger.md §13）：

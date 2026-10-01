@@ -93,12 +93,32 @@ Skill 比对的数据底座。**为什么新增**：现有 GET /admin/venue-sync
 - **不产生数据更新公告**（与 applyBatch 的关键差异）：公告口径是「新增/恢复」的正向信息，
   数百家转暂停对外发布是纯噪音。
 - 审计链完整：VenueStatusLog（changedBy=null + changeSource=AGENT_BATCH）+ 关注者站内信/
-  订阅消息（VenueStatusChangedEvent）+ 热度/详情/列表缓存失效，与
+  订阅消息（VenueStatusChangedEvent）+ 门店读模型提交后统一失效（29 号「门店读模型失效：领域事件」），与
   `VenueService.markSuspendedByReport`（举报采纳路径）同权。
 - 返回：`BatchSuspendResult{total, suspended, venueNotFound, details[{venueId, venueName,
   fromStatus, toStatus, sourceId, source}]}`（**刻意独立于 BatchApplyResult**，避免 confidence
   语义混淆、不扰动管理后台「可直接更新」链路）。
 - Skill 侧：`python3 scripts/qw_api.py status-suspend --items '[...]' --report-date YYYY-MM-DD`。
+
+**关门方向影响面熔断（2026-10-01，`SuspendBlastRadiusGuard`，V36 运营配置）**
+
+- **根因**：关门方向是「白名单差集推断」，正确性完全取决于来源当日是否完整；而「城市范围由调用方
+  保证」意味着影响面护栏只存在于 Skill 提示词里（提示词本身还出现过自相矛盾的口径）。来源漏发半份
+  名单 / 匹配引擎回归 / Agent 算错覆盖边界 ⇒ 整城营业门店一次调用被改成暂停，**并给每个收藏者推送
+  微信服务通知**（真实触达，次日恢复再推一次）。`run-history.md` 已有「2 天内来回打脸」实录。
+- **执行三段**：① 规划（零副作用：不存在 / 非 OPEN / 门禁跳过 / 批内重复都不计入）→ ② 逐城熔断 →
+  ③ 执行。熔断作用在「真正会被暂停的集合」上，不是调用方提交的原始条目（锁内门店本就不会被改）。
+- **判据**：某城本批暂停数 ≥ `venue.suspend_guard.min_count`（默认 5，小样本不熔断）**且**
+  占该城当前营业中门店 > `venue.suspend_guard.max_ratio_percent`%（默认 50；100 = 关闭比例熔断）⇒
+  整批拒绝 **1036**（不做部分执行——半批写库会让汇报口径与用户核对对象错位）。阈值热更新。
+- **放行**：请求体 `confirmedCities`（逐城，字面与 `cityImpacts.city` 一致）；不提供整批一键越过，
+  避免确认一个城顺手放过别的城。
+- **预演**：`dryRun=true` ⇒ 返回与正式执行同结构的结果（`details` = 将要暂停的计划，
+  `cityImpacts[]` = 逐城 `openCount / toSuspend / ratioPercent / tripped / confirmed`），不写库、
+  不通知、不失效缓存。Skill 侧 `--dry-run` / `--confirm-cities`。
+- 返回体增 `dryRun` + `cityImpacts`；单测 `DailyOpeningServiceSuspendTest`（熔断零写库 / 预演零副作用 /
+  确认放行且整批一次声明变更 / 门禁跳过不计入分子）。
+- **未做（立项）**：按批次回滚（需在状态日志上加 batch_id）。
 
 **避免再造一套**：两个方向的状态写库逻辑唯一权威 = DailyOpeningService。
 

@@ -32,11 +32,8 @@ spring:
     properties:
       hibernate:
         format_sql: false
-  flyway:
-    # MySQL 环境独立迁移目录：全新 RDS 库直接执行 V1 全量基线即达最新结构，
-    # 数据由线上 PG 或本地验证库迁移（scripts/pg2mysql_*.py，见 docs/mysql-production-migration.md）。
-    locations: classpath:db/migration-mysql
-    baseline-on-migrate: false
+  # flyway：目录与基线策略统一在 application.yaml 声明（2026-10-01 起基础配置即 MySQL 目录），
+  # 此处不再重复——环境 yaml 只放环境差异，防两处漂移。
 
 # 微信小程序（secret 由外部 config/application-prod.yaml 覆盖，基础配置已声明 ${WECHAT_SECRET}，此处无需重复）
 

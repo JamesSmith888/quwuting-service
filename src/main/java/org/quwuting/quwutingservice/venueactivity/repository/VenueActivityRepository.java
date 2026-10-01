@@ -6,7 +6,6 @@ import org.quwuting.quwutingservice.venueactivity.enums.ActivityStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -62,21 +61,24 @@ public interface VenueActivityRepository extends JpaRepository<VenueActivity, Lo
                                           Pageable pageable);
 
     /**
-     * 到期强转下线（@Scheduled 调用，状态权威）。
+     * 到期待下线的活动（@Scheduled 调用，状态权威）。
      * <p>
      * 判据 {@code endDate < today} ⇒ <b>结束当天仍然有效</b>，次日凌晨的第一次调度
      * 才把它转下线。{@code ALWAYS} 类型（长期有效）不参与，靠 {@code outerType}
      * 排除——不用 "endDate IS NULL" 判空，因为 enum 是显式契约、判空是隐式的。
+     * <p>
+     * 2026-10-01：由「批量 UPDATE 返回行数」改为「查出实体 → 逐条下线」——调度器需要知道
+     * <b>哪些门店</b>的活动变了，才能声明门店事实变更（「有活动」筛选的结果集随之失效）；
+     * 批量 UPDATE 只返回行数，且绕过实体层，旧实现因此从未失效列表缓存。
+     * 到期量级 = 每天个位数，逐条写可忽略。
      */
-    @Modifying
     @Query("""
-            UPDATE VenueActivity a SET a.status = :offline
+            SELECT a FROM VenueActivity a
             WHERE a.deleted = false AND a.status = :published
               AND a.outerType IN :expiringTypes
               AND a.endDate IS NOT NULL AND a.endDate < :today
             """)
-    int expireDue(@Param("published") ActivityStatus published,
-                  @Param("offline") ActivityStatus offline,
-                  @Param("expiringTypes") Collection<ActivityOuterSchedule> expiringTypes,
-                  @Param("today") LocalDate today);
+    List<VenueActivity> findDue(@Param("published") ActivityStatus published,
+                                @Param("expiringTypes") Collection<ActivityOuterSchedule> expiringTypes,
+                                @Param("today") LocalDate today);
 }

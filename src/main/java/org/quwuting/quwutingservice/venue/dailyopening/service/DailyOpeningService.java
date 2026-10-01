@@ -9,16 +9,17 @@ import org.quwuting.quwutingservice.venue.dailyopening.dto.request.VenueSuspendI
 import org.quwuting.quwutingservice.venue.dailyopening.dto.response.BatchApplyResult;
 import org.quwuting.quwutingservice.venue.dailyopening.dto.response.BatchSuspendResult;
 import org.quwuting.quwutingservice.venue.dailyopening.dto.response.SkippedByGuardDetail;
+import org.quwuting.quwutingservice.venue.dailyopening.dto.response.SuspendCityImpact;
 import org.quwuting.quwutingservice.venue.dailyopening.enums.DailyOpeningConfidence;
 import org.quwuting.quwutingservice.venue.dailyopening.enums.DailyOpeningStatus;
 import org.quwuting.quwutingservice.venue.dailyopening.enums.GuardSkipReason;
+import org.quwuting.quwutingservice.venue.change.VenueChangePublisher;
+import org.quwuting.quwutingservice.venue.change.VenueFactChange;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.entity.VenueStatusLog;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
-import org.quwuting.quwutingservice.venue.service.VenueHeatService;
-import org.quwuting.quwutingservice.venue.service.VenueService;
 import org.quwuting.quwutingservice.venue.service.VenueStatusGuardService;
 import org.quwuting.quwutingservice.venuestatuswatcher.service.VenueStatusWatcherService;
 import org.springframework.stereotype.Service;
@@ -26,8 +27,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -77,9 +80,11 @@ public class DailyOpeningService {
     private final VenueRepository venueRepository;
     private final VenueStatusLogRepository venueStatusLogRepository;
     private final VenueStatusWatcherService venueStatusWatcherService;
-    private final VenueHeatService venueHeatService;
-    private final VenueService venueService;
     private final VenueStatusGuardService venueStatusGuardService;
+    /** 门店事实变更声明（缓存失效由各属主订阅、提交后执行，见 VenueChangePublisher） */
+    private final VenueChangePublisher venueChangePublisher;
+    /** 关门方向影响面熔断（2026-10-01，见 SuspendBlastRadiusGuard） */
+    private final SuspendBlastRadiusGuard suspendBlastRadiusGuard;
     private final org.quwuting.quwutingservice.announcement.service.AnnouncementService announcementService;
 
     /** 管理端「同步报告勾选应用」的来源标签：人工背书，可越过人工锁（语义见类注释）。 */
@@ -153,8 +158,6 @@ public class DailyOpeningService {
             venueStatusLogRepository.save(statusLog);
 
             venueStatusWatcherService.notifyStatusChanged(venue.getId(), current, VenueStatus.OPEN);
-            venueHeatService.invalidate(venue.getId());
-            venueService.invalidateDetailPublic(venue.getId());
             reversedVenueIds.add(venue.getId());
             reversals.add(new BatchApplyResult.ReversalDetail(
                     venue.getId(), venue.getName(), current.name(),
@@ -162,9 +165,9 @@ public class DailyOpeningService {
                     item.source()));
         }
 
-        // 列表缓存为全局维度，批量反转后统一失效一次（避免逐店重复失效）
+        // 整批一次声明门店事实变更（逐店 + 全局读模型在提交后统一失效）
         if (!reversedVenueIds.isEmpty()) {
-            venueService.invalidateVenueListCache();
+            venueChangePublisher.publish(VenueFactChange.STATUS, reversedVenueIds);
             // 数据更新公告（2026-09-01，docs/agents/34）：营业状态批量反转成功触发
             // SYSTEM 公告；开关关闭/同日已存在 → 内部幂等跳过，不干扰写库主流程
             announcementService.createDataUpdateAnnouncement(0, reversals.size());
@@ -203,6 +206,11 @@ public class DailyOpeningService {
      *       或已豁免的门店跳过，计入 {@code skippedLocked} / {@code skippedExempt}。
      *       这一方向最需要保护：本通道一次会暂停几十上百家，管理员手工纠错后若被批量冲回，
      *       用户看到「暂停营业」会直接白跑。</li>
+     *   <li><b>影响面熔断 + 预演（2026-10-01，见 {@link SuspendBlastRadiusGuard}）</b>：执行分
+     *       「规划 → 熔断 → 执行」三段，规划零副作用；某城本批暂停占比超上限且未在
+     *       {@code confirmedCities} 中确认 ⇒ 整批拒绝（1036，不做部分执行）；{@code dryRun=true}
+     *       只返回计划与逐城影响面。根因：「城市范围由调用方保证」把全部护栏放在 Skill 提示词里，
+     *       一次来源漏发即可让整城被批量改成暂停并给收藏者推送真实通知。</li>
      * </ul>
      *
      * @param request 待暂停门店条目（调用方已按「同城 + 未上榜」筛出，≤500 条）
@@ -211,31 +219,32 @@ public class DailyOpeningService {
     @Transactional
     public BatchSuspendResult applyBatchSuspend(ApplyVenueSuspendBatchRequest request) {
         List<VenueSuspendItemRequest> items = request.items();
+        boolean dryRun = Boolean.TRUE.equals(request.dryRun());
+        LocalDateTime now = LocalDateTime.now();
+        Map<Long, Venue> venues = loadVenues(items);
 
+        // ① 规划（零副作用）：确定「真正会被暂停」的门店——不存在 / 非 OPEN / 门禁跳过 / 批内重复
+        //    都不计入。熔断必须作用在这个集合上，而不是作用在调用方提交的原始条目上
+        //   （锁内门店本来就不会被改，算进分子会把正常批次误判成熔断）。
         int notFound = 0;
         int skippedLocked = 0;
         int skippedExempt = 0;
         List<SkippedByGuardDetail> skipped = new ArrayList<>();
-        List<BatchSuspendResult.SuspendDetail> details = new ArrayList<>();
-        Set<Long> suspendedVenueIds = new LinkedHashSet<>();
-        LocalDateTime now = LocalDateTime.now();
-
+        List<PlannedSuspend> planned = new ArrayList<>();
+        Set<Long> plannedIds = new LinkedHashSet<>();
         for (VenueSuspendItemRequest item : items) {
-            Venue venue = venueRepository.findById(item.venueId()).orElse(null);
+            Venue venue = venues.get(item.venueId());
             if (venue == null || venue.isDeleted()) {
                 notFound++;
                 continue;
             }
-            VenueStatus current = venue.getStatus();
-            if (current != VenueStatus.OPEN) {
-                continue; // 非营业中：不做暂停（已停业/休息/装修保持原状，幂等跳过）
+            if (venue.getStatus() != VenueStatus.OPEN || plannedIds.contains(venue.getId())) {
+                continue; // 非营业中不做暂停（已停业/休息/装修保持原状）；批内重复条目幂等跳过
             }
-
-            // 入口门禁（V25）：同 applyBatch（先判「确需动作」再判门禁，语义见该方法注释）
+            // 入口门禁（V25）：同 applyBatch（先判「确需动作」再判门禁，语义见该方法注释）。
+            // source="ADMIN" = 管理端人工背书，可越过人工锁。
             boolean humanConfirmed = SOURCE_ADMIN.equalsIgnoreCase(item.source());
-            if (humanConfirmed) {
-                venueStatusGuardService.takeOverByExternalWrite(venue);
-            } else {
+            if (!humanConfirmed) {
                 VenueStatusGuardService.Decision decision =
                         venueStatusGuardService.decideExternalWrite(venue, now);
                 if (!decision.allowed()) {
@@ -248,40 +257,71 @@ public class DailyOpeningService {
                             decision.reason().name(), decision.lockedUntil()));
                     continue;
                 }
-                venueStatusGuardService.takeOverByExternalWrite(venue);
             }
+            planned.add(new PlannedSuspend(venue, item));
+            plannedIds.add(venue.getId());
+        }
 
+        // ② 影响面熔断（逐城）：预演只报告不拦截；正式执行时存在「熔断且未确认」的城市 ⇒ 整批拒绝
+        List<SuspendCityImpact> cityImpacts = suspendBlastRadiusGuard.evaluate(
+                planned.stream().map(p -> p.venue().getCity()).toList(), request.confirmedCities());
+        if (!dryRun) {
+            suspendBlastRadiusGuard.requireWithinLimits(cityImpacts);
+        }
+
+        List<BatchSuspendResult.SuspendDetail> details = new ArrayList<>(planned.size());
+        for (PlannedSuspend p : planned) {
+            details.add(new BatchSuspendResult.SuspendDetail(
+                    p.venue().getId(), p.venue().getName(), VenueStatus.OPEN.name(),
+                    VenueStatus.SUSPENDED.name(), p.item().sourceId(), p.item().source()));
+        }
+        if (!skipped.isEmpty()) {
+            log.info("[venue-daily-openings/batch-suspend] 门禁跳过 {} 条（锁内 {} / 豁免 {}）{}",
+                    skipped.size(), skippedLocked, skippedExempt, dryRun ? "（预演）" : "");
+        }
+        // ③ 预演：返回与正式执行同结构的计划，不写库、不通知、不失效缓存
+        if (dryRun) {
+            return new BatchSuspendResult(items.size(), 0, notFound,
+                    skippedLocked, skippedExempt, skipped, details, true, cityImpacts);
+        }
+
+        // ④ 执行：审计链与人工改状态（markSuspendedByReport）同权
+        for (PlannedSuspend p : planned) {
+            Venue venue = p.venue();
+            venueStatusGuardService.takeOverByExternalWrite(venue);
             venue.setStatus(VenueStatus.SUSPENDED);
             venueRepository.save(venue);
 
             VenueStatusLog statusLog = new VenueStatusLog();
             statusLog.setVenueId(venue.getId());
-            statusLog.setFromStatus(current);
+            statusLog.setFromStatus(VenueStatus.OPEN);
             statusLog.setToStatus(VenueStatus.SUSPENDED);
             statusLog.setChangedBy(null); // null = 系统/Agent 来源（人工=userId）
-            statusLog.setChangeSource(item.source()); // 批量更新标识（AGENT_BATCH=Agent+Skill 批量）
+            statusLog.setChangeSource(p.item().source()); // 批量更新标识（AGENT_BATCH=Agent+Skill 批量）
             venueStatusLogRepository.save(statusLog);
 
-            venueStatusWatcherService.notifyStatusChanged(venue.getId(), current, VenueStatus.SUSPENDED);
-            venueHeatService.invalidate(venue.getId());
-            venueService.invalidateDetailPublic(venue.getId());
-            suspendedVenueIds.add(venue.getId());
-            details.add(new BatchSuspendResult.SuspendDetail(
-                    venue.getId(), venue.getName(), current.name(),
-                    VenueStatus.SUSPENDED.name(), item.sourceId(), item.source()));
+            venueStatusWatcherService.notifyStatusChanged(venue.getId(), VenueStatus.OPEN, VenueStatus.SUSPENDED);
         }
-
-        // 列表缓存为全局维度，批量变更后统一失效一次（避免逐店重复失效）
-        if (!suspendedVenueIds.isEmpty()) {
-            venueService.invalidateVenueListCache();
-            // 刻意不触发数据更新公告：暂停方向无正向信息量（见方法注释）
-        }
-        if (!skipped.isEmpty()) {
-            log.info("[venue-daily-openings/batch-suspend] 门禁跳过 {} 条（锁内 {} / 豁免 {}）",
-                    skipped.size(), skippedLocked, skippedExempt);
-        }
+        // 整批一次声明门店事实变更；刻意不触发数据更新公告：暂停方向无正向信息量（见方法注释）
+        venueChangePublisher.publish(VenueFactChange.STATUS, plannedIds);
 
         return new BatchSuspendResult(items.size(), details.size(), notFound,
-                skippedLocked, skippedExempt, skipped, details);
+                skippedLocked, skippedExempt, skipped, details, false, cityImpacts);
     }
+
+    /** 一次查询批量加载本批门店（替代逐条 findById 的 N 次往返） */
+    private Map<Long, Venue> loadVenues(List<VenueSuspendItemRequest> items) {
+        Set<Long> ids = new LinkedHashSet<>();
+        for (VenueSuspendItemRequest item : items) {
+            ids.add(item.venueId());
+        }
+        Map<Long, Venue> byId = new HashMap<>();
+        for (Venue venue : venueRepository.findAllById(ids)) {
+            byId.put(venue.getId(), venue);
+        }
+        return byId;
+    }
+
+    /** 规划阶段的产物：将被暂停的门店 + 其来源条目（审计字段取自条目） */
+    private record PlannedSuspend(Venue venue, VenueSuspendItemRequest item) {}
 }

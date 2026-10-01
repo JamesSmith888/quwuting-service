@@ -1,4 +1,7 @@
-# 29 · 性能优化（跨洲 DB 往返是第一约束）
+# 29 · 性能优化（最少 DB 往返 + 门店读模型失效纪律）
+
+> 2026-08-31 起生产 = 阿里云同地域 RDS MySQL（单次往返毫秒级），下文「跨洲 371ms」是迁库前的
+> 定位记录；「最少 DB 往返」原则与缓存分层仍然成立（连接池只有 5，往返少 = 持有连接时间短）。
 
 > **渐进式披露详情文档** —— 由 [AGENTS.md](../../AGENTS.md) 主题索引引用。
 > 维护纪律：本文件只承载单一主题的详细设计；新增细节写到这里，**禁止写回 AGENTS.md**；本文件膨胀超过 ~300 行时，请拆出子主题另建文档，并同步登记到 AGENTS.md 索引表。
@@ -37,7 +40,7 @@
 
 **铁律**：
 1. **个人态永不缓存**（reactedByMe / canManage / myClaimStatus）——缓存粒度落在实体/公共值对象，个人态字段在缓存外实时组装。
-2. **写路径显式失效**：内嵌 Caffeine 不走 Spring CacheManager，写方法显式调用 `invalidateXxx`（与 `invalidateDetailPublic` 同模式）；热度累积（reaction/favorite/view）变化靠 TTL 自然过期兜底，不穷举失效。
+2. **门店事实写路径只声明变更、不挑缓存**（2026-10-01 起，见下节「门店读模型失效：领域事件」）：写库后 `venueChangePublisher.publish(VenueFactChange.X, venueIds)`，各缓存属主订阅事件在**提交后**自行失效；热度累积（reaction/favorite/view）这类**用户行为信号**不是门店事实，仍直接调 `VenueHeatService#invalidate` 或靠 TTL 兜底。
 3. **相对时间文案禁缓存渲染结果**（「N 分钟前」缓存期会失真）——缓存原始行，渲染时实时计算。
 4. **缓存键 = 影响结果的全部参数**（不可变 record 作键）；配置值（positiveCodes/pointsWeight）不进键；全局集合（hotIds 5min 缓存）由更短 TTL 自然兜底。
 
@@ -47,7 +50,28 @@
 - **仅 hasCoords=false 分支走缓存**（`dispatchListQuery` 分流）；带坐标分支恒实时；
 - 缓存粒度 `Page<Venue>` 实体（纯公共）；badges/浏览量/照片/角标仍在缓存外批量实时组装（badges 内含个人态契约）；
 - LoadingCache 单飞：热参数组合（默认全国推荐）多用户共享同一份结果；
-- TTL 60s + 9 个写路径统一 `invalidateVenueListCache()`（create/update/照片增删审/状态变更/恢复）。
+- TTL 60s + 门店事实变更事件统一失效（见下节；2026-10-01 前为写路径各自调用 `invalidateVenueListCache()`，已删除）。
+
+## 门店读模型失效：领域事件（2026-10-01，唯一权威）
+
+### 根因
+门店相关缓存有 7 个：实体 `CACHE_VENUE`（60s）/ 详情公共部分 / 列表无坐标视图 / 城市分面 / 热度 / 热门集合 `CACHE_HOT_VENUE_IDS`（5min）/ 城市统计 `CACHE_CITY_STATS`（5min），分属 Spring CacheManager 与三个服务的内嵌 Caffeine。此前**每条写路径自己决定失效其中哪几个**，于是每新增一条写路径就多一次「抄漏清单」的机会，审计时实测漏了：
+
+| 写路径 | 漏掉的失效 | 用户可见后果 |
+|---|---|---|
+| 舞讯批量开门 / 关门（`DailyOpeningService`） | 实体缓存、热门集合；且失效发生在**提交前** | 列表已改、详情 / 热度页 60s 内仍是旧状态；提交前并发读把旧值回填进缓存 |
+| 别名增删 / 批量导入（`VenueAliasService`） | 列表、城市分面 | 新别名 60s 内搜不到，删掉的仍能搜到 |
+| 活动到期调度 / 手动发布下线（`VenueActivityService`） | 全部 | 「有活动」筛选在活动结束后仍命中 |
+| 批量补坐标 / 解锁 / 设豁免 / 高德主图 | 全部 | 「附近」筛选与详情坐标滞后 |
+
+元根因：**「写入」和「失效哪些读模型」被放在同一处决定**，而后者的正确答案只有缓存属主知道。
+
+### 契约
+- **写入方只声明「哪些门店的事实变了」**：`VenueChangePublisher#publish(VenueFactChange, venueIds)`，批量写库在循环结束后发布**一次**。`VenueFactChange` 只用于日志，**不参与失效决策**——任何门店事实变化都让全部门店读模型失效（逐店：实体 / 详情 / 热度；全局：列表 / 分面 / 热门 / 城市统计）。门店事实写入频率低，全量失效成本可忽略；按类别挑子集正是旧问题的形态。
+- **缓存属主订阅 `VenueFactsChangedEvent`**：`VenueService#onVenueFactsChanged`（详情 / 列表 / 分面）、`VenueHeatService#onVenueFactsChanged`（热度）、`VenueSharedCacheInvalidator`（Spring 托管三项）。一律 `@TransactionalEventListener(AFTER_COMMIT, fallbackExecution = true)`：**提交后失效**消除「并发读回填旧值」；事务回滚则什么都不失效；无事务的逐条提交入口（批量建档 / 别名导入 / 补坐标）立即执行。
+- **属主不暴露局部失效**：`VenueService` 不再有 public `invalidate*` 方法。新增一个门店读模型缓存 = 在属主里加监听器，写路径零改动；新增一条写路径 = 写完调用一次 publish。
+- **门店事实表** = `qwt_venues` / `qwt_venue_photos` / `qwt_venue_aliases` / `qwt_venue_activities`。用户行为（收藏 / 浏览 / 表情 / 评分 / 动态 / 积分）不在其列。
+- **机器门禁**：`VenueFactWritersPublishChangeTest`——扫描全部非仓库类，凡对上述四张表的仓库调用写方法（CRUD 写方法或 `@Modifying` 方法）而不发布事件 ⇒ 失败；同时断言属主无 public 失效方法、监听器 AFTER_COMMIT + fallback。新增门店事实表须在该测试的 `FACT_REPOSITORIES` 登记。
 
 ## 角标与信任权重缓存（CrowdReportService）
 

@@ -208,6 +208,35 @@ CEASED/SUSPENDED` 的开门反转 = **永远自动写库 + 自动发公告**，*
 > Agent 自身能力（WebFetch + LLM），**禁止**调用 `quwuting-ops/venue-opening` 的 `main.py` /
 > adapter / matcher；状态写库直接调 `/admin/**`。
 
+**🔰 Step 1.5 · 源语义准入校验（2026-10-01 立规，每个源至少做一次）**
+
+> **为什么需要**：整套白名单口径的前提是「**该源 = 当日营业白名单**」。xianbao360 /
+> 市井慢时光天然满足（标题即「X月X日开门营业最新消息」），但公众号来源常是
+> **全量目录 / 参考资料**（自称「营业信息汇总」「XX大全」「导航查询」），此时
+> 「未上榜」**不等于**关门 —— 照跑表⑤ 会把整城误暂停，是本 Skill 最大的单点事故源。
+> 历史上靠肉眼朗读判断 —— ⚠️ **老源同样可能从未校验过**：2026-10-01 首次把它变成**可算的数字**时，
+> 「舞厅百事通」其实已自 09-16 起跑了十几轮，从未有人问过它是不是白名单。
+> ⇒ **每个源至少跑一次本校验**（并记录结论到 `run-history.md`）；源版式明显变化时重跑。
+
+**做法**（只读，写完 profile 即可判定，不写库）：先跑完 Step 2–3B，再看 `qw_analyze.py`
+新增的「🔍 量级复核」输出，两行决定取舍：
+
+| 输出行 | 判据 | 结论 |
+|---|---|---|
+| `覆盖城内命中率 X%` | **≥60%** | ✅ 源=当日营业白名单 ⇒ **两个方向照常执行**（09-29 起的自动门不变） |
+| 同上 | **<60%** | 🚫 源=全量目录 ⇒ **关门方向停用**（表⑤ 不提交），**只保留表① 高置信反转** |
+| `须 = 未点名 N` | 两侧不等 | ⚠️ 差集不自洽，先修维度再提交（`in_scope` / `mentioned` 取错所致） |
+
+- **误 smaller/larger 都不放过**：若源写了「10月X日更新」但整篇是**系统性逐省逐市罗列**
+  （出现「未有待更新」「待定」「不稳定」这类**编者认知**措辞，而非「今日无演出」这类**当日事实**
+  措辞）⇒ 倾向目录型，先按上表的数字确认，别被每日更新的标题骗过去。
+- 同一源后续轮次若覆盖率骤降 >20 个百分点，
+  按新源重跑一次（源可能换了版式）。
+
+> 🔧 **这些都已脚本化**（2026-10-01）：`qw_analyze.py` 直接输出自洽等式 + 排除明细 + 语义裁决。
+> ⛔ **别再手写差集复核脚本** —— 本轮就是手写时把 `venueId` 取空（`r.get('venue') or {}` 缺
+> `or r.get('venueId')` 回退）⇒ 虚高出一版「250+ 家被排除」的错结论，差点误判成口径失效。
+
 ### Step 2 拉取平台门店候选
 
 > 🔧 **2026-09-14 起本步 + Step 3 + 3B 由脚本承担**：`python3 scripts/qw_match.py --mentions <m.json>
@@ -417,6 +446,18 @@ UNMATCHED 标记为「新店候选」前，若存疑先联网核实。数据源�
   ⚠️ **城市范围必须由 Skill 侧算好**再提交，混入未覆盖城市会误伤。
   ⚠️ 返回体新增 `skippedLocked` / `skippedExempt` / `skipped[]`（V25 门禁）——**必须逐类汇报**
   （暂停方向一次几十上百家，用户最需要知道「有几家因为人工状态被保护住了」）。
+  🛑 **影响面熔断（2026-10-01 服务端强制，`SuspendBlastRadiusGuard`）**：某城本批真正会被暂停的
+  门店 ≥ `venue.suspend_guard.min_count`（默认 5）**且**占该城当前营业中门店 >
+  `venue.suspend_guard.max_ratio_percent`%（默认 50）⇒ **整批拒绝（1036）、零写库**。
+  这是服务端对「来源漏发半份名单 ⇒ 整城误暂停 + 给收藏者推送真实通知」的兜底，**与本 Skill
+  的「直接执行」口径不冲突**——直接执行指不再逐轮询问，熔断拦的是**异常规模**。固定流程：
+  1. 先 `status-suspend ... --dry-run`：返回 `dryRun=true` + `details`（将暂停清单）+
+     `cityImpacts[]`（逐城 `openCount / toSuspend / ratioPercent / tripped`），**零副作用**；
+  2. 无 `tripped=true` ⇒ 去掉 `--dry-run` 正式提交；
+  3. 有 `tripped=true` ⇒ **先查该城舞讯是否完整**（漏页 / 只发了半城 / 源换版式），
+     确认「整城确实大面积未营业」（如节假日整城歇业）后，带 `--confirm-cities 城市A,城市B`
+     正式提交；**无法确认 ⇒ 该城本轮不提交**，并在汇报里单列。
+  ⛔ 禁止为了「跑通」把全部城市塞进 `--confirm-cities`——那等于亲手关掉唯一的服务端护栏。
 - **表③ 新店录入（⚠️ 仅限用户放行后执行，红线 4）**：`python3 scripts/qw_api.py batch-create --items 'JSON数组' --base-url <BASE_URL>`
   items = `{"name","city","district?","address?","status?"}`。同城同名返回 EXISTED 属正常。
   ⚠️ 请求体是 `{"items":[...]}` 包装（裸数组会 5000 报错）；batch-create **不落营业时段/经纬度**，
@@ -637,8 +678,10 @@ POST /admin/venue-aliases/batch-import
 | POST | /admin/venue-sync/guard/unlock | 恢复自动同步（释放人工锁，幂等） |
 | POST | /admin/venue-sync/guard/exempt | 设/撤「不参与舞讯推断」永久豁免，body `{venueIds, exempt, note}` |
 | POST | /admin/venue-daily-openings/batch | 批量状态反转（停业/暂停 → 营业） |
-| POST | /admin/venue-daily-openings/batch-suspend | 批量置暂停营业（白名单口径，仅 OPEN→SUSPENDED） |
+| POST | /admin/venue-daily-openings/batch-suspend | 批量置暂停营业（白名单口径，仅 OPEN→SUSPENDED）；请求体可带 `dryRun` / `confirmedCities`，单城超比例 ⇒ 1036 整批拒绝（2026-10-01 影响面熔断） |
 | POST | /admin/venue-aliases/batch-import | 别名批量导入（幂等，单条失败不拖整批） |
+| GET | /admin/venue-aliases | 已配置别名的门店聚合列表（**`?venueId=` 过滤无效**，接口恒返回全量 216 家 / 263 条 ⇒ 本地自行按 venueId 筛） |
+| DELETE | /admin/venue-aliases/{id} | **别名软删**（2026-10-01 实证可用）。⚠️ 这是**别名域**的删除口，**与「门店无删除接口」不冲突**——门店不能删，别名可以 |
 | GET | /admin/venue-sync/reversals?limit= | 更新记录（本次反转可核验） |
 | POST | /admin/announcements/create | 创建数据更新公告 |
 | POST | /admin/announcements/{id}/publish | 发布公告（缺省立即发布） |
@@ -648,6 +691,12 @@ POST /admin/venue-aliases/batch-import
 
 ## 常见问题（高频 5 条；其余见 `troubleshooting.md`）
 
+- 🔐 **`login` 必须显式带 `--password`，否则进程会卡在交互输入被超时杀掉**（2026-10-01 实证：
+  裸跑 `qw_api.py login` ⇒ 提示「管理密码:」挂住，最终 `exit 137 / SIGTERM`，白丢一轮调用）。
+  本地 develop 固定写法（生产环境变量不要传这个）：
+  `python3 scripts/qw_api.py login --base-url http://localhost:8080 --password qwt-admin-dev-2026`
+- **`export` 的返回体是顶层 `content`，不是 `data.content`**（写合并脚本时踩过）。分页合并的正确写法：
+  `d = json.load(f); rows += d.get("content", [])`（`qw_analyze.py` 已同时兼容数组与含 content 的对象）。
 - **城市名对不上 / 该城整城没写库**：舞讯常用简称，先映射到平台标准词表；**多源比较前必须去「市」归一**。
 - **反转/暂停没生效**：后端只处理 `CEASED/SUSPENDED → OPEN` 与 `OPEN → SUSPENDED`，其余静默跳过
   （正确行为）。若「该暂停的没暂停」，**先看返回体的 `skippedLocked` / `skippedExempt`**——
@@ -661,6 +710,12 @@ POST /admin/venue-aliases/batch-import
   （属正常保护）。CLOSED/RENOVATING 本身不在两个舞讯通道的作用域内，天然不受影响。
 - **门店删除/清理重复**：后端**无门店删除接口**（项目禁 PUT/DELETE）——Agent 识别到同名同址重复
   条目时**不代删、不自动反转**，呈「疑似重复」交用户决策；字典 `removed_duplicates` 仅登记用户已删确认的店。
+- 🧹 **别名域的「测试数据污染」清理（2026-10-01 立规）**：`GET /admin/venue-aliases` **全库扫一遍**
+  （正则 `测试|test|demo`），命中即 `DELETE /admin/venue-aliases/{id}` 软删——**别名是匹配器的输入**，
+  一条「测试别名」会让任何含该词的舞讯写法误挂到这家店（`via=alias-domain:*` 且置信度直接 EXACT，
+  **不会进人工复核**，静默写库）。本次实证：`qwt_venue_aliases` 最早两行 id=1/2 就是
+  「测试别名 / 测试别名 2」，挂在 #1222 雲麗舞厅KTV 上达数月。
+  ⛔ **别只删眼前那家**——先全量扫再删，删完复核「残留疑似 = 0」+ 别名总数 −N。
 - **`status-reverse` / `status-suspend` 报「需要 --report-date YYYY-MM-DD」**：`--report-date` 是
   **顶层参数**（每个 item 里写同样的字段不算数）——2026-09-30 实证踩坑，命令末尾补 `--report-date 2026-09-30` 即可。
 - **写库后必须做「全量 export 逐店 diff」**：只报接口返回的 `total/suspended` **不够**——

@@ -5,6 +5,7 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.common.web.LogRedaction;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
@@ -17,15 +18,16 @@ import java.io.IOException;
  *
  * <p>日志格式（固定前缀 [http]，便于 grep）：
  * <pre>
- *   INFO  [http] GET /venues/14/tags/stats -> 200 cost=9ms rid=r3-m1abc
- *   WARN  [http] GET /venues/14 -> 200 cost=2412ms rid=r4-m1abd [SLOW]
+ *   INFO  [http] GET /venues/14/tags/stats -> 200 cost=9ms rid=r3-m1abc ip=1.2.3.4
+ *   WARN  [http] GET /venues?lat=32.01&lng=120.86 -> 200 cost=2412ms rid=r4-m1abd ip=1.2.3.4 [SLOW]
  * </pre>
  *
  * <p>语义与用法：
  * <ul>
  *   <li>cost 覆盖 Filter 链 → 拦截器（含 AuthInterceptor 查库）→ Controller → Service
  *       全链路，即"服务端处理耗时"。与前端 services/requestPerf.ts 的同 rid 日志对比：
- *       前端 cost − 后端 cost ≈ 网络传输开销（含 Cloudflare Tunnel）</li>
+ *       前端 cost − 后端 cost ≈ 网络传输开销</li>
+ *   <li>query 经 {@link LogRedaction} 脱敏后才落日志（2026-10-01：用户精确坐标不得进日志）</li>
  *   <li>rid 来自前端 X-Request-Id 请求头；无此头的请求（curl 等）自动生成 s 前缀 ID</li>
  *   <li>达到 SLOW_THRESHOLD_MS 的请求升级为 WARN，便于日志中快速筛出慢请求</li>
  * </ul>
@@ -56,10 +58,13 @@ public class RequestTimingFilter extends OncePerRequestFilter {
             filterChain.doFilter(request, response);
         } finally {
             long costMs = System.currentTimeMillis() - startMs;
-            String query = request.getQueryString();
+            // query 先脱敏（坐标降精度 / 凭据打码，见 LogRedaction）；ip = 容器按可信代理
+            // 解析后的真实来源（server.forward-headers-strategy），频控与安全排障共用同一口径
+            String query = LogRedaction.redactQuery(request.getQueryString());
             String target = query != null ? request.getRequestURI() + "?" + query : request.getRequestURI();
             String line = "[http] " + request.getMethod() + " " + target
-                    + " -> " + response.getStatus() + " cost=" + costMs + "ms rid=" + rid;
+                    + " -> " + response.getStatus() + " cost=" + costMs + "ms rid=" + rid
+                    + " ip=" + request.getRemoteAddr();
             if (costMs >= SLOW_THRESHOLD_MS) {
                 log.warn(line + " [SLOW]");
             } else {

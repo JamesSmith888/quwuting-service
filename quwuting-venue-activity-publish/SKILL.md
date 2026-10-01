@@ -86,6 +86,25 @@ bash scripts/sync-skills.sh --check  # 只读检查差异（退出码 1 = 有差
 
 内层生效窗口 = 纯数据（不设枚举）：`weekdays`（可空/空 = 每天）× `windows`（可空/空 = 全时段）。
 
+#### `windows` 只管「此刻能否参与」，不证明「这次到访是否达标」（2026-10-01 富都汇实战）
+
+`ActivityStateResolver` 只拿**当前一个时刻**调用 `ActivityWindow.contains(now)`，多条窗口之间是
+**OR**。因此它能表达「13:00-14:00 可免票」「13:00-20:00 前仍可参加赠票活动」，但不能
+表达「20:00 前到店 **且** 22:30 后离场」这种同一次到访的**双时点 AND 条件**。
+
+- 单时点参与截止（如「14:00 前到店」）：`windows` 填「门店开门时间 → 14:00」，让新到店者
+  过点后看到 `ENDED_TODAY`；不要从 `00:00` 起填，避免与门店档案营业时间同屏冲突。
+- 双时点资格（如「20:00 前到店且 22:30 后离场」）：`windows` 只填「门店开门时间 →
+  20:00」表示**最晚参与时间**；「22:30 后离场」写入 `benefitSummary`，由门店线下核验。
+  ⛔ 禁把到店段和离场段拆成两条窗口——数组按 OR 命中，会把 AND 条件静默改错。
+- 履约规则（如「16:00 后出门可盖章」）：若列表页需要独立短标签，拆为 `OTHER` 活动并给
+  `badgeLabel`；否则写入相关活动的说明/核销提示。它不是新的权益算法，禁新增单店枚举。
+
+**根因边界**：活动域是「结构化展示 + 自动上下线」，不是券核销引擎；现有打卡只记录自然日，
+没有同一次到访的到店/离场时刻。没有可验证事实源时，新增资格判定字段只会制造“字段有值、
+平台无法判定”的伪能力。若同类门槛高频到需要独立展示，再新增**仅展示、不进状态机**的通用
+到访规则对象；在此之前使用 `windows + benefitSummary`，不得解析自由文本参与判定。
+
 **两处容易漏的连带后果（2026-09-17 实战补记）**：
 
 - ⚠️ **`OPEN_TO_ALL` 会让「我到店了」打卡按钮不渲染**：服务端把「不可归因」算进
@@ -191,8 +210,9 @@ curl -sS "https://api.starseek.online/venues/13/activities"
 **核对 `nextChangeAt` 与实际时钟，别用自己的时间比较去判对错**）；`windowsText` /
 `validityText` / `badgeLabel` 是否就是你要的文案；`redemptionHint` 是否上屏。
 
-- ⚠️ **管理端响应（`AdminVenueActivityResponse`）不含 `redemptionHint` / `platformAddon`**
-  ⇒ 核销提示与加项文案**只能回用户端接口复看**，管理端列表里看不出来。
+- 管理端响应（`AdminVenueActivityResponse`）**包含** `redemptionHint` / `platformAddon`，可用于编辑全量回显；
+  发布核验仍必须回用户端接口，因为只有用户端返回服务端派生的 `state` / `nextChangeAt` /
+  `windowsText` / `validityText`，这才是用户真正看到的口径。
 - 详情页与列表页**两个口径都要看**：详情页 = `GET /venues/{id}/activities`；
   列表页标记 = `GET /venues/activity-badges?venueIds=`（返回 `{venueId: {...}}`，
   无活动的门店**不返回键**）。

@@ -55,16 +55,18 @@ import org.quwuting.quwutingservice.venueclaim.enums.ClaimStatus;
 import org.quwuting.quwutingservice.venueclaim.repository.VenueClaimRepository;
 import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.storage.ImageContentValidator;
-import org.springframework.cache.CacheManager;
-import org.springframework.cache.annotation.CacheEvict;
+import org.quwuting.quwutingservice.venue.change.VenueChangePublisher;
+import org.quwuting.quwutingservice.venue.change.VenueFactChange;
+import org.quwuting.quwutingservice.venue.change.VenueFactsChangedEvent;
 import org.springframework.cache.annotation.Cacheable;
-import org.springframework.cache.annotation.Caching;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.event.TransactionPhase;
+import org.springframework.transaction.event.TransactionalEventListener;
 import org.springframework.util.StringUtils;
 import tools.jackson.databind.ObjectMapper;
 
@@ -143,7 +145,6 @@ public class VenueService {
     private final CrowdReportService crowdReportService;
     /** 门店报告列表角标批量生成（2026-09-04「有用户上报」，独立微服务规避构造器循环，见其类注释） */
     private final StatusReportLatestService statusReportLatestService;
-    private final VenueHeatService venueHeatService;
     private final ObjectMapper objectMapper;
     private final VenueLookupService venueLookupService;
     private final VenueDefaultsConfig defaultsConfig;
@@ -167,8 +168,12 @@ public class VenueService {
      * 只补展示、不参与过滤/排序。
      */
     private final VenueSyncAliasRepository venueSyncAliasRepository;
-    /** 场所实体缓存显式逐出（照片写方法 key 依赖查询结果，@CacheEvict 无法表达，见 VenueClaimService 同款先例） */
-    private final CacheManager cacheManager;
+    /**
+     * 门店事实变更的唯一声明入口（2026-10-01，docs/agents/29-performance.md「门店读模型失效：
+     * 领域事件」）：本类所有写路径只声明「哪些门店变了」，缓存失效由各属主订阅
+     * {@link VenueFactsChangedEvent} 在<b>提交后</b>执行（本类的监听器见 {@link #onVenueFactsChanged}）。
+     */
+    private final VenueChangePublisher venueChangePublisher;
     /**
      * 热度统计内部账号排除集合（2026-09-19）：ADMIN ∪ 运营配置名单，恒非空（见其类注释）。
      * 列表排序（HEAT_SCORE）与热门判定（findHotVenueIds）都要按它过滤行为输入——
@@ -199,7 +204,7 @@ public class VenueService {
      *       claim 仅登录时查（匿名恒 null）；</li>
      *   <li>refresh-ahead 30s + 硬过期 10min + 单飞：活跃场所不吃同步冷加载，
      *       与 heat / tagStats / reaction 聚合缓存同族语义；</li>
-     *   <li>新鲜度主保障 = 写路径显式 {@link #invalidateDetailPublic}：场所编辑、
+     *   <li>新鲜度主保障 = 门店事实变更事件（{@link #onVenueFactsChanged}，提交后执行）：场所编辑、
      *       状态变更（采纳暂停/恢复）、认领审批后立即失效，refresh 仅兜底；</li>
      *   <li>base.topReactions（默认窗口徽标）内嵌了聚合缓存快照，Reaction toggle 写路径
      *       只失效聚合缓存、不失效本缓存——30s 内徽标短暂滞后可接受（详情页 Reaction UI
@@ -231,7 +236,7 @@ public class VenueService {
      *   <li>缓存粒度 = <b>Page&lt;Venue&gt; 实体列表</b>（纯公共数据），不含任何
      *       用户相关字段——Reaction 个人参与态（reactedByMe）、canManage 等仍在
      *       缓存外实时查询组装（ReactionBadge 注释契约「个人状态永远实时查询」）；</li>
-     *   <li>TTL 60s + 写路径显式失效（{@link #invalidateVenueListCache}）：门店
+     *   <li>TTL 60s + 门店事实变更事件失效（{@link #onVenueFactsChanged}）：门店
      *       新增/编辑/状态变更/照片变化立即生效；热度排序（reaction/favorite/view
      *       累积）靠 60s 自然过期兜底——此类低频变化用户无秒级实时感知诉求
      *       （热门 ID 集合本身也是 5min 缓存）；</li>
@@ -289,7 +294,7 @@ public class VenueService {
      * 分面查询 = 关键词 LIKE 全扫 + GROUP BY（无索引、数据千级，单次毫秒级），但输入
      * 即搜（350ms 防抖）每改一次词都会打一次；而列表主查询在单关键词下走 60s 缓存
      * ⇒ 不缓存的分面会<b>反过来成为搜索链路上最重的一跳</b>。故同配 60s TTL +
-     * 写路径显式失效（{@link #invalidateVenueListCache} 一并逐出）。
+     * 门店事实变更事件一并逐出（{@link #onVenueFactsChanged}）。
      * <p>
      * <b>入缓存的条件 = 单串关键词（{@code filterIds == null}）</b>：多词 AND 的白名单
      * 集合与请求强耦合、基数不可控，恒实时查询（与列表主查询同款判定）。
@@ -338,10 +343,6 @@ public class VenueService {
      * 独立表并直发 PUBLIC（创建者为管理方可信写者，保留旧 JSON 列直写公开语义）。
      */
     @Transactional
-    @Caching(evict = {
-            @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true),
-            @CacheEvict(value = CacheConfig.CACHE_CITY_STATS, allEntries = true)
-    })
     public VenueResponse createVenue(CreateVenueRequest req) {
         validateTickets(req.tickets());
         imageValidator.validate(req.imageUrl());
@@ -389,8 +390,8 @@ public class VenueService {
         if (!photos.isEmpty()) {
             persistPhotosDirect(saved.getId(), UserContext.getCurrentUserId(), photos, VenuePhotoStatus.PUBLIC);
         }
-        // 新门店出现：列表主查询缓存立即失效（新店 60s 内必须可见）
-        invalidateVenueListCache();
+        // 新门店出现：门店读模型提交后统一失效（新店 60s 内必须可见；城市统计/热门集合一并刷新）
+        venueChangePublisher.publish(VenueFactChange.CREATED, saved.getId());
         return venueResponseMapper.toResponse(saved, Collections.emptyList(), false, 0L,
                 loadPublicPhotosByVenueIds(List.of(saved.getId())).getOrDefault(saved.getId(), List.of()));
     }
@@ -406,11 +407,6 @@ public class VenueService {
      * 全量覆盖（JSON 列全量覆盖会误删他人 UGC 照片，见 AGENTS.md「门店照片域」）。
      */
     @Transactional
-    @Caching(evict = {
-            @CacheEvict(value = CacheConfig.CACHE_VENUE, key = "#id"),
-            @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true),
-            @CacheEvict(value = CacheConfig.CACHE_CITY_STATS, allEntries = true)
-    })
     public VenueResponse updateVenue(Long id, CreateVenueRequest req) {
         Venue venue = venueRepository.findByIdAndDeletedFalse(id)
                 .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
@@ -502,14 +498,8 @@ public class VenueService {
         VenueResponse response = venueResponseMapper.toResponse(venueRepository.save(venue),
                 Collections.emptyList(), false, 0L,
                 loadPublicPhotosByVenueIds(List.of(id)).getOrDefault(id, List.of()));
-        // 场所编辑影响热度响应的输出（status/状态日志 → currentStatus / currentStatusDays）——
-        // 显式逐出，与其余写路径一致
-        venueHeatService.invalidate(id);
-        // 列表主查询缓存失效：字段/状态变化影响列表排序与展示（2026-08-30 新增）
-        invalidateVenueListCache();
-        // 详情公共部分缓存失效：字段/状态变更后 base 响应（含 photos/tickets/status/
-        // statusUpdatedAt/claimed 快照）必须立即重算（2026-08-13 新增）
-        invalidateDetailPublic(id);
+        // 字段/状态变更影响详情、列表、热度、热门与城市统计 ⇒ 提交后统一失效
+        venueChangePublisher.publish(VenueFactChange.PROFILE, id);
         return response;
     }
 
@@ -535,7 +525,7 @@ public class VenueService {
      * 收口后 admin 上传直发 PUBLIC（可信写者，保留旧 JSON 列直写公开语义）。
      * <p>
      * 返回本人视角全量照片（PUBLIC 全部）。写路径失效公共缓存（详情/列表照片已变化，
-     * 见 {@link #invalidateDetailPublic}）。
+     * 经 {@link VenueChangePublisher} 声明变更）。
      */
     @Transactional
     public List<VenuePhotoResponse> addVenuePhotos(Long userId, Long venueId, List<String> urls) {
@@ -547,10 +537,7 @@ public class VenueService {
             throw new BusinessException(1001, "单次最多上传 " + MAX_PHOTOS_PER_UPLOAD + " 张照片");
         }
         persistPhotosDirect(venueId, userId, urls, VenuePhotoStatus.PUBLIC);
-        // 公开照片变化：详情/列表公共缓存立即失效（key 为事务内已确定的 venueId，显式逐出）
-        evictVenueEntityCache(venueId);
-        invalidateDetailPublic(venueId);
-        invalidateVenueListCache();
+        venueChangePublisher.publish(VenueFactChange.PHOTO, venueId);
         return fetchVenuePhotos(venueId, userId);
     }
 
@@ -571,6 +558,9 @@ public class VenueService {
     @Transactional
     public void syncGalleryPhotos(Long venueId, List<String> urls) {
         venuePhotoRepository.deleteImportedByVenue(venueId);
+        // 重置式导入：先删后插，删除本身就改变了公开相册 ⇒ 无论后续是否有新图都必须声明变更
+        // （旧实现在 urls 为空的早退分支里漏了失效，错配图被清掉后详情仍显示旧相册）
+        venueChangePublisher.publish(VenueFactChange.PHOTO, venueId);
         if (urls == null || urls.isEmpty()) {
             return;
         }
@@ -588,9 +578,6 @@ public class VenueService {
             photo.setSortOrder(nextOrder++);
             venuePhotoRepository.save(photo);
         }
-        evictVenueEntityCache(venueId);
-        invalidateDetailPublic(venueId);
-        invalidateVenueListCache();
     }
 
     /**
@@ -607,9 +594,7 @@ public class VenueService {
     public void clearImportedPhotos(Long venueId) {
         venueRepository.clearCoverImage(venueId);
         venuePhotoRepository.deleteImportedByVenue(venueId);
-        evictVenueEntityCache(venueId);
-        invalidateDetailPublic(venueId);
-        invalidateVenueListCache();
+        venueChangePublisher.publish(VenueFactChange.PHOTO, venueId);
     }
 
     /**
@@ -635,9 +620,7 @@ public class VenueService {
         photo.setDeleted(true);
         venuePhotoRepository.save(photo);
         if (photo.getStatus() == VenuePhotoStatus.PUBLIC) {
-            evictVenueEntityCache(venueId);
-            invalidateDetailPublic(venueId);
-            invalidateVenueListCache();
+            venueChangePublisher.publish(VenueFactChange.PHOTO, venueId);
         }
     }
 
@@ -680,23 +663,11 @@ public class VenueService {
         photo.setStatus(status);
         venuePhotoRepository.save(photo);
         if (status == VenuePhotoStatus.PUBLIC) {
-            // 待审 → 公开：照片对外可见变化，详情/列表公共缓存立即失效
-            // （key 依赖事务内查询结果，显式 CacheManager.evict 而非 @CacheEvict）
-            evictVenueEntityCache(photo.getVenueId());
-            invalidateDetailPublic(photo.getVenueId());
-            invalidateVenueListCache();
+            // 待审 → 公开：照片对外可见变化
+            venueChangePublisher.publish(VenueFactChange.PHOTO, photo.getVenueId());
         }
         log.info("管理员 {} 审核门店照片 {} → {}（门店 {}）{}", adminId, photoId, status,
                 photo.getVenueId(), reason == null || reason.isBlank() ? "" : "，说明：" + TextSanitizer.sanitize(reason, 200));
-    }
-
-    /** 场所实体缓存显式逐出（照片写方法共用；key 依赖查询结果，见 VenueClaimService 同款先例） */
-    private void evictVenueEntityCache(Long venueId) {
-        // 全限定类型名：避免与频控字段的 caffeine Cache import 简名冲突
-        org.springframework.cache.Cache cache = cacheManager.getCache(CacheConfig.CACHE_VENUE);
-        if (cache != null) {
-            cache.evict(venueId);
-        }
     }
 
     // ─── 照片读取（批量公开加载 / 管理入口本人视角） ────────────────────────────────
@@ -784,13 +755,9 @@ public class VenueService {
      * 与 updateVenue 同模式写状态变迁日志 + 失效场所/热门缓存。
      * <p>
      * 幂等：门店已是 SUSPENDED 时直接返回（不重复写变迁日志——状态未变，审计链
-     * 不应产生冗余记录）；缓存逐出经 {@link @Caching} 在方法返回后仍会执行（无害）。
+     * 不应产生冗余记录）。
      */
     @Transactional
-    @Caching(evict = {
-            @CacheEvict(value = CacheConfig.CACHE_VENUE, key = "#venueId"),
-            @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
-    })
     public void markSuspendedByReport(Long venueId, Long changedBy) {
         Venue venue = venueRepository.findByIdAndDeletedFalse(venueId)
                 .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
@@ -812,13 +779,7 @@ public class VenueService {
         // 关注者通知（同事务；幂等早退已拦截"已是 SUSPENDED"场景，此处必为实际变更）
         venueStatusWatcherService.notifyStatusChanged(
                 venue.getId(), fromStatus, VenueStatus.SUSPENDED);
-        // 热度失效：status 是热度响应输出（currentStatus / currentStatusDays）的组成部分，
-        // 与 updateVenue 的显式逐出同模式（venueHeat 为服务内嵌 LoadingCache，不走 @CacheEvict）
-        venueHeatService.invalidate(venueId);
-        // 详情公共部分缓存失效：status 与 statusUpdatedAt（新增状态日志）均属公共事实
-        invalidateDetailPublic(venueId);
-        // 列表主查询缓存失效：营业状态是列表徽标/排序展示（2026-08-30 新增）
-        invalidateVenueListCache();
+        venueChangePublisher.publish(VenueFactChange.STATUS, venueId);
     }
 
     /**
@@ -831,13 +792,9 @@ public class VenueService {
      * 日志 + 失效场所/热门缓存。
      * <p>
      * 幂等：门店已是 OPEN 时直接返回（不重复写变迁日志——状态未变，审计链不应产生
-     * 冗余记录）；缓存逐出经 {@link @Caching} 在方法返回后仍会执行（无害）。
+     * 冗余记录）。
      */
     @Transactional
-    @Caching(evict = {
-            @CacheEvict(value = CacheConfig.CACHE_VENUE, key = "#venueId"),
-            @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
-    })
     public void reopenByReport(Long venueId, Long changedBy) {
         Venue venue = venueRepository.findByIdAndDeletedFalse(venueId)
                 .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
@@ -859,11 +816,7 @@ public class VenueService {
         // 关注者通知（同事务；幂等早退已拦截"已是 OPEN"场景，此处必为实际变更）
         venueStatusWatcherService.notifyStatusChanged(
                 venue.getId(), fromStatus, VenueStatus.OPEN);
-        venueHeatService.invalidate(venueId);
-        // 详情公共部分缓存失效：status 与 statusUpdatedAt（新增状态日志）均属公共事实
-        invalidateDetailPublic(venueId);
-        // 列表主查询缓存失效：营业状态是列表徽标/排序展示（2026-08-30 新增）
-        invalidateVenueListCache();
+        venueChangePublisher.publish(VenueFactChange.STATUS, venueId);
     }
 
     /**
@@ -893,13 +846,9 @@ public class VenueService {
      * <p>
      * 事务：由调用方（调度器）开启——调度器是独立 Bean，经 Spring 代理调用本方法，
      * 故 {@code @Transactional} 正常生效。**勿把调度循环搬进本类**：同类内自调用
-     * 不经代理，事务与缓存注解会静默失效。
+     * 不经代理，事务注解会静默失效（缓存失效经提交后事件执行，同样依赖事务边界）。
      */
     @Transactional
-    @Caching(evict = {
-            @CacheEvict(value = CacheConfig.CACHE_VENUE, key = "#venueId"),
-            @CacheEvict(value = CacheConfig.CACHE_HOT_VENUE_IDS, allEntries = true)
-    })
     public void applyScheduledOpening(Long venueId) {
         Venue venue = venueRepository.findByIdAndDeletedFalse(venueId)
                 .orElseThrow(() -> new BusinessException(1001, "场所不存在"));
@@ -927,9 +876,7 @@ public class VenueService {
         venueRepository.save(venue);
         // 关注者通知（同事务；早退分支已保证此处必为实际变更）
         venueStatusWatcherService.notifyStatusChanged(venue.getId(), fromStatus, VenueStatus.OPEN);
-        venueHeatService.invalidate(venueId);
-        invalidateDetailPublic(venueId);
-        invalidateVenueListCache();
+        venueChangePublisher.publish(VenueFactChange.STATUS, venueId);
         log.info("[venue/{}/scheduled-opening] 开业计划兑现：{} → OPEN（已打人工锁，开业日已清空）",
                 venue.getId(), fromStatus);
     }
@@ -938,13 +885,12 @@ public class VenueService {
      * 计划已被人工提前兑现（门店已 OPEN 但开业日仍挂在库）时只清悬挂值。
      * <p>
      * 不写状态日志、不发通知——状态本身没有变化，只是把一个已兑现的计划归档掉。
-     * 仍逐出详情/列表缓存（{@code expectedOpenDate} 随响应下发，缓存里存的是旧副本）。
+     * 仍声明门店资料变更（{@code expectedOpenDate} 随响应下发，缓存里存的是旧副本）。
      */
     private void clearFulfilledOpeningPlan(Venue venue) {
         venue.setExpectedOpenDate(null);
         venueRepository.save(venue);
-        invalidateDetailPublic(venue.getId());
-        invalidateVenueListCache();
+        venueChangePublisher.publish(VenueFactChange.PROFILE, venue.getId());
     }
 
     /**
@@ -1059,7 +1005,7 @@ public class VenueService {
         List<String> photos = loadPublicPhotosByVenueIds(List.of(id)).getOrDefault(id, List.of());
         VenueResponse base = venueResponseMapper.toResponse(venue, topReactions, false, viewCount, photos);
         // 门店别名（2026-09-07 门店别名域）：详情公共部分缓存体（录入顺序）；
-        // 管理端写路径经 invalidateDetailPublic 失效（VenueAliasService#upsert/#delete）
+        // 管理端写路径发布门店事实变更事件后失效（VenueAliasService#upsert/#delete，见 #onVenueFactsChanged）
         List<String> aliases = venueAliasRepository.findByVenueIdAndDeletedFalseOrderByIdAsc(id)
                 .stream().map(VenueAlias::getAlias).toList();
         return new VenueDetailPublic(base,
@@ -1069,12 +1015,20 @@ public class VenueService {
     }
 
     /**
-     * 详情公共部分缓存显式失效（写路径调用：场所编辑 / 状态变更 / 认领审批）。
-     * 与 {@link VenueHeatService#invalidate} 同模式——内嵌 LoadingCache 不走
-     * Spring CacheManager，@CacheEvict 无法表达，必须显式调用。
+     * 本类内嵌门店读模型缓存的失效（2026-10-01：由「写路径各自调用 public 失效方法」收敛为
+     * 订阅 {@link VenueFactsChangedEvent}，见 {@link VenueChangePublisher}）。
+     * <ul>
+     *   <li>详情公共部分（逐店）：base 响应含 status/statusUpdatedAt/photos/tickets/claimed/aliases 快照；</li>
+     *   <li>列表主查询无坐标视图（全局）：门店新增/编辑/状态/照片/别名/活动都会改变结果集或排序；</li>
+     *   <li>城市分面（全局）：与列表同源，不同步失效会出现「chip 写着 12 家、点进去 11 家」。</li>
+     * </ul>
+     * 提交后执行（无事务时立即执行）。热度累积（reaction/favorite/view）不走本事件，靠 60s TTL。
      */
-    public void invalidateDetailPublic(Long venueId) {
-        venueDetailPublicCache.invalidate(venueId);
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
+    public void onVenueFactsChanged(VenueFactsChangedEvent event) {
+        venueDetailPublicCache.invalidateAll(event.venueIds());
+        venueListCache.invalidateAll();
+        cityFacetCache.invalidateAll();
     }
 
     /**
@@ -1398,7 +1352,7 @@ public class VenueService {
      * <p>
      * 无坐标分支走 {@link #venueListCache}（2026-08-30 性能优化）：全国 / 显式城市
      * 视角的行为热度排序是公共数据（与请求用户无关、低频变化），60s 缓存 + 写路径
-     * 显式失效（见 {@link #invalidateVenueListCache}）；带坐标分支（结果集受半径
+     * 门店事实变更事件失效（见 {@link #onVenueFactsChanged}）；带坐标分支（结果集受半径
      * 筛选约束，与请求者位置相关）恒实时查询。
      */
     private Page<Venue> dispatchListQuery(VenueSortMode sortMode, String city, String district,
@@ -1512,19 +1466,6 @@ public class VenueService {
                     null, key.tagPattern(),
                     nearbyCities, cityScopeLimited, key.hotOnly(), hotIds, key.hasActivity(), pageable);
         };
-    }
-
-    /**
-     * 列表主查询无坐标视图缓存显式失效（写路径调用，与 {@link #invalidateDetailPublic}
-     * 同模式——内嵌 LoadingCache 不走 Spring CacheManager，@CacheEvict 无法表达）。
-     * 门店新增/编辑/状态变更/照片变化后调用：列表内容或排序立即生效，
-     * 不依赖 60s TTL 兜底。热度累积（reaction/favorite/view）变化不失效，靠 TTL。
-     */
-    public void invalidateVenueListCache() {
-        venueListCache.invalidateAll();
-        // 城市分面（搜索态 chips 数据源）与列表同源：门店增删改会同时改变「某城市命中几
-        // 家」，不逐出会出现「chip 写着 12 家、点进去 11 家」。与列表同 TTL 同族语义。
-        cityFacetCache.invalidateAll();
     }
 
     /** 有场所的城市列表（按场所数倒序），供前端热门城市选择。

@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -15,6 +16,9 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    /** 数据库瞬时故障的建议重试等待（秒）：连接池/网络抖动通常亚秒级恢复 */
+    private static final int DB_TRANSIENT_RETRY_AFTER_SECONDS = 1;
 
     /** 需要登录但未登录 → HTTP 401，前端据此触发登录流程 */
     @ExceptionHandler(UserContext.AuthRequiredException.class)
@@ -48,17 +52,34 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * 数据库连接类故障（连接池获取超时/连接中断/数据库不可达，Supabase 抖动常见）→ HTTP 503。
-     * <p>2026-08-10 事故根因修复：此类异常多为瞬时故障，语义应为"暂时不可用"而非内部错误；
-     * 前端对幂等 GET 的 5xx 自动重试一次即可自愈（见前端 auth.ts 请求层约定）。
-     * 仅打 WARN 摘要不打堆栈——已知外部条件（Supabase 不稳定）下堆栈无诊断价值。
+     * 数据库连接类故障（连接池获取超时/连接中断/数据库不可达）→ HTTP 503 + {@code Retry-After}。
+     * <p>2026-08-10 事故根因修复：此类异常多为瞬时故障，语义应为"暂时不可用"而非内部错误。
+     * <p>2026-10-01 重试契约显式化：「可不可以重试」由服务端用 {@code Retry-After} 声明，
+     * 客户端只对声明了短等待的 503（及网关层 502/504）重试，不再把一切 5xx 当瞬时故障
+     * （见 12-api-conventions「重试契约」）。仅打 WARN 摘要不打堆栈。
      */
     @ExceptionHandler(DataAccessResourceFailureException.class)
     public ApiResponse<Void> handleDataAccessFailure(DataAccessResourceFailureException ex,
                                                      HttpServletResponse response) {
         log.warn("Data access failure (transient DB issue): {}", ex.getMessage());
         response.setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+        response.setHeader(HttpHeaders.RETRY_AFTER, String.valueOf(DB_TRANSIENT_RETRY_AFTER_SECONDS));
         return ApiResponse.fail(5003, "服务暂时不可用，请稍后重试");
+    }
+
+    /**
+     * 外部依赖暂不可用（配额耗尽 / 限流 / 凭证失效 / 上游超时）→ HTTP 503 + code 5005 +
+     * {@code Retry-After}（2026-10-01）。可预期的外部失败不是程序缺陷：只打 WARN 摘要，
+     * 不进兜底处理器（否则每次请求一条 ERROR 堆栈，且被客户端当 500 重试放大外呼）。
+     */
+    @ExceptionHandler(ExternalServiceUnavailableException.class)
+    public ApiResponse<Void> handleExternalUnavailable(ExternalServiceUnavailableException ex,
+                                                       HttpServletResponse response) {
+        log.warn("External dependency unavailable [{}] retryAfter={}s: {}",
+                ex.getDependency(), ex.getRetryAfterSeconds(), ex.getMessage());
+        response.setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+        response.setHeader(HttpHeaders.RETRY_AFTER, String.valueOf(ex.getRetryAfterSeconds()));
+        return ApiResponse.fail(5005, ex.getUserMessage());
     }
 
     @ExceptionHandler(Exception.class)

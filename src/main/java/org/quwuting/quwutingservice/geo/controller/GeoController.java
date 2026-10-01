@@ -17,8 +17,10 @@ import org.springframework.web.bind.annotation.RestController;
  *       （对齐"全链路 gcj02、服务商限定腾讯/高德、key 只放后端"坐标约定）；</li>
  *   <li>输入 = 前端 wx.getLocation 采集的 gcj02 坐标；输出 = 标准行政区划城市名
  *       （与 picker mode="region" 词表、列表筛选共用词表，精确匹配）；</li>
- *   <li>失败场景（未配置 key / 坐标越界 / 腾讯 API 失败）→ 业务错，前端静默降级
- *       （城市留空让用户手动选择，绝不阻塞表单主流程）。</li>
+ *   <li>失败场景：未配置 key / 坐标越界 → 业务错；上游不可用（日配额耗尽 / 限流 / 网络）→
+ *       HTTP 503 + code 5005 + Retry-After（2026-10-01，配额耗尽时熔断到次日 0 点、不再外呼）；
+ *       前端一律静默降级（城市留空让用户手动选择，绝不阻塞主流程）。</li>
+ *   <li>结果按约 1km 网格缓存 30 天（{@code GeocodeService}），同一片区域重复定位零外呼。</li>
  * </ul>
  */
 @RestController
@@ -28,7 +30,7 @@ public class GeoController {
 
     private final GeocodeService geocodeService;
 
-    /** 坐标 → 城市名（公开；城市名粗粒度低敏，不设频控，同 GET /venues/cities 策略） */
+    /** 坐标 → 城市名（公开；城市名粗粒度低敏；外呼量由网格缓存 + 配额熔断约束） */
     @GetMapping("/reverse")
     public ApiResponse<String> reverse(@RequestParam double lat, @RequestParam double lng) {
         return ApiResponse.ok(geocodeService.reverseGeocode(lat, lng));

@@ -5,6 +5,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.quwuting.quwutingservice.spend.SpendEntryLimits;
 import org.quwuting.quwutingservice.spend.dto.SpendEntryItem;
 import org.quwuting.quwutingservice.spend.dto.SpendSyncRequest;
 import org.quwuting.quwutingservice.spend.dto.SpendSyncResponse;
@@ -150,6 +151,52 @@ class SpendServiceTest {
                 entry(longId.toString(), "DANCE", "PARTNER")));
 
         assertEquals(1, res.rejected());
+        verify(spendEntryRepository, never()).save(any(SpendEntryEntity.class));
+    }
+
+    // ── ②′ 存储约束（2026-10-01 毒丸修复：越界逐条拒，绝不让落库异常回滚整批） ──
+
+    @Test
+    void testValuesBeyondColumnLimitsRejectedPerEntryNotPerBatch() {
+        stubFreshInsert();
+        SpendEntryItem tooLarge = new SpendEntryItem("led-big", TS, new BigDecimal("100000000.00"),
+                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, null);
+        SpendEntryItem longVenueName = new SpendEntryItem("led-venue", TS, new BigDecimal("10.00"),
+                "PARTNER", "DANCE", "", 1L, "店".repeat(SpendEntryLimits.VENUE_NAME_MAX_LENGTH + 1),
+                null, Boolean.FALSE, null);
+        SpendEntryItem longRef = new SpendEntryItem("led-ref", TS, new BigDecimal("10.00"),
+                "PARTNER", "DANCE", "r".repeat(SpendEntryLimits.SOURCE_REF_ID_MAX_LENGTH + 1),
+                null, null, null, Boolean.FALSE, null);
+
+        SpendSyncResponse res = service().sync(1L, request(
+                tooLarge, longVenueName, longRef, entry("led-ok", "DANCE", "PARTNER")));
+
+        assertEquals(1, res.accepted(), "合法条目照常落库");
+        assertEquals(List.of("led-big", "led-venue", "led-ref"), res.rejectedIds());
+        verify(spendEntryRepository, times(1)).save(any(SpendEntryEntity.class));
+    }
+
+    @Test
+    void testFloatingPointTailIsRoundedToColumnScaleInsteadOfRejected() {
+        stubFreshInsert();
+        // 客户端表达式求和的浮点尾差（0.1 + 0.2）——是正常账目，不能因小数位多而拒收
+        SpendEntryItem floatTail = new SpendEntryItem("led-float", TS, new BigDecimal("0.30000000000000004"),
+                "SNACK", "MANUAL", "", null, null, null, Boolean.FALSE, null);
+
+        SpendSyncResponse res = service().sync(1L, request(floatTail));
+
+        assertEquals(1, res.accepted());
+        ArgumentCaptor<SpendEntryEntity> captor = ArgumentCaptor.forClass(SpendEntryEntity.class);
+        verify(spendEntryRepository).save(captor.capture());
+        assertEquals(new BigDecimal("0.30"), captor.getValue().getAmount(), "落库值 = 校验值 = 列精度");
+    }
+
+    @Test
+    void testAmountThatRoundsToZeroRejected() {
+        SpendEntryItem dust = new SpendEntryItem("led-dust", TS, new BigDecimal("0.004"),
+                "SNACK", "MANUAL", "", null, null, null, Boolean.FALSE, null);
+        SpendSyncResponse res = service().sync(1L, request(dust));
+        assertEquals(List.of("led-dust"), res.rejectedIds(), "四舍五入后为 0 的金额不是有效账目");
         verify(spendEntryRepository, never()).save(any(SpendEntryEntity.class));
     }
 

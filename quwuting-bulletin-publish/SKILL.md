@@ -43,6 +43,12 @@ bash scripts/sync-skills.sh          # 在 quwuting-service 仓内执行（脚�
    - **跨域迁移必须重审内容**：把旧**公告**搬成快讯时，公告原文里常带「疑似集中检查」
      「因××被查」这类**公告域没拦、快讯域禁写**的表述（2026-09-10 宁波迁移实证）——
      迁移 ≠ 复制，**照快讯边界重裁一遍**，只留开/关事实，并明确告诉用户删了什么、为什么。
+   - 🛡 **服务端兜底（2026-10-01 就位，运营开关 `bulletin.content_redline.enabled` 默认关闭）**：
+     开启后快讯三条写路径（create / update / agent-publish）都会过 `BulletinContentPolicy` 红线词表
+     （`quwuting-service/src/main/resources/content-policy/bulletin-forbidden-terms.txt`：执法 / 治安 /
+     经营负面类词），命中 ⇒ **1035 拒绝**，message 点名命中词。处置 = **按本条改写为纯可得性表述后
+     重发**，⛔ 不要换同义词绕过（词表是兜底，不是内容边界本身）。开关关闭时**本条自审仍是唯一防线**。
+     误伤正常表述 ⇒ 报告用户，由人改词表并跑 `BulletinContentPolicyTest`。
 2. **发布是面向全体用户的对外动作**：用户本轮明说「发快讯 / 投放 / 发这条」即视为授权，
    无需逐字段确认；用户未要求 → 不创建。
 3. **环境即生产**：快讯唯一生效环境 = `https://api.starseek.online`（本地 develop 发了

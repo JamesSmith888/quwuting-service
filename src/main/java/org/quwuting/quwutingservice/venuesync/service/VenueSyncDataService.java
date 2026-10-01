@@ -2,7 +2,6 @@ package org.quwuting.quwutingservice.venuesync.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.quwuting.quwutingservice.config.CacheConfig;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.entity.VenueAlias;
@@ -11,12 +10,12 @@ import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.repository.VenueAliasRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueStatusLogRepository;
-import org.quwuting.quwutingservice.venue.service.VenueService;
+import org.quwuting.quwutingservice.venue.change.VenueChangePublisher;
+import org.quwuting.quwutingservice.venue.change.VenueFactChange;
 import org.quwuting.quwutingservice.venuesync.dto.request.CreateVenueItem;
 import org.quwuting.quwutingservice.venuesync.dto.response.BatchCreateVenueResponse;
 import org.quwuting.quwutingservice.venuesync.dto.response.CreateVenueItemResult;
 import org.quwuting.quwutingservice.venuesync.dto.response.VenueExportItem;
-import org.springframework.cache.CacheManager;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
@@ -59,8 +58,8 @@ public class VenueSyncDataService {
     private final VenueRepository venueRepository;
     private final VenueStatusLogRepository venueStatusLogRepository;
     private final VenueAliasRepository venueAliasRepository;
-    private final VenueService venueService;
-    private final CacheManager cacheManager;
+    /** 门店事实变更声明（新店出现：列表/热门/城市统计等读模型统一失效，见 VenueChangePublisher） */
+    private final VenueChangePublisher venueChangePublisher;
     private final org.quwuting.quwutingservice.announcement.service.AnnouncementService announcementService;
 
     // ===== 候选门店导出（GET /admin/venue-sync/venues/export） =====
@@ -122,6 +121,7 @@ public class VenueSyncDataService {
         }
 
         int created = 0, existed = 0, failed = 0;
+        List<Long> createdIds = new ArrayList<>();
         List<CreateVenueItemResult> results = new ArrayList<>(items.size());
         // 同城门店缓存：幂等判重按城市一次性加载 + 内存归一化比对，避免逐条查库
         Map<String, List<Venue>> venuesByCity = new HashMap<>();
@@ -160,6 +160,7 @@ public class VenueSyncDataService {
                 statusLog.setChangedBy(null);
                 venueStatusLogRepository.save(statusLog);
                 created++;
+                createdIds.add(saved.getId());
                 results.add(new CreateVenueItemResult(i, name, city, "CREATED", saved.getId(), null));
             } catch (Exception e) {
                 log.warn("[venue-sync] batch create failed: {} / {}: {}", city, name, e.getMessage());
@@ -168,12 +169,10 @@ public class VenueSyncDataService {
             }
         }
 
-        // 新店出现：列表/热门/城市统计缓存统一失效（与 createVenue 写路径同口径——
-        // 列表 60s 缓存、hotIds 5min、cityStats 5min 都是全局维度，逐店失效无意义）
+        // 新店出现：整批一次声明门店事实变更（各条已独立提交 ⇒ 监听器立即执行；
+        // 与 createVenue 同口径，失效哪些缓存由属主决定，本处不再手抄清单）
         if (created > 0) {
-            venueService.invalidateVenueListCache();
-            evictCacheAll(CacheConfig.CACHE_HOT_VENUE_IDS);
-            evictCacheAll(CacheConfig.CACHE_CITY_STATS);
+            venueChangePublisher.publish(VenueFactChange.CREATED, createdIds);
             // 数据更新公告（2026-09-01，docs/agents/34）：新店录入成功触发 SYSTEM 公告；
             // 开关关闭/同日已存在 → 内部幂等跳过，不干扰写库主流程
             announcementService.createDataUpdateAnnouncement(created, 0);
@@ -226,13 +225,6 @@ public class VenueSyncDataService {
     }
 
     /** 缓存整域逐出（hotIds/cityStats 用；key 无关调用方，全部失效最简） */
-    private void evictCacheAll(String cacheName) {
-        org.springframework.cache.Cache cache = cacheManager.getCache(cacheName);
-        if (cache != null) {
-            cache.clear();
-        }
-    }
-
     private static String blankToNull(String value) {
         return StringUtils.hasText(value) ? value.trim() : null;
     }

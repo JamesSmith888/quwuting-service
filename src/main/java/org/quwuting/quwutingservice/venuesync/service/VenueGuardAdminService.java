@@ -6,10 +6,13 @@ import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venue.service.VenueStatusGuardService;
 import org.quwuting.quwutingservice.venuesync.dto.response.VenueGuardStateItem;
+import org.quwuting.quwutingservice.venue.change.VenueChangePublisher;
+import org.quwuting.quwutingservice.venue.change.VenueFactChange;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
@@ -33,6 +36,7 @@ public class VenueGuardAdminService {
 
     private final VenueRepository venueRepository;
     private final VenueStatusGuardService venueStatusGuardService;
+    private final VenueChangePublisher venueChangePublisher;
 
     /** 查询门禁状态（顺序按 venueId 升序，便于前端逐条匹配） */
     @Transactional(readOnly = true)
@@ -58,14 +62,17 @@ public class VenueGuardAdminService {
     public int unlock(List<Long> venueIds, Long adminId) {
         LocalDateTime now = LocalDateTime.now();
         int unlocked = 0;
+        List<Long> changedIds = new ArrayList<>();
         for (Venue venue : venueRepository.findByIdInAndDeletedFalse(venueIds)) {
             if (!venueStatusGuardService.isLockActive(venue, now)) {
                 continue;
             }
             venueStatusGuardService.unlockByHuman(venue);
             venueRepository.save(venue);
+            changedIds.add(venue.getId());
             unlocked++;
         }
+        venueChangePublisher.publish(VenueFactChange.SYNC_GUARD, changedIds);
         log.info("[venue-guard] admin {} 解锁 {} 家（提交 {} 家）", adminId, unlocked, venueIds.size());
         return unlocked;
     }
@@ -79,14 +86,17 @@ public class VenueGuardAdminService {
     public int setExempt(List<Long> venueIds, boolean exempt, String note, Long adminId) {
         boolean hasNote = note != null && !note.isBlank();
         int changed = 0;
+        List<Long> changedIds = new ArrayList<>();
         for (Venue venue : venueRepository.findByIdInAndDeletedFalse(venueIds)) {
             if (venue.isDailySyncExempt() == exempt && !hasNote) {
                 continue; // 已是目标值且无需更新备注：幂等跳过（汇报口径只计真实变更）
             }
             venueStatusGuardService.setExempt(venue, exempt, note);
             venueRepository.save(venue);
+            changedIds.add(venue.getId());
             changed++;
         }
+        venueChangePublisher.publish(VenueFactChange.SYNC_GUARD, changedIds);
         log.info("[venue-guard] admin {} 设置豁免={} 生效 {} 家（提交 {} 家）",
                 adminId, exempt, changed, venueIds.size());
         return changed;

@@ -2,7 +2,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # quwuting-service 一键部署脚本（Alibaba Cloud Linux 3 / RHEL 系兼容）
 #
-# 适用场景：阿里云 ECS + Cloudflare Tunnel（HTTPS 终止，转发至 localhost:8080）。
+# 适用场景：阿里云 ECS + 本机 nginx（HTTPS 终止，反代至 localhost:8080）。
 # 满足 AGENTS.md 核心约束：java -jar + JVM 内存限制 + systemd
 # Restart=always + cgroup MemoryMax 三件套。
 #
@@ -33,6 +33,11 @@ LOG_DIR="${LOG_DIR:-/var/log/${APP_NAME}}"
 UNIT_FILE="/etc/systemd/system/${APP_NAME}.service"
 JAR_GLOB="${APP_DIR}/target/${APP_NAME}-*.jar"
 SPRING_PROFILE="${SPRING_PROFILE:-prod}"   # 2026-08-30: MySQL 生产环境，默认 prod
+# 就绪探测（2026-10-01）：restart 后轮询 /health（DB 可用才算就绪），超时即判部署失败
+APP_PORT="${APP_PORT:-8080}"
+READY_URL="${READY_URL:-http://127.0.0.1:${APP_PORT}/health}"
+READY_TIMEOUT_SECONDS="${READY_TIMEOUT_SECONDS:-120}"
+READY_INTERVAL_SECONDS=3
 # 生产敏感配置 = Spring Boot 外部化配置（jar 同目录 config/，gitignored，优先级高于 classpath）
 EXT_CONFIG="${APP_DIR}/config/application-${SPRING_PROFILE}.yaml"
 
@@ -184,6 +189,9 @@ ExecStart=${JAVA_HOME}/bin/java ${JVM_FLAGS} -jar ${JAR_PATH} --spring.profiles.
 # 守护：被杀立即拉起
 Restart=always
 RestartSec=10s
+# 优雅停机（2026-10-01）：应用侧 server.shutdown=graceful 最长等在途请求 20s，
+# 此处给足 30s 再 SIGKILL，避免 systemd 先于应用的排空窗口动手
+TimeoutStopSec=30
 
 # cgroup 内存 — 必须 < 物理内存，让 OOM-Killer 命中本进程而非 sshd/postgres
 MemoryHigh=${CGROUP_MEMORY_HIGH}
@@ -215,15 +223,22 @@ log "enable + restart ${APP_NAME}"
 systemctl enable "${APP_NAME}.service" >/dev/null
 systemctl restart "${APP_NAME}.service"
 
-sleep 3
-if systemctl is-active --quiet "${APP_NAME}.service"; then
-  log "✅ ${APP_NAME} 已启动"
-  systemctl --no-pager status "${APP_NAME}.service" | head -15
-  echo
-  log "实时日志：journalctl -u ${APP_NAME} -f"
-  log "RSS 观察：pmap -x \$(systemctl show -p MainPID --value ${APP_NAME}) | tail -1"
-else
-  warn "❌ 启动失败，最近 50 行日志："
-  journalctl -u "${APP_NAME}.service" -n 50 --no-pager
-  exit 1
-fi
+# 就绪探测（2026-10-01）：「进程在跑」≠「能服务」——迁移校验失败 / 配置缺失 / 连不上库时
+# 进程会反复被 systemd 拉起，旧脚本 sleep 3 后看 is-active 恰好命中「刚拉起」的瞬间而报成功。
+# 现在轮询 /health（含一次 DB 往返）直到 200，超时打印日志并以非 0 退出。
+log "等待就绪：${READY_URL}（最长 ${READY_TIMEOUT_SECONDS}s）"
+waited=0
+until curl -fsS --max-time 5 "${READY_URL}" >/dev/null 2>&1; do
+  if (( waited >= READY_TIMEOUT_SECONDS )); then
+    warn "❌ ${READY_TIMEOUT_SECONDS}s 内未就绪，最近 80 行日志："
+    journalctl -u "${APP_NAME}.service" -n 80 --no-pager
+    exit 1
+  fi
+  sleep "${READY_INTERVAL_SECONDS}"
+  waited=$(( waited + READY_INTERVAL_SECONDS ))
+done
+log "✅ ${APP_NAME} 已就绪（${waited}s）"
+systemctl --no-pager status "${APP_NAME}.service" | head -15
+echo
+log "实时日志：journalctl -u ${APP_NAME} -f"
+log "RSS 观察：pmap -x \$(systemctl show -p MainPID --value ${APP_NAME}) | tail -1"

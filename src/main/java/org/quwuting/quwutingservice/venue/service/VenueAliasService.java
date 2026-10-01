@@ -12,14 +12,18 @@ import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.entity.VenueAlias;
 import org.quwuting.quwutingservice.venue.repository.VenueAliasRepository;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
+import org.quwuting.quwutingservice.venue.change.VenueChangePublisher;
+import org.quwuting.quwutingservice.venue.change.VenueFactChange;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -37,7 +41,8 @@ import java.util.stream.Collectors;
  * </ul>
  * 详情下发不走本服务——{@code VenueService#computeVenueDetailPublic} 直查
  * {@link VenueAliasRepository} 并入公共部分缓存体（冷启动 +1 查、命中零往返）；
- * 本服务所有写路径负责 {@link VenueService#invalidateDetailPublic} 失效。
+ * 本服务所有写路径经 {@link VenueChangePublisher} 声明门店事实变更（别名同时是详情公共部分
+ * 与 KW_MATCH 搜索结果集的载体——2026-10-01 前只失效了详情缓存，新别名 60s 内搜不到）。
  */
 @Slf4j
 @Service
@@ -49,7 +54,7 @@ public class VenueAliasService {
 
     private final VenueAliasRepository aliasRepository;
     private final VenueRepository venueRepository;
-    private final VenueService venueService;
+    private final VenueChangePublisher venueChangePublisher;
 
     /** 已配置别名的门店聚合列表（组序 = 最近配置在前；门店已删的组跳过） */
     @Transactional(readOnly = true)
@@ -98,8 +103,7 @@ public class VenueAliasService {
         }
         entity.setDeleted(false); // 软删行复活重用
         VenueAlias saved = aliasRepository.save(entity);
-        // 详情公共部分缓存体含别名（computeVenueDetailPublic），写后失效
-        venueService.invalidateDetailPublic(request.venueId());
+        venueChangePublisher.publish(VenueFactChange.ALIAS, request.venueId());
         log.info("[venue-alias] upsert: venueId={} alias={} id={}",
                 request.venueId(), alias, saved.getId());
         return new VenueAliasGroupResponse.AliasItem(saved.getId(), saved.getAlias());
@@ -117,13 +121,14 @@ public class VenueAliasService {
      *   <li>别名（trim 后）与门店主名同名 → skipped（无检索意义）；</li>
      *   <li>门店不存在/已删/非法输入 → failed（带原因，不抛出中断整批）。</li>
      * </ul>
-     * 每条写后失效详情缓存（别名进 computeVenueDetailPublic 缓存体）。
+     * 整批结束后一次声明门店事实变更（各条已独立提交，监听器立即执行）。
      */
     public BatchImportVenueAliasResponse batchImport(BatchImportVenueAliasRequest request) {
         int imported = 0;
         int skipped = 0;
         List<BatchImportVenueAliasResponse.FailedItem> failed = new ArrayList<>();
         List<UpsertVenueAliasRequest> items = request.items();
+        Set<Long> changedVenueIds = new LinkedHashSet<>();
 
         for (int i = 0; i < items.size(); i++) {
             UpsertVenueAliasRequest item = items.get(i);
@@ -152,13 +157,14 @@ public class VenueAliasService {
                 }
                 entity.setDeleted(false); // 软删行复活重用
                 aliasRepository.save(entity);
-                venueService.invalidateDetailPublic(venueId);
+                changedVenueIds.add(venueId);
                 imported++;
             } catch (Exception e) {
                 failed.add(new BatchImportVenueAliasResponse.FailedItem(i, venueId, alias,
                         e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
             }
         }
+        venueChangePublisher.publish(VenueFactChange.ALIAS, changedVenueIds);
         log.info("[venue-alias] batch-import: total={} imported={} skipped={} failed={}",
                 items.size(), imported, skipped, failed.size());
         return new BatchImportVenueAliasResponse(items.size(), imported, skipped, failed);
@@ -172,7 +178,7 @@ public class VenueAliasService {
                 .orElseThrow(() -> new BusinessException(404, "别名不存在"));
         alias.setDeleted(true);
         aliasRepository.save(alias);
-        venueService.invalidateDetailPublic(alias.getVenueId());
+        venueChangePublisher.publish(VenueFactChange.ALIAS, alias.getVenueId());
         log.info("[venue-alias] deleted: id={} venueId={} alias={}",
                 id, alias.getVenueId(), alias.getAlias());
     }

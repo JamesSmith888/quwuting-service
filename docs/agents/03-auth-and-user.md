@@ -19,7 +19,11 @@
 
 **后端不提供 refresh token 端点**：`POST /auth/login` 同时承担「首次登录」与「凭证过期后续期」两条链路——微信 `jscode2session` 是随时可执行的静默能力（无授权弹窗），等价于一个"永远可用的续期凭证"，再引入 refresh token 只会多出轮换/撤销/存储一致性三类状态而收益为零。届时有端（如 Web 管理后台）需要治理会话时，判据与做法见前端仓 `docs/auth-and-user.md`「为什么不用 refresh token」。
 
-**因此 `/auth/login` 必须保持幂等可重入**：同一 openid 重复调用只应返回新 token 与同一用户，不得产生任何副作用（不得重复建号、不得累加计数）——`findByOpenIdAndDeletedFalse().orElseGet(createUser)` 的现状即满足，改动时须保持。
+**因此 `/auth/login` 必须保持幂等可重入**：同一 openid 重复调用只应返回新 token 与同一用户，不得产生任何副作用（不得重复建号、不得累加计数）——`findByOpenIdAndDeletedFalse().orElseGet(createUserOrReadConcurrent)` 满足，改动时须保持。
+
+**登录不开事务（2026-10-01）**：旧实现 `login` 整体 `@Transactional`，微信 `code2Session`（读超时 10s）期间持有数据库连接——池只有 5 个连接，每次冷启动都静默登录，微信一抖动即可占满整池、全站超时。现在远程调用在事务外完成，查/建用户各自是仓库层单语句事务；首登并发建号由 `open_id` 唯一约束兜底，撞键（`DbConstraintViolations.isUniqueViolation`，MySQL 1062）即回读已建好的行。同一规则见 13-code-standards「事务边界」。
+
+**Web 后台密码登录限速（2026-10-01）**：`WebAuthService#passwordLogin` 按**来源 IP**（`ClientIpResolver`，可信代理由 `server.forward-headers-strategy` 声明）记失败次数，窗口内失败满 `web-auth.password-login.max-failures`（默认 5）次即锁到窗口结束（`lockout-minutes` 默认 15），返回 1006；成功即清零。按 IP 而非用户名计数——用户名只有一个，按用户名锁 = 任何人都能把唯一的管理员锁在门外。扫码登录会话改为「先向微信生成小程序码、再落会话行」，外呼不再持有连接。
 
 ### 401 重放安全契约（重要，禁止破坏）
 

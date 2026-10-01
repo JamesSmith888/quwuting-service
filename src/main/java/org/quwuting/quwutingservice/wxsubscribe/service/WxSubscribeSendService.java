@@ -1,6 +1,7 @@
 package org.quwuting.quwutingservice.wxsubscribe.service;
 
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.common.tx.TransactionBoundaryGuard;
 import org.quwuting.quwutingservice.auth.service.WechatService;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venuestatuswatcher.event.VenueStatusChangedEvent;
@@ -143,6 +144,9 @@ public class WxSubscribeSendService {
         if (recipients.isEmpty()) {
             return; // 无有额度关注者：连 token 都不取（省微信 API 调用）
         }
+        // 已知项（2026-10-01 登记）：AFTER_COMMIT 阶段原事务连接仍处于绑定态，逐用户外呼期间
+        // 持有该连接——批量状态变更时尤甚。探针让它在日志里可见，收敛方向 = 异步执行器。
+        TransactionBoundaryGuard.warnIfInTransaction("wechat.subscribeSend", WxSubscribeSendService.class);
         String accessToken = wechatService.getAccessToken();
 
         Map<String, Object> data = Map.of(

@@ -3,13 +3,14 @@ package org.quwuting.quwutingservice.auth.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.auth.dto.response.LoginResponse;
+import org.quwuting.quwutingservice.common.db.DbConstraintViolations;
 import org.quwuting.quwutingservice.security.JwtUtil;
 import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.mapper.UserInfoMapper;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
 import org.quwuting.quwutingservice.user.service.UserCode;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 @Slf4j
 @Service
@@ -31,16 +32,33 @@ public class AuthService {
      * 主动静默续期——本接口同时是「首次登录」与「凭证过期后的续期」两条链路
      * 的公共入口（续期不新增端点，因为微信 jscode2session 是随时可执行的静默
      * 能力，见 docs/agents/03-auth-and-user.md）。
+     * <p>
+     * <b>事务边界（2026-10-01）</b>：本方法<b>不开事务</b>——旧实现整体 {@code @Transactional}，
+     * 微信 code2Session 远程调用（读超时 10s）期间持有数据库连接；连接池只有 5 个，
+     * 每次冷启动都会静默登录，微信接口一抖动即可把整池占满、全站接口随之超时。
+     * 查用户与建用户各自是仓库层的单语句事务，远程调用在任何事务之外完成。
+     * 首次登录的并发建号（同一用户两个请求同时到达）由 open_id 唯一约束兜底：
+     * 撞键即回读已建好的那一行。
      */
-    @Transactional
     public LoginResponse login(String code) {
         String openId = wechatService.code2Session(code);
 
         User user = userRepository.findByOpenIdAndDeletedFalse(openId)
-                .orElseGet(() -> createUser(openId));
+                .orElseGet(() -> createUserOrReadConcurrent(openId));
 
         String token = jwtUtil.generateToken(user.getId(), user.getRole());
         return new LoginResponse(token, jwtUtil.getExpiresInSeconds(), userInfoMapper.toResponse(user));
+    }
+
+    private User createUserOrReadConcurrent(String openId) {
+        try {
+            return createUser(openId);
+        } catch (DataIntegrityViolationException e) {
+            if (!DbConstraintViolations.isUniqueViolation(e)) {
+                throw e;
+            }
+            return userRepository.findByOpenIdAndDeletedFalse(openId).orElseThrow(() -> e);
+        }
     }
 
     private User createUser(String openId) {
@@ -48,7 +66,9 @@ public class AuthService {
         user.setOpenId(openId);
         // 默认昵称的唯一权威（注册写入与管理端「是否自定义昵称」判定同值，见 UserCode）
         user.setNickname(UserCode.DEFAULT_NICKNAME);
-        log.info("New user registered: openId={}", openId);
-        return userRepository.save(user);
+        // openId 是跨会话稳定的用户标识，不进 INFO 日志（13-code-standards「日志与隐私」）；记 uid 即可关联
+        User saved = userRepository.save(user);
+        log.info("New user registered: uid={}", saved.getId());
+        return saved;
     }
 }

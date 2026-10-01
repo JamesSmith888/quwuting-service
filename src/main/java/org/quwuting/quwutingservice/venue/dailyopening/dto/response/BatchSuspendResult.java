@@ -15,7 +15,9 @@ import java.util.List;
  * @param skippedLocked 因「人工锁未过期」跳过数（2026-09-14，V25；人工优先，不写库）
  * @param skippedExempt 因「已豁免舞讯推断」跳过数（2026-09-14，V25）
  * @param skipped       跳过明细（按原因可读；调用方须显式汇报，见 {@link SkippedByGuardDetail}）
- * @param details       暂停明细（审计/回滚用）
+ * @param details       暂停明细（审计/回滚用；dryRun 时为「将要暂停」的计划）
+ * @param dryRun        true = 本次为预演，未写库、未通知（2026-10-01）
+ * @param cityImpacts   逐城影响面（熔断判据与确认状态，2026-10-01；见 {@link SuspendCityImpact}）
  */
 public record BatchSuspendResult(
         int total,
@@ -24,7 +26,9 @@ public record BatchSuspendResult(
         int skippedLocked,
         int skippedExempt,
         List<SkippedByGuardDetail> skipped,
-        List<SuspendDetail> details
+        List<SuspendDetail> details,
+        boolean dryRun,
+        List<SuspendCityImpact> cityImpacts
 ) {
     /** 暂停明细：门店 + 变更前后状态 + 来源标识（回滚依据） */
     public record SuspendDetail(

@@ -5,6 +5,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.config.AmapProperties;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
+import org.quwuting.quwutingservice.venue.change.VenueChangePublisher;
+import org.quwuting.quwutingservice.venue.change.VenueFactChange;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.JsonNode;
@@ -78,6 +80,7 @@ public class AmapVenuePhotoSyncService {
 
     private final VenueRepository venueRepository;
     private final VenueService venueService;
+    private final VenueChangePublisher venueChangePublisher;
     private final AmapProperties amapProperties;
     private final ObjectMapper objectMapper;
 
@@ -269,6 +272,9 @@ public class AmapVenuePhotoSyncService {
                         1001, "门店不存在"));
         venueService.clearImportedPhotos(venueId);
         venueRepository.markPhotoSyncExcluded(venueId);
+        // 本类自己写了门店表（排除标记）⇒ 自己声明变更：不依赖被调方「恰好也发了」——
+        // 两次发布在同一事务内提交后各失效一次，幂等无副作用
+        venueChangePublisher.publish(VenueFactChange.PHOTO, venueId);
         log.info("[amap-photo-sync] clear photos: venue={} ({}), marked photoSyncExcluded",
                 venueId, venue.getName());
     }
@@ -355,6 +361,7 @@ public class AmapVenuePhotoSyncService {
             // 主图缺失 / 不在匹配结果（疑似错配）→ 重写主图 + 重置相册
             venue.setImageUrl(imageUrl);
             venueRepository.save(venue);
+            venueChangePublisher.publish(VenueFactChange.PHOTO, venue.getId());
             persistGalleryPhotos(venue.getId(), result.photos());
             return SyncItem.of(venue, "SUCCESS", imageUrl,
                     result.photos().size() + " 张照片，已取官方图床主图并入相册"

@@ -92,6 +92,23 @@ storage:
   - **排障提示（403 必须看响应体 `Code`）**：`AccessDenied` = policy 字段缺失/不匹配或角色权限不足；`SignatureDoesNotMatch` = 签名算错；`InvalidPolicyDocument` = policy 结构非法或已过期；`RequestTimeTooSkewed` = 本机时钟偏移。前端已把 Code 写入错误消息与 console（旧版只抛裸状态码，无法区分根因）。
   - **CORS 判别**：浏览器跨域 POST multipart/form-data 属 CORS 简单请求（无预检），bucket 未配 CORS 时表现为 fetch reject（TypeError / status 0）**而非 403**；能读到 403 即说明该来源已被 CORS 规则放行。
   - **本地开发绕 CORS（2026-09-24）**：bucket CORS 白名单只登记生产后台域名，本地任何端口直传都会被拦（CORS error）。解法不是往白名单塞 localhost，而是 **dev 期由 vite 代理转发**——`vite.config.ts` 新增 `/oss-direct` → `https://{bucket}.{endpoint}`（rewrite 去前缀，`VITE_OSS_PROXY_TARGET` 可覆盖桶），admin-web `services/storage.ts` 在 `import.meta.env.DEV` 时用 `/oss-direct` 替代 `token.host`；生产仍直连 `token.host`，凭证/路径/publicUrl 两环境完全一致，仅入口不同——换端口、换机器都不再需要动控制台。
+  - **生产 bucket CORS 规则（admin-web 浏览器直传必配，2026-10-01 舞友之家 GROUP_QR 上传 CORS error 复勘）**：浏览器 multipart POST 直传到 `https://{bucket}.{endpoint}` 是跨域请求，bucket 必须显式允许 admin-web 来源，否则 fetch reject（CORS error / status 0）。**小程序端 `wx.uploadFile` 是原生上传、不经浏览器同源策略，故切流 `STORAGE_PROVIDER=oss` 时小程序侧 200 通过、admin-web 侧必爆 CORS——这正是 2026-09-24「只测小程序不算通过」护栏要防的缺口**。判定来源：DevTools → Network → 失败的 POST/OPTIONS → Request Headers 里的 `Origin:` 值即为须放行来源（务必含 scheme，`http://` 与 `https://` 不同源）。推荐规则（允许域名而非 `*`）：
+    ```xml
+    <CORSConfiguration>
+      <CORSRule>
+        <AllowedOrigin>https://admin.starseek.online</AllowedOrigin>
+        <AllowedOrigin>http://admin.starseek.online</AllowedOrigin>
+        <AllowedMethod>POST</AllowedMethod>
+        <AllowedMethod>OPTIONS</AllowedMethod>
+        <AllowedHeader>*</AllowedHeader>
+        <ExposeHeader>ETag</ExposeHeader>
+        <MaxAgeSeconds>300</MaxAgeSeconds>
+      </CORSRule>
+    </CORSConfiguration>
+    ```
+    - 阿里云控制台：OSS → `quwuting-public` → 权限管理 → 跨域设置（CORS）→ 创建规则，按上面填；或 `ossutil cors --method put oss://quwuting-public cors.xml`。
+    - 若 admin 仅 https 可删 `http://` 那条；若临时放宽可用单个 `<AllowedOrigin>*</AllowedOrigin>`（允许任意站点带签名直传，policy 已限定精确 key 故风险可控，仅作应急）。
+    - **本地 `npm run preview` / 直接起 dist 也会直连 OSS（DEV=false）→ localhost 来源被 CORS 拦**：这不是 bucket 问题，改用 `npm run dev`（走 `/oss-direct` 代理）或本地也挂同源反代。
 
 **URL 白名单与内网校验（ImageContentValidator）**：
 - 白名单 = Supabase 前缀（projectUrl + legacyProjectUrls）+ OSS 前缀（`https://{bucket}.{endpoint}/`，**oss 配置完整即生效，与 provider 开关无关**——过渡期两代 URL 并存）；

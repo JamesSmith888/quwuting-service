@@ -33,10 +33,20 @@ build/
 .vscode/
 
 ### Local dev config (contains DB credentials) ###
+# 2026-10-01 根因修复：原规则逐个枚举文件名（dev/mysql），任何变体（.bak / 拷贝 / -local）都会漏网——
+# application-dev.yaml.bak 就这样带着真实密钥进了 Git。改为「资源目录下的环境配置默认忽略、
+# 只放行明确要入库的那一份」（白名单）；新增环境配置若确需入库，必须在下面显式 ! 放行。
+**/src/main/resources/application-*
+!**/src/main/resources/application-prod.yaml
 **/application-dev.yaml
 **/application-dev.yml
 **/application-mysql.yaml
 **/application-mysql.yml
+# 编辑器/手工备份一律不入库（备份文件最容易携带真实配置）
+*.bak
+*.orig
+*.swp
+*~
 
 ### Local data (uploads etc.) ###
 data/

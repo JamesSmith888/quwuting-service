@@ -1,6 +1,7 @@
 package org.quwuting.quwutingservice.auth.service;
 
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.common.tx.TransactionBoundaryGuard;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
@@ -66,6 +67,7 @@ public class WechatService {
      * @throws BusinessException 当微信返回错误码或响应无法解析时
      */
     public String code2Session(String code) {
+        TransactionBoundaryGuard.warnIfInTransaction("wechat.code2Session", WechatService.class);
         String body = restClient.get()
                 .uri(JSCODE2SESSION_URL, appid, secret, code)
                 .retrieve()
@@ -79,7 +81,8 @@ public class WechatService {
         try {
             resp = objectMapper.readValue(body, Code2SessionResponse.class);
         } catch (Exception e) {
-            log.error("WeChat code2Session response parse failed, body={}", body, e);
+            // 响应体可能含 session_key（敏感凭据）：只记长度，不落正文
+            log.error("WeChat code2Session response parse failed, bodyLength={}", body.length(), e);
             throw new BusinessException(5001, "微信接口响应格式异常");
         }
 
@@ -125,6 +128,7 @@ public class WechatService {
             if (accessToken != null && System.currentTimeMillis() < accessTokenExpiresAt - 300_000L) {
                 return accessToken;
             }
+            TransactionBoundaryGuard.warnIfInTransaction("wechat.getAccessToken", WechatService.class);
             String body = restClient.get()
                     .uri(GET_ACCESS_TOKEN_URL, appid, secret)
                     .retrieve()
@@ -136,7 +140,8 @@ public class WechatService {
             try {
                 resp = objectMapper.readValue(body, AccessTokenResponse.class);
             } catch (Exception e) {
-                log.error("WeChat getAccessToken response parse failed, body={}", body, e);
+                // 响应体可能含 access_token（敏感凭据）：只记长度，不落正文
+            log.error("WeChat getAccessToken response parse failed, bodyLength={}", body.length(), e);
                 throw new BusinessException(5001, "微信接口响应格式异常");
             }
             if (resp.errcode() != null && resp.errcode() != 0) {
@@ -159,6 +164,7 @@ public class WechatService {
      * @param envVersion  release / trial / develop
      */
     public byte[] getUnlimitedQrCode(String scene, String page, String envVersion) {
+        TransactionBoundaryGuard.warnIfInTransaction("wechat.getUnlimitedQrCode", WechatService.class);
         String token = getAccessToken();
         String reqBody;
         try {

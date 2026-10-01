@@ -22,7 +22,10 @@
 
   # 批量置「暂停营业」（白名单口径，2026-09-10；仅 OPEN→SUSPENDED，非 OPEN 静默跳过）
   # items 元素只需 {"venueId":123}——reportDate/sourceId/source 由脚本统一注入
-  python3 qw_api.py status-suspend --base-url http://localhost:8080 --items '[...]' --report-date 2026-09-10
+  # 2026-10-01 影响面熔断：先 --dry-run 看 cityImpacts（tripped=true 的城会被整批拒绝 1036），
+  # 核实属实后再带 --confirm-cities 正式提交
+  python3 qw_api.py status-suspend --base-url http://localhost:8080 --items '[...]' --report-date 2026-09-10 --dry-run
+  python3 qw_api.py status-suspend --base-url http://localhost:8080 --items '[...]' --report-date 2026-09-10 --confirm-cities 南通市
 
   # 批量灌别名（低置信长尾的固定处置，2026-09-25 用户拍板；逐条幂等，同店同名复活/有效行跳过）
   # ⚠️ alias 取值必须是「舞讯的原写法」——匹配器拿舞讯写法去别名域查表；灌后必须重跑 qw_match.py 回读
@@ -119,6 +122,11 @@ def main() -> int:
     parser.add_argument("--source-id", default="xianbao360", help="渠道标识（status-reverse）")
     parser.add_argument("--change-source", default="AGENT_BATCH",
                         help="变更来源标识（status-reverse 写入审计日志，默认 AGENT_BATCH=Agent 批量更新）")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="status-suspend 预演：只返回将要暂停的计划与逐城影响面（cityImpacts），不写库不通知")
+    parser.add_argument("--confirm-cities", default="",
+                        help="status-suspend 熔断放行：逗号分隔的城市名（与 cityImpacts.city 字面一致），"
+                             "仅在 dry-run 核对属实（如整城歇业）后使用")
     args = parser.parse_args()
 
     if args.command == "login":
@@ -199,8 +207,15 @@ def main() -> int:
             it.setdefault("reportDate", args.report_date)
             it.setdefault("sourceId", args.source_id)
             it.setdefault("source", args.change_source)
+        # 影响面熔断（2026-10-01，服务端 SuspendBlastRadiusGuard）：某城本批暂停占比超上限 ⇒
+        # 整批拒绝 1036。标准流程 = 先 --dry-run 看 cityImpacts，tripped 的城市核实后再带
+        # --confirm-cities 正式提交；⛔ 不要为了「跑通」把全部城市塞进 confirm-cities。
+        confirmed = [c.strip() for c in args.confirm_cities.split(",") if c.strip()]
+        payload = {"items": items, "dryRun": bool(args.dry_run)}
+        if confirmed:
+            payload["confirmedCities"] = confirmed
         data = _request(args.base_url, "POST", "/admin/venue-daily-openings/batch-suspend",
-                        token, {"items": items})
+                        token, payload)
         print(json.dumps(data, ensure_ascii=False))
         return 0
 

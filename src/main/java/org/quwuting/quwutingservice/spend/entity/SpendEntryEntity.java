@@ -1,5 +1,6 @@
 package org.quwuting.quwutingservice.spend.entity;
 
+import org.quwuting.quwutingservice.spend.SpendEntryLimits;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -40,7 +41,7 @@ public class SpendEntryEntity extends BaseEntity {
     private Long userId;
 
     /** 客户端生成 id（重放安全；与 user_id 组成幂等键） */
-    @Column(name = "client_entry_id", nullable = false, length = 32)
+    @Column(name = "client_entry_id", nullable = false, length = SpendEntryLimits.CLIENT_ENTRY_ID_MAX_LENGTH)
     private String clientEntryId;
 
     /** 业务发生时刻（结算=停止时刻；手动=记账时刻；Java 传 LocalDateTime，禁 DB now()） */
@@ -48,7 +49,7 @@ public class SpendEntryEntity extends BaseEntity {
     private LocalDateTime ts;
 
     /** 金额（元，恒正数；0 元账目在客户端已不落） */
-    @Column(nullable = false, precision = 10, scale = 2)
+    @Column(nullable = false, precision = SpendEntryLimits.AMOUNT_PRECISION, scale = SpendEntryLimits.AMOUNT_SCALE)
     private BigDecimal amount;
 
     /** 消费分类（固定 7 类禁自定义；第 7 类 GUEST=客人 为收入向，见 SpendCategory） */
@@ -69,7 +70,7 @@ public class SpendEntryEntity extends BaseEntity {
     private SpendDirection direction;
 
     /** 来源关联 id（source=DANCE 时指向客户端 DanceRecord.id，明细↔账目追溯） */
-    @Column(name = "source_ref_id", length = 32)
+    @Column(name = "source_ref_id", length = SpendEntryLimits.SOURCE_REF_ID_MAX_LENGTH)
     private String sourceRefId;
 
     /** 关联门店（可空 = 未关联；定位失败且用户未手动挂是合法状态，聚合时独立桶展示） */
@@ -77,7 +78,7 @@ public class SpendEntryEntity extends BaseEntity {
     private Long venueId;
 
     /** 门店名称快照（门店改名/删除后账目行仍可读，对齐 DanceRecord 规则快照思路） */
-    @Column(name = "venue_name", length = 100)
+    @Column(name = "venue_name", length = SpendEntryLimits.VENUE_NAME_MAX_LENGTH)
     private String venueName;
 
     /** 结算时长秒数（仅 DANCE 来源；手动无此字段） */

@@ -72,8 +72,20 @@ sudo bash deploy/deploy.sh --no-user --no-unit   # 仅重新打包+重启
 | `Restart=always` + `RestartSec=10s` | systemd 守护 | 异常退出后 10s 自愈 |
 | `StartLimitBurst=5` / `StartLimitIntervalSec=120` | 2 分钟内最多重启 5 次 | 防止配置错误导致无限重启循环 |
 | `MemoryMax=950M` / `MemoryHigh=800M` | cgroup 硬/软限制 | JVM 逃逸时兜底（仍 < 物理 2GB 一半），OS 不被拖死 |
+| 优雅停机（2026-10-01） | `server.shutdown: graceful` + `spring.lifecycle.timeout-per-shutdown-phase: 20s` + unit `TimeoutStopSec=30` | restart 时先停收新请求、排空在途请求（结算入账 / 上报 / 批量写库）再退出，不再腰斩写请求 |
+| 就绪探测（2026-10-01） | restart 后轮询 `GET /health`（含一次 DB 往返，`common/web/HealthController`），最长 `READY_TIMEOUT_SECONDS`（默认 120s） | 「进程在跑」≠「能服务」：迁移校验失败 / 配置缺失 / 连不上库时进程被反复拉起，旧脚本 `sleep 3` + `is-active` 恰好命中「刚拉起」瞬间报成功；现在未就绪即打印日志并非 0 退出 |
 
-**HikariCP 连接池**：统一在 `application.yaml` 基础配置声明（2026-08-10 起，禁止在环境 yaml 重复——防漂移）：maximumPoolSize=5, minimumIdle=2, idle-timeout=5min, max-lifetime=15min, connection-timeout=10s, leak-detection-threshold=30s, **keepalive-time=60s + validation-timeout=3s**。低流量小程序 + 高延迟 DB（~150ms/往返）场景下 5 连接足够，减少内存占用；keepalive 探活是"数据库抖动不死连接"的关键（见「连接池与数据库抖动韧性」）。
+**部署就绪检查的边界（2026-10-01）**：上表两项消除的是「切换期间腰斩在途请求」与「启动失败无人知」。
+单机 restart 期间（JVM 启动约 15~20s）**仍然没有实例在服务**——这需要蓝绿（双端口 + nginx upstream
+切换）才能消除，属架构事项未做；夜间部署请避开微信审核时段。
+
+**可信代理（2026-10-01）**：`server.forward-headers-strategy: native`（Tomcat RemoteIpValve）从
+`X-Forwarded-For` **右侧**跳过可信代理（回环 / 内网 / CGNAT 段）取真实来源写入 `remoteAddr`。
+⚠️ 前提：nginx 必须 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`（admin-web 部署脚本
+已如此）；api 站点配置不在仓库内，变更前在服务器只读核对。若未来在 nginx 前再加一层 CDN/SLB，需要把它
+的出口网段加入可信代理（`server.tomcat.remoteip.internal-proxies`），否则所有请求的来源都会变成那层代理。
+
+**HikariCP 连接池**：统一在 `application.yaml` 基础配置声明（2026-08-10 起，禁止在环境 yaml 重复——防漂移）：maximumPoolSize=5, minimumIdle=2, idle-timeout=5min, max-lifetime=15min, connection-timeout=10s, leak-detection-threshold=30s, **keepalive-time=60s + validation-timeout=3s**。低流量单机场景下 5 连接足够；**池小 ⇒ 任何持有连接等待网络的代码都会迅速耗尽它**（事务内禁远程调用，见 13-code-standards「事务边界」）；keepalive 探活是"数据库抖动不死连接"的关键（见「连接池与数据库抖动韧性」）。
 
 nginx 站点配置：`/etc/nginx/conf.d/api.starseek.online.conf`（443 ssl，证书 `/etc/nginx/ssl/api.starseek.online.pem`（DigiCert DV），反代 `127.0.0.1:8080`；80 端口 301 跳 https）。
 
@@ -140,6 +152,12 @@ Supabase 事务池化（6543）抖动（用户确认：Supabase 当前不稳定�
 ## Schema 演进与数据库完整性（2026-08-07 起：Flyway 显式迁移 + validate）
 
 ### Schema 演进策略（Flyway 版本化迁移，Hibernate 只校验）
+
+> **2026-10-01 现状**：生产库 = RDS MySQL，迁移目录 = `classpath:db/migration-mysql`，且**已写进
+> `application.yaml` 基础配置**（此前基础配置默认指向已冻结的 PG 目录 `db/migration`、只靠各 profile
+> 覆盖——任何一次漏带 profile 启动都会对 MySQL 执行 PG 脚本）；`baseline-on-migrate=false`、
+> `clean-disabled=true`、`validate-on-migrate=true` 显式声明，环境 yaml 不再重复 flyway 配置。
+> 下文 PG 时代的 baseline 双路径是历史记录。
 
 **核心决策（2026-08-07）**：schema 演进由 **Flyway 显式版本化迁移**管理（`classpath:db/migration/V{n}__描述.sql`，应用启动时自动按序执行），Hibernate `ddl-auto` 从 `update` 改为 **`validate`**（启动时校验实体映射与实际表结构一致，不一致即拒绝启动，fail-fast）。**废止 2026-08-05 确立的 `ddl-auto: update` 自动演进策略**——其固有缺陷（不能删列/改约束、无版本历史/回滚、多实例并发启动 DDL 竞态、schema 变更与业务代码耦合在启动路径）是生产稳定性隐患（详见下「根因分析（2026-08-07 引入 Flyway）」）。
 

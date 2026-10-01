@@ -4,6 +4,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.auth.dto.response.LoginResponse;
 import org.quwuting.quwutingservice.auth.service.WechatService;
+import org.quwuting.quwutingservice.common.ratelimit.FailedAttemptLimiter;
+import org.quwuting.quwutingservice.common.web.ClientIpResolver;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.security.JwtUtil;
 import org.quwuting.quwutingservice.security.UserContext;
@@ -15,6 +17,7 @@ import org.quwuting.quwutingservice.webauth.dto.response.CreateSessionResponse;
 import org.quwuting.quwutingservice.webauth.dto.response.PollSessionResponse;
 import org.quwuting.quwutingservice.webauth.entity.WebLoginSession;
 import org.quwuting.quwutingservice.webauth.repository.WebLoginSessionRepository;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,6 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Base64;
 
@@ -73,20 +77,49 @@ public class WebAuthService {
     @Value("${web-auth.qrcode-page:pages/admin-web-login/admin-web-login}")
     private String qrcodePage;
 
+    /**
+     * 密码登录失败限制（2026-10-01）：同一来源 IP 在窗口内失败满 N 次即锁到窗口结束。
+     * 根因：密码通道成功即签发 ADMIN JWT（全部 /admin/** 能力），旧实现除常量时间比较外
+     * 没有任何速率约束，可被在线爆破。按 IP 而非按用户名计数——用户名固定为一个，
+     * 按用户名锁 = 任何人都能把唯一的管理员锁在门外。
+     */
+    @Value("${web-auth.password-login.max-failures:5}")
+    private int passwordMaxFailures;
+
+    @Value("${web-auth.password-login.lockout-minutes:15}")
+    private int passwordLockoutMinutes;
+
+    private FailedAttemptLimiter passwordAttemptLimiter;
+
+    /** 同时跟踪的来源上限（防异常流量把内存撑大；超限按 Caffeine 策略淘汰最久未用） */
+    private static final long PASSWORD_LIMITER_MAX_KEYS = 10_000;
+
+    @PostConstruct
+    void initPasswordAttemptLimiter() {
+        passwordAttemptLimiter = new FailedAttemptLimiter(Math.max(1, passwordMaxFailures),
+                Duration.ofMinutes(Math.max(1, passwordLockoutMinutes)), PASSWORD_LIMITER_MAX_KEYS);
+    }
+
     @Value("${web-auth.qrcode-env:release}")
     private String qrcodeEnv;
 
-    /** 生成新会话 + 小程序码。 */
-    @Transactional
+    /**
+     * 生成新会话 + 小程序码。
+     * <p>
+     * 事务边界（2026-10-01）：先在事务外向微信生成小程序码，成功后再落会话（仓库单语句事务）——
+     * 旧实现整体 {@code @Transactional}，外呼微信期间持有连接；且外呼失败时会话行随回滚消失、
+     * 外呼成功落库失败时码已作废，两种顺序的失败形态里「先码后存」更干净（无悬空会话）。
+     */
     public CreateSessionResponse createSession() {
         String sessionId = newSessionId();
+        byte[] png = wechatService.getUnlimitedQrCode(SCENE_PREFIX + sessionId, qrcodePage, qrcodeEnv);
+
         WebLoginSession session = new WebLoginSession();
         session.setSessionId(sessionId);
         session.setStatus(STATUS_PENDING);
         session.setExpiresAt(LocalDateTime.now().plusSeconds(SESSION_TTL_SECONDS));
         sessionRepository.save(session);
 
-        byte[] png = wechatService.getUnlimitedQrCode(SCENE_PREFIX + sessionId, qrcodePage, qrcodeEnv);
         String dataUrl = "data:image/png;base64," + Base64.getEncoder().encodeToString(png);
         return new CreateSessionResponse(sessionId, dataUrl, SESSION_TTL_SECONDS);
     }
@@ -150,11 +183,19 @@ public class WebAuthService {
         if (webAuthPassword == null || webAuthPassword.isBlank()) {
             throw new BusinessException(1003, "密码登录未启用（扫码登录为主通道）");
         }
+        String attemptKey = "ip:" + ClientIpResolver.resolve();
+        if (passwordAttemptLimiter.isBlocked(attemptKey)) {
+            log.warn("[webauth] password login rejected (locked out) {}", attemptKey);
+            throw new BusinessException(1006, "尝试次数过多，请 " + passwordLockoutMinutes + " 分钟后再试");
+        }
         if (!constantTimeEquals(username, webAuthUsername)
                 || !constantTimeEquals(password, webAuthPassword)) {
-            log.warn("[webauth] password login failed (bad credentials)");
+            int failures = passwordAttemptLimiter.recordFailure(attemptKey);
+            log.warn("[webauth] password login failed (bad credentials) {} failures={}/{}",
+                    attemptKey, failures, passwordMaxFailures);
             throw new BusinessException(1003, "账号或密码错误");
         }
+        passwordAttemptLimiter.reset(attemptKey);
         User admin = userRepository.findFirstByRoleAndDeletedFalse(UserRole.ADMIN)
                 .orElseThrow(() -> new BusinessException(1003, "平台管理员账号不存在"));
         String token = jwtUtil.generateToken(admin.getId(), admin.getRole());

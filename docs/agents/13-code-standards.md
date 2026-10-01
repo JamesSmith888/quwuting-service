@@ -203,6 +203,34 @@ public class GlobalExceptionHandler {
 - 禁止在 Service 层 catch 后吞掉异常
 - Controller 层禁止 try-catch，统一由 `GlobalExceptionHandler` 处理
 - 日志用 `@Slf4j`，错误级别：业务异常用 `warn`，系统异常用 `error`
+- **外部依赖的可预期失败**（配额 / 限流 / 凭证 / 上游超时）抛 `ExternalServiceUnavailableException`
+  （→ 503 + 5005 + Retry-After），禁止包成 `IllegalStateException` 落进兜底 500（见 12-api-conventions「重试契约」）
+- 唯一键冲突判定一律 `DbConstraintViolations.isUniqueViolation`（PG 23505 / MySQL 1062；MySQL 的 SQLState
+  23000 同时覆盖外键/非空，**禁只看 SQLState**）
+
+### 事务边界：远程 I/O 不进事务（2026-10-01）
+
+连接池只有 5 个连接，事务期间连接一直被持有。事务内等一个外部 HTTP（微信 code2Session 读超时 10s、
+地图 API、图片下载校验）= 连接空转——5 个并发慢请求即可占满整池、全站接口随之超时。2026-10-01 实例：
+`AuthService.login` 整体 `@Transactional` 包住 code2Session（每次冷启动静默登录都走它）。
+
+- **规则**：远程调用在事务外完成，拿到结果后再进入短事务落库；需要「远程成功才落库」的，顺序是
+  「先远程、后落库」（先例 `WebAuthService#createSession`），不是「开事务 → 远程 → 提交」。
+- **并发建号类**：去掉外层事务后，用唯一约束兜底 + 撞键回读（先例 `AuthService#createUserOrReadConcurrent`）。
+- **运行期探针**：远程客户端在发起网络调用前调用 `TransactionBoundaryGuard.warnIfInTransaction(op, Client.class)`，
+  处于活动事务中即 WARN（含业务调用方），同一「操作 × 调用方」10 分钟内只记一次。已接入：
+  `WechatService`（code2Session / accessToken / 小程序码）、`TencentLbsClient`、`ImageContentValidator`
+  下载校验、`WxSubscribeSendService`。**新增外部客户端必须接入**。已知存量告警点：门店编辑时的图片校验
+  （在 `updateVenue` 事务内）、订阅消息发送（AFTER_COMMIT 阶段连接仍绑定）——收敛方向见各自注释。
+
+### 日志与隐私（2026-10-01）
+
+- 请求日志的 query 必须先经 `common/web/LogRedaction.redactQuery`：坐标参数降到 2 位小数（≈1km），
+  凭据参数（token / code / password / secret / session_key / ticket）打码。用户精确坐标不得进日志
+  （与 52 号文档「用户坐标不出端」同一红线），日志是保留最久、访问控制最弱的存储。
+- 外部接口响应体可能含凭据（code2Session 的 session_key、access_token）：解析失败时只记长度，不落正文。
+- 客户端 IP 只读 `request.getRemoteAddr()`（`ClientIpResolver`）；可信代理由 `server.forward-headers-strategy`
+  统一声明，**禁止自行解析 X-Forwarded-For**（取第一个值 = 取客户端自己声明的值，按 IP 的频控形同虚设）。
 
 ### 并发写入竞态处理（upsert 优先，唯一约束 catch 兜底）
 
@@ -251,7 +279,7 @@ INFO  [http] GET /venues/14/tags/stats -> 200 cost=9ms rid=r3-m1abc
 WARN  [http] GET /venues/14 -> 200 cost=2412ms rid=r4-m1abd [SLOW]
 ```
 
-- `cost` 覆盖 Filter → AuthInterceptor → Controller → Service 全链路，即"服务端处理耗时"。前端同 rid 日志的 cost − 后端 cost ≈ 网络传输开销（含 Cloudflare Tunnel）
+- `cost` 覆盖 Filter → AuthInterceptor → Controller → Service 全链路，即"服务端处理耗时"。前端同 rid 日志的 cost − 后端 cost ≈ 网络传输开销；行尾 `ip=` 为容器按可信代理解析后的来源（2026-10-01）
 - `SLOW_THRESHOLD_MS`（当前 1000ms，依据单次跨洲 DB 往返 ~300-500ms 定档）及以上升级为 WARN，便于日志中快速筛出慢请求
 - `rid` 读取前端 `X-Request-Id` 请求头（小程序 `services/requestPerf.ts` 生成）；无此头的请求（curl 等）自动生成 `s` 前缀 ID
 - 必须保持最高优先级：若其他 Filter 排在其前，计时将漏掉前置处理

@@ -243,7 +243,43 @@ def main() -> int:
         print(f"  #{vid} {nm} —— {tag}{'（' + note + '）' if note else ''}")
     if not annotated:
         print("  （无）")
-    print(f"\n自检：暂停规模应在 40–80 家量级；跑到几百家先查城市名归一与范围细化。")
+    # ── 🔍 量级复核（2026-10-01 固化，取代每轮手写的 ad-hoc 差集脚本）──
+    # 背景：本轮 Agent 手写差集脚本时把 venueId 取空（`r.get('venue') or {}` 缺回退）
+    # ⇒ 虚高出一版「250+ 家被排除」的错结论，差点误判成口径失效。这类临时脚本每轮重写
+    # 必错一次 ⇒ 收口进脚本，输出自洽等式：减法两侧必须对得上。
+    _open_cov = [v for v in venues if v.get("status") == "OPEN" and v["city"] in covered]
+    _not_hit = [v for v in _open_cov if v["venueId"] not in mentioned]
+    _sub_ids = {s["venueId"] for s in suspend}
+    _hold_ids = {s["venueId"] for s in suspend_manual_hold} | {s["venueId"] for s in suspect_hold}
+    _gdrop_ids = {s["venueId"] for s in suspend_guard_dropped}
+    _scope_excluded = [v for v in _not_hit if v["venueId"] not in _sub_ids
+                       and v["venueId"] not in _hold_ids and v["venueId"] not in _gdrop_ids]
+    print("\n🔍 量级复核（城市级差集 · 自洽校验）：")
+    print(f"  覆盖城内 OPEN {len(_open_cov)} − 已点名 {len(_open_cov) - len(_not_hit)}"
+          f" = 未点名 {len(_not_hit)}")
+    print(f"  ⇒ 暂停提交 {len(_sub_ids)} + 护栏剔除 {len(_hold_ids)} + 守卫 {len(_gdrop_ids)}"
+          f" + 范围细化排除 {len(_scope_excluded)}"
+          f" = {len(_sub_ids) + len(_hold_ids) + len(_gdrop_ids) + len(_scope_excluded)}"
+          f"（须 = 未点名 {len(_not_hit)}）")
+    if _scope_excluded:
+        _cnt = Counter((v.get("district") or "（无辖区）") for v in _scope_excluded)
+        # 「县级市/县/镇/旗/盟」= 非主城区的下级行政区，未被报到属正常排除；
+        # 只有出现「区/街道/无辖区」才可能是真的漏报，需人工复核。
+        _SUB = ("市", "县", "镇", "旗", "盟")
+        _bad = [k for k in _cnt if not k.endswith(_SUB)]
+        print(f"  排除明细（辖区）：{dict(_cnt)}")
+        print("  ✅ 全部落在县级市/县（未报到）—— 正常"
+              if not _bad else f"  ⚠️ 含非县级辖区，需人工复核：{_bad}")
+    # 🆕 新源语义准入校验（2026-10-01 立规，见 SKILL.md §Step 1「新源准入校验」）：
+    # 白名单语义 = 「列出来的 = 今日营业」⇒ 源应命中该城绝大多数在营门店。
+    # 命中率过低 = 源是「全量目录/参考资料」，此时「未上榜」≠ 关门，关门方向必须停用。
+    if _open_cov:
+        _rate = (len(_open_cov) - len(_not_hit)) / len(_open_cov)
+        print(f"  新源语义校验：覆盖城内命中率 {_rate:.0%} ⇒ "
+              + ("✅ 具备「当日营业白名单」语义，可执行关门方向" if _rate >= 0.6
+                 else "🚫 疑似「全量目录/参考资料」，**关门方向停用**，只保留高置信反转"))
+    print("\n自检：暂停规模应在 40–80 家量级；远低于该区间先看上一轮是否刚执行过暂停"
+          "（存量已清空属正常），几百家则查城市名归一与范围细化。")
     if args.out:
         print(f"→ 已落盘 {args.out}")
     return 0
