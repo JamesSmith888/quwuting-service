@@ -1,7 +1,7 @@
 {
   "source": "xianbao360",
   "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-09-30",
+  "updated": "2026-10-02",
   "entries": [
     {
       "city": "西安市",
@@ -3898,6 +3898,46 @@
       "venue_id": 360,
       "kind": "alias",
       "note": "2026-09-30 低置信长尾别名双写（09-25 口径）：舞讯用简称、平台名带品类后缀（演艺厅/舞吧/音乐酒吧/音乐茶吧/茶吧）⇒ 匹配落 CONTAINED。平台 alias 域已 alias-import，重跑回读改判 EXACT（via=alias-domain）。同日该店由 SUSPENDED/CEASED 反转 OPEN。"
+    },
+    {
+      "city": "成都市",
+      "news_name": "时代派克",
+      "platform_name": "时代派克盛世舞厅",
+      "venue_id": 481,
+      "kind": "alias",
+      "note": "2026-10-02 低置信长尾别名双写（09-25 口径）：舞讯用简称、平台名带「盛世舞厅」后缀 ⇒ 匹配落 CONTAINED。平台 alias 域已 alias-import，重跑回读改判 EXACT；同日由 CEASED 反转 OPEN。"
+    },
+    {
+      "city": "苏州市",
+      "news_name": "景气",
+      "platform_name": "景气旺座舞厅",
+      "venue_id": 1126,
+      "kind": "alias",
+      "note": "2026-10-02 低置信长尾别名双写（09-25 口径）：舞讯用简称、平台名带「旺座舞厅」后缀 ⇒ 匹配落 CONTAINED（fuzzy-prefix）。平台 alias 域已 alias-import，重跑回读改判 EXACT；同日由 SUSPENDED 反转 OPEN。"
+    },
+    {
+      "city": "长沙市",
+      "news_name": "东潮汇城",
+      "platform_name": "东潮汇舞厅娱乐城",
+      "venue_id": 897,
+      "kind": "alias",
+      "note": "2026-10-02 低置信长尾别名双写（09-25 口径）：平台别名域原只有「东潮汇」，舞讯写「东潮汇城」⇒ 落 CONTAINED（fuzzy-prefix）。补灌别名「东潮汇城」后回读改判 EXACT；同日由 SUSPENDED 反转 OPEN。"
+    },
+    {
+      "city": "成都市",
+      "news_name": "鲸鲨",
+      "platform_name": "京鲨跳舞俱乐部",
+      "venue_id": 484,
+      "kind": "typo",
+      "note": "2026-10-02 谐音字（鲸/京）+ 长名后缀，首二字子串 / 形近字 / 整串 keyword 三道全漏 ⇒ 表③ 险成假新店，真身 #484 还差点被算进暂停。keyword「鲨」同城唯一命中 ⇒ 已双写平台别名 + 本条目；同日由 CEASED 反转 OPEN。（末字补搜规则即由此例立，见 SKILL.md Step 3 兜底）"
+    },
+    {
+      "city": "兰州市",
+      "news_name": "温酱吟",
+      "platform_name": "温馨吟酒吧",
+      "venue_id": 1365,
+      "kind": "typo",
+      "note": "2026-10-02 中字错字（酱/馨）+ 平台名带「酒吧」后缀；工商登记「城关区温酱吟酒吧」（经营者温生仓，2023-01-03 成立，农民巷215号）+ 砂舞指南列「兰州温酱吟酒吧 今日营业」⇒ 同源确认同一实体。keyword「吟」同城唯一命中 ⇒ 已双写平台别名 + 本条目；同日由 SUSPENDED 反转 OPEN。⚠️ 平台主名「温馨吟酒吧」疑为错字，建议后续订正为「温酱吟酒吧」。"
     }
   ],
   "removed_duplicates": [

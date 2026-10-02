@@ -226,6 +226,46 @@ def match_one(m, cities: set[str], by_city: dict, indexes: dict, header_map: dic
     return rec
 
 
+def _try_cross_check(base_url: str, r: dict, qname: str) -> bool:
+    """单条 UNMATCHED 的 keyword 交叉验证（可换 query 重试）。
+
+    命中「同城且唯一」⇒ 就地升级 CONTAINED（via=keyword-cross-check）+ 记 cross_check_query，
+    返回 True（不再试其它 query）。命中多个 ⇒ 累积 cross_check_candidates 后返回 False。
+    接口报错 ⇒ 落 cross_check_error 并返回 False（静默跳过 = 假阴性无人知，见 2026-09-16 实证）。
+    """
+    q = urllib.parse.urlencode({"keyword": qname, "page": 0, "size": 20, "sort": "newest"})
+    try:
+        d = _get(base_url, f"/venues?{q}")
+    except SystemExit:
+        return False
+    except urllib.error.HTTPError as e:
+        # 2026-09-16 实证：个别 keyword 会让 /venues 列表接口 500
+        # （`keyword=金莎` 时 size<=11 正常、size>=12 必 500；单店详情接口正常）。
+        # 交叉验证是「兜底增益」而非主判据 ⇒ 单条失败不得中断整轮比对，
+        # 但必须落盘标记 + 汇总打印，交人工复核。
+        r["cross_check_error"] = f"HTTP {e.code}"
+        return False
+    except Exception as e:                       # 超时/DNS/解析等一律降级
+        r["cross_check_error"] = f"{type(e).__name__}"
+        return False
+    items = d if isinstance(d, list) else d.get("content", [])
+    hits = [x for x in items if x.get("city") == r["platform_city"]]
+    if len(hits) == 1:
+        vid = hits[0].get("id") or hits[0].get("venueId")
+        r.update(venueId=vid, confidence="CONTAINED", via="keyword-cross-check",
+                 mapped_platform_name=hits[0]["name"], status=hits[0].get("status"),
+                 district=hits[0].get("district"), platform_city_of_hit=hits[0].get("city"),
+                 cross_check_query=qname)
+        r.pop("fuzzy_hints", None)
+        r.pop("cross_check_error", None)
+        return True
+    if hits:
+        r.setdefault("cross_check_candidates", [])
+        r["cross_check_candidates"] += [f"{x['name']}#{x.get('id') or x.get('venueId')}"
+                                        for x in hits]
+    return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="舞讯 × 平台门店比对引擎")
     ap.add_argument("--mentions", required=True)
@@ -294,32 +334,17 @@ def main() -> int:
         for r in results:
             if r["confidence"] != "UNMATCHED" or r["guard"] or not r["platform_city"]:
                 continue
-            q = urllib.parse.urlencode({"keyword": r["name"], "page": 0, "size": 20, "sort": "newest"})
-            try:
-                d = _get(args.base_url, f"/venues?{q}")
-            except SystemExit:
-                continue
-            except urllib.error.HTTPError as e:
-                # 2026-09-16 实证：个别 keyword 会让 /venues 列表接口 500
-                # （`keyword=金莎` 时 size<=11 正常、size>=12 必 500；单店详情接口正常）。
-                # 交叉验证是「兜底增益」而非主判据 ⇒ 单条失败不得中断整轮比对，
-                # 但必须落盘标记 + 汇总打印，交人工复核（静默跳过 = 假阴性无人知）。
-                r["cross_check_error"] = f"HTTP {e.code}"
-                continue
-            except Exception as e:                       # 超时/DNS/解析等一律降级
-                r["cross_check_error"] = f"{type(e).__name__}"
-                continue
-            items = d if isinstance(d, list) else d.get("content", [])
-            hits = [x for x in items if x.get("city") == r["platform_city"]]
-            if len(hits) == 1:
-                vid = hits[0].get("id") or hits[0].get("venueId")
-                r.update(venueId=vid, confidence="CONTAINED", via="keyword-cross-check",
-                         mapped_platform_name=hits[0]["name"], status=hits[0].get("status"),
-                         district=hits[0].get("district"), platform_city_of_hit=hits[0].get("city"))
-                r.pop("fuzzy_hints", None)
-            elif hits:
-                r["cross_check_candidates"] = [f"{x['name']}#{x.get('id') or x.get('venueId')}"
-                                               for x in hits]
+            # 🔎 末字补搜（2026-10-02 立规）：短名整串搜不到时，再拿**末字**搜一次。
+            #    实证：成都·鲸鲨 → #484 京鲨跳舞俱乐部（郫都区，CEASED），谐音（鲸/京）+ 长名后缀，
+            #    首二字子串 / 形近字 / 整串 keyword 三道全漏 ⇒ 表③ 冒出假新店「鲸鲨」，
+            #    同时真身 #484 因未被算进 mentionedSet 差点被判暂停（两个方向同时错）。
+            queries = [r["name"]]
+            nq = norm(r["name"])
+            if 2 <= len(nq) <= 4 and nq[-1] != r["name"]:
+                queries.append(nq[-1])
+            for qname in queries:
+                if _try_cross_check(args.base_url, r, qname):
+                    break
 
     out = {"reportDate": M.get("reportDate"), "sources": M.get("sources", []),
            "noListHeaders": M.get("noListHeaders", []),
