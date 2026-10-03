@@ -93,6 +93,13 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * （id/name/距离）——计时器"匹配最近门店"只认这三样；不筛营业状态（用户人就在
      * 店里，CEASED/SUSPENDED 的店也该能挂，数据准确性优先于状态过滤）。
      * HAVING 别名过滤是 MySQL 方言（WHERE 里不能引用聚合/别名），仅此查询使用。
+     * <p>
+     * <b>同距并列必须确定性排序（2026-10-03 根因修复，52 号 §4.2）</b>：同楼多店的坐标
+     * 来自地址级地理编码，常常<b>完全相同</b>（现网 51 家，如南通五洲国际广场
+     * 「一壶淡泊 F2」与「丽莎 3 层」同一坐标）。只按距离排序时并列项顺序由执行计划决定，
+     * 消费方取「最近一家」等于随机挑——补 {@code id ASC} 作为次序键，使同一位置
+     * 永远得到同一顺序。注意确定性 ≠ 正确归因：同址门店的归因由消费方各自处理
+     * （到访统计按同址组共享；计时器「50m 内恰好一家」判据天然拒绝并列）。
      */
     @Query(value = """
             SELECT id AS venueId,
@@ -104,7 +111,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             FROM qwt_venues
             WHERE deleted = 0 AND latitude IS NOT NULL AND longitude IS NOT NULL
             HAVING distanceMeters <= :radiusM
-            ORDER BY distanceMeters ASC
+            ORDER BY distanceMeters ASC, id ASC
             LIMIT :limit
             """, nativeQuery = true)
     List<NearbyVenueRow> findNearby(@Param("lat") double lat,
@@ -119,6 +126,57 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
         String getVenueName();
 
         double getDistanceMeters();
+    }
+
+    /**
+     * 同址门店对（2026-10-03，52 号 §4.2「同址组」）：对每个入参门店，返回与它坐标间距
+     * ≤ radiusM 的<b>其他</b>在库门店（不含自身）。
+     * <p>
+     * <b>为什么需要</b>：手机定位分不出坐标太近的店——同一商场/大楼里的多家店经地址级地理编码后
+     * 坐标重合（现网 51 家完全重合），或因地址写法不同而散开数十米（南通京扬广场同层三家 27~44m，
+     * 2026-10-03）。「用户在 A 店」与「用户在同址的 B 店」是同一个位置证据，归因层必须把它们当作
+     * 一组看待，而不是让 nearby 的「最近一家」替用户掷骰子。半径的标定见
+     * {@code VenuePresenceService#CO_LOCATED_RADIUS_M}。
+     * <p>
+     * 距离公式与 {@link #findNearby} 逐字同源（地球半径 6371000m 的 Haversine），
+     * 保证「端侧上报距离」与「门店间距」在同一度量下比较。数据量 = 入参集合（一页几十家；
+     * admin 足迹排序时 = 有到访证据的门店，百级）× 全表（千级），无需空间索引。
+     * <p>
+     * 双方营业状态随行返回（2026-10-03，52 号 §4.4「营业状态消歧」）：同址组里只有一家在营时，
+     * 该址的到访证据归它——归因判定在 {@code VenuePresenceService}，本查询只交付几何与状态事实。
+     */
+    @Query(value = """
+            SELECT a.id AS venueId,
+                   a.status AS venueStatus,
+                   b.id AS coLocatedId,
+                   b.name AS coLocatedName,
+                   b.status AS coLocatedStatus
+            FROM qwt_venues a
+            JOIN qwt_venues b
+              ON b.id <> a.id
+             AND b.deleted = 0 AND b.latitude IS NOT NULL AND b.longitude IS NOT NULL
+            WHERE a.id IN (:venueIds)
+              AND a.latitude IS NOT NULL AND a.longitude IS NOT NULL
+              AND (6371000 * ACOS(LEAST(1,
+                       COS(RADIANS(a.latitude)) * COS(RADIANS(b.latitude))
+                       * COS(RADIANS(b.longitude) - RADIANS(a.longitude))
+                       + SIN(RADIANS(a.latitude)) * SIN(RADIANS(b.latitude))))) <= :radiusM
+            ORDER BY a.id ASC, b.id ASC
+            """, nativeQuery = true)
+    List<CoLocatedVenueRow> findCoLocatedPairs(@Param("venueIds") Collection<Long> venueIds,
+                                               @Param("radiusM") int radiusM);
+
+    /** 投影接口：同址门店对（venueId 的同址邻居 coLocatedId；状态为存储态枚举名） */
+    interface CoLocatedVenueRow {
+        Long getVenueId();
+
+        String getVenueStatus();
+
+        Long getCoLocatedId();
+
+        String getCoLocatedName();
+
+        String getCoLocatedStatus();
     }
 
 
@@ -1657,17 +1715,37 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * <p>
      * keyword 已由调用方做 LIKE 转义与小写化（06 号 §LIKE 字面转义 ESCAPE 同款
      * 约定，转义点在 Service 单侧，本查询不重复处理）。
+     * <p>
+     * 2026-10-03：筛选谓词抽为 {@link #ADMIN_LIST_FILTERS}，与 {@link #findAdminIds}（足迹排序
+     * 路径）共用——两条查询必须对同一组筛选给出同一个门店集合，否则「共 N 家」在切换排序时跳变。
      */
-    @Query("""
-            SELECT v FROM Venue v
-            WHERE v.deleted = false
-              AND (:city IS NULL OR v.city = :city)
-              AND (:status IS NULL OR v.status = :status)
-              AND (:keyword IS NULL OR LOWER(v.name) LIKE CONCAT('%', :keyword, '%'))
-            ORDER BY v.id DESC
-            """)
+    @Query("SELECT v FROM Venue v\n" + ADMIN_LIST_FILTERS + "\nORDER BY v.id DESC")
     Page<Venue> findAdminPage(@Param("city") String city,
                               @Param("status") VenueStatus status,
                               @Param("keyword") String keyword,
                               Pageable pageable);
+
+    /**
+     * 管理端门店列表筛选谓词（{@link #findAdminPage} / {@link #findAdminIds} 唯一实现）：
+     * 只按显式筛选条件过滤，无业务裁剪。参数 :city / :status / :keyword 均可空（= 不筛）。
+     */
+    String ADMIN_LIST_FILTERS = """
+            WHERE v.deleted = false
+              AND (:city IS NULL OR v.city = :city)
+              AND (:status IS NULL OR v.status = :status)
+              AND (:keyword IS NULL OR LOWER(v.name) LIKE CONCAT('%', :keyword, '%'))
+            """;
+
+    /**
+     * 管理端门店列表的<b>全量 id</b>（2026-10-03 足迹排序，52 号 §6.1；消费方唯一 =
+     * {@code AdminVenueQueryService} 的派生量排序路径）。
+     * <p>
+     * 为什么不在 SQL 里排序：到访人数是<b>派生量</b>（命中谓词 × 同址组用户并集 × 营业状态归因），
+     * 不是任何一列，进不了 ORDER BY；故取筛选后的全部 id（千级 Long，id 倒序 = 默认序），
+     * 由 Service 按派生量稳定排序后切页。量级边界登记在 52 号 §6.1（门店到万级再评估物化）。
+     */
+    @Query("SELECT v.id FROM Venue v\n" + ADMIN_LIST_FILTERS + "\nORDER BY v.id DESC")
+    List<Long> findAdminIds(@Param("city") String city,
+                            @Param("status") VenueStatus status,
+                            @Param("keyword") String keyword);
 }

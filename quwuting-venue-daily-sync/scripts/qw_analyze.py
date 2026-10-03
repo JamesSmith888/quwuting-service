@@ -15,11 +15,19 @@
   reversal_manual 表② 低置信（CONTAINED/FUZZY）→ 需 user 放行（提交时带 forceReversal:true）
   new_candidates  表③ 新店候选（UNMATCHED，且未被守卫命中）——**只列不建**（红线 4）
   ref_only        表④ 命中且已 OPEN / 未覆盖城市
-  suspend_items   表⑤ 关门候选（白名单差集 + 范围细化，已剔除守卫、人工状态店、**疑似同店**）——提交前请核对自检行
+  suspend_items   表⑤ 关门候选（白名单差集 + 范围细化，已剔除守卫、人工状态店、**疑似同店**、
+                  **跨日跨源冲突**）——提交前请核对自检行
   suspend_suspect_hold 🛡 **疑似同店（被点名但匹配没挂上）⇒ 暂停方向保守剔除**，不进提交集；
                   由 Agent 判是否 `alias-import` 固化（实现与 qw_ms.py 共用）
   suspend_manual_hold 人工状态店（statusSource=MANUAL）**已剔除、不自动提交**，需用户逐条决定
                   （2026-09-27 P1 护栏：人工锁有期限，但「这店是人定的」不会过期 ⇒ 锁过期也不静默关）
+  suspend_cross_source_hold 🛡 **跨日跨源冲突**（2026-10-03 固化，**仅单源日生效**）：该店在近
+                  `--cross-source-days`（默认 2）日内曾被**另一来源**点名营业并已实际反转为 OPEN，
+                  今日这一条来源却没点名它 ⇒ 等价于双源日的「源间冲突」形态（0<|M|<|S|），
+                  两个方向都不自动写 ⇒ 不进提交集，列「待裁决」。
+                  为什么必须有它（10-03 实证）：市井慢时光单源日暂停候选 44 家中 **36 家**落在
+                  10-01/10-02 舞厅百事通的反转清单里 —— 直接执行 = 逢百事通发布日反向横跳 +
+                  给收藏者推送错误的「暂停营业」站内信/订阅消息（源覆盖口径差异被当成关门信号）。
   manual_annotated 人工权威标注（V25 人工锁 / 永久豁免）——**仅标注**，供汇报单列，
                   门禁判定唯一实现在服务端（本地不过滤，提交后看返回体 skippedLocked/skippedExempt）
 
@@ -56,12 +64,69 @@ def _county_key(s: str) -> str:
     return s
 
 
+def _resolve_token(base_url: str) -> str:
+    """与 qw_match.py 同一套 token 顺序：ADMIN_TOKEN > 缓存文件（同 base_url 才复用）。"""
+    if os.environ.get("ADMIN_TOKEN"):
+        return os.environ["ADMIN_TOKEN"]
+    try:
+        with open(os.environ.get("QW_TOKEN_CACHE", "/tmp/qw_token.json"), encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return ""
+    if d.get("baseUrl") and d["baseUrl"] != base_url.rstrip("/"):
+        return ""
+    return d.get("token") or ""
+
+
+def _fetch_recent_reversals(base_url: str, days: int, report_date):
+    """近 N 日内被反转为 OPEN 的门店 {venueId: {...}}。
+
+    ⚠️ 接口不可达 / 无 token 时返回 **None**（而非空 dict）——护栏据此降级并**显式告警**，
+    绝不静默放过（静默 = 又回到「差点误暂停 36 家」的老路）。
+    """
+    import datetime as _dt
+    import urllib.request
+    tok = _resolve_token(base_url)
+    if not tok:
+        return None
+    try:
+        req = urllib.request.Request(
+            f"{base_url.rstrip('/')}/admin/venue-sync/reversals?limit=200",
+            headers={"Authorization": "Bearer " + tok})
+        payload = json.load(urllib.request.urlopen(req, timeout=20))
+    except Exception:
+        return None
+    rows = payload.get("data", payload)
+    if isinstance(rows, dict):
+        rows = rows.get("content", [])
+    try:
+        today = _dt.date.fromisoformat(report_date) if report_date else _dt.date.today()
+    except Exception:
+        today = _dt.date.today()
+    out = {}
+    for r in rows or []:
+        ts = str(r.get("reversedAt") or "")[:10]
+        try:
+            rd = _dt.date.fromisoformat(ts)
+        except Exception:
+            continue
+        age = (today - rd).days
+        if 0 <= age <= days and r.get("toStatus") == "OPEN":
+            out[r["venueId"]] = {"reversedAt": ts, "ageDays": age,
+                                 "city": r.get("city"), "name": r.get("venueName")}
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="舞讯差异分析（3B + 五表）")
     ap.add_argument("--match", required=True, help="qw_match.py 的产出 JSON")
     ap.add_argument("--export", required=True, help="平台门店全量 JSON（数组或含 content 的对象）")
     ap.add_argument("--out")
     ap.add_argument("--dict", default=DEFAULT_DICT)
+    ap.add_argument("--base-url", default="http://localhost:8080")
+    ap.add_argument("--cross-source-days", type=int, default=2,
+                    help="跨日跨源冲突护栏窗口（天）。该店近 N 日内曾被另一来源点名反转 OPEN ⇒ "
+                         "单源日不判其关门。0 = 关闭该护栏")
     args = ap.parse_args()
 
     M = json.load(open(args.match, encoding="utf-8"))
@@ -173,6 +238,31 @@ def main() -> int:
                 s["suspect_hints"] = weak
             kept.append(s)
     suspend = kept
+
+    # 🛡 跨日跨源冲突护栏（2026-10-03 固化，**仅单源日生效**）
+    # 为什么只在单源日：双源日的 M/S 判定已能表达「一源点名、另一源覆盖该城却没点名」= 冲突；
+    # 单源日没有第二个源在盘面上，但**平台侧的反转记录**就是第二个源的痕迹 —— 用它把
+    # 「源覆盖口径差异」与「真关门」区分开。10-03 实证：不加这条护栏，44 家候选里 36 家会误暂停。
+    suspend_cross_source_hold = []
+    if args.cross_source_days > 0 and len(M.get("sources", [])) < 2:
+        recent = _fetch_recent_reversals(args.base_url, args.cross_source_days,
+                                         M.get("reportDate"))
+        if recent is None:
+            print("⚠️ 跨日跨源护栏**未生效**（reversals 接口不可达/无 token）"
+                  f"——暂停清单可能含「另一源近 {args.cross_source_days} 日点过名」的门店，"
+                  "提交前必须人工复核！")
+        else:
+            cross, keep2 = [], []
+            for s in suspend:
+                hit = recent.get(s["venueId"])
+                if hit:
+                    cross.append({**s, "crossSource": hit,
+                                  "why": f"近 {args.cross_source_days} 日内被另一来源点名营业"
+                                         f"（{hit['reversedAt']} → OPEN）⇒ 跨日跨源冲突，不判关门"})
+                else:
+                    keep2.append(s)
+            suspend, suspend_cross_source_hold = keep2, cross
+
     suspend_guard_dropped = [{"venueId": v["venueId"], "name": v["name"], "city": v["city"]}
                              for v in venues
                              if v["status"] == "OPEN" and v["city"] in covered and in_scope(v)
@@ -190,14 +280,19 @@ def main() -> int:
            "suspend_items": suspend, "suspend_guard_dropped": suspend_guard_dropped,
            "suspend_manual_hold": suspend_manual_hold,
            "suspend_suspect_hold": suspect_hold,
+           "suspend_cross_source_hold": suspend_cross_source_hold,
+           "crossSourceDays": args.cross_source_days,
            "manual_annotated": [{"venueId": i, "name": n, "manualLock": l, "exempt": e, "note": t}
                                 for i, n, l, e, t in annotated]}
     if args.out:
         json.dump(out, open(args.out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
     # ── 提交前自检（close-direction-playbook §5） ──
+    # ⚠️ 单源提示（2026-10-03 修正）：旧文案「单源：两个方向都只能当待放行清单」自 09-15
+    # （表① 高置信永远自动）与 09-29（关门方向不再逐轮询问）起已**作废**，保留会误导执行。
+    # 现行：单源只降级【低置信反转】与【跨日跨源冲突项】。
     print(f"来源 {len(out['sources'])} 个 {out['sources']}"
-          f"{'  ⚠️ 单源：两个方向都只能当待放行清单' if len(out['sources']) < 2 else ''}")
+          f"{'（单源：低置信反转 / 跨日跨源冲突项 不自动写；高置信反转与关门方向照常执行）' if len(out['sources']) < 2 else ''}")
     print(f"覆盖城市 {len(covered)} 个；仅有城市名无名单 "
           f"{out['noListHeaders'] or '（未提供，见 mentions JSON.noListHeaders）'}（视同未覆盖）")
     print(f"县级 header 回挂母城并参与范围细化："
@@ -220,6 +315,14 @@ def main() -> int:
             print(f"  #{s['venueId']} {s['name']}（{s['city']}·{s.get('district')}）"
                   f" 锁至 {str(s.get('manualLock'))[:16] if s.get('manualLock') else '（已过期）'}"
                   f" —— 需用户决定：本次照关（写库后转 SYNC 回归自动）/ 本次跳过")
+    if suspend_cross_source_hold:
+        print(f"\n🛡 跨日跨源冲突 · 暂停方向不写库 {len(suspend_cross_source_hold)} 家"
+              f"（近 {args.cross_source_days} 日内被**另一来源**点名并反转为 OPEN ⇒ 与双源日"
+              f"「源间冲突」同形；列待裁决，不推送错误的停业通知）：")
+        for x in suspend_cross_source_hold:
+            h = x["crossSource"]
+            print(f"  #{x['venueId']} {x['name']}（{x['city']}·{x.get('district')}）"
+                  f" ← {h['reversedAt']} 被点名反转 OPEN（{h['ageDays']} 天前）")
     if suspend_guard_dropped:
         print(f"  守卫豁免剔除 {len(suspend_guard_dropped)} 家："
               f"{[s['name'] + '#' + str(s['venueId']) for s in suspend_guard_dropped]}")
@@ -250,14 +353,18 @@ def main() -> int:
     _open_cov = [v for v in venues if v.get("status") == "OPEN" and v["city"] in covered]
     _not_hit = [v for v in _open_cov if v["venueId"] not in mentioned]
     _sub_ids = {s["venueId"] for s in suspend}
-    _hold_ids = {s["venueId"] for s in suspend_manual_hold} | {s["venueId"] for s in suspect_hold}
+    _hold_ids = ({s["venueId"] for s in suspend_manual_hold}
+                 | {s["venueId"] for s in suspect_hold}
+                 | {s["venueId"] for s in suspend_cross_source_hold})
     _gdrop_ids = {s["venueId"] for s in suspend_guard_dropped}
     _scope_excluded = [v for v in _not_hit if v["venueId"] not in _sub_ids
                        and v["venueId"] not in _hold_ids and v["venueId"] not in _gdrop_ids]
     print("\n🔍 量级复核（城市级差集 · 自洽校验）：")
     print(f"  覆盖城内 OPEN {len(_open_cov)} − 已点名 {len(_open_cov) - len(_not_hit)}"
           f" = 未点名 {len(_not_hit)}")
-    print(f"  ⇒ 暂停提交 {len(_sub_ids)} + 护栏剔除 {len(_hold_ids)} + 守卫 {len(_gdrop_ids)}"
+    print(f"  ⇒ 暂停提交 {len(_sub_ids)} + 护栏剔除(人工{len(suspend_manual_hold)}"
+          f"/疑似{len(suspect_hold)}/跨源{len(suspend_cross_source_hold)}) {len(_hold_ids)}"
+          f" + 守卫 {len(_gdrop_ids)}"
           f" + 范围细化排除 {len(_scope_excluded)}"
           f" = {len(_sub_ids) + len(_hold_ids) + len(_gdrop_ids) + len(_scope_excluded)}"
           f"（须 = 未点名 {len(_not_hit)}）")

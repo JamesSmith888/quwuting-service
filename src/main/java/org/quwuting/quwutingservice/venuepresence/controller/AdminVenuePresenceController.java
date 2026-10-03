@@ -29,10 +29,10 @@ public class AdminVenuePresenceController {
      * 单店到访统计（仅 ADMIN）。
      * GET /admin/venues/{venueId}/presence
      * <p>
-     * 近 7 天 / 近 30 天到访人数（20m 命中口径）+ 近 30 天附近人数（300m 片区
-     * 覆盖口径）+ 最近到访时刻；口径参数随响应回显（服务端权威，admin 展示必须
-     * 与数值同屏）。门店不存在时由 statsFor 的查询自然返回全 0（不校验存在性——
-     * 统计端点只读，无副作用）。
+     * 近 7 天 / 近 30 天到访人数（命中口径 HIT_RADIUS_M，同址门店按营业状态归因、无法归因时共享）+
+     * 近 30 天附近人数（300m 片区覆盖口径）+ 最近到访时刻 + 同址归因方式；口径参数随响应回显
+     * （服务端权威，admin 展示必须与数值同屏）。门店不存在时由 statsFor 的查询自然返回全 0
+     * （不校验存在性——统计端点只读，无副作用）。
      */
     @GetMapping("/{venueId}/presence")
     public ApiResponse<VenuePresenceStats> stats(@PathVariable Long venueId) {
@@ -41,12 +41,12 @@ public class AdminVenuePresenceController {
     }
 
     /**
-     * 到店足迹开关统计（仅 ADMIN，2026-09-29 四轮 V34）。
+     * 到店足迹开关统计（仅 ADMIN，2026-09-29 四轮 V34；2026-10-03 五轮改到店首问口径）。
      * GET /admin/venues/presence-consent-stats
      * <p>
-     * 当前态分布（每用户最新一条 consent 行）：启用 / 关闭去重用户数 +
-     * 其中「从未手动改过设置」的默认开启人数 + 近 30 天手动变更次数。
-     * 全局口径（非门店维度），admin-web 门店列表页头展示。
+     * 当前态分布（每用户最新一条 consent 行）：已允许 / 已关闭 / 待补问（最新态仍是默认开启期的
+     * 历史 DEFAULT）+ 到店首问回答分布 + 近 30 天设置变更次数。全局口径（非门店维度），
+     * admin-web 门店列表页头展示。
      */
     @GetMapping("/presence-consent-stats")
     public ApiResponse<VenuePresenceConsentStats> consentStats() {

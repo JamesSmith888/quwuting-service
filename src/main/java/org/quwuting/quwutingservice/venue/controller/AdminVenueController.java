@@ -28,17 +28,21 @@ public class AdminVenueController {
     private final AdminVenueQueryService adminVenueQueryService;
 
     /**
-     * 管理端门店列表（仅 ADMIN；全量无业务裁剪，city/status/keyword 筛选 + 分页）。
-     * GET /admin/venues?city=&status=&keyword=&page=0&size=20
+     * 管理端门店列表（仅 ADMIN；全量无业务裁剪，city/status/keyword 筛选 + 足迹排序/筛选 + 分页）。
+     * GET /admin/venues?city=&status=&keyword=&sort=LATEST|VISITS_30D|LAST_VISIT&visitedOnly=false&page=0&size=20
+     * <p>
+     * sort 缺省 / 非法 = LATEST（id 倒序）；visitedOnly = 只看近 30 天有到访的门店（52 号 §6.1）。
      */
     @GetMapping
     public ApiResponse<Page<AdminVenueListItem>> list(
             @RequestParam(required = false) String city,
             @RequestParam(required = false) String status,
             @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) String sort,
+            @RequestParam(defaultValue = "false") boolean visitedOnly,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size) {
         UserContext.requireAdmin();
-        return ApiResponse.ok(adminVenueQueryService.list(city, status, keyword, page, size));
+        return ApiResponse.ok(adminVenueQueryService.list(city, status, keyword, sort, visitedOnly, page, size));
     }
 }

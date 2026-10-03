@@ -6,7 +6,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
+import org.quwuting.quwutingservice.spend.enums.WireEnums;
 import org.quwuting.quwutingservice.venue.entity.Venue;
+import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.enums.VenueType;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuepresence.dto.request.ReportPresenceRequest;
@@ -14,6 +16,7 @@ import org.quwuting.quwutingservice.venuepresence.dto.response.PresenceReportRes
 import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceConsentStats;
 import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceStats;
 import org.quwuting.quwutingservice.venuepresence.entity.VenuePresenceConsent;
+import org.quwuting.quwutingservice.venuepresence.enums.CoLocatedAttribution;
 import org.quwuting.quwutingservice.venuepresence.enums.ConsentSource;
 import org.quwuting.quwutingservice.venuepresence.repository.VenuePresenceConsentRepository;
 import org.quwuting.quwutingservice.venuepresence.repository.VenuePresencePingRepository;
@@ -22,11 +25,16 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
+import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -36,9 +44,14 @@ import java.util.concurrent.TimeUnit;
  * <b>不进热度公式</b>（到店数天然随曝光增长，线性进公式即马太闭环——热度四问判据
  * 第 3 问不过；待数据量起来后按 05 号文档流程另行评估）。
  * <p>
- * <b>写宽松读严格</b>：写入侧只做协议限幅（防脏数据），「到访 / 附近」口径
- * （{@link #HIT_RADIUS_M} / {@link #HIT_MAX_ACCURACY_M} / {@link #NEARBY_RADIUS_M}）
- * 全部在查询侧判定——门店坐标是人工选点（10~30m 误差），阈值定错时历史数据可回溯。
+ * <b>写宽松读严格</b>：写入侧只做协议限幅（防脏数据），「到访 / 附近 / 同址 / 营业归因」口径
+ * （{@link #HIT_RADIUS_M} / {@link #HIT_MAX_ACCURACY_M} / {@link #NEARBY_RADIUS_M} /
+ * {@link #CO_LOCATED_RADIUS_M} / {@link #isInOperation}）全部在查询侧判定——门店坐标是地址级
+ * 地理编码（同楼多店坐标重合，室内偏离 50~150m），阈值定错时历史数据可回溯（2026-10-03 即据此回溯修复）。
+ * <p>
+ * <b>同意门禁（2026-10-03 五轮）</b>：只收「最新一条状态确立是用户显式开启」的用户的 ping
+ * （{@link #isExplicitlyEnabled}）——服务端是「先有同意、后有足迹」证据链的唯一收敛点，
+ * 旧版默认开启端未经询问的采集在上线即被拒收，不依赖端上升级覆盖率（52 号 §5）。
  * <p>
  * <b>隐私红线</b>：本域数据面 = (venueId, distanceM, accuracyM) 三个标量 +
  * 开关偏好布尔（V34，consent 流水——不含任何位置信息），用户经纬度在协议上
@@ -53,9 +66,9 @@ import java.util.concurrent.TimeUnit;
 @RequiredArgsConstructor
 public class VenuePresenceService {
 
-    /**
-     * 采集总开关（常量定义在 {@link OpsConfigService#KEY_PRESENCE_COLLECT_ENABLED}，
-     * V33 迁移插入默认行 true）：关闭后上报端点返回 {@code accepted=false(DISABLED)}
+    /*
+     * 采集总开关（常量定义在 OpsConfigService#KEY_PRESENCE_COLLECT_ENABLED，
+     * V33 迁移插入默认行 true）：关闭后上报端点返回 accepted=false(DISABLED)
      * 而非报错——客户端对失败静默，开关只影响「新数据是否进库」，历史数据不受影响。
      * 提审/隐私争议时可一键停采。
      */
@@ -70,7 +83,7 @@ public class VenuePresenceService {
     /**
      * 写入距离限幅（米，协议常量）：与 /venues/nearby 的采集半径同量级——超出
      * 500m 的「命中」不可能是真到店（更可能是端侧伪造或逻辑错），拒收防脏数据。
-     * 口径过滤（20m/300m）在查询侧，本限幅只是写侧卫生。
+     * 口径过滤（150m/300m）在查询侧，本限幅只是写侧卫生。
      */
     public static final int WRITE_MAX_DISTANCE_M = 500;
 
@@ -78,25 +91,88 @@ public class VenuePresenceService {
     public static final int WRITE_MAX_ACCURACY_M = 500;
 
     /**
-     * 到访命中半径（米，口径参数）：取值依据 = 2026-09-29 真库实测 20m 内有邻居的
-     * 门店仅 5.4%（归因唯一性成立）+ 需求方「20m 内才算准」的直觉。门店坐标本身
-     * 带人工选点误差（10~30m），本阈值**必然漏检部分真到访**——admin 展示必须
-     * 携带口径说明（严重低估真实到店量）。调整需发版并同步 52 号文档。
+     * 到访命中半径（米，口径参数 = 「用户 ↔ 门店坐标」的容差）。
+     * <p>
+     * <b>2026-10-03 由 20m 改为 150m（根因修复，52 号 §4.1）</b>：原 20m 把两个不同的量
+     * 混成了一个——它的论据「20m 内有邻居的店仅 5.4%」是<b>门店 ↔ 门店</b>间距统计
+     * （回答「归因唯一吗」），却被用作<b>用户 ↔ 门店</b>的命中容差（回答「人在店里时
+     * 离坐标多远」），而后者的误差预算完全不同：
+     * <ul>
+     *   <li>门店坐标是<b>地址级地理编码</b>（商场/大楼的锚点），不是原假设的
+     *       「wx.chooseLocation 人工选点 10~30m」——同楼多店坐标完全重合即为铁证；</li>
+     *   <li>室内定位（商场 3 层、无 GPS 直视）的实际偏离远大于 wx 回报的 accuracy。</li>
+     * </ul>
+     * 现网证据（截至 2026-10-03 共 21 条 ping）：需求方 10-02 夜在南通五洲国际广场现场
+     * 连续 4 条均为 86~91m，其余疑似在店样本 56~147m；20m 口径只留下 3 条（2 个 UV），
+     * <b>到访统计几乎全 0</b>。
+     * 距离分布在 147m 与 159m 之间出现自然断点（之后是 202m / 301m 的路过样本），
+     * 且 150m 落在 Android 地理围栏官方建议下限 100~150m 区间内。
+     * <p>
+     * 写宽松读严格 ⇒ 改值对历史 ping 立即回溯生效，无需重采。复核方法（数据量起来后
+     * 按此重标定，禁凭直觉改）：见 52 号 §4.3 标定 SQL。
+     * <p>
+     * <b>镜像</b>（改值三处同改，52 号 §4 参数表）：admin-web {@code PRESENCE_HIT_RADIUS_M}（列表口径
+     * 提示）、小程序 {@code ARRIVAL_PROMPT_RADIUS_M}（「真正到店」才首问的触发半径）。
      */
-    public static final int HIT_RADIUS_M = 20;
+    public static final int HIT_RADIUS_M = 150;
 
     /**
-     * 到访命中的精度门槛（米，口径参数）：accuracy 超过本值的定位（城市级误差）
-     * 即便距离凑巧 ≤ 20m 也不采信。NULL 精度视为达标（端侧未提供 ≠ 超标，
-     * 判据见 Repository 口径注释）。
+     * 到访命中的精度门槛（米）：<b>派生于 {@link #HIT_RADIUS_M}，不是独立口径参数</b>。
+     * 判据 = 定位自身的不确定半径大于判定圆时，这次定位在物理上就无法回答「在不在
+     * 圈内」——门槛只该排除这类「无判定能力」的定位。
+     * <p>
+     * 原值 30m（「超过即城市级误差」）是错误前提：wx 端室内 accuracy 常见 30~65m
+     * （iOS 无 GPS 时回报 65、Android 常见 35），30m 门槛恰好系统性剔除了最该被
+     * 统计的室内样本。NULL 精度视为达标（判据见 Repository 口径注释）。
      */
-    public static final int HIT_MAX_ACCURACY_M = 30;
+    public static final int HIT_MAX_ACCURACY_M = HIT_RADIUS_M;
+
+    /**
+     * 同址半径（米，口径参数 = 「门店 ↔ 门店」的<b>定位不可分辨</b>距离；2026-10-03 新增，同日 20 → 50m）。
+     * <p>
+     * 两家店坐标间距 ≤ 本值 ⇒ 手机定位判断不了用户在哪一家，归因改用定位以外的事实（营业状态，
+     * 52 号 §4.4），分不出时共享（组内用户并集）——而不是让 nearby 的「最近一家」替用户掷骰子。
+     * 这里的「同址」= <b>定位上分不开</b>，不等于同一门牌：同楼不同层、同楼不同门牌、紧邻的两栋楼，
+     * 对归因是同一个问题。
+     * <p>
+     * <b>20 → 50m 的根因（52 号 §4.2，勿重蹈）</b>：20m 的前提「同楼的店坐标重合；20~50m 已进入定位可分辨
+     * 的量级」只对<b>同一地址字符串</b>编码出的坐标成立（丽莎 / 一壶淡泊逐位相同）。同一栋楼用不同写法的地址
+     * 编码时锚点会散开：南通京扬广场「寻梦缘（校西路…京扬广场2楼）/ 抖舞（人民中路209号京扬数码城B座）/
+     * 南来北往（人民中路209号）」实际同层、寻梦缘与抖舞面对面不到 10m，坐标却两两相距 27 / 39 / 44m——
+     * 20m 把它们当成三家可区分的店，在楼里的用户（331：距南来北往坐标 20m、精度 15m）被记给已停业的
+     * 南来北往。与命中半径 20m 是同一类错误：阈值的前提从未对数据检验过。
+     * <p>
+     * <b>标定（现网 1301 家有坐标门店，2026-10-03，复核 SQL = 52 号 §4.3 ④）</b>：
+     * <ul>
+     *   <li>地址指向同一楼 / 商场、且至少一家在营的门店对，坐标间距 27~44m（京扬 27/39/44、富江商业广场 32、
+     *       书院万达 44）⇒ 取上界向上到 10m 档 = 50m；</li>
+     *   <li>同楼散布的长尾（65~92m：阳光天地、力宝广场、杉杉 IN 象、联盛广场）目前<b>双方都不在营</b>，
+     *       不影响归因——有在营门店落进这一段时按 §4.3 ④ 重标定；</li>
+     *   <li>代价 = 都在营、只能共享的门店对：20m 2 对 → 50m 5 对；按营业状态即可分清的对 15 → 22。
+     *       100m 会共享 12 对，多为确实不同楼的邻居，故不取。</li>
+     * </ul>
+     * 不变量：本值 &lt; {@link #HIT_RADIUS_M}（两个量回答的问题不同，见命中半径注释）。
+     */
+    public static final int CO_LOCATED_RADIUS_M = 50;
 
     /**
      * 「附近」覆盖半径（米，口径参数）：对齐 GET /venues/nearby 的缺省 300m——
      * 同一「附近」语义在采集与统计两侧共用一个值，避免第二份真值。
      */
     public static final int NEARBY_RADIUS_M = 300;
+
+    /**
+     * 「在营」状态集（2026-10-03，52 号 §4.4 营业状态消歧）：可被到访归因的门店状态。
+     * <p>
+     * 判据 = 「人此刻可能在这家店里」：OPEN 显然；CLOSED（休息中）是<b>短期态</b>（今天不开 ≠ 这家店
+     * 不存在），按在营处理——否则一次休息日就把整个 30 天窗口的证据让给邻居。RENOVATING / SUSPENDED /
+     * CEASED 是长期不在营：同址仍有在营门店时，该位置的证据不可能属于它们。
+     * <p>
+     * 已知局限（接受）：按<b>当前</b>状态归因、不按 ping 当时的状态——门店状态变更低频，且由每日同步
+     * 维持新鲜度；查询侧归因让状态更正（如 CEASED→OPEN 反转）立即回溯生效。状态数据本身失真时归因随之
+     * 失真，admin 详情页同屏展示同址门店状态，运营可据此识别。
+     */
+    private static final Set<VenueStatus> IN_OPERATION_STATUSES = EnumSet.of(VenueStatus.OPEN, VenueStatus.CLOSED);
 
     /** 每用户写频控（次/窗口，协议常量）：桶幂等已限 (user, venue) 粒度，此处限用户总写入速率 */
     private static final int WRITE_RATE_LIMIT = 10;
@@ -109,7 +185,7 @@ public class VenuePresenceService {
 
     /**
      * 每用户写入频控（滑动窗口）：键 = userId，值 = 窗口内写入时刻队列。
-     * 30 分钟桶幂等挡不住「跨店狂刷」，此处兜底用户级速率。合法流量（每次打开
+     * 15 分钟桶幂等挡不住「跨店狂刷」，此处兜底用户级速率。合法流量（每次打开
      * 至多 1 条）距上限差两个数量级。
      */
     private final Cache<Long, Deque<Long>> writeRateCache = Caffeine.newBuilder()
@@ -117,9 +193,15 @@ public class VenuePresenceService {
             .maximumSize(10_000)
             .build();
 
+    // ── 写侧 ────────────────────────────────────────────────────────────────────
+
     /**
      * 上报一次到访痕迹（POST /venues/{venueId}/presence 的实现）。
      * 调用方必须已 {@code UserContext.requireAuth()}（重放安全不变量：鉴权在副作用之前）。
+     * <p>
+     * 判定序：运营总开关 → 用户写频控 → <b>同意门禁</b> → 门店与参数校验 → 桶幂等写入。
+     * 门禁不通过返回 {@code accepted=false(CONSENT_REQUIRED)} 而非错误码：旧版默认开启端对失败
+     * 静默，拒收不该在它们的日志里制造 4xx 噪音。
      */
     @Transactional
     public PresenceReportResponse report(Long venueId, Long userId, ReportPresenceRequest request) {
@@ -128,6 +210,9 @@ public class VenuePresenceService {
         }
         if (exceedsWriteRate(userId)) {
             throw new BusinessException(1022, "上报过于频繁，请稍后再试");
+        }
+        if (!hasExplicitConsent(userId)) {
+            return new PresenceReportResponse(false, PresenceReportResponse.REASON_CONSENT_REQUIRED);
         }
         Venue venue = venueRepository.findById(venueId)
                 .filter(v -> !v.isDeleted())
@@ -149,96 +234,285 @@ public class VenuePresenceService {
         // UTC epoch 分钟派生，与时区无关（V33 迁移头注 §防刷与幂等）
         long bucket = System.currentTimeMillis() / 60_000L / WRITE_WINDOW_MINUTES;
         pingRepository.upsertInBucket(userId, venueId, bucket, distanceM, accuracyM, LocalDateTime.now());
-        // 默认态确立（V34）：授权模型 09-29 四轮改版为「默认开启」——首次采集触达
-        // 即补记出厂态，使「默认开启人群」进入 admin 开关统计（无用户动作、无弹窗）
-        consentRepository.insertDefaultIfAbsent(userId, LocalDateTime.now());
         return new PresenceReportResponse(true, null);
     }
 
     /**
-     * 记录一次用户手动开关变更（POST /venues/presence-consent 的实现）。
-     * 「我的-设置」拨动开关时 fire-and-forget 上报；每次变更插一行 USER 流水
-     * （不 upsert——保留变更历史才能回答「近期变更热度」；当前态由查询侧
-     * 「每用户最新一条」口径派生）。enabled 为 null（缺字段）按 1022 拒绝，
-     * 禁猜默认值。
+     * 记录一次状态确立（POST /venues/presence-consent 的实现）：设置页拨动开关（USER）或到店首问
+     * 回答（PROMPT）各插一行流水（不 upsert——保留变更历史才能回答「近期变更热度」与「首问效果」；
+     * 当前态由查询侧「每用户最新一条」口径派生）。
+     * <p>
+     * enabled 缺失按 1022 拒绝（禁猜默认值）；来源解析见 {@link #resolveReportedSource}。
      */
     @Transactional
-    public void recordConsent(Long userId, Boolean enabled) {
+    public void recordConsent(Long userId, Boolean enabled, String sourceRaw) {
         if (enabled == null) {
             throw new BusinessException(1022, "缺少开关状态");
         }
         VenuePresenceConsent consent = new VenuePresenceConsent();
         consent.setUserId(userId);
         consent.setEnabled(enabled);
-        consent.setSource(ConsentSource.USER);
+        consent.setSource(resolveReportedSource(sourceRaw));
         // created_at/updated_at 由 BaseEntity 的 @CreationTimestamp/@UpdateTimestamp 托管
         consentRepository.save(consent);
     }
 
     /**
-     * 开关统计（admin 门店列表页头）。当前态 = 每用户最新一条 consent 行；
-     * 「默认开启」= 最新态仍是 DEFAULT 来源（从未手动改过设置）。数据量级 =
-     * 用户数 × 变更次数（千级行），native 窗口函数一条 SQL 出分布，见
+     * 端上声明的确立来源：缺失 = USER（协议历史——10-03 前的端只在设置页上报且不带来源，这不是猜测）；
+     * 可识别的显式来源原样采用；DEFAULT（服务端历史补记来源，端上无权声明）或无法识别的值按 1022 拒绝。
+     */
+    static ConsentSource resolveReportedSource(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return ConsentSource.USER;
+        }
+        ConsentSource parsed = WireEnums.parse(ConsentSource.class, raw);
+        if (parsed == null || !parsed.isExplicit()) {
+            throw new BusinessException(1022, "非法的开关来源");
+        }
+        return parsed;
+    }
+
+    /**
+     * 同意判据（单点）：最新一条状态确立是<b>用户显式开启</b>——采集门禁与 admin「已允许」口径共用。
+     * DEFAULT 来源（默认开启期补记、用户从未被问过）即使 enabled=true 也不构成同意。
+     */
+    public static boolean isExplicitlyEnabled(Boolean enabled, ConsentSource source) {
+        return Boolean.TRUE.equals(enabled) && source != null && source.isExplicit();
+    }
+
+    private boolean hasExplicitConsent(Long userId) {
+        return consentRepository.findFirstByUserIdAndDeletedFalseOrderByCreatedAtDescIdDesc(userId)
+                .map(c -> isExplicitlyEnabled(c.getEnabled(), c.getSource()))
+                .orElse(false);
+    }
+
+    // ── 开关统计 ────────────────────────────────────────────────────────────────
+
+    /**
+     * 开关统计（admin 门店列表页头）。当前态 = 每用户最新一条 consent 行，按
+     * {@link #isExplicitlyEnabled} 分为 已允许 / 已关闭 / 待补问（最新态仍是历史 DEFAULT）；
+     * 另附首问回答分布与近 30 天设置变更次数。数据量级 = 用户数 × 变更次数（千级行），
+     * native 窗口函数一条 SQL 出分布，见
      * {@code VenuePresenceConsentRepository#countLatestByEnabledAndSource}。
      */
     public VenuePresenceConsentStats consentStats() {
         long enabledUsers = 0;
         long disabledUsers = 0;
-        long defaultUsers = 0;
+        long legacyDefaultUsers = 0;
         for (Object[] row : consentRepository.countLatestByEnabledAndSource()) {
             boolean enabled = Boolean.TRUE.equals(row[0]);
-            boolean isDefault = ConsentSource.DEFAULT.name().equals(String.valueOf(row[1]));
+            ConsentSource source = WireEnums.parse(ConsentSource.class, String.valueOf(row[1]));
             long users = ((Number) row[2]).longValue();
-            if (enabled) {
+            if (isExplicitlyEnabled(enabled, source)) {
                 enabledUsers += users;
-                if (isDefault) {
-                    defaultUsers += users;
-                }
+            } else if (enabled) {
+                legacyDefaultUsers += users;
             } else {
                 disabledUsers += users;
             }
         }
+        long promptAllowed = 0;
+        long promptDeclined = 0;
+        for (Object[] row : consentRepository.countPromptAnswersByEnabled()) {
+            long users = ((Number) row[1]).longValue();
+            if (Boolean.TRUE.equals(row[0])) {
+                promptAllowed += users;
+            } else {
+                promptDeclined += users;
+            }
+        }
         long changes30d = consentRepository.countUserChangesSince(LocalDateTime.now().minusDays(30));
-        return new VenuePresenceConsentStats(enabledUsers, disabledUsers, defaultUsers, changes30d);
+        return new VenuePresenceConsentStats(enabledUsers, disabledUsers, legacyDefaultUsers,
+                promptAllowed, promptDeclined, changes30d);
     }
 
+    // ── 读侧：到访统计 ──────────────────────────────────────────────────────────
+
     /**
-     * 单店到访统计（admin 详情卡）。
-     * 三个数值 = 同一命中谓词、三种窗口/半径组合；口径参数随响应回显，
-     * admin 端展示时必须与数值同屏（统计量不带口径 = 邀请误读）。
+     * 单店到访统计（admin 详情卡）。到访人数 / 最近到访 = {@link #visitSummaries} 同一计算；
+     * 附近人数是片区语义（这一带出现过多少人），归属范围恒为「本店 + 全部同址门店」、不做营业归因。
+     * 口径参数与同址归因随响应回显，admin 端展示时必须与数值同屏（统计量不带口径 = 邀请误读）。
      */
     public VenuePresenceStats statsFor(Long venueId) {
         LocalDateTime now = LocalDateTime.now();
-        long uv7d = distinctUsers(venueId, now.minusDays(7), HIT_RADIUS_M);
-        long uv30d = distinctUsers(venueId, now.minusDays(30), HIT_RADIUS_M);
-        long nearby30d = distinctUsers(venueId, now.minusDays(30), NEARBY_RADIUS_M);
-        LocalDateTime lastPresenceAt = pingRepository
-                .findFirstByVenueIdAndDeletedFalseOrderByCreatedAtDesc(venueId)
-                .map(p -> p.getCreatedAt())
-                .orElse(null);
-        return new VenuePresenceStats(uv7d, uv30d, nearby30d, lastPresenceAt, HIT_RADIUS_M, NEARBY_RADIUS_M);
+        Attribution attribution = attributionsFor(List.of(venueId)).get(venueId);
+        Map<Long, Map<Long, LocalDateTime>> hitLastSeen = lastSeenByVenue(attribution.evidenceVenueIds(), HIT_RADIUS_M);
+        VenueVisitSummary summary = summarize(attribution, hitLastSeen, now);
+        Map<Long, Map<Long, LocalDateTime>> nearbyLastSeen = lastSeenByVenue(attribution.areaVenueIds(), NEARBY_RADIUS_M);
+        long nearby30d = countSince(unionLastSeen(attribution.areaVenueIds(), nearbyLastSeen), now.minusDays(30));
+        List<VenuePresenceStats.CoLocatedVenue> peers = attribution.peers().stream()
+                .map(p -> new VenuePresenceStats.CoLocatedVenue(
+                        p.id(), p.name(), displayOf(p.status()), isInOperation(p.status())))
+                .toList();
+        return new VenuePresenceStats(summary.visitUsers7d(), summary.visitUsers30d(), nearby30d,
+                summary.lastVisitAt(), HIT_RADIUS_M, NEARBY_RADIUS_M, CO_LOCATED_RADIUS_M,
+                summary.coLocatedAttribution(), peers);
     }
 
     /**
-     * 批量每店近 30 天到访人数（admin 列表列）：一次 IN 覆盖整页防 N+1，
-     * 无数据的店不在返回 map 中（调用方按 0 兜底）。
+     * 批量到访摘要（admin 列表一页）：同址解析 1 次 + 命中查询 1 次覆盖整页，防 N+1。
+     * 返回<b>每个</b>入参门店的摘要（无到访也有一行——归因方式本身是要展示的信息）。
      */
-    public Map<Long, Long> visitUsers30dByVenueIds(Collection<Long> venueIds) {
+    public Map<Long, VenueVisitSummary> visitSummaries(Collection<Long> venueIds) {
         if (venueIds.isEmpty()) {
             return Map.of();
         }
-        Map<Long, Long> result = new HashMap<>();
-        for (Object[] row : pingRepository.countDistinctUsersByVenueIdsSince(
-                venueIds, LocalDateTime.now().minusDays(30), HIT_RADIUS_M, HIT_MAX_ACCURACY_M)) {
-            result.put((Long) row[0], (Long) row[1]);
+        LocalDateTime now = LocalDateTime.now();
+        Map<Long, Attribution> attributions = attributionsFor(venueIds);
+        Set<Long> evidence = new LinkedHashSet<>();
+        attributions.values().forEach(a -> evidence.addAll(a.evidenceVenueIds()));
+        Map<Long, Map<Long, LocalDateTime>> lastSeen = lastSeenByVenue(evidence, HIT_RADIUS_M);
+        Map<Long, VenueVisitSummary> result = new LinkedHashMap<>();
+        attributions.forEach((id, a) -> result.put(id, summarize(a, lastSeen, now)));
+        return result;
+    }
+
+    /**
+     * 全部「有过到访」门店的摘要（admin 按足迹排序 / 只看有足迹，52 号 §6.1）：从全量命中证据出发，
+     * 候选 = 有证据的门店 + 它们的同址邻居（邻居可能经共享 / 并入获得到访），再走与
+     * {@link #visitSummaries} 完全相同的归因与汇总——两条路径对同一家店必须给出同一组数字。
+     * 只返回 lastVisitAt 非空的门店（稀疏结果；缺席 = 从无到访）。
+     */
+    public Map<Long, VenueVisitSummary> visitedVenueSummaries() {
+        LocalDateTime now = LocalDateTime.now();
+        Map<Long, Map<Long, LocalDateTime>> lastSeen =
+                toLastSeenByVenue(pingRepository.findVisitorLastSeen(HIT_RADIUS_M, HIT_MAX_ACCURACY_M));
+        if (lastSeen.isEmpty()) {
+            return Map.of();
+        }
+        Set<Long> candidates = new LinkedHashSet<>(lastSeen.keySet());
+        for (VenueRepository.CoLocatedVenueRow row
+                : venueRepository.findCoLocatedPairs(lastSeen.keySet(), CO_LOCATED_RADIUS_M)) {
+            candidates.add(row.getCoLocatedId());
+        }
+        Map<Long, VenueVisitSummary> result = new LinkedHashMap<>();
+        attributionsFor(candidates).forEach((id, a) -> {
+            VenueVisitSummary summary = summarize(a, lastSeen, now);
+            if (summary.lastVisitAt() != null) {
+                result.put(id, summary);
+            }
+        });
+        return result;
+    }
+
+    /** 在营判定（可被到访归因的门店状态，{@link #IN_OPERATION_STATUSES}）；状态无法识别时按在营处理（不凭未知让渡证据） */
+    public static boolean isInOperation(VenueStatus status) {
+        return status == null || IN_OPERATION_STATUSES.contains(status);
+    }
+
+    // ── 同址归因 ────────────────────────────────────────────────────────────────
+
+    /** 同址邻居（几何 + 状态事实，来自 {@link VenueRepository#findCoLocatedPairs}） */
+    private record Peer(Long id, String name, VenueStatus status) {
+    }
+
+    /**
+     * 一家店的归因结论。
+     *
+     * @param kind             同址归因方式
+     * @param peers            同址邻居（不含本店）
+     * @param evidenceVenueIds 到访证据取自哪些门店上的 ping（YIELDED = 空 ⇒ 本店计 0）
+     * @param areaVenueIds     片区范围（本店 + 全部同址门店；附近人数用，不做营业归因）
+     */
+    private record Attribution(CoLocatedAttribution kind, List<Peer> peers,
+                               Set<Long> evidenceVenueIds, Set<Long> areaVenueIds) {
+    }
+
+    /**
+     * 归因判定（52 号 §4.4，纯函数）：证据是「有人在这个位置」，归属看谁可能被到访——
+     * <ul>
+     *   <li>无同址 → NONE，只算本店；</li>
+     *   <li>本店在营：同址另有在营店 → SHARED（分不出，共享）；否则 → ABSORBED（同址不在营店的证据并入本店）；</li>
+     *   <li>本店不在营：同址有在营店 → YIELDED（证据归它们，本店 0）；全组都不在营 → SHARED（无从归属，如实共享）。</li>
+     * </ul>
+     */
+    private static Attribution attribute(Long venueId, VenueStatus selfStatus, List<Peer> peers) {
+        Set<Long> area = new LinkedHashSet<>();
+        area.add(venueId);
+        peers.forEach(p -> area.add(p.id()));
+        if (peers.isEmpty()) {
+            return new Attribution(CoLocatedAttribution.NONE, peers, area, area);
+        }
+        boolean anyPeerInOperation = peers.stream().anyMatch(p -> isInOperation(p.status()));
+        if (isInOperation(selfStatus)) {
+            CoLocatedAttribution kind = anyPeerInOperation ? CoLocatedAttribution.SHARED : CoLocatedAttribution.ABSORBED;
+            return new Attribution(kind, peers, area, area);
+        }
+        if (anyPeerInOperation) {
+            return new Attribution(CoLocatedAttribution.YIELDED, peers, Set.of(), area);
+        }
+        return new Attribution(CoLocatedAttribution.SHARED, peers, area, area);
+    }
+
+    /**
+     * 批量归因：一次同址查询（几何 + 双方状态）。无同址邻居的店不在查询结果里，按 NONE 补齐——
+     * 返回 map 覆盖全部入参（保序）。
+     */
+    private Map<Long, Attribution> attributionsFor(Collection<Long> venueIds) {
+        Map<Long, VenueStatus> selfStatus = new HashMap<>();
+        Map<Long, List<Peer>> peers = new HashMap<>();
+        for (VenueRepository.CoLocatedVenueRow row : venueRepository.findCoLocatedPairs(venueIds, CO_LOCATED_RADIUS_M)) {
+            selfStatus.put(row.getVenueId(), parseStatus(row.getVenueStatus()));
+            peers.computeIfAbsent(row.getVenueId(), k -> new ArrayList<>())
+                    .add(new Peer(row.getCoLocatedId(), row.getCoLocatedName(), parseStatus(row.getCoLocatedStatus())));
+        }
+        Map<Long, Attribution> result = new LinkedHashMap<>();
+        for (Long id : venueIds) {
+            result.put(id, attribute(id, selfStatus.get(id), peers.getOrDefault(id, List.of())));
         }
         return result;
     }
 
-    private long distinctUsers(Long venueId, LocalDateTime since, int radiusM) {
-        List<Object[]> rows = pingRepository.countDistinctUsersByVenueIdsSince(
-                List.of(venueId), since, radiusM, HIT_MAX_ACCURACY_M);
-        return rows.isEmpty() ? 0L : (Long) rows.get(0)[1];
+    /** 归因证据 → 摘要：组内用户并集（同一用户在两家都有 ping 只计 1，COUNT 相加会重复计） */
+    private static VenueVisitSummary summarize(Attribution attribution,
+                                               Map<Long, Map<Long, LocalDateTime>> lastSeen,
+                                               LocalDateTime now) {
+        Map<Long, LocalDateTime> users = unionLastSeen(attribution.evidenceVenueIds(), lastSeen);
+        LocalDateTime last = users.values().stream().max(LocalDateTime::compareTo).orElse(null);
+        return new VenueVisitSummary(countSince(users, now.minusDays(7)), countSince(users, now.minusDays(30)),
+                last, attribution.kind(), attribution.peers().size());
+    }
+
+    // ── 证据读取（命中谓词唯一实现在 Repository） ─────────────────────────────────
+
+    private Map<Long, Map<Long, LocalDateTime>> lastSeenByVenue(Collection<Long> venueIds, int radiusM) {
+        if (venueIds.isEmpty()) {
+            return Map.of();
+        }
+        return toLastSeenByVenue(pingRepository.findVisitorLastSeenByVenueIds(venueIds, radiusM, HIT_MAX_ACCURACY_M));
+    }
+
+    /** Object[]{venueId, userId, lastSeenAt} → venueId → (userId → 最近命中时刻) */
+    private static Map<Long, Map<Long, LocalDateTime>> toLastSeenByVenue(List<Object[]> rows) {
+        Map<Long, Map<Long, LocalDateTime>> result = new HashMap<>();
+        for (Object[] row : rows) {
+            result.computeIfAbsent((Long) row[0], k -> new HashMap<>()).put((Long) row[1], (LocalDateTime) row[2]);
+        }
+        return result;
+    }
+
+    /** 多店证据的用户并集：userId → 该用户在这些店上的最近命中时刻 */
+    private static Map<Long, LocalDateTime> unionLastSeen(Collection<Long> venueIds,
+                                                          Map<Long, Map<Long, LocalDateTime>> lastSeen) {
+        Map<Long, LocalDateTime> users = new HashMap<>();
+        for (Long venueId : venueIds) {
+            lastSeen.getOrDefault(venueId, Map.of())
+                    .forEach((user, at) -> users.merge(user, at, (a, b) -> a.isAfter(b) ? a : b));
+        }
+        return users;
+    }
+
+    /** 时间窗去重：用户在窗口内到访过 ⟺ 其最近命中时刻 ≥ 窗口起点 */
+    private static long countSince(Map<Long, LocalDateTime> users, LocalDateTime since) {
+        return users.values().stream().filter(at -> !at.isBefore(since)).count();
+    }
+
+    private static VenueStatus parseStatus(String raw) {
+        return WireEnums.parse(VenueStatus.class, raw);
+    }
+
+    private static String displayOf(VenueStatus status) {
+        return status == null ? "未知" : status.getDisplayName();
     }
 
     private boolean exceedsWriteRate(Long userId) {

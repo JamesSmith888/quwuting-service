@@ -2,7 +2,8 @@
 
 > 后端权威文档。采集端（小程序）= quwuting 仓 `docs/agents/52-venue-presence.md`；
 > admin 展示 = quwuting-admin-web 仓 README「门店列表 / 门店详情」节。
-> 迁移 = `db/migration-mysql/V33__venue_presence_pings.sql`（头注含完整根因）。
+> 迁移 = `db/migration-mysql/V33__venue_presence_pings.sql`（头注含完整根因）/ `V34__venue_presence_consents.sql`
+> （状态确立流水）/ `V37__presence_consent_source_comment.sql`（2026-10-03 来源列注释）。
 
 ## 1. 定位与边界（先读这个再动代码）
 
@@ -18,6 +19,28 @@
 
 歌友会（SONG_CLUB）不在采集范围：坐标写路径主动清空 ⇒ nearby 拿不到 ⇒ 天然排除；
 写接口侧另有显式拒绝（`VenuePresenceService.report` 的无坐标/SONG_CLUB 守卫，封死直连伪造路径）。
+
+### 1.1 到访进排序：复评（2026-10-03，需求方提出「把实际到店人数作为门店排序因素」）
+
+**结论：方向成立，现在不接。** 上表「不进热度公式」与 §5「用于排序前须重评信任边界」仍有效；本节记录接入的
+前置条件，到线后按 05 号流程 + `quwuting-venue-heat-metric` 技能落地，不再从头论证。
+
+- **数据量没到线**：09-29 评估定的暗跑止损线 = 「< 100 条/周、有到访门店 < 30 家/周」即停。现状 4 天 21 条、9 家
+  （≈ 37 条/周），且 10-03 同意门禁上线后只收显式同意用户，量级要随新版小程序重新攒。此时进公式 = 一个人去不去就能
+  改排序（与 09-07「89 家收藏恰好 1 人」同一类泊松噪声）。
+- **接入必须同时满足**：
+  1. **排序用分摊人数，不用共享人数**：同址组都在营时（§4.4 SHARED），每位用户按 1/k 分给 k 家在营店（④ 用户确认过的
+     按确认归属）。共享计数（每家都记满）进排序 = 同楼两家各吃一份整楼人流，比同等人流的独栋店多一倍。admin 展示
+     仍用共享口径并同屏说明，两者是不同问题。
+  2. **取数走物化汇总表**：归因是查询侧 Java 计算（同址 × 营业状态 × 用户并集），JPQL 无派生表能力进不了
+     `HEAT_BEHAVIOR`。定时任务按唯一归因实现刷新 `(venue_id, 分摊到访人数 7d/30d, refreshed_at)`，公式以标量子查询引用；
+     同时替代 §6.1 的内存排序。
+  3. **同城归一化**：到访人数 ≈ 周边活跃用户数，跨城直接比 = 把人口密度当门店质量（09-29 评估）。
+  4. **只做加性项**：不做「无到访 ⇒ 降权」的折减 / 门槛——抗刷要求无到访降权，发现新店要求无到访不降权，在这一维度
+     上不可调和（09-29 评估）。
+  5. **信任边界重评**（§5）：distance 是端上自报值，进排序后才有刷量动机；接入前必须给出账号门槛与异常监控方案。
+- **同楼都在营的竞品（如寻梦缘 / 抖舞）**：定位层面无解（两店实际不到 10m，室内精度 15~65m），分摊只能做到「不偏袒」；
+  要分出高下只能靠 §4.4 ④ 用户确认。
 
 ## 2. 采样时机的根因（为什么不是「每 30 分钟」）
 
@@ -43,22 +66,162 @@ presence 只是在拿到新 fix 后顺带做一次 nearby 判定 + 一条上报�
   15 分钟窗口的**首见事实**（`ON DUPLICATE KEY UPDATE` 只刷 updated_at，
   不改写 created_at / distance / accuracy——首证保留）。
 - **写宽松读严格**：写侧只做协议限幅（distance ≤ 500m、accuracy ≤ 500m，防脏数据）；
-  「到访 / 附近」口径全部在**查询侧**判定。理由：门店坐标是 `wx.chooseLocation`
-  人工选点（10~30m 误差），阈值定错时历史数据可回溯，无需重采。
+  「到访 / 附近 / 同址」口径全部在**查询侧**判定。理由：阈值定错时历史数据可回溯，无需重采
+  ——2026-10-03 的命中口径修复（§4.1）正是靠这条原则对全部历史 ping 立即生效的。
+  ⚠️ 原文此处的前提「门店坐标是 `wx.chooseLocation` 人工选点（10~30m 误差）」**已被数据证伪**：
+  门店坐标主要来自地址级地理编码（商场/大楼锚点），同楼多店坐标完全重合，见 §4.1。
 - 索引：`(venue_id, created_at)`（admin 聚合）、`(user_id, created_at)`（异常排查/打标回溯）。
 - 时间戳 Java 传 `LocalDateTime.now()`（JVM 北京时间，禁 DB now()——V59 同款事故）。
-- **V34 `qwt_venue_presence_consents`（开关状态流水）**：每行一次状态确立
-  （DEFAULT=默认态确立 / USER=用户手动变更），当前态 = 每用户最新一条；
-  授权模型与统计口径见 §5「用户级授权」。
+- **V34 `qwt_venue_presence_consents`（状态确立流水）**：每行一次状态确立，来源
+  PROMPT=到店首问回答 / USER=设置页手动变更 / DEFAULT=历史（09-29 ~ 10-03 默认开启期补记，已停写）；
+  当前态 = 每用户最新一条，**同时是采集门禁的判据**（2026-10-03 五轮，见 §5）。V37 只更新了 source
+  列注释。实体两列**刻意无默认值**（同意证据上的默认值 = 替用户同意；14 号「NOT NULL 必带
+  `@ColumnDefault`」约定保护的是存量表 ADD COLUMN 路径，此两列随建表产生，属有意例外）。
 
 ## 4. 口径参数与判据
 
-| 参数 | 值 | 位置 | 依据 |
+| 参数 | 值 | 位置 | 回答的问题 / 依据 |
 |---|---|---|---|
-| 命中半径 | 20m | `VenuePresenceService.HIT_RADIUS_M` | 真库实测 20m 内有邻居的店仅 5.4%（归因唯一性成立）+ 需求方直觉 |
-| 精度门槛 | 30m | `HIT_MAX_ACCURACY_M` | 超过即城市级误差；NULL 精度视为达标（未提供 ≠ 超标） |
+| 命中半径 | **150m**（原 20m，2026-10-03 改） | `VenuePresenceService.HIT_RADIUS_M` | **用户 ↔ 门店坐标**容差：人在店里时离坐标多远。现网在店样本 56~147m，分布在 147/159m 间自然断点；落在 Android 地理围栏建议下限 100~150m 内（§4.1）。**镜像三处同改**：admin-web `PRESENCE_HIT_RADIUS_M`（列表口径提示）、小程序 `ARRIVAL_PROMPT_RADIUS_M`（「真正到店」才首问，§5） |
+| 精度门槛 | **= 命中半径**（原 30m） | `HIT_MAX_ACCURACY_M` | 派生量，非独立参数：定位不确定半径大于判定圆即无判定能力；NULL 精度视为达标 |
+| 同址半径 | **50m**（2026-10-03 新增 20m，同日改 50m） | `CO_LOCATED_RADIUS_M` | **门店 ↔ 门店**定位不可分辨距离：坐标间距 ≤ 此值的店按营业状态归因、分不出时共享（§4.2 / §4.4）。「同址」= 手机定位分不开，**不等于同一门牌**（同楼不同层、同楼不同地址写法都算）；标定见 §4.2.1 |
+| 在营状态集 | **OPEN + CLOSED**（2026-10-03 新增） | `isInOperation` | 「人此刻可能在这家店里」：休息中是短期态按在营；装修 / 暂停 / 停业不可能被到访（§4.4） |
 | 附近半径 | 300m | `NEARBY_RADIUS_M` | 对齐 `GET /venues/nearby` 缺省值——同一「附近」语义一个值，不造第二份真值 |
 | 写窗口 | 15min | `WRITE_WINDOW_MINUTES` | ≈ 典型前台会话粒度上界 |
+
+不变量（`VenuePresenceAttributionTest` 守护）：同址半径 < 命中半径 < 附近半径 ≤ 写侧限幅 500m。
+
+### 4.1 命中口径 20m → 150m 的根因（2026-10-03，勿重蹈）
+
+**现象**：上线 4 天、21 条 ping、12 个用户，admin「到访」只有 2 家店各 1 人，其余全 0；
+需求方 10-02 夜在南通「丽莎歌舞厅」现场打开小程序，列表显示距该店约 80m。
+
+**根因 = 一个阈值回答了两个不同的问题**。原 20m 的论据是「20m 内有邻居的店仅 5.4%
+（归因唯一性成立）」——这是**门店 ↔ 门店**间距统计，回答「归因会不会撞车」；却被拿来当
+**用户 ↔ 门店**的命中容差，而后者的误差预算完全是另一回事：
+
+1. **门店坐标精度被高估**：原假设「人工选点 10~30m」，实际坐标主要来自**地址级地理编码**——
+   五洲国际广场 F2「一壶淡泊」与 3 层「丽莎」坐标**逐位相同**（现网 51 家坐标完全重合）。
+   大型商场/大楼里，人在店内与锚点相距 50~150m 是常态，其他地图平台同一 POI 也是同一坐标，
+   **这是数据源的物理上限，不是可修的数据错误**；
+2. **室内定位误差被低估**：精度门槛 30m 的前提「超过即城市级误差」错误——wx 室内 accuracy
+   常见 30~65m（iOS 无 GPS 回报 65、Android 常见 35），30m 门槛恰好系统性剔除室内样本；
+3. **前提从未对数据做过检验**：口径上线时 ping 表为空，「20m 命中」没有任何样本支撑。
+   ⇒ **新口径参数上线后必须在首批数据到达时按 §4.3 复核一次**（本节即首次复核）。
+
+**为什么不是「更大就更好」**：附近半径 300m 已承担「片区覆盖」语义；202m / 301m / 310m 的样本
+是路过/周边（与 147m 之间有明显断点）。150m 是「覆盖在店样本」与「不吞路过样本」的分界。
+
+### 4.2 同址组：「距离最近的门店」在同址场景下无定义
+
+**现象**：需求方在丽莎，4 条 ping（86~91m）全部落在「一壶淡泊」。
+
+**根因**：端侧取 nearby 第一家上报；两店坐标相同 ⇒ 距离并列 ⇒ 原 SQL 只按距离排序，
+并列顺序由执行计划决定（实际恒为 id 小的 120）。这不是噪声而是**确定性错误**：
+丽莎的到访永远记给一壶淡泊。「一定范围内距离最近的门店」作为归因规则本身是对的
+（端侧本来就是这么做的），但它在**同址**时无解——二维坐标里根本不存在「更近」的那家。
+
+**修复（服务端，零协议改动、零隐私面变化、历史回溯）**：
+- 同址组 = 本店 + 坐标间距 ≤ `CO_LOCATED_RADIUS_M` 的在库门店（`VenueRepository.findCoLocatedPairs`，
+  Haversine 与 `findNearby` 同源；随行返回双方营业状态）；
+- 组内证据先按**营业状态归属**（§4.4：只剩一家在营 ⇒ 归它），分不出时才**共享**：到访 / 附近人数 =
+  归因证据门店上命中 ping 的**用户并集**（不是 COUNT 相加——同一用户在组内两家都有 ping 只计 1）；
+  Repository 只返回 (venueId, userId, 最近命中时刻)，命中谓词仍是唯一实现；
+- 最近到访时刻同口径同范围（否则「到访 3 人」旁显示「从无记录」自相矛盾）；
+- `VenuePresenceStats.coLocatedAttribution` + `coLocatedVenues`（含状态）随响应回显，admin 详情页按归因方式
+  同屏说明（并入 / 让渡 / 共享不可相加）；
+- `findNearby` 补 `id ASC` 次序键：并列结果确定性（对计时器候选面板同样有益；计时器「50m 内
+  恰好一家」判据天然拒绝并列，不受影响）。
+
+**为什么不在端侧解决**：① 端侧上报多个候选 = 协议改动 + 需要发版；② 上报多家门店的距离
+可三边定位还原坐标，触碰 §1 隐私红线；③ 楼层信息任何端侧手段都拿不到。服务端按门店
+几何分组是唯一不扩大隐私面的解。
+
+**已知边界（接受）**：
+- 同址组内**都在营**的店仍无法区分（共享），数字是「这栋楼」的到访，不是「这家店」的；admin 已同屏告知。
+  50m 口径下全量 **5 对**（马鞍山 丽都小酒馆/小马TENEDR、宁波 乐8量贩ktv/丽莎舞厅KTV、南通 寻梦缘/抖舞、
+  成都 星星/欢聚、绵阳 二筒/星光印象），见 §4.4；
+- 坐标间距 > 50m 的相邻门店仍按「最近一家」归因（Voronoi），坐标偏差大时可能记给隔壁——残余量用 §4.3 ⑤ 监测；
+- 门店软删除后其历史 ping 不再被任何组吸收（组只含在库门店）；门店合并若需保留到访史，
+  应在合并流程里迁移 ping，而非在统计侧兼容。
+
+### 4.2.1 同址半径 20m → 50m（2026-10-03 同日二改，勿重蹈）
+
+**现象**：南通「南来北往酒吧」（CEASED）记到 2 人，同楼的寻梦缘、抖舞（都 OPEN）各 1 人。需求方确认：南来北往是
+寻梦缘开的新店、已关；寻梦缘和抖舞**同楼同层面对面，实际相距不到 10m**。
+
+**根因**：20m 的前提是「同楼的店坐标重合；20~50m 已进入定位可分辨的量级」——**只对同一地址字符串编码出的坐标
+成立**（丽莎 / 一壶淡泊逐位相同）。同一栋楼用不同写法的地址编码时，锚点会散开：
+
+| 门店 | 地址写法 | 坐标间距 |
+|---|---|---|
+| 13 寻梦缘（OPEN） | 校西路当家人对面电梯京扬广场2楼 | ↔ 抖舞 27m |
+| 14 抖舞（OPEN） | 人民中路209号京扬数码城B座2012室 | ↔ 南来北往 44m |
+| 111 南来北往（CEASED） | 人民中路209号 | ↔ 寻梦缘 39m |
+
+楼里的用户 331（距南来北往坐标 20m、精度 15m）因停业店坐标恰好最近被记给它；20m 不并组 ⇒ §4.4 的营业状态消歧
+够不着它。**与命中半径 20m（§4.1）是同一类错误**：阈值的前提从未对数据检验过。另：`10-02 20:53 / 22:00` 需求方
+本人的 147m / 159m 两条也落在南来北往（是否在楼内待需求方确认，影响 §4.1 命中半径的标定，见 §4.3 ②）。
+
+**为什么不是「同楼识别」**：全量里地址指向同一楼 / 商场的门店对坐标间距从 26m 到 92m 都有，中间穿插着确实
+不同楼的邻居（24、37、40、48、53、55m）——**几何距离本身分不出同楼与邻楼**。但归因不需要知道「是不是同楼」，
+只需要知道「手机能不能分开」：分不开就交给定位以外的事实。所以本参数定义为「定位不可分辨距离」，不改名、不造楼宇实体。
+
+**标定**（1301 家有坐标门店，2026-10-03 只读）：
+- 地址指向同一楼 / 商场、且至少一家在营的门店对，坐标间距 **27~44m**（京扬 27/39/44、海门富江商业广场 32、
+  青岛书院万达 44）⇒ 取上界向上到 10m 档 = **50m**；
+- 同楼散布的长尾 65~92m（泰州阳光天地、扬州力宝广场、嘉兴杉杉 IN 象、宁波联盛广场）目前**双方都不在营**，不影响
+  归因；有在营门店落进这一段时按 §4.3 ④ 重标定；
+- 代价（都在营、只能共享的门店对）：20m 2 对 → 50m 5 对；按营业状态即可分清的对 15 → 22（新增 7 对全是
+  停业 / 暂停店挨着在营店，如魅恋 → 魅莎同一间 2066 室改名）。100m 会共享 12 对、多为确实不同楼的邻居，不取。
+
+**回溯效果**（全量历史 ping）：南来北往 2 → 0（YIELDED）；寻梦缘、抖舞 SHARED，同为 {908, 65, 331, 2} 4 人（含待确认的
+147m 那条）；其余门店不变。
+
+**撤回 10-03 上午的「端侧优先选在营门店」后续项**：那条方案要小程序在 nearby 里跳过停业店再上报——等于把营业状态
+写进 ping，状态更正（如 CEASED→OPEN 反转）不再能回溯，违反「写宽松读严格」（§3）与 §4.4「按当前状态归因」。
+营业状态只在查询侧用，归因所需的门店几何由本半径负责。
+
+### 4.3 口径复核 SQL（只读；数据量起来后按此重标定，禁凭直觉改值）
+
+```sql
+-- ① 距离 × 精度分布：找在店样本与路过样本之间的断点
+SELECT CASE WHEN distance_m<=50 THEN 'a<=50' WHEN distance_m<=100 THEN 'b<=100'
+            WHEN distance_m<=150 THEN 'c<=150' WHEN distance_m<=200 THEN 'd<=200'
+            ELSE 'e<=500' END d, COUNT(*) n, MAX(accuracy_m) max_acc
+FROM qwt_venue_presence_pings GROUP BY d ORDER BY d;
+-- ② 高置信在店样本 = 同一用户同一店一晚内 ≥2 条且距离稳定（驻留）——取其距离 P90 作为命中半径参考
+SELECT user_id, venue_id, DATE(created_at - INTERVAL 6 HOUR) night, COUNT(*) n,
+       MIN(distance_m), MAX(distance_m)
+FROM qwt_venue_presence_pings GROUP BY user_id, venue_id, night HAVING n >= 2;
+-- ③ 同址规模：每店最近邻距离分布（同址半径复核；1301 家量级，自连接可直接跑）
+WITH v AS (SELECT id, latitude la, longitude lo FROM qwt_venues
+           WHERE deleted=0 AND latitude IS NOT NULL AND venue_type<>'SONG_CLUB'),
+     nn AS (SELECT a.id, MIN(ST_Distance_Sphere(POINT(a.lo,a.la), POINT(b.lo,b.la))) d
+            FROM v a JOIN v b ON a.id<>b.id AND ABS(a.la-b.la)<0.01 AND ABS(a.lo-b.lo)<0.01
+            GROUP BY a.id)
+SELECT SUM(d=0) same_coord, SUM(d<=20) le20, SUM(d<=50) le50, SUM(d<=150) le150 FROM nn;
+-- ④ 同址半径标定：半径外一倍距离内、至少一家在营的门店对，人工看地址判断是否同楼（同楼且有在营 ⇒ 半径该放大）
+WITH v AS (SELECT id, name, status, address, latitude la, longitude lo FROM qwt_venues
+           WHERE deleted=0 AND latitude IS NOT NULL AND venue_type<>'SONG_CLUB')
+SELECT ROUND(ST_Distance_Sphere(POINT(a.lo,a.la), POINT(b.lo,b.la))) d,
+       a.name, a.status, a.address, b.name, b.status, b.address
+FROM v a JOIN v b ON a.id<b.id AND ABS(a.la-b.la)<0.002 AND ABS(a.lo-b.lo)<0.002
+WHERE ST_Distance_Sphere(POINT(a.lo,a.la), POINT(b.lo,b.la)) BETWEEN 50 AND 100
+  AND (a.status IN ('OPEN','CLOSED') OR b.status IN ('OPEN','CLOSED'))
+ORDER BY d;
+-- ⑤ Voronoi 残余：命中证据落在不在营门店上、同址半径内没有在营门店、但命中半径内有——这些仍可能记错
+WITH hit AS (SELECT DISTINCT p.venue_id FROM qwt_venue_presence_pings p
+             WHERE p.distance_m <= 150 AND (p.accuracy_m IS NULL OR p.accuracy_m <= 150))
+SELECT a.id, a.name, a.status, MIN(ROUND(ST_Distance_Sphere(POINT(a.longitude,a.latitude),
+       POINT(b.longitude,b.latitude)))) nearest_operating_m
+FROM hit JOIN qwt_venues a ON a.id = hit.venue_id AND a.status NOT IN ('OPEN','CLOSED')
+JOIN qwt_venues b ON b.id <> a.id AND b.deleted = 0 AND b.status IN ('OPEN','CLOSED') AND b.latitude IS NOT NULL
+WHERE ST_Distance_Sphere(POINT(a.longitude,a.latitude), POINT(b.longitude,b.latitude)) <= 150
+GROUP BY a.id, a.name, a.status HAVING nearest_operating_m > 50;
+```
+
+2026-10-03 首次复核回溯结果（全量历史 ping）：有到访的门店 2 → 9 家；丽莎 / 一壶淡泊 0 → 3（同址共享）。
 
 **口径参数为什么不进 opsconfig**：① 阈值是统计口径而非产品开关，变更应与本文档和
 admin 展示文案同步发版；② 管理端开关控件承载不了数值语义（数值会被渲染成
@@ -66,11 +229,50 @@ admin 展示文案同步发版；② 管理端开关控件承载不了数值语�
 `presence.collect.enabled`**（V33 插默认行 true + OpsConfigService 常量 + admin-web
 登记三处同步）进 opsconfig。
 
+### 4.4 同址门店怎么分：分层消歧（2026-10-03，需求方提问「丽莎 2 楼 / 一壶 3 楼这类怎么处理」）
+
+**物理上限先说清**：手机定位给的是二维坐标 + 不确定半径，小程序拿不到气压计 / 楼层 / 室内定位，
+同楼不同层的店在定位上**就是同一个点**。任何声称「手机知道你在几楼」的方案都是伪精度。
+所以到访证据的本质是「有人在这个位置」，**归属哪家必须靠位置之外的事实**，按可靠性分层：
+
+| 层 | 证据 | 状态 | 覆盖面（2026-10-03 全量，同址 ≤50m 共 93 家） |
+|---|---|---|---|
+| ① 几何 | 坐标间距 ≤ 50m ⇒ 同址组（§4.2.1） | ✅ §4.2 | 全部 |
+| ② 营业状态 | 组内只有一家**在营**（OPEN/CLOSED）⇒ 证据归它（ABSORBED / YIELDED） | ✅ 本节 | 同址对里**双方都在营的只有 5 对**，其余 22 对由状态即可分清——丽莎 / 一壶淡泊、京扬南来北往正是此类 |
+| ②′ 营业时段 | ping 时刻只有一家在营业时段内 ⇒ 归它 | ⛔ 不做 | 5 对里实测时段区分不了（寻梦缘、抖舞都是 13:00–02:00）；`business_hours` 为自由录入，可靠性不够当归因依据 |
+| ③ 用户行为 | 用户本人指向某一家的动作：记账关联门店、到店前后看过其中一家的详情、活动打卡 | ⏸ 未做 | **实测覆盖 ≈ 0**：京扬 4 位到访用户里，除需求方本人外无一人在到访前后看过其中一家详情；记账 112 条只有 12 条带门店 |
+| ④ 用户确认 | 只在「同址组 ≥2 家在营」时，到店后让用户点一次「你在哪一家」 | ⏸ 待裁决 | 只涉及 5 对、10 家店；**到访要进排序时，这是区分同楼竞品的唯一手段**（§1.1） |
+
+**② 的判定（`VenuePresenceService.attribute`，纯函数，`CoLocatedAttribution` 四态）**：
+无同址 → NONE；本店在营且同址另有在营 → SHARED（共享，不可相加）；本店在营且是唯一在营 → ABSORBED
+（同址不在营门店上的证据并入本店）；本店不在营且同址有在营 → YIELDED（本店计 0）；全组都不在营 →
+SHARED（无从归属，如实共享，不让证据消失）。「附近」是片区语义，**恒合并、不做营业归因**。
+
+- **为什么 CLOSED 算在营**：休息中是短期态，今天不开 ≠ 店不存在；按不在营处理会让一次休息日把 30 天
+  窗口的证据整个让给邻居。
+- **为什么按当前状态而不是 ping 当时的状态**：门店状态低频变化且由每日同步维持新鲜度；查询侧归因
+  让状态更正（如 CEASED→OPEN 反转）立即回溯生效——与「写宽松读严格」同一原则。代价：状态数据失真时
+  归因随之失真；admin 详情页同屏列出同址门店及其状态，运营可识别。
+- **与 nearby「不筛营业状态」不冲突**：那是计时器挂店（人就在店里，宁可挂上停业店也不丢数据）；
+  这里是统计归因（同一位置有在营与不在营两家时，在营那家是唯一合理解释）。两个消费方、两个问题。
+- **数据卫生（不在本节修，登记）**：同址对里大量是 CEASED/SUSPENDED 旧店 + 同址新店、或重复录入
+  （如丽莎另有一条无坐标的重复记录 id=17，与 121 同名同址）——属门店合并流程的事，统计侧不兼容。
+
+**下一步（按需，触发条件写清再做）**：
+- **Voronoi 残余**（坐标间距 > 50m 的邻居）：§4.3 ⑤ 监测「证据落在不在营门店、50m 内无在营、150m 内有」的门店，
+  2026-10-03 为 0 家。出现时先按 §4.3 ④ 看是不是同楼长尾（是 ⇒ 重标定半径），不是再评估。
+  ~~端侧优先选在营门店~~ 已撤回，原因见 §4.2.1 末段。
+- **③ 行为证据**：触发条件 = 行为证据覆盖率显著（当前 ≈ 0，做了也分不开任何一次到访）。
+- **④ 用户确认**：触发条件 = 到访进排序（§1.1），或运营要求分开看某对都在营的同址店。
+
 ### 统计口径（查询侧唯一实现 = `VenuePresencePingRepository`）
 
 - **到访人数（UV）**：`COUNT(DISTINCT user_id)`，`distance ≤ hitRadius` 且
-  `(accuracy IS NULL OR accuracy ≤ maxAccuracy)`，时间窗 7d / 30d。
-- **附近人数**：同谓词、半径换 300m。语义 = **片区覆盖度**（这一带出现过多少用户），
+  `(accuracy IS NULL OR accuracy ≤ maxAccuracy)`，时间窗 7d / 30d；归因范围按 §4.4。
+  实现形态 = 每 (店, 人) 取最近命中时刻，窗口判定「最近命中 ≥ 窗口起点」（一次查询同时出 7d / 30d / 最近到访）。
+- **最近到访**：同一命中谓词、同一归因范围、**不设时间窗**（2026-10-03 前取「任意距离的最近痕迹」，
+  会在「到访 0 人」旁显示一个时刻，已改）。
+- **附近人数**：同谓词、半径换 300m。语义 = **片区覆盖度**（这一带出现过多少用户；同址组恒合并、不做营业归因），
   不是实时在场——实时「附近」在当前量级（日均打开 48.5 人）下恒为 0，无意义。
 - **禁自然日去重**：舞厅营业跨零点（22:00 进 02:00 出会被日粒度拆成两天两次），
   UV 恒按时间窗去重（与热度「近 30 天去重人数」同构）。
@@ -84,40 +286,81 @@ admin 展示文案同步发版；② 管理端开关控件承载不了数值语�
 无坐标门店显式拒绝 + admin 侧距离分布观察。**若未来要把到访数据用于任何有利益
 关联的场合（排序/积分），必须先重新评估本节**——这是当前形态的明确边界。
 
-用户级授权（consent，V34）——09-29 四轮改版后服务端**可观测偏好**（不再是
-纯端上私有，但仍不含任何位置信息）：
+用户级授权（consent，V34；**2026-10-03 五轮改「第一次真正到店时询问」+ 服务端同意门禁**）：
 
-- **模型 = 默认开启 + 常驻开关 + 手动开启提醒**（详见采集端 52 号 §3.5）：
-  未选择 = 采集开启；关闭立即停采（端上判定）；开关只存端上 `presence_consent`。
-- **服务端感知面 = 状态确立流水**（`qwt_venue_presence_consents`，V34）：
-  ① USER 行——「我的-设置」拨动开关时端上 fire-and-forget 上报
-  `POST /venues/presence-consent`（body `{enabled}`，每次一行，不幂等去重）；
-  ② DEFAULT 行——首次采集 ping 时该用户无任何 consent 行则补一条
-  enabled=true（`INSERT ... WHERE NOT EXISTS` 单语句，最少 DB 往返；并发窗口
-  双写无害，统计口径吸收）。
-- **admin 统计**（`GET /admin/venues/presence-consent-stats`，门店列表页头展示）：
-  当前态 = 每用户最新一条（native 窗口函数，`ROW_NUMBER` 按 created_at DESC,
-  id DESC）；启用 / 关闭去重用户数 + 其中「从未手动改过设置」的默认开启人数
-  （最新态 source=DEFAULT）+ 近 30 天 USER 变更次数。
-- **信任边界不变量**：consent 流水是 admin 统计输入，**不反哺采集行为**（采集
-  与否只由端上开关决定）；若未来要服务端强制执行 consent（如关闭者发 ping 直接
-  拒收），属信任模型升级，须与「distance 复算」一并评估。
+**为什么改（根因）**：09-29 四轮把授权定为「默认开启、默认用户不弹任何窗」，论证停在「先问后采在默认
+开启模型下无意义」——它回答的是**产品体验**问题，没有回答**合规**问题：行踪轨迹属敏感个人信息，处理需
+用户**单独同意**（个保法第 28/29 条），「未询问 = 允许」恰好是不被承认的那种同意。10-02 需求方在丽莎现场
+「没有任何弹窗」即为该设计的直接表现；上线 4 天有 **11 位用户在未被询问的情况下被记录**（consent 最新态 =
+DEFAULT）。教训：**涉及个人信息的默认值，先过合规判据，再谈体验**。
+
+- **模型 = 到店首问 + 常驻开关**（详见采集端 52 号 §3.5）：三态 未询问（不采集）/ 已允许 / 已关闭；
+  第一次**真正到店**（最近一家在 `HIT_RADIUS_M` 内且精度达标）时弹「允许 / 不用了」，回答前端上零外发；
+  「我的-设置」随时可改。
+- **状态确立流水**（`qwt_venue_presence_consents`）三种来源：PROMPT（首问回答）/ USER（设置页拨动；
+  `source` 缺省 = USER，兼容 10-03 前只发 `{enabled}` 的端）/ DEFAULT（**历史**，09-29 ~ 10-03 首次 ping
+  补记，`insertDefaultIfAbsent` 已删除——默认开启退役后，「首次 ping 时没有任何 consent 行」只可能是旧版
+  未经询问的端，正是门禁要拒收的对象，不能再补记成一条看似合法的状态确立）。端上**不可声明** DEFAULT（1022）。
+- **服务端同意门禁（本轮新增，`VenuePresenceService.report`）**：只收「最新一条 = 显式来源（PROMPT/USER）且
+  enabled」的用户的 ping，否则 `accepted=false(CONSENT_REQUIRED)`（非错误码：旧端对失败静默，不该收到 4xx 噪音）。
+  **为什么必须在服务端**：小程序无强制更新，旧版默认开启端会在用户下次冷启动前继续采集；只改端上 = 合规
+  依赖升级覆盖率。门禁让「上线即止住未经询问的采集」，并把「先有同意、后有足迹」变成可证明的证据链。
+  判据单点 = `isExplicitlyEnabled(enabled, source)`，admin「已允许」口径共用。
+  - 端上配套：状态上报不再是纯 fire-and-forget——失败落 `presence_consent_pending`，下个采集周期先补发，
+    补发成功前不发足迹（发了也会被拒收）。行为门禁 = 小程序 `npm run check:presence`（9 条时序不变量）。
+  - 这**不是**防刷手段：恶意端照样能先发同意再发足迹，与 distance 自报同一信任等级（本节开头）。门禁防的是
+    「诚实的旧端在未经同意时采集」，不是伪造者。
+  - 多端边界：同一账号在 A 端允许、B 端关闭 ⇒ 最新一条（关闭）生效，A 端本地仍显示开启但服务端拒收——
+    账号级决定以最后一次为准，符合「撤回同意立即生效」；量级可忽略，不做端间同步。
+- **待补问人群**：11 位 DEFAULT 用户本地无记录 ⇒ 端上天然回到「未询问」，下次到店被问一次；门禁已停收其数据。
+  他们 10-03 前被记录的 ping **保留未删**（是否在「不用了」时删除历史足迹属待裁决事项，见采集端 52 号 §3.5）。
+- **admin 统计**（`GET /admin/venues/presence-consent-stats`，门店列表页头展示）：当前态 = 每用户最新一条
+  （native 窗口函数，`ROW_NUMBER` 按 created_at DESC, id DESC）；已允许 / 已关闭 / **待补问**（最新态仍是
+  DEFAULT，只减不增，归零即补问完成）+ 首问回答分布（允许 / 不用了，去重用户）+ 近 30 天设置变更次数。
 
 ## 6. 接口清单
 
 | 接口 | 鉴权 | 说明 |
 |---|---|---|
-| `POST /venues/{venueId}/presence` | requireAuth | body `{distanceMeters, accuracyMeters?}`；桶幂等；开关关闭返回 `accepted=false(DISABLED)` 而非报错；错误码 **1022**（门店不存在 / 不参与采集 / 参数越界 / 频控）；**同时触发默认态确立**（该用户无 consent 行则补 DEFAULT 行，V34） |
-| `POST /venues/presence-consent` | requireAuth | 开关状态上报（V34）：body `{enabled}`，每次变更插一行 USER 流水；fire-and-forget，客户端失败静默 |
-| `GET /admin/venues` | requireAdmin | 管理端门店列表（无业务裁剪全量分页，`AdminVenueQueryService` + `VenueRepository.findAdminPage`）；行内带 `visitUsers30d` 批量注入；status 经 `WireEnums.parse` 宽容解析（非法 = 不筛） |
-| `GET /admin/venues/{id}/presence` | requireAdmin | 单店到访统计（口径参数随响应回显，admin 展示必须与数值同屏；DTO 全字段 `@JsonInclude(ALWAYS)`——non_null 全局策略会删 null，35 号教训） |
-| `GET /admin/venues/presence-consent-stats` | requireAdmin | 开关统计（V34）：启用 / 关闭去重用户数 + 默认开启未改设置人数 + 近 30 天手动变更次数；admin-web 门店列表页头展示 |
+| `POST /venues/{venueId}/presence` | requireAuth | body `{distanceMeters, accuracyMeters?}`；桶幂等；判定序 = 运营开关（关 ⇒ `accepted=false(DISABLED)`）→ 频控 → **同意门禁**（无显式开启 ⇒ `accepted=false(CONSENT_REQUIRED)`，2026-10-03）→ 门店与参数校验；错误码 **1022**（门店不存在 / 不参与采集 / 参数越界 / 频控） |
+| `POST /venues/presence-consent` | requireAuth | 状态确立上报：body `{enabled, source?}`，source = `USER`（缺省）/ `PROMPT`；每次插一行流水；DEFAULT / 未知来源 / 缺 enabled ⇒ 1022。端上失败留待下个周期补发 |
+| `GET /admin/venues` | requireAdmin | 管理端门店列表（无业务裁剪全量分页，`AdminVenueQueryService`）；`sort` = `LATEST`（缺省，SQL 分页）/ `VISITS_30D` / `LAST_VISIT`、`visitedOnly`（近 30 天有到访），见 §6.1；行内带到访摘要（7d / 30d / 最近到访 / 同址归因 / 同址数）批量注入；status / sort 经 `WireEnums.parse` 宽容解析（非法 = 不筛 / 默认序） |
+| `GET /admin/venues/{id}/presence` | requireAdmin | 单店到访统计（口径参数随响应回显，admin 展示必须与数值同屏；DTO 全字段 `@JsonInclude(ALWAYS)`——non_null 全局策略会删 null，35 号教训）；2026-10-03 增 `coLocatedRadiusM` / `coLocatedAttribution` / `coLocatedVenues`（含营业状态），`lastPresenceAt` 改名 `lastVisitAt` 并改为命中口径（§4.4） |
+| `GET /admin/venues/presence-consent-stats` | requireAdmin | 授权统计：已允许 / 已关闭 / 待补问 + 首问回答分布 + 近 30 天设置变更次数（2026-10-03 字段 `defaultUsers` → `legacyDefaultUsers` 且语义改变，admin-web 须同版发布） |
 
 admin-web 门店基础信息详情复用既有公开 `GET /venues/{id}`（该响应无 venueType——
 管理列表行的类型来自本清单第二个接口，两处字段面不同是有意的）。
+
+### 6.1 admin 按足迹排序 / 筛选（2026-10-03）
+
+**为什么不能 `ORDER BY`**：到访人数是**派生量**（命中谓词 × 同址归因 × 用户并集），不是任何一列；
+先分页再注入（原做法）只能排当前页。**两条分页路径、同一组筛选谓词**（`VenueRepository.ADMIN_LIST_FILTERS`，
+`findAdminPage` / `findAdminIds` 共用——切换排序时「共 N 家」不能跳）：
+
+- `LATEST` 且不筛足迹 → SQL 分页，与门店规模无关；
+- 足迹排序 / `visitedOnly` → 取筛选后的**全量 id**（千级 Long，id 倒序）+ 有到访门店的**稀疏摘要**
+  （`VenuePresenceService.visitedVenueSummaries`：全量命中证据 → 有证据的门店 + 其同址邻居 → 与单页路径
+  **同一个** `attributionsFor` + `summarize`），内存**稳定**排序后切页（`AdminVenueQueryService.orderByFootprint`）。
+  并列按最近到访倒序，再并列（含从无到访）回落 id 倒序 ⇒ 翻页确定。
+- 两条路径的行数据都经 `visitSummaries` 注入 ⇒ 列表、排序键、详情卡三处数字同源。
+
+**量级边界（登记，到线再做）**：每次排序请求 = 1 次 id 全量 + 1 次 ping 全表 GROUP BY + 2 次同址查询。
+门店到万级或 ping 表到 10^6 行级（约 5 年现有增速）时，改为定时物化汇总表（`venue_id, uv7d, uv30d,
+last_visit_at, refreshed_at`），admin 侧标注刷新时刻——届时排序走 SQL，本节两条路径合一。
 
 ## 7. 验证边界（静态红线）
 
 后端：`rm -rf target/maven-status` 后 compile + test-compile 全绿（防 ECJ 假绿）；
 `VenueListQueryHqlSyntaxTest`（新增 `findAdminPage` JPQL 过括号配平门禁）✓。
-未连库、未启动服务；行为验证（真机采集→落库→admin 展示）交用户联调。
+2026-10-03：`VenuePresenceAttributionTest`（口径不变量 + 同址并集不重复计 + 无同址店归因不变）✓；
+`findCoLocatedPairs` / `findNearby`（并列次序键）两条 native SQL 已在生产库只读跑通。
+2026-10-03 五轮：`VenuePresenceAttributionTest` 重写为 9 条（营业状态 ABSORBED / YIELDED / SHARED / 全组不在营
+回落共享、7d/30d 时间窗、详情片区语义、全量排序路径与单页路径同数、命中查询 HQL 语法）+
+`VenuePresenceConsentGateTest` 7 条（未询问 / DEFAULT / 已关闭拒收、PROMPT 放行、来源解析、统计与门禁同一判据）+
+`AdminVenueFootprintOrderTest` 3 条 + `VenueListQueryHqlSyntaxTest` 收录 admin 两条查询，共 21 条全绿；
+`findCoLocatedPairs`（加双方状态列）生产只读跑通：120 一壶淡泊 SUSPENDED ↔ 121 丽莎 OPEN ⇒ 丽莎 ABSORBED 3 人、
+一壶淡泊 YIELDED 0。HQL 语法断言工具已提为共享 `src/test/.../support/HqlSyntaxAssertions`。
+未启动服务；行为验证（真机采集→落库→admin 展示）交用户联调。
+2026-10-03 同址半径 20 → 50m：`VenuePresenceAttributionTest` 增至 10 条（新增京扬三店：停业店 YIELDED、两家在营 SHARED
+且组内用户并集不重复计；半径下限断言 ≥ 44m = 实测同楼散布），与 ConsentGate 7 / FootprintOrder 3 / HQL 语法 2 共 22 条全绿；
+`findCoLocatedPairs` 在 50m 下生产只读跑通（13 ↔ 14 / 111 互为同址，1155 魅莎 ↔ 100 魅恋）；§4.3 ④（17 对待人工看）/ ⑤（0 家）只读跑通。

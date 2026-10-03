@@ -1,13 +1,7 @@
 package org.quwuting.quwutingservice.venue.service;
 
-import org.antlr.v4.runtime.BaseErrorListener;
-import org.antlr.v4.runtime.CharStreams;
-import org.antlr.v4.runtime.CommonTokenStream;
-import org.antlr.v4.runtime.RecognitionException;
-import org.antlr.v4.runtime.Recognizer;
-import org.hibernate.grammars.hql.HqlLexer;
-import org.hibernate.grammars.hql.HqlParser;
 import org.junit.jupiter.api.Test;
+import org.quwuting.quwutingservice.support.HqlSyntaxAssertions;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -60,6 +54,10 @@ class VenueListQueryHqlSyntaxTest {
             "SELECT v.city AS city, COUNT(v) AS venueCount\nFROM Venue v\n"
                     + VenueRepository.LIST_FILTERS
                     + "\nGROUP BY v.city\nORDER BY COUNT(v) DESC, v.city ASC",
+            // findAdminPage / findAdminIds（2026-10-03 足迹排序）：两条查询共用 ADMIN_LIST_FILTERS，
+            // 拼接形态与注解逐字一致（实体投影分页 + id 投影全量）
+            "SELECT v FROM Venue v\n" + VenueRepository.ADMIN_LIST_FILTERS + "\nORDER BY v.id DESC",
+            "SELECT v.id FROM Venue v\n" + VenueRepository.ADMIN_LIST_FILTERS + "\nORDER BY v.id DESC",
     };
 
     @Test
@@ -132,20 +130,6 @@ class VenueListQueryHqlSyntaxTest {
     }
 
     private static void parseOrFail(String hql) {
-        HqlLexer lexer = new HqlLexer(CharStreams.fromString(hql));
-        HqlParser parser = new HqlParser(new CommonTokenStream(lexer));
-        // ANTLR 默认错误策略会尝试恢复（只打印不抛）——改为收集语法错误并失败，
-        // 让语法性回归在测试层直接显形（与 Hibernate 自身 parseHql 的 fail-fast 语义一致）
-        parser.removeErrorListeners();
-        parser.addErrorListener(new BaseErrorListener() {
-            @Override
-            public void syntaxError(Recognizer<?, ?> recognizer, Object offendingSymbol,
-                                    int line, int charPositionInLine, String msg,
-                                    RecognitionException e) {
-                throw new AssertionError("HQL 语法错误 L" + line + ":" + charPositionInLine
-                        + " -> " + msg + "\nSQL:\n" + hql, e);
-            }
-        });
-        parser.statement();
+        HqlSyntaxAssertions.assertParses(hql);
     }
 }
