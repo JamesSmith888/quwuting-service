@@ -303,6 +303,13 @@ def main() -> int:
           f"（双源 {len(covered) - len(out['singleSourceCities'])} / "
           f"单源 {len(out['singleSourceCities'])}）")
     print(f"单源城市: {out['singleSourceCities']}")
+    # 🚨 来源齐备性预检（2026-10-03 立规，双源日）：见 SKILL.md Step 0
+    if len(out["sources"]) < 2:
+        print("🚨 **单源日**：关门方向（表⑤/表⑤′）**默认挂起**，等当日已知来源都发布后再执行 ——\n"
+              "    已知来源更新规律：「舞厅百事通」**每日双更（午 10-13 / 晚 17-20）**，"
+              "「市井慢时光 / xianbao360」每日单更。\n"
+              "    10-03 实证：14:00 按单源执行 7 家暂停，17:47 第二源到位 ⇒ **7 家全部需回滚 + 公告重发**。\n"
+              "    ✅ 表① 开门反转（正向、代价低）可先行执行；⛔ 表⑤ 请等第二源。")
     print(f"无名单 header（整城未动）: {out['noListHeaders']}")
     print(f"县级回挂: {sorted(reported_county)}")
     print(f"\n表① 反转（M==S 高置信）{len(t1)} 家")

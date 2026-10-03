@@ -54,6 +54,9 @@ MANAGED_SKILLS=(
   quwuting-git-sync
   quwuting-prod-readonly-diagnosis
   quwuting-audit-rejection-triage
+  # 2026-10-03 纳入：此前只有运行时副本（脚本的「仅存在于运行时」清单里挂着），
+  # 与小程序的每次改动都相关却不受版本管理——本轮补项目源，改它一律改源再 sync
+  quwuting-miniprogram-change
 )
 
 RSYNC_EXCLUDES=(--exclude=.DS_Store --exclude=__pycache__ --exclude=*.pyc)

@@ -113,18 +113,18 @@ public class WxacodeShareService {
     private record CachedCode(byte[] bytes, long expiresAtMillis) {}
 
     /**
-     * 获取门店分享码（JPEG 字节）。门店不存在/已删除 → 1001；微信失败 → 5001。
+     * 获取门店分享码（JPEG 字节 + 内容标识）。门店不存在/已删除 → 1001；微信失败 → 5001。
      * scene：{@code id=<venueId>}（&s=<uid> 登录归因）；32 字符超限防御性拒绝
      * （"id=1234567&s=7654321" 极限 20 字符，正常数据不可达）。
      */
-    public byte[] getVenueWxacode(Long venueId) {
+    public WxacodeImage getVenueWxacode(Long venueId) {
         venueRepository.findByIdAndDeletedFalse(venueId)
                 .orElseThrow(() -> new BusinessException(1001, "门店不存在"));
         return getPersonalCode(new WxacodeSpec(appId, VENUE_PAGE, buildVenueScene(venueId), qrcodeEnv));
     }
 
     /** 获取平台分享码（首页，无归因）。微信失败 → 5001。 */
-    public byte[] getHomeWxacode() {
+    public WxacodeImage getHomeWxacode() {
         return getStaticAsset(new WxacodeSpec(appId, HOME_PAGE, HOME_SCENE, qrcodeEnv));
     }
 
@@ -147,12 +147,15 @@ public class WxacodeShareService {
      * 没有 TTL——"过期"这个概念对静态内容不成立；内容变化的唯一信号是规格变化，
      * 而规格变化会直接产生新指纹 ⇒ 新行 + 新生成（配置改了即刻生效）。
      * 外呼微信只发生在"该指纹首次被请求"这一次。
+     * <p>
+     * 返回 {@link WxacodeImage}（字节 + 内容标识）而不再只回字节：HTTP 层的 ETag 与
+     * 资产主键是同一个事实，必须由**派生指纹的那一处**给出（见 WxacodeImage 注释）。
      */
-    private byte[] getStaticAsset(WxacodeSpec spec) {
+    private WxacodeImage getStaticAsset(WxacodeSpec spec) {
         String fingerprint = spec.fingerprint();
         byte[] stored = assetRepository.findImageBytes(fingerprint);
         if (stored != null && stored.length > 0) {
-            return stored;
+            return new WxacodeImage(stored, fingerprint);
         }
         Object lock = assetLocks.computeIfAbsent(fingerprint, key -> new Object());
         try {
@@ -160,12 +163,12 @@ public class WxacodeShareService {
                 // 双检：等锁期间可能已被同指纹的并发请求物化
                 byte[] recheck = assetRepository.findImageBytes(fingerprint);
                 if (recheck != null && recheck.length > 0) {
-                    return recheck;
+                    return new WxacodeImage(recheck, fingerprint);
                 }
                 byte[] jpeg = wechatService.getUnlimitedQrCode(spec.scene(), spec.page(), spec.envVersion());
                 assetRepository.insertIfAbsent(spec, jpeg, IMAGE_CONTENT_TYPE);
                 log.info("Wxacode static asset materialized: {}", fingerprint);
-                return jpeg;
+                return new WxacodeImage(jpeg, fingerprint);
             }
         } finally {
             assetLocks.remove(fingerprint, lock);
@@ -173,11 +176,11 @@ public class WxacodeShareService {
     }
 
     /** 个性化码通道：内存缓存优先，miss 时调微信生成并回填（容量护栏：超限整体清空本通道） */
-    private byte[] getPersonalCode(WxacodeSpec spec) {
+    private WxacodeImage getPersonalCode(WxacodeSpec spec) {
         String fingerprint = spec.fingerprint();
         CachedCode cached = personalCodeCache.get(fingerprint);
         if (cached != null && System.currentTimeMillis() < cached.expiresAtMillis()) {
-            return cached.bytes();
+            return new WxacodeImage(cached.bytes(), fingerprint);
         }
         byte[] jpeg = wechatService.getUnlimitedQrCode(spec.scene(), spec.page(), spec.envVersion());
         if (personalCodeCache.size() >= PERSONAL_CACHE_MAX_SIZE) {
@@ -187,6 +190,6 @@ public class WxacodeShareService {
         }
         personalCodeCache.put(fingerprint,
                 new CachedCode(jpeg, System.currentTimeMillis() + PERSONAL_CACHE_TTL_MILLIS));
-        return jpeg;
+        return new WxacodeImage(jpeg, fingerprint);
     }
 }
