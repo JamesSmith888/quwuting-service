@@ -534,8 +534,10 @@ UNMATCHED 标记为「新店候选」前，若存疑先联网核实。数据源�
   ⛔ 禁止为了「跑通」把全部城市塞进 `--confirm-cities`——那等于亲手关掉唯一的服务端护栏。
 - **表③ 新店录入（⚠️ 仅限用户放行后执行，红线 4）**：`python3 scripts/qw_api.py batch-create --items 'JSON数组' --base-url <BASE_URL>`
   items = `{"name","city","district?","address?","status?"}`。同城同名返回 EXISTED 属正常。
-  ⚠️ 请求体是 `{"items":[...]}` 包装（裸数组会 5000 报错）；batch-create **不落营业时段/经纬度**，
-  需补走 `POST /venues/{id}/update` 全量回填（详见 Step 4B / `build-playbook.md`）。
+  ⚠️ 请求体是 `{"items":[...]}` 包装（裸数组会 5000 报错）；batch-create **只落
+  name/city/district/address/status**，**不落 `description` / 营业时段 / 经纬度** ——
+  后三者必须补走 `POST /venues/{id}/update` 全量回填（2026-10-04 实证：`description` 传了也静默丢弃，
+  回读为 null，**必须回读验证**，见 Step 4B.5）。
 
 **别名回写（写库确认后的固定动作）**：本轮确认的 typo / alias / variant / renamed 映射，
 先灌平台别名字段再回写字典：
