@@ -217,6 +217,21 @@ SQL 侧镜像一致性由 `VenueHeatServiceTest` 公式测试 + 本 AGENTS.md �
 - **满意度偏移不进排序**：排序看"行为热度"（可 SQL 镜像、非负、稳定），口碑（±80 微调）在热度页综合呈现——语义划分：排序热度 = 行为热度，展示热度 = 行为热度 + 口碑偏移。
 - **约束（2026-08-10 V2 权重收敛）**：`HEAT_SCORE` 与 `findHotVenueIds` 是 SQL 双镜像；全部非配置化权重经 `VenueHeatWeights` 常量拼接、积分权重经 `:pointsWeight` 参数注入（配置唯一事实源 `app.points.heat-weight`）——**调整权重只改一处**（常量或配置），镜像一致性由 `VenueHeatServiceTest` 公式测试 + 代码注释互指维持。
 - **约束**：`HEAT_SCORE` 与 `findHotVenueIds` 是 SQL 双镜像，权重调整必须三处同步（VenueHeatService 常量 + HEAT_SCORE + findHotVenueIds），由本 AGENTS.md 约束；SQL 侧无法引用 Java 常量，镜像一致性靠 `VenueHeatServiceTest` 公式测试 + 代码注释互指维持。
+- 🔴 **文本块拼接必须显式补空格（2026-10-06 P0 事故，native SQL 语法错 → 列表接口整体 500）**：
+  `findHotVenueIds` 的到访项实拼出 `) -2ELSE 0 END) * 10` ⇒ MySQL 词法器把 `2E` 当科学计数法起始
+  ⇒ `SQLSyntaxErrorException` ⇒ **门店列表（推荐排序 + 翻页）整体 500**。
+  **根因**：Java 文本块（text block）**剥离每行行尾空白**、且 `"""` 后的换行 + 缩进同样被剥掉，
+  于是 `+ VISIT_FREE_TIER + """\n ELSE 0 END)` 两侧空格全丢。**唯一正确写法**：
+  `+ " " + VenueHeatWeights.VISIT_FREE_TIER + " " + """`（拼接点两侧都补）。
+  **为什么 JPQL 镜像没炸**：Hibernate 的 HQL ANTLR 词法把 `>=15THEN` 切成两个 token 而容错通过，
+  **MySQL 不容错** ⇒ 同一段拼接文本「JPQL 侧绿灯 / MySQL 侧炸」，正是 native 与 JPQL
+  校验手段不对称的盲区（native 无启动期校验，只能真库执行期暴露）。
+  **⛔ 纪律**：① 文本块拼接点一律显式 `" " + 常量 + " "`，禁依赖文本块自带的空格；
+  ② 已入机器门禁 `VenueListQueryHqlSyntaxTest#noQueryTextHasNumberGluedToFollowingIdentifier`
+  （反射扫全部 `@Query` value/countQuery，断言无「数字紧跟字母」粘连）
+  与 `#sharedSqlFragmentsHaveNoNumberGluedToFollowingIdentifier`（扫 HEAT_SCORE 等 8 个共享片段）；
+  ③ 这与 **2026-08-29 `DancerRepository.PUBLIC_PAGE_ORDER_BY` 同款事故**（`*3/THEN2ELSE`）是同一缺陷类，
+  当时只靠注释提醒未进门禁 ⇒ 同类拼接点现已全部收敛为显式空格写法。
 
 ### 数据采集层
 

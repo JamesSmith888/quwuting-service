@@ -747,22 +747,22 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                 WHERE f.venueId = v.id AND f.deleted = false
                   AND f.userId NOT IN :excludedUserIds
                   AND f.createdAt >= (CURRENT_DATE - 30 day) AND f.createdAt < (CURRENT_DATE + 1 day)) * """
-            + VenueHeatWeights.NEW_FAVORITE + """
+            + " " + VenueHeatWeights.NEW_FAVORITE + " " + """
              + (SELECT COUNT(*) FROM VenuePost p
                 WHERE p.venueId = v.id AND p.deleted = false
                   AND p.createdAt >= (CURRENT_DATE - 30 day) AND p.createdAt < (CURRENT_DATE + 1 day)) * """
-            + VenueHeatWeights.POST + """
+            + " " + VenueHeatWeights.POST + " " + """
              + (SELECT COUNT(DISTINCT ti.userId) FROM TagInteraction ti
                 WHERE ti.venueId = v.id AND ti.deleted = false AND ti.score IS NOT NULL
                   AND ti.userId NOT IN :excludedUserIds
                   AND ti.createdAt >= (CURRENT_DATE - 30 day) AND ti.createdAt < (CURRENT_DATE + 1 day)) * """
-            + VenueHeatWeights.RATING + """
+            + " " + VenueHeatWeights.RATING + " " + """
              + (SELECT COUNT(DISTINCT r.userId) FROM VenueReaction r
                 WHERE r.venueId = v.id AND r.deleted = false
                   AND r.userId NOT IN :excludedUserIds
                   AND r.reactionCode IN :positiveCodes
                   AND r.createdAt >= (CURRENT_DATE - 30 day) AND r.createdAt < (CURRENT_DATE + 1 day)) * """
-            + VenueHeatWeights.REACTION + """
+            + " " + VenueHeatWeights.REACTION + " " + """
              + (SELECT COALESCE(SUM(-pt.delta), 0) FROM PointsTransaction pt
                 WHERE pt.targetType = org.quwuting.quwutingservice.points.enums.PointsTargetType.VENUE
                   AND pt.targetId = v.id AND pt.delta < 0
@@ -770,9 +770,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                   AND pt.createdAt >= (CURRENT_DATE - 30 day) AND pt.createdAt < (CURRENT_DATE + 1 day)) * :pointsWeight
              + GREATEST(0, COALESCE((SELECT m.visitUsers30d FROM VenueVisitMetric m
                 WHERE m.venueId = v.id AND m.deleted = false), 0) - """
-            + VenueHeatWeights.VISIT_FREE_TIER + """
+            + " " + VenueHeatWeights.VISIT_FREE_TIER + " " + """
             ) * """
-            + VenueHeatWeights.VISIT + """
+            + " " + VenueHeatWeights.VISIT + " " + """
             )
             """;
 
@@ -822,7 +822,7 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
             (CASE WHEN ("""
             + HEAT_BEHAVIOR + """
             ) >= """
-            + VenueHeatWeights.SORT_WEIGHT_GUARD_MIN_BEHAVIOR + """
+            + " " + VenueHeatWeights.SORT_WEIGHT_GUARD_MIN_BEHAVIOR + " " + """
             THEN v.sortWeight ELSE 0 END
              + """
             + HEAT_BEHAVIOR + """
@@ -1670,22 +1670,22 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                               WHERE f.venue_id = v.id AND f.deleted = false
                                 AND f.user_id NOT IN :excludedUserIds
                                 AND f.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND f.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * """
-            + VenueHeatWeights.NEW_FAVORITE + """
+            + " " + VenueHeatWeights.NEW_FAVORITE + " " + """
                            + (SELECT COUNT(*) FROM qwt_venue_posts p
                               WHERE p.venue_id = v.id AND p.deleted = false
                                 AND p.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND p.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * """
-            + VenueHeatWeights.POST + """
+            + " " + VenueHeatWeights.POST + " " + """
                            + (SELECT COUNT(DISTINCT ti.user_id) FROM qwt_tag_interactions ti
                               WHERE ti.venue_id = v.id AND ti.deleted = false AND ti.score IS NOT NULL
                                 AND ti.user_id NOT IN :excludedUserIds
                                 AND ti.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND ti.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * """
-            + VenueHeatWeights.RATING + """
+            + " " + VenueHeatWeights.RATING + " " + """
                            + (SELECT COUNT(DISTINCT r.user_id) FROM qwt_venue_reactions r
                               WHERE r.venue_id = v.id AND r.deleted = false
                                 AND r.user_id NOT IN :excludedUserIds
                                 AND r.reaction_code IN :positiveCodes
                                 AND r.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND r.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * """
-            + VenueHeatWeights.REACTION + """
+            + " " + VenueHeatWeights.REACTION + " " + """
                            + (SELECT COALESCE(SUM(-pt.delta), 0) FROM qwt_points_transactions pt
                               WHERE pt.target_type = 'VENUE' AND pt.target_id = v.id AND pt.delta < 0
                                 AND pt.user_id NOT IN :excludedUserIds
@@ -1693,9 +1693,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                            + GREATEST(0, CASE WHEN v.status IN ('OPEN','CLOSED')
                               THEN COALESCE((SELECT m.visit_users_30d FROM qwt_venue_visit_metrics m
                                 WHERE m.venue_id = v.id AND m.deleted = false), 0) - """
-            + VenueHeatWeights.VISIT_FREE_TIER + """
+            + " " + VenueHeatWeights.VISIT_FREE_TIER + " " + """
                               ELSE 0 END) * """
-            + VenueHeatWeights.VISIT + """
+            + " " + VenueHeatWeights.VISIT + " " + """
                            AS heat_score
                     FROM qwt_venues v
                     WHERE v.deleted = false

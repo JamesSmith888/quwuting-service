@@ -106,6 +106,79 @@ class VenueListQueryHqlSyntaxTest {
         assertTrue(checked >= 20, "应扫描到全部 @Query 方法（当前 " + checked + " 个，疑似反射口径失效）");
     }
 
+    /**
+     * 「文本块拼接粘连」缺陷类的静态拦截（2026-10-06 线上事故入机器门禁）。
+     * <p>
+     * <b>根因</b>：Java 文本块（text block）会剥离每行<b>行尾空白</b>，且 {@code """} 后的
+     * 换行 + 缩进同样被剥掉。于是
+     * <pre>
+     * ") - """ + FREE_TIER + """\n ELSE 0 END) * """
+     * </pre>
+     * 实拼成 {@code ) -2ELSE 0 END) *10}——数字与后续 SQL 关键字<b>粘连</b>。
+     * MySQL 词法器把 {@code 2E} 当科学计数法起始 ⇒ {@code SQLSyntaxErrorException}，
+     * native SQL 无启动期校验 ⇒ 只能由真实数据库在首次执行时报出来，表现为接口整体 500。
+     * <p>
+     * <b>为什么括号配平测试拦不住</b>：{@link #allQuerySqlTextsHaveBalancedParentheses}
+     * 只管 {@code ()} 数量；{@link #listQueryHqlParsesWithoutSyntaxErrors} 走 HQL
+     * ANTLR 词法，Hibernate 会把 {@code 2ELSE} 切成两个 token 而容错通过——但 MySQL 不容错。
+     * 换言之<b>同一段拼接文本在 JPQL 侧绿灯、在 MySQL 侧炸</b>，这正是 native 与 JPQL
+     * 校验手段不对称的盲区。
+     * <p>
+     * <b>本测试的判定</b>：拼接完成后的 SQL 文本中不应出现「数字紧跟字母/下划线」
+     * （{@code \d[A-Za-z_]}）。SQL 文本里数字与标识符之间<b>永远</b>需要分隔符，
+     * 该模式在本仓无合法出现（表别名形如 {@code vv1}/{@code pt} 是字母在前，不匹配）。
+     * <p>
+     * <b>正确写法（唯一）</b>：拼接点两侧一律显式补空格，
+     * {@code + " " + VenueHeatWeights.VISIT_FREE_TIER + " " + """}——
+     * 该约定已有两处先例（{@code DancerRepository.PUBLIC_PAGE_ORDER_BY} 2026-08-29 事故
+     * 修复、{@code VenueRepository.VIEW_BEHAVIOR} 浏览三项权重），本门禁将其升为
+     * 全 {@code @Query} 文本的强制约束。
+     */
+    @Test
+    void noQueryTextHasNumberGluedToFollowingIdentifier() {
+        int checked = 0;
+        java.util.regex.Pattern glued =
+                java.util.regex.Pattern.compile("(?<![A-Za-z_0-9.])[0-9]+[A-Za-z_]");
+        for (java.lang.reflect.Method method : VenueRepository.class.getDeclaredMethods()) {
+            org.springframework.data.jpa.repository.Query q =
+                    method.getAnnotation(org.springframework.data.jpa.repository.Query.class);
+            if (q == null) continue;
+            assertNotGlued(method.getName() + "#value", q.value(), glued);
+            if (!q.countQuery().isBlank()) {
+                assertNotGlued(method.getName() + "#countQuery", q.countQuery(), glued);
+            }
+            checked++;
+        }
+        assertTrue(checked >= 20, "应扫描到全部 @Query 方法（当前 " + checked + " 个，疑似反射口径失效）");
+    }
+
+    /** 同款检查覆盖 {@link VenueRepository} 的公开 SQL 片段常量（被多处查询复用的公式载体）。 */
+    @Test
+    void sharedSqlFragmentsHaveNoNumberGluedToFollowingIdentifier() {
+        java.util.regex.Pattern glued =
+                java.util.regex.Pattern.compile("(?<![A-Za-z_0-9.])[0-9]+[A-Za-z_]");
+        String[] fragments = {
+                VenueRepository.HEAT_SCORE, VenueRepository.HEAT_BEHAVIOR,
+                VenueRepository.VIEW_BEHAVIOR, VenueRepository.LIST_FILTERS,
+                VenueRepository.RADIUS_PREDICATE, VenueRepository.RELEVANCE_KEYS,
+                VenueRepository.DISTANCE_KM, VenueRepository.ADMIN_LIST_FILTERS,
+        };
+        for (String fragment : fragments) {
+            assertNotGlued("fragment", fragment, glued);
+        }
+    }
+
+    private static void assertNotGlued(String label, String sql, java.util.regex.Pattern glued) {
+        java.util.regex.Matcher m = glued.matcher(sql);
+        if (m.find()) {
+            int from = Math.max(0, m.start() - 60);
+            int to = Math.min(sql.length(), m.end() + 60);
+            throw new AssertionError("[" + label + "] 数字与后续标识符/关键字粘连（文本块拼接漏空格）：\""
+                    + m.group() + "\"\n上下文：…" + sql.substring(from, to).replace("\n", "\\n") + "…\n"
+                    + "修法：拼接点两侧显式补空格 + \" \" + 常量 + \" \" + \"\"\"");
+        }
+    }
+
     private static void assertBalanced(String label, String sql) {
         int depth = 0;
         boolean inLiteral = false;
