@@ -170,7 +170,7 @@ Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对�
 |------|------|------|------|
 | GET | `/venues/{venueId}/reactions/stats` | 公开（软鉴权） | 字典内全部 Reaction 的四窗口统计 + 当前用户"今日已参与"状态，详情页"大家对这里的感受"+"查看更多"用 |
 | POST | `/venues/{venueId}/reactions/{code}` | 需登录 | toggle 语义（2026-08-14 每日一票：今日未参与=参与、今日已参与=取消、已选其他=**换票**），返回 `{reacted, replacedFrom}`；`code` 为路径变量而非请求体（字典固定，路径更简洁） |
-| GET | `/venues?...&window=7d/30d/all` | 公开（软鉴权） | 列表接口 `window` 参数：控制卡片 Top Reaction 徽标的**排序与展示计数**窗口，默认 `7d`（近7天）；**不影响集合构成**（集合恒为有史以来 `countAll>0`，2026-10-06 起） |
+| GET | `/venues` | 公开（软鉴权） | 卡片 Top Reaction 徽标（`topReactions`）：集合 = 有史以来 `countAll>0`、展示数字与排序 = `countAll` 累计（大者在左），**与任何请求参数无关**（原 `window` 参数已于 2026-10-06 移除） |
 
 **toggle 并发**：每日一票模式下同日并发由 `pg_advisory_xact_lock` 事务级咨询锁串行化（见上「每日一票」章节）；多选模式（开关关闭）下同日并发重复插入触发唯一约束冲突 → 幂等视为已参与（`DataIntegrityViolationException` 捕获 + `entityManager.clear()`）。前端每 code 一个 in-flight 守卫（见前端 AGENTS.md）已把同端连点串行化，本防御兜底多端竞态。
 
@@ -240,11 +240,11 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 
 ---
 
-## 2026-10-06 集合与统计窗口解耦（`ReactionWindow` 只保留排序职责）
+## 2026-10-06 集合 / 数字 / 排序三口径统一（`ReactionWindow` 与 `window` 参数整体退场）
 
-**需求（用户驱动，两次表述合并）**：列表页 reaction 表情**展示全部**（不被 7 天窗口筛掉）；**展示数字 = 累计总数**（用户原话："用户只关心有多少人点过，我们后台只统计近 7 天，用户是感知不到的"）；**7 天只留在后台排序里**。即"后台统计口径 ≠ 用户可见口径"。
+**需求（用户三次表述合并）**：① "表情不应该默认展示 7 天，而是应该展示所有的表情"；② "列表页还是要展示全部的表情数量……我们后台只统计近 7 天，用户是感知不到的"；③ "排序也是最大的表情在左边展示"。合并口径 = **可见集合 = 有史以来、展示数字 = 累计总数、呈现顺序 = 累计降序**——三者同口径，且都与任何时间窗口无关。
 
-**根因**：`ReactionWindow` 同时兼任三职责——集合过滤、排序、徽标内计数。而它**与列表排序正交**（列表排序走独立 `sort` 参数 / `VenueSortMode`），本质是纯 reaction 统计口径；兼任"可见性开关"属越权，兼任"用户可见数字"属口径泄漏（用户看到 7 天切片却以为是总数）。
+**根因**：`ReactionWindow` 历史上同时兼任三职责——集合过滤、排序、徽标内计数。而它**与列表排序正交**（列表排序走独立 `sort` 参数 / `VenueSortMode`），本质是纯 reaction 统计口径：兼任"可见性开关"属越权，兼任"用户可见数字"属口径泄漏（用户看到 7 天切片却以为是总数），兼任"呈现顺序"则与展示数字打架（出现倒挂）。
 
 **生产取证（2026-10-06，`qwt_venue_reactions` 只读统计）**：
 
@@ -261,13 +261,14 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 **实现（`VenueReactionService.buildTopBadgesFromCounts`）**：
 
 - 集合过滤判据：`sortKeyByCode > 0`（所选窗口计数）→ **`countAllByCode > 0`（有史以来）**
-- 排序：`sortKey desc` → **`sortKey desc → countAll desc → code 字典序`**（后两级为必需 tie-break：集合取全量后大量 `7d=0` 表情并列同分位，缺则次序退化到 `HashMap` 迭代序 ⇒ 翻页/重取后 chip 换位；前端 `deriveRows` 用同序前两级 + 稳定排序保持本序）
-- 徽标内计数（`ReactionBadge.countAll/count7d/count30d`）：**全部不变**（API 契约零变更）；前端**展示数字取 `countAll`（累计，用户可见口径）**，所选窗口计数只用于**排序**
-- 前端消费方：`venue-card.deriveRows`（`count: b.countAll`）、`buildReactionTagRows`（`map` 覆盖 `count = countAll`）、详情页折叠头摘要按 `countAll` 求和；列表页筛选面板 section 由「热度统计」更名**「表情排序」**（该参数如今只剩排序作用，标签恒等于结果）
-- **API 契约、DB schema 零变更**；`getStats`（详情页四窗口全量下发）与 `ReactionWindow.from` 默认值均不变
+- 展示数字：前端恒取 **`countAll` 累计**（用户可见口径）
+- 排序：`sortKey desc` → **`countAll desc → code 字典序`**（字典序为必需 tie-break：**52.2% 的表情实例只有 1 次点击** ⇒ 大量并列，缺则次序退化到 `HashMap` 迭代序 ⇒ 翻页/重取后 chip 换位；前端 `deriveRows` 同序 + 稳定排序保持本序）
+- **`window` 请求参数与 `ReactionWindow` 枚举整体删除**：`VenueController` / `VenueService.listVenues` / `VenueReactionService.getBadges`·`batchGetBadges`·`buildTopBadgesFromCounts` / `FavoriteService` / `AdminVenueSyncReportController` 调用点 / 两个测试类 同步；`VenueSortMode` javadoc 的交叉引用一并清理
+- 徽标内计数（`ReactionBadge.countAll/count7d/count30d`）：**全部保留**（`getStats` 四窗口全量下发 + 前端乐观更新本地 ±1 仍需要）；`count7d/count30d` 仅此用途，**不再影响集合 / 数字 / 顺序**
+- **DB schema 零变更**；`GET /venues` 仅不再接收 `window`（可选参数移除，旧客户端多传会被忽略 ⇒ 向后兼容）
 
-**有意保持分叉的一处**：详情页「近期风险」区块（前端 `buildRiskRows`）**仍守 7 天口径**——风险区定位是"近期风险预警"（文案即"近7天有 N 人反馈"），历史旧账长期挂在门店主页与「平台裁决事实、不翻旧账」取向相悖。故：标签云 = 全量集合 + **累计**数字；风险区 = 7 天集合 + 7 天数字。
+**有意保持分叉的一处**：详情页「近期风险」区块（前端 `buildRiskRows`）**仍守 7 天口径**——风险区定位是"近期风险预警"（文案即"近7天有 N 人反馈"），历史旧账长期挂在门店主页与「平台裁决事实、不翻旧账」取向相悖。故：标签云 = 全量集合 + **累计**数字 + **累计**排序；风险区 = 7 天集合 + 7 天数字。
 
-**已知副作用（数字与排序口径分离的必然结果）**：可能出现"小数字排在大数字前面"——老表情累计 8 次但近 7 天无人点，会排在近 7 天有 2 次点击的新表情之后；**现网实测 56 家中 3 家存在此类倒挂**。若改为同口径（排序也用 `countAll`），卡片将彻底不依赖所选窗口，届时窗口切换器应同步移除——当前保持分离（用户明确"后台统计按 7 天"）。
+**已消除的副作用（排序改为累计后不复存在）**：曾出现"小数字排在大数字前面"——老表情累计 8 次但近 7 天无人点，会排在近 7 天有 2 次点击的新表情之后；**现网实测 56 家中 3 家存在此类倒挂**。**排序改为 `countAll` 降序后该现象不复存在**，用户看到的 chip 数字必然从大到小。
 
-**验证**：`./mvnw -q test-compile` 通过；前端 tsc 编译通过（隔离工作区 tsc 5.9.3）、`check:tokens` / `check:es-syntax` / `check:venue-card`（33 项）通过。前端细节见[前端文档](../../quwuting/docs/agents/08-reaction-system.md) · 「2026-10-06 集合与统计窗口解耦」。
+**验证**：`./mvnw -s settings-central.xml -q test-compile` 通过；前端 tsc（隔离工作区 5.9.3）通过、`check:tokens` / `check:es-syntax` / `check:list-filters`（7 维度接线）通过。 前端细节见[前端文档](../../quwuting/docs/agents/08-reaction-system.md) · 「2026-10-06 集合与统计窗口解耦」。

@@ -220,7 +220,7 @@ public class CrowdReportService {
 
     /** 确认奖励即时反馈文案（服务端权威）：「你的上报被 3 位舞友确认 · +3 积分已到账」 */
     private String buildRewardText(int agreeCount) {
-        return "你的上报被 " + agreeCount + " 位舞友确认 · +" + pointsService.crowdConfirmReward()
+        return "您的上报被 " + agreeCount + " 位舞友确认 · +" + pointsService.crowdConfirmReward()
                 + " 积分已到账";
     }
 
@@ -677,7 +677,7 @@ public class CrowdReportService {
             } else {
                 messageService.create(reportUserId, MessageType.CROWD_CONFIRMED,
                         "今晚热度已确认",
-                        "你在「" + venueName + "」的今晚热度上报已被 " + agreeCount
+                        "您在「" + venueName + "」的今晚热度上报已被 " + agreeCount
                                 + " 位舞友确认 · +" + reward + " 积分已到账",
                         RELATED_TYPE_VENUE, venueId);
             }
@@ -693,7 +693,7 @@ public class CrowdReportService {
                 }
                 messageService.create(favoriterId, MessageType.CROWD_CONFIRMED,
                         "收藏门店 · 今晚热度",
-                        "你收藏的「" + venueName + "」今晚热度已被 " + agreeCount
+                        "您收藏的「" + venueName + "」今晚热度已被 " + agreeCount
                                 + " 位舞友确认（数据仅供参考）",
                         RELATED_TYPE_VENUE, venueId);
             }

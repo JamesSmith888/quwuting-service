@@ -94,6 +94,48 @@ public interface VenuePresencePingRepository extends JpaRepository<VenuePresence
                                                     @Param("excludedUserIds") Collection<Long> excludedUserIds);
 
     /**
+     * 窗口内 + 排除内部账号的<b>去重到访日</b>明细（2026-10-06，V39「到访次数」新增）：
+     * {@code (venueId, userId, visitDay)}，每行 = 一位用户在一家店的<b>一个到店日</b>
+     * （{@code DISTINCT} 已吃掉当天重复命中）。
+     * <p>
+     * <b>为什么返回「日明细」而不是 COUNT 聚合值</b>（与人数查询的形态差异是刻意的）：
+     * 同址归因要求<b>并集</b>而非相加—— 人数侧是"用户在组内任一家到过即算 1 人"
+     * （{@code unionLastSeen}）；次数侧同理必须是"用户在这几家店的<b>去重日并集</b>
+     * 的大小"。若在 SQL 里先GROUP BY 聚成每店每天数，Java 侧只能把各店的 count 相加
+     * ⇒ 同一用户同一天在同址两家都被命中时会<b>被重复计一次</b>（人数侧不会），
+     * 两个数字之间凭空出现口径裂缝。返回日明细才能在内存里做真正的并集
+     * （{@code unionVisitDays}），与人数侧同构。
+     * <p>
+     * <b>口径 = 每 (人, 店) 一组、去重自然日</b>（2026-10-06 用户定案）：
+     * <ul>
+     *   <li>用户某天到某店 ⇒ 那天记 1 次（<b>一天内去多次只记 1 次</b>，由 DISTINCT 保证）；</li>
+     *   <li>连去 3 天 ⇒ 3 次；</li>
+     *   <li>去重键含 {@code venue_id} ⇒ 同一天去两家不同门店，两家各记 1 次。</li>
+     * </ul>
+     * ⚠️ <b>与人数口径刻意不同</b>（52 号 §4 已登记）：人数用 {@code MAX(createdAt)} 时间窗去重，
+     * <b>跨零点连场算 1 次</b>（舞厅 22:00 进 02:00 出不会被拆成两天）；本查询按自然日去重，
+     * 跨零点连场会算 2 次。二者对"同一次到访"的判断本就不同，故同源计算、分别落列，
+     * <b>禁止互相推算</b>。
+     * <p>
+     * ⚠️ <b>{@code DATE()} 的时区语义</b>：{@code created_at} 由 Java 写入
+     * （JVM = 北京时间，见 {@link #upsertInBucket} 红线），MySQL 的 {@code DATE()}
+     * 按会话时区切分该 datetime ⇒ RDS 会话时区非北京时间时会把凌晨的到访算到前一天。
+     * 生产连接串已固定 {@code serverTimezone=Asia/Shanghai}（14 号部署文档），
+     * 实际按北京时间切分。⛔ 改连接串时区前先复核本段。
+     * <p>
+     * 量级 = Σ(每位用户 × 每家店 × 每个到店日)。到访是稀疏信号
+     * （2026-10-06 现网全网 52 条 ping / 9 家店），远小于 ping 表行数；
+     * {@code (venue_id, created_at)} 索引前缀可裁掉窗口外行。
+     */
+    @Query("SELECT DISTINCT p.venueId, p.userId, DATE(p.createdAt) FROM VenuePresencePing p "
+            + "WHERE " + HIT_PREDICATE
+            + " AND p.createdAt >= :since AND p.userId NOT IN :excludedUserIds")
+    List<Object[]> findVisitorDaysSinceExcluding(@Param("since") LocalDateTime since,
+                                                 @Param("radiusM") int radiusM,
+                                                 @Param("maxAccuracyM") int maxAccuracyM,
+                                                 @Param("excludedUserIds") Collection<Long> excludedUserIds);
+
+    /**
      * 幂等写入（15 分钟桶）：INSERT 新行 / 桶冲突时仅刷新 updated_at——
      * <b>不改写 distance_m / accuracy_m / created_at</b>：桶内首见时刻与首证距离
      * 是「该窗口的原始事实」，后到的重复采样（onShow 抖动）不覆盖首证。

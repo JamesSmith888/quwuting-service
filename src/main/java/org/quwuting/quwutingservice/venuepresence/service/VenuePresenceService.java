@@ -25,6 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -32,6 +33,7 @@ import java.util.Collection;
 import java.util.Deque;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -421,7 +423,7 @@ public class VenuePresenceService {
     // ── 读侧：排序口径到访份额（2026-10-06，V38） ─────────────────────────────────
 
     /**
-     * 排序口径的到访份额：**排除内部账号 + 同址分摊 + 不在营记 0**，供定时刷新任务写入
+     * 排序口径的到访份额：**可配排除账号 + 同址分摊 + 不在营记 0**，供定时刷新任务写入
      * {@code qwt_venue_visit_metrics}（唯一消费方 = {@code VenueVisitMetricsScheduler}）。
      * <p>
      * <b>为什么必须由本类产出、不能由公式侧自己算</b>：到访人数是派生量
@@ -429,12 +431,12 @@ public class VenuePresenceService {
      * JPQL 无 FROM 派生表能力 ⇒ 公式只能读物化结果。见 {@code VenueVisitMetric} 类注释。
      * <p>
      * <b>与 admin 展示口径 {@link #visitedVenueSummaries()} 的三处分叉</b>（有意，见
-     * {@link VenueVisitShare}）：排除内部账号、分摊（1/k）而非共享、不在营门店不产出。
+     * {@link VenueVisitShare}）：排除集合、分摊（1/k）而非共享、不在营门店不产出。
      * <p>
      * 时间窗只取 30 天（{@link #RANKING_WINDOW_DAYS}）：7 天份额由同一份命中集在内存里
      * 二次判定，不额外查库（"用户在某窗口内到访过 ⟺ 其最近命中时刻 ≥ 窗口起点"）。
      *
-     * @param excludedUserIds 内部账号排除集合（恒非空由调用方保证；本方法对空集合退化为
+     * @param excludedUserIds 排除账号集合（恒非空由调用方保证；本方法对空集合退化为
      *                        哨兵值，避免 {@code NOT IN ()} 语法错误——与公式侧同款防御）
      * @return venueId → 份额；<b>缺席 = 排序记 0</b>（无到访 / 已让渡 / 不在营）
      */
@@ -443,12 +445,19 @@ public class VenuePresenceService {
         LocalDateTime now = LocalDateTime.now();
         Collection<Long> exclusions = (excludedUserIds == null || excludedUserIds.isEmpty())
                 ? List.of(NO_EXCLUSION_SENTINEL) : excludedUserIds;
+        LocalDateTime windowStart = now.minusDays(RANKING_WINDOW_DAYS);
         Map<Long, Map<Long, LocalDateTime>> lastSeen = toLastSeenByVenue(
                 pingRepository.findVisitorLastSeenSinceExcluding(
-                        now.minusDays(RANKING_WINDOW_DAYS), HIT_RADIUS_M, HIT_MAX_ACCURACY_M, exclusions));
+                        windowStart, HIT_RADIUS_M, HIT_MAX_ACCURACY_M, exclusions));
         if (lastSeen.isEmpty()) {
             return Map.of();
         }
+        // 到访次数（V39）：单独取「去重到访日」明细。⛔ 不能从 lastSeen 推——那里面一天
+        // 的多次命中已被压成 MAX(createdAt)，"来过几天"的信息不可恢复（同 PingRepository
+        // 注释）。与人数共用同一套排除集与窗口起点，两列因此永远同窗。
+        Map<Long, Map<Long, Set<LocalDate>>> visitDays = toVisitDaysByVenue(
+                pingRepository.findVisitorDaysSinceExcluding(
+                        windowStart, HIT_RADIUS_M, HIT_MAX_ACCURACY_M, exclusions));
         // 候选 = 有证据的门店 + 它们的同址邻居（邻居可能经共享 / 并入获得到访），
         // 与 admin 全量路径同一手法（52 号 §6.1）
         Set<Long> candidates = new LinkedHashSet<>(lastSeen.keySet());
@@ -470,9 +479,13 @@ public class VenuePresenceService {
             // 分摊分母 = 组内在营门店数（含本店，≥1）：同址组都在营 ⇒ 每位用户 1/k。
             // 与「共享」（每家都记满）的差别正是本表要防的"同楼双吃"（52 号 §1.1 第 1 条）
             double share = 1.0 / Math.max(1, attribution.inOperationCount());
+            // 次数 = 证据门店的「(人, 日) 二元组并集」大小 × 同一 share（⛔ 不是日期并集：
+            // 那会把"谁来的"压掉 —— 6 位用户散在 5 天会被并成 5 次，见 countVisitEvents）
+            long eventCount = countVisitEvents(attribution.evidenceVenueIds(), visitDays);
             result.put(id, new VenueVisitShare(
-                    scaleVisits(countSince(users, now.minusDays(RANKING_WINDOW_DAYS)) * share),
+                    scaleVisits(countSince(users, windowStart) * share),
                     scaleVisits(countSince(users, now.minusDays(VISIT_RECENT_WINDOW_DAYS)) * share),
+                    scaleVisits(eventCount * share),
                     attribution.areaVenueIds().size()));
         });
         return result;
@@ -598,6 +611,55 @@ public class VenuePresenceService {
                     .forEach((user, at) -> users.merge(user, at, (a, b) -> a.isAfter(b) ? a : b));
         }
         return users;
+    }
+
+    /**
+     * Object[]{venueId, userId, visitDay} → venueId → (userId → 该用户的去重到店日集合)（V39）。
+     * <p>
+     * **保留 user维度**（⛔ 别在这里就把人压掉）：同址归因的并集在 {@code unionVisitDays}
+     * 里按 {@code (user, day)} 二元组合并——若本方法返回 {@code Set<LocalDate>}，
+     * "谁来的"这一维已被丢弃，6 位不同用户散在 5 天里会被并成 5 个日期
+     * （现网实证：120/121 同址组 6 人 ⇒ 误算成 5 次/2.5 次 ⇒ 卡片显示"1 次"）。
+     */
+    private static Map<Long, Map<Long, Set<LocalDate>>> toVisitDaysByVenue(List<Object[]> rows) {
+        Map<Long, Map<Long, Set<LocalDate>>> result = new HashMap<>();
+        for (Object[] row : rows) {
+            result.computeIfAbsent((Long) row[0], k -> new HashMap<>())
+                    .computeIfAbsent((Long) row[1], k -> new HashSet<>())
+                    .add((LocalDate) row[2]);
+        }
+        return result;
+    }
+
+    /**
+     * 多店证据的<b>去重到店次数</b>（V39）= {@code (userId, visitDay)} 二元组并集的<b>大小</b>。
+     *
+     * <p><b>为什么并集键必须是 (人, 日) 二元组、不能只是日</b>（2026-10-06 实测修正）：
+     * 同址组共享证据时（坐标完全重合的门店，常见于商场/大楼锚点），一家店的到访证据
+     * 可能全部来自邻居店。真实样本（一壶淡泊 120 / 丽莎 121 坐标完全重合）：
+     * <ul>
+     *   <li>120 店 30 天内有 <b>6 位用户</b>，散在 <b>5 个日期</b>上；</li>
+     *   <li>若按 {@code Set<LocalDate>} 去重 ⇒ 只剩 <b>5</b>（6 位不同用户被并成 5 个日期，
+     *       "谁来的"这一维凭空消失）；再经同址 1/k 分摊 ⇒ 更小；</li>
+     *   <li>⇒ 卡片显示「1 次真实到店足迹」，而用户明明看到<b>两位以上</b>被记录 ⇒ 读起来是
+     *       "系统只认了一个人"，是对贡献者的直接否定。</li>
+     * </ul>
+     * 正确语义：<b>每个 (谁, 哪天) 算一次</b>。于是 6 位用户各来 1 天 = <b>6 次</b>；
+     * 同一人连来 3 天 = 3 次；同一人同一天在同址两家都命中 = <b>1 次</b>（按日去重，正是
+     * 用户定的口径）。
+     *
+     * <p>⚠️ 由此次数<b>恒 ≥ 人数</b>（每个用户至少贡献 1 次）⇒ 这不是巧合而是口径的必然，
+     * 但也意味着<b>次数天然随用户数放大</b>：现网样本极稀（仅 1 家店过 ≥3 门槛）时，
+     * 「6 位舞友 · 6 次」读起来仍偏弱是数据量问题，不是公式问题。
+     */
+    private static long countVisitEvents(Collection<Long> venueIds,
+                                         Map<Long, Map<Long, Set<LocalDate>>> visitDays) {
+        Set<String> userDays = new HashSet<>();
+        for (Long venueId : venueIds) {
+            visitDays.getOrDefault(venueId, Map.of())
+                    .forEach((user, days) -> days.forEach(day -> userDays.add(user + "|" + day)));
+        }
+        return userDays.size();
     }
 
     /** 时间窗去重：用户在窗口内到访过 ⟺ 其最近命中时刻 ≥ 窗口起点 */

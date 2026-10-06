@@ -236,19 +236,19 @@ public class AppFeedbackService {
         switch (target) {
             case ADOPTED -> {
                 title = "反馈已采纳";
-                content = "你的「" + categoryLabel + "」反馈已被采纳并奖励积分";
+                content = "您的「" + categoryLabel + "」反馈已被采纳并奖励积分";
             }
             case ADOPTED_NO_REWARD -> {
                 title = "反馈已采纳";
-                content = "你的「" + categoryLabel + "」反馈已被采纳（未奖励积分）";
+                content = "您的「" + categoryLabel + "」反馈已被采纳（未奖励积分）";
             }
             case RESOLVED -> {
                 title = "反馈已处理";
-                content = "你的「" + categoryLabel + "」反馈已处理";
+                content = "您的「" + categoryLabel + "」反馈已处理";
             }
             case DISMISSED -> {
                 title = "反馈已忽略";
-                content = "你的「" + categoryLabel + "」反馈已忽略";
+                content = "您的「" + categoryLabel + "」反馈已忽略";
             }
             default -> {
                 return; // 非终态（PENDING）不可能走到通知分支，防御性早退

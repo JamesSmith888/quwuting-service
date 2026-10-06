@@ -1,7 +1,7 @@
 {
   "source": "xianbao360",
   "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-10-05",
+  "updated": "2026-10-06",
   "entries": [
     {
       "city": "西安市",
@@ -5970,6 +5970,57 @@
       "kind": "typo",
       "venue_id": 1494,
       "note": "形近字（I/L）。2026-10-05 首见即固化：源站写「Ls丽莎」→ UNMATCHED 造成 1 个假新店 + 1 家营业店误进暂停候选（两道错同源）；已灌平台别名（venueId=1494），重跑回读 via=alias-domain:ls丽莎 / EXACT"
+    },
+    {
+      "city": "苏州市",
+      "news_name": "雅乐汇",
+      "platform_name": "雅乐汇歌舞厅",
+      "venue_id": 1121,
+      "kind": "exact",
+      "note": "2026-10-06 市井慢时光新增点名（10-05 源站无此店），EXACT 命中，SUSPENDED→OPEN 已反转（公告 #98）"
+    },
+    {
+      "city": "无锡市",
+      "news_name": "323",
+      "platform_name": "323音乐吧",
+      "venue_id": 1234,
+      "kind": "exact",
+      "note": "江阴 323（源文写法「323」）经别名域命中；2026-10-06 SUSPENDED→OPEN 已反转（公告 #98）"
+    },
+    {
+      "city": "常熟市",
+      "news_name": "ace",
+      "platform_name": null,
+      "kind": "unmatched-new-store",
+      "note": "2026-10-06 新表③候选（字母名）。⛔ 勿用末字补搜挂店：补搜「e」会命中 #1109 欧曼酒吧（CEASED）——2026-10-06 已修 qw_match.py（纯拉丁名不做末字补搜）"
+    },
+    {
+      "city": "苏州市",
+      "news_name": "浪集",
+      "platform_name": null,
+      "kind": "unmatched-new-store",
+      "note": "2026-10-06 新表③候选（常熟）；源站 10-05 同段写「老朱」无浪集，判当日新增点名"
+    },
+    {
+      "city": "杭州市",
+      "news_name": "兰博",
+      "platform_name": null,
+      "kind": "unmatched-new-store",
+      "note": "2026-10-06 新表③候选；10-05 台账已记「续见」，连续两轮未匹配"
+    },
+    {
+      "city": "嘉兴市",
+      "news_name": "舞魅",
+      "platform_name": null,
+      "kind": "unmatched-new-store",
+      "note": "2026-10-06 新表③候选；10-05 台账已记「续见」"
+    },
+    {
+      "city": "嘉兴市",
+      "news_name": "余新",
+      "platform_name": null,
+      "kind": "unmatched-new-store",
+      "note": "2026-10-06 新表③候选；源文「嘉兴交谊舞*余新 舞魅」——「余新」疑为镇名（嘉兴余新镇）而非店名，keyword=余新 零命中"
     }
   ],
   "removed_duplicates": [

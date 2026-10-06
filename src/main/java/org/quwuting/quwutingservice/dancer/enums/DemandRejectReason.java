@@ -50,7 +50,7 @@ public enum DemandRejectReason {
      * 下一步出路引导，替代 DemandStatus.statusText 的通用「暂时不方便」表述）。
      */
     public String guestText() {
-        return "TA 暂时不方便（" + label + "），你可以看看其他舞伴";
+        return "TA 暂时不方便（" + label + "），您可以看看其他舞伴";
     }
 
     /** 解析原因代码（非法/空 → null，防御历史脏数据/旧客户端） */

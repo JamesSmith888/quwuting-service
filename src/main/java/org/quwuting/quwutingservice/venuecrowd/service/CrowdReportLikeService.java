@@ -71,7 +71,7 @@ public class CrowdReportLikeService {
         if (affected == 1 && !likerId.equals(report.getUserId())) {
             messageService.create(report.getUserId(), MessageType.CROWD_REPORT_LIKED,
                     "收到热度点赞",
-                    "你在「" + venueName(report.getVenueId()) + "」的今晚热度上报收到 1 个赞，感谢分享真实情况",
+                    "您在「" + venueName(report.getVenueId()) + "」的今晚热度上报收到 1 个赞，感谢分享真实情况",
                     RELATED_TYPE_VENUE, report.getVenueId());
         }
         return new CrowdLikeResponse(likeCountOf(reportId), true);

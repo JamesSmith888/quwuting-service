@@ -16,7 +16,7 @@ import java.util.Map;
 /**
  * 门店到访指标刷新调度器（2026-10-06，V38；文档 = docs/agents/52-venue-presence.md「到访进排序」）。
  * <p>
- * <b>职责</b>：把「派生量」到访人数（归因 × 分摊 × 排除内部账号）落到
+ * <b>职责</b>：把「派生量」到访人数（归因 × 分摊 × 可配排除集合）落到
  * {@code qwt_venue_visit_metrics}，让热度公式可以只做一次主键点查的标量子查询。
  * 这是到访能进 {@code HEAT_BEHAVIOR} 的**唯一合规路径**（JPQL 无派生表能力，
  * 见 {@code VenueVisitMetric} 类注释）。
@@ -86,7 +86,8 @@ public class VenueVisitMetricsScheduler {
                     venuePresenceService.visitSharesForRanking(heatExclusionService.excludedUserIds());
             metricRepository.resetAll(now);
             shares.forEach((venueId, share) -> metricRepository.upsert(
-                    venueId, share.visitUsers30d(), share.visitUsers7d(), share.groupSize(), now));
+                    venueId, share.visitUsers30d(), share.visitUsers7d(),
+                    share.visitEvents30d(), share.groupSize(), now));
             // 无到访（或全被让渡 / 不在营）的轮次很常见——只在真有数据时记日志，避免 30 分钟一条噪音
             if (!shares.isEmpty()) {
                 log.info("[venue-visit-metrics] 到访指标刷新：门店数={}", shares.size());

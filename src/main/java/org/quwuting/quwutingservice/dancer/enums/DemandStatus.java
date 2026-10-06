@@ -46,11 +46,11 @@ public enum DemandStatus {
      */
     public String statusText() {
         return switch (this) {
-            case PENDING -> "邀约已送达，TA 会在 24 小时内回复你";
+            case PENDING -> "邀约已送达，TA 会在 24 小时内回复您";
             case APPROVED -> "TA 已同意，微信已展示，快去添加好友吧";
-            case REJECTED -> "TA 暂时不方便接收邀约，你可以看看其他舞伴";
-            case AUTO_RELEASED -> "TA 未及时回复，平台已为你展示微信，快去添加好友吧";
-            case EXPIRED -> "TA 可能暂时没看到，你可以稍后再试，或看看其他舞伴";
+            case REJECTED -> "TA 暂时不方便接收邀约，您可以看看其他舞伴";
+            case AUTO_RELEASED -> "TA 未及时回复，平台已为您展示微信，快去添加好友吧";
+            case EXPIRED -> "TA 可能暂时没看到，您可以稍后再试，或看看其他舞伴";
         };
     }
 

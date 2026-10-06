@@ -35,7 +35,8 @@ public interface VenueVisitMetricRepository extends JpaRepository<VenueVisitMetr
      */
     @Modifying
     @Query(value = "UPDATE qwt_venue_visit_metrics "
-            + "SET visit_users_30d = 0, visit_users_7d = 0, refreshed_at = :now, updated_at = :now "
+            + "SET visit_users_30d = 0, visit_users_7d = 0, visit_events_30d = 0, "
+            + "refreshed_at = :now, updated_at = :now "
             + "WHERE deleted = false",
             nativeQuery = true)
     void resetAll(@Param("now") LocalDateTime now);
@@ -43,26 +44,36 @@ public interface VenueVisitMetricRepository extends JpaRepository<VenueVisitMetr
     /**
      * 逐店 upsert（刷新任务第二步）：冲突键 = {@code UNIQUE(venue_id)}。
      * 已存在的行只刷新三个业务值与时间戳（{@code created_at} 保留首见）。
+     * <p>
+     * ⚠️ {@code visit_events_30d} 与两个数列<b>同批写入</b>：三者共用同一趟归因
+     * （同attribution / 同分摊 / 同排除集），分开写会出现"人数更新了、次数还是上一轮"
+     * 的陈旧对（且这种错不会报错，只会让卡片文案自相矛盾）。
      */
     @Modifying
     @Query(value = "INSERT INTO qwt_venue_visit_metrics "
-            + "(created_at, updated_at, deleted, venue_id, visit_users_30d, visit_users_7d, group_size, refreshed_at) "
-            + "VALUES (:now, :now, false, :venueId, :visitUsers30d, :visitUsers7d, :groupSize, :now) "
+            + "(created_at, updated_at, deleted, venue_id, visit_users_30d, visit_users_7d, visit_events_30d, group_size, refreshed_at) "
+            + "VALUES (:now, :now, false, :venueId, :visitUsers30d, :visitUsers7d, :visitEvents30d, :groupSize, :now) "
             + "ON DUPLICATE KEY UPDATE "
             + "visit_users_30d = VALUES(visit_users_30d), visit_users_7d = VALUES(visit_users_7d), "
+            + "visit_events_30d = VALUES(visit_events_30d), "
             + "group_size = VALUES(group_size), refreshed_at = VALUES(refreshed_at), updated_at = VALUES(updated_at)",
             nativeQuery = true)
     void upsert(@Param("venueId") Long venueId,
                 @Param("visitUsers30d") BigDecimal visitUsers30d,
                 @Param("visitUsers7d") BigDecimal visitUsers7d,
+                @Param("visitEvents30d") BigDecimal visitEvents30d,
                 @Param("groupSize") int groupSize,
                 @Param("now") LocalDateTime now);
 
     /**
-     * 整页批量取数（列表卡片徽标，防 N+1）：<b>排序口径</b>的分摊后到访人数。
-     * 返回 Object[]{venueId, visitUsers30d}；无到访的门店不在结果里（调用方按缺席处理）。
+     * 整页批量取数（列表卡片徽标，防 N+1）：<b>排序口径</b>的分摊后到访人数 + 到访次数。
+     * 返回 Object[]{venueId, visitUsers30d, visitEvents30d}；无到访的门店不在结果里
+     * （调用方按缺席处理）。
+     * <p>
+     * 次数随行返回而非二次查询：两者同源同窗，列表页只渲染这一行，
+     * 拆成两次取数会让"人数与次数"之间多一个可能不一致的时间窗。
      */
-    @Query("SELECT m.venueId, m.visitUsers30d FROM VenueVisitMetric m "
+    @Query("SELECT m.venueId, m.visitUsers30d, m.visitEvents30d FROM VenueVisitMetric m "
             + "WHERE m.deleted = false AND m.venueId IN :venueIds")
     List<Object[]> findVisitUsersByVenueIds(@Param("venueIds") Collection<Long> venueIds);
 }

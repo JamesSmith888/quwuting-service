@@ -30,7 +30,9 @@ import java.time.LocalDateTime;
  *
  * <h3>本表的三个口径（与 admin 展示口径**有意分叉**，勿"顺手统一"）</h3>
  * <ol>
- *   <li><b>排除内部账号</b>（{@code heat.excluded.user.ids} ∪ 哨兵）：到访是低基数信号
+ *   <li><b>排除集合</b>（{@code heat.excluded.user.ids} ∪ 哨兵，<b>当前为空 = 谁都不排除</b>
+ *       ——2026-09-19 用户决策「先不要做任何排除」，管理员与真实用户同权计入，见
+ *       {@code HeatAccountExclusionService}）：到访是低基数信号
  *       （2026-10-06 现网 51 条 ping 中 ADMIN 一人占 26 条 = 51%），内部账号在本项的占比
  *       远高于它在收藏/反馈里的占比。admin 展示口径**不排除**（展示回答"发生了什么"、
  *       公式回答"有多火"）。</li>
@@ -70,7 +72,7 @@ public class VenueVisitMetric extends BaseEntity {
     private Long venueId;
 
     /**
-     * 近 30 天到访人数（归因 + 分摊 + 排除内部账号）——<b>排序口径</b>。
+     * 近 30 天到访人数（归因 + 分摊 + 可配排除集合）——<b>排序口径</b>。
      * 小数来源：同址组都在营时按 1/k 分摊（见类注释 ②）。
      */
     @Column(name = "visit_users_30d", nullable = false)
@@ -79,6 +81,34 @@ public class VenueVisitMetric extends BaseEntity {
     /** 近 7 天到访人数（同口径）；<b>仅展示</b>，不进公式（避免第二处时间项） */
     @Column(name = "visit_users_7d", nullable = false)
     private BigDecimal visitUsers7d;
+
+    /**
+     * 近 30 天到访<b>次数</b>（2026-10-06，V39）——<b>仅展示</b>，不进公式。
+     * <p>
+     * 口径 = {@code COUNT(DISTINCT (用户, 门店, 自然日))}（二元组去重，恒 ≥ {@link #visitUsers30d}）：
+     * 用户某天到某店记1 次
+     * （<b>一天内去多次只记 1 次</b>），连去 3 天记 3 次；去重键含 {@code venueId}
+     * ⇒ 同一天去两家不同门店，两家各记 1 次。
+     * <p>
+     * <b>与人数列的三点差异（刻意分列，勿互相推算）</b>：
+     * <ol>
+     *   <li><b>去重粒度不同</b>：人数 = {@code MAX(createdAt)} 时间窗去重，
+     *       <b>跨零点连场算 1 次</b>（舞厅 22:00 进 02:00 出不会被拆成两天）；
+     *       次数 = <b>自然日</b>去重，跨零点连场会算 2 次。</li>
+     *   <li><b>不可从人数推出</b>：ping 按 15 分钟写幂等桶，一次到店有多条 ping
+     *       ⇒ {@code COUNT(*)} 会把"一次到店"数成 5~6 次。次数必须单独取数
+     *       （{@code VenuePresencePingRepository.findVisitorDayCounts...}）。</li>
+     *   <li><b>不同源即自相矛盾</b>：若与人数不同源，会出现"5 位舞友分享 0 次"
+     *       （现网 venue 121 自身 ping=0、人数 5 全部来自同址邻居的证据）。
+     *       故本列与人数<b>共用同一趟归因</b>（同 attribution / 同分摊 / 同排除集），
+     *       见 {@code VenuePresenceService#visitSharesForRanking}。</li>
+     * </ol>
+     * <p>
+     * ⚠️ <b>禁进公式</b>：次数与人数是同一份命中集的两个粒度，同时进 {@code HEAT_BEHAVIOR}
+     * = 同一信号算两票。
+     */
+    @Column(name = "visit_events_30d", nullable = false)
+    private BigDecimal visitEvents30d;
 
     /** 同址组规模（含本店，≥1）——口径说明用，<b>不参与计算</b> */
     @Column(name = "group_size", nullable = false)

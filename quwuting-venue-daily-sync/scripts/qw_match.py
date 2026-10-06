@@ -338,9 +338,13 @@ def main() -> int:
             #    实证：成都·鲸鲨 → #484 京鲨跳舞俱乐部（郫都区，CEASED），谐音（鲸/京）+ 长名后缀，
             #    首二字子串 / 形近字 / 整串 keyword 三道全漏 ⇒ 表③ 冒出假新店「鲸鲨」，
             #    同时真身 #484 因未被算进 mentionedSet 差点被判暂停（两个方向同时错）。
+            # ⛔ 2026-10-06 修正：**纯拉丁字母名不做末字补搜**（单字母 keyword 命中率≈全库噪声）。
+            #    实证：常熟·ace → 补搜「e」命中 #1109 欧曼酒吧（CEASED）⇒ 差一个字母就反转，
+            #    方向完全无关。字母名交给 keyword 整串 + 人工判读，不靠单字母兜。
             queries = [r["name"]]
             nq = norm(r["name"])
-            if 2 <= len(nq) <= 4 and nq[-1] != r["name"]:
+            has_cjk = any("一" <= ch <= "鿿" for ch in nq)
+            if has_cjk and 2 <= len(nq) <= 4 and nq[-1] != r["name"]:
                 queries.append(nq[-1])
             for qname in queries:
                 if _try_cross_check(args.base_url, r, qname):

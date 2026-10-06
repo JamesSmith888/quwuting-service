@@ -1898,7 +1898,7 @@ public class DancerService {
         if (granted) {
             messageService.create(dancer.getCreatedBy(), MessageType.DANCER_VERIFICATION,
                     "信息核验通过",
-                    "你的舞伴主页「" + nickname + "」已通过平台信息核验，获得「信息已核验」标识。",
+                    "您的舞伴主页「" + nickname + "」已通过平台信息核验，获得「信息已核验」标识。",
                     "DANCER", dancer.getId());
             return;
         }
@@ -1906,7 +1906,7 @@ public class DancerService {
                 ? "" : "，原因：" + reason;
         messageService.create(dancer.getCreatedBy(), MessageType.DANCER_VERIFICATION,
                 "信息核验标识已移除",
-                "你的舞伴主页「" + nickname + "」的信息核验标识已被移除" + reasonText
+                "您的舞伴主页「" + nickname + "」的信息核验标识已被移除" + reasonText
                         + "。可修改资料后重新申请核验。",
                 "DANCER", dancer.getId());
     }
@@ -1923,22 +1923,22 @@ public class DancerService {
         if (to == DancerStatus.NORMAL && from == DancerStatus.PENDING) {
             type = MessageType.DANCER_REVIEW;
             title = "舞伴主页审核通过";
-            content = "你的舞伴主页「" + nickname + "」已通过审核，现在可以在舞伴列表中展示。";
+            content = "您的舞伴主页「" + nickname + "」已通过审核，现在可以在舞伴列表中展示。";
         } else if (to == DancerStatus.REJECTED && from == DancerStatus.PENDING) {
             type = MessageType.DANCER_REVIEW;
             title = "舞伴主页未通过审核";
             String reasonText = reason == null || reason.isBlank()
                     ? "" : "，原因：" + TextSanitizer.sanitize(reason, 200);
-            content = "你的舞伴主页「" + nickname + "」未通过审核" + reasonText
+            content = "您的舞伴主页「" + nickname + "」未通过审核" + reasonText
                     + "。可修改资料后重新提交。";
         } else if (to == DancerStatus.HIDDEN && from != DancerStatus.REJECTED) {
             type = MessageType.DANCER_STATUS;
             title = "舞伴主页已隐藏";
-            content = "你的舞伴主页「" + nickname + "」已被隐藏，暂不对其他用户展示。";
+            content = "您的舞伴主页「" + nickname + "」已被隐藏，暂不对其他用户展示。";
         } else if (to == DancerStatus.NORMAL && from != DancerStatus.PENDING) {
             type = MessageType.DANCER_STATUS;
             title = "舞伴主页已恢复展示";
-            content = "你的舞伴主页「" + nickname + "」已恢复展示。";
+            content = "您的舞伴主页「" + nickname + "」已恢复展示。";
         } else {
             return; // 其余流转（REJECTED→HIDDEN 等）不产生通知
         }
