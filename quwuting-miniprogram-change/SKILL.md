@@ -145,21 +145,22 @@ git diff --stat -- <改动路径>            # ⑤ 确认只动了预期文件
 
 ```bash
 npx tsc --noEmit            # 类型
-npm run check               # 聚合入口，**以 package.json 的 `check` 为准**（2026-10-06 实测 = 三十三道：
+npm run check               # 聚合入口，**以 package.json 的 `check` 为准**（2026-10-06 实测 = 三十六道：
                             # tokens / positioning / float-corner / detailparams / surface / protocol /
                             # tabbar-assets / tabbar-custom / bar-ruler / pattern-assets / list-selfheal /
-                            # list-chrome / list-filters / block-rhythm / empty-state / z-stack / location /
-                            # scrollview-flex / popover-width / fold-reveal / bottom-track / dance-timer /
-                            # direction-vocab / venue-card / press-feedback / auth-session /
-                            # first-paint-auth / first-frame / es-syntax / token-mirror / mirror /
-                            # presence / page-enter —— 以 package.json 实时为准，本行只是快照）
+                            # list-chrome / list-filters / block-rhythm / empty-state / reaction-empty /
+                            # z-stack / location / scrollview-flex / popover-width / fold-reveal /
+                            # bottom-track / dance-timer / direction-vocab / round-vocab / venue-card /
+                            # press-feedback / auth-session / first-paint-auth / first-frame / es-syntax /
+                            # token-mirror / mirror / presence / encoding / page-enter
+                            # —— 以 package.json 实时为准，本行只是快照）
 ```
 
-> ⚠️ **别照抄"十一道 … 三十三道"这类数字**——2026-09-30 一天之内从十七涨到二十二
->（`check:list-chrome` / `check:auth-session` / `check:empty-state` / `check:block-rhythm` /
-> `check:z-stack` / `check:fold-reveal` + `check:bottom-track` 入链），2026-10-06 起为三十三道
->（+ `check:direction-vocab`）。本节清单已连续多次落后。
-> **加/删门禁脚本时同步改 `package.json` 的 `check` 与本节这一行**，否则 Skill 会教人少跑。
+> ⚠️ **别照抄"…道"这类数字，也别把它写进 `docs/agents/**` 的正文**——2026-10-06 一天之内
+> 从三十三涨到三十六（`check:direction-vocab` / `check:round-vocab` / `check:reaction-empty` /
+> `check:encoding` 入链），**本仓是多会话并发改同一条链的**，任何写死的数字都会在几小时内过期。
+> **判据：门禁数量只在 `package.json` 里存在；文档与记忆里写"以 package.json 的 `check` 为准"。**
+> （2026-09-30 一天之内从十七涨到二十二、2026-10-06 从三十三涨到三十六，两次都因为快照没同步。）
 >
 > ⚠️ **聚合入口是 `&&` 串联 ⇒ 中途一道红，后面的门禁根本不跑**（本轮实测：`check:detailparams`
 > 因**另一个并发会话**在飞的 venue-detail 改动而红，导致日志里只剩前 3 条 ✓，看着像"大面积失败"）。
@@ -197,12 +198,12 @@ TMP=$(mktemp -d) && tsc --outDir "$TMP" \
 噪声（无害，勿追）：`components/qwt-icon/icons.d.js` = `.d.ts` 的产物，不是运行时文件。
 
 ② 补跑断点之后的门禁 —— 逐道跑，别整链重跑（清单以 `package.json` 的 `check` 链在
-`empty-state` **之后**的项为准；下面为 2026-10-06 实测的 17 道）：
+  `empty-state` **之后**的项为准；下面为 2026-10-06 实测的 19 道，**新会话请从 `package.json` 重新取一遍**）：
 
 ```bash
-for g in z-stack location scrollview-flex popover-width fold-reveal bottom-track dance-timer \
-         direction-vocab venue-card press-feedback auth-session first-paint-auth first-frame \
-         es-syntax token-mirror presence page-enter; do
+for g in reaction-empty z-stack location scrollview-flex popover-width fold-reveal bottom-track \
+         dance-timer direction-vocab round-vocab venue-card press-feedback auth-session \
+         first-paint-auth first-frame es-syntax token-mirror presence encoding page-enter; do
   npm run check:$g > /tmp/ck-$g.log 2>&1 || echo "RED check:$g"
 done
 ```
@@ -243,6 +244,25 @@ done
   `NON_PASSTHROUGH_QUERY_KEYS` 登记（`subscribe=1` 漏登记曾在主路径上 100% 失效且全绿）。
 - **共性**：跨层字符串协议（URL query / 请求参数 / storage 键）都要有**单一声明处 + 机器校验**；
   新写这类协议时顺手加一条门禁，比写注释有效。**新门禁必须做变异测试**（见 §5）。
+- **⛔「逐字同改 / 两页同文」类约定必须落成逐字比较门禁**（2026-10-06 九十六轮 §87 实证）：
+  43 号 §22 早就写了「回溯确认框两页逐字同改」，**实际两页文案长期漂移**——计时页
+  「已过去 X，按真实起止计费。」vs 记录页「以 HH:mm 作为计费起点…费用按真实起止计算。」，
+  一直等到用户再次报障才发现。根因：**文档约定不是门禁**。判据：凡文档/skill 里出现
+  「逐字同改」「同源」「必须一致」字样，都要问一句"**有机器断言吗**"；没有就补一条
+  逐字比较断言（本仓现成位=`check:dance-timer` 的 L 组 L1，禁短语的回流量L2）。
+  **断言必须剥注释后打**（否则"把旧文案写进注释解释历史"就能骗绿，本仓老坑）。
+  配套：改这类跨页共享文案时，**先 grep 全仓同名 handler/字段确认有几处消费方**，
+  再一次性收敛——用户以为只有一处，实际常常 ≥2 处。
+- **⛔ 同族第二例：「多处必须同值」的配置常量，坏方向是「文案 > 实际」**
+  （2026-10-06 九十七轮 §88 实证）：息屏记录窗口散在**三处**——`screenWatch.SEGMENTS_TTL_MS`
+  （存储裁剪）/ `danceSegments.SEGMENT_WINDOW_MS`（读侧第二道防线）/ 记录页 wxml **两处用户可见
+  「N 小时」**（页头 + 空态），24→12 那轮是三处**手改**的，彼此从未被机器比对。
+  ⛔ 不等 ≠ "多留点数据"，而是**承诺与事实分叉**，且方向不对称：**文案 > 实际 = 坏方向**
+  （承诺 12h、实际 6h ⇒ 用户记录**凭空消失** = 静默丢他还要回溯的起点）；反方向只是浪费占位。
+  ⇒ **动手前先列全部落点，尤其别漏「面向用户的那份」**（它是唯一能被用户看见的承诺）；
+  改完落机器断言（现成位：`check:dance-timer` L3 = 两常量相等、L4 = wxml 文案数字 == 常量）。
+  ⛔ **静态门禁断言配置常量必须取源码文本（正则抓 `N * 3600`），不能 `require` 运行时值**——
+  门禁不启动小程序运行时，用 require 就退化成"实现跟自己比"= 恒真恒绿零判别力。
 
 - `check:list-selfheal` = `scripts/check-list-selfheal.py`（2026-09-15 新增）：**首页城市列表的
   控件带自愈必须「接线完整 + 锚点在位」**——A 组 = `.pt-tail-anchor`（控件带自愈的「内容末端」
@@ -437,6 +457,18 @@ done
      "Values have same structure but are not reference-equal" ⇒ 比较前 `{ ...patch }` 转成本域对象；
   3. ⛔ **块注释里禁出现 `*/`**：`/** 表（pages/*/readouts.ts） */` 会被 `*/` 提前闭合 ⇒ 整脚本
      `SyntaxError`（先跑 `node --check` 再跑门禁）。
+  4. ⛔ **提取函数体的正则必须容许返回类型标注**（2026-10-06 实录）：`function f(): { a: T } {`
+     的参数表右括号与左花括号之间隔着返回类型，若沿用 `methodBody` 的 `\)` 后直接要求 `\{`
+     ⇒ **取不到函数体**。它的失效方式很隐蔽：规则没有恒绿通过，而是被 `body !== null`
+     拦成一条 FAIL，报错文案是"函数不存在"，看起来像**你把实现改坏了**。
+     **判据：提取失败必须显式报错，绝不允许降级成"跳过这条规则"**（fail-closed 是这里的关键）。
+  5. ⛔ **"把源码里所有字符串字面量收集起来"的断言必须带 `g`**：`body.match(/'[^']*'/)` 只返回
+     **第一个**（本例是 `'exact'`），于是"文案里有没有『计费』"永远为否，报错同样像实现坏了。
+     **判据：先 `node -e` 把收集结果打印一次看一眼，再信这条断言。**
+  6. ⛔ **WXSS 里的 token 名只能来自 `app.wxss`，不能从任何预览页 / 文档里的样式样例抄**
+     （2026-10-06 实录）：预览页为了自包含用的是 `--text-secondary` / `--muted`，而小程序的
+     规范名是 `--color-text-secondary` / `--color-muted` ⇒ `check:tokens` 当场报 3 处未注册引用。
+     **抄样式时连变量名一起抄是必然的，不是手滑** ⇒ 判据：token 名的唯一来源是 `app.wxss`。
   另外：门禁里"发现规则"要 **fail-closed + 变异自测**（如"像读数的导出函数必须有 TTL 缓存，否则登记理由"），
   否则规则会随命名习惯漂移而**静默失效**——"门禁绿"与"规则真的在工作"是两件事。
 - **收尾固定顺序（两条都要看，缺一条就会漏）**：
