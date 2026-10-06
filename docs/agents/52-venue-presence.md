@@ -56,6 +56,73 @@
   ⛔ 因此**不要**在到访口径里擅自"顺手排除"内部账号；真要治理应走名单配置
   （运营可改、30s 生效），而不是在公式里硬编码 `role = ADMIN`。
 
+- **展示与排序拆成两条线（2026-10-06 六轮，用户裁决）**：
+  - **展示：全部展示**——有到访记录（≥1 人）即渲染该行，**不设人数门槛**。旧口径（≥3）曾让
+    9 家有到访门店中的 **8 家全部静默**（寻梦缘2/抖舞2/天宝1/金莎1/魅莎1/舞美时光1/开心音乐1/
+    钜之淋1）= 功能近乎不存在；一次真实到访连一句感谢都拿不到，对贡献者是最不该发生的事。
+  - **排序/热度：仍按 ≥3**（`VISIT_FREE_TIER+1`，免计基数 2）。
+  - **⚠️「有显示 ⇔ 有分」契约已有意放弃**（取舍，非缺陷）：1~2 人店与停业店都会出现
+    "有显示但无分"。**后人勿当 bug 修。**
+  - **停业店也展示**（用户口径「营业状态时常变换」）：到访是**已发生**的事实，不该被状态
+    字段抹掉（今天关门、昨天有人去过，两件事同时为真）。现网有 3 家非在营店带到访记录
+    （南来北往2/一壶淡泊6/钜之淋1；一壶淡泊正是丽莎的证据来源）。
+  - **⛔ 排序侧必须另有守卫**（本轮最大风险点，已补）：旧实现在 `visitSharesForRanking` 里对
+    `!selfInOperation` 直接 `return` ⇒ 停业店在物化表里**连行都没有**，降门槛也救不回来。
+    本轮改为**停业店也产出份额**，于是「不让停业店在榜单上浮」的责任转移到**公式读数侧**，
+    已在 `VenueRepository` 两处镜像补 `CASE WHEN v.status IN ('OPEN','CLOSED')`：
+    ① `countHeatCounters.visitUsers30d`（单店/热度页）② `findHotVenueIds` 的 heat_score。
+    ⚠️ **改任何一处到访份额产出逻辑时，必须同时确认这两处守卫还在**——否则停业店会凭
+    份额在榜单上浮（排序回归，且**不会报错**）。
+  - **1~2 人时省略「N 次」**（方案 A）：1 人来 1 天时"1 位 · 1 次"两数字同一个数、零信息量；
+    现网 8/9 家是 1~2 人 ⇒ 满屏"1 次"让功能像"什么都没干"。故「次」只在 ≥3 人时出现。
+  - **「无到访」仍不渲染**（唯一硬约束）：显示"0 人到店"是负面失实陈述，且会给每张卡片凭空加一行。
+
+
+### 🔴 P0 事故复盘：`ClassCastException` 让整表永久陈旧（2026-10-06）
+
+**症状**：部署后**过了很久**物化表仍停在旧值（`refreshed_at` 不再前进），卡片数字不变。
+**排查过程中我犯的错（方法论级教训，见下）**。
+
+**根因**：`VenuePresenceService#toVisitDaysByVenue` 写的是 `(LocalDate) row[2]`，
+而 JPQL `DATE(p.createdAt)` 在 Hibernate 下返回 **`java.sql.Date`**（JDBC 层类型），
+**不是** `java.time.LocalDate`。⇒ 生产调度首轮
+`ClassCastException: java.sql.Date cannot be cast to java.time.LocalDate`，
+被 `refresh()` 的 `catch (Exception)` 吞成一行 ERROR ⇒ **物化表此后再不更新，零告警**。
+
+**为什么本地全绿**：现有到访测试（`VenuePresenceAttributionTest` /
+`VenuePresenceConsentGateTest`）**全是纯 Java 逻辑，没有一条真正连库执行这条 JPQL**；
+且 `SELECT Object[]` 的元素静态类型是 `Object`，**编译器不会对元素转型报错**。
+
+**修复（生产级，三层）**：
+1. **单一类型转换点 `toLocalDate(Object)`**：用 `instanceof` 白名单显式登记
+   `LocalDate` / `java.sql.Date` / `java.sql.Timestamp`，遇未知类型**主动抛异常并带类型名**
+   （而不是留一个隐晦 CCE让人猜）。⛔ 禁直接强转 —— 本次事故正是它遮蔽了类型问题。
+2. **顺序不变式**：`refresh()` 的「先算完 → 再清零 → 后写入」保证任何异常都发生在
+   `resetAll` **之前** ⇒ 表要么被完整刷新、要么停在上一轮的完整值，**永不出现中间态**。
+3. **连库契约测试 `VenueVisitDayQuerySqlTest`**（新增，`run.db.tests` 门禁）：真实执行该 JPQL
+   并逐元素校验类型。运行方式
+   `./mvnw test -Dtest='VenueVisitDayQuerySqlTest' -Drun.db.tests=true -Dspring.profiles.active=mysql`
+   （⚠️ **必须 `mysql` profile**；`dev` profile 会连遗留 PG，报
+   `Unable to obtain connection ... postgres... not found`）。
+
+**⛔ 周期性任务的失败可见性纪律**：`refresh()` 是**无人值守**任务，失败时没有任何调用方
+会感知 ⇒ **那条 ERROR 日志是唯一出口**。⛔ 禁把 catch 降级为 warn 或吞掉；要监控就在此
+基础上**上报指标**，而非削弱日志。
+
+### 排查方法论教训（我自己踩的，比 bug 本身更值得记）
+本次定位连续误判 4 次，根因全是**取证方法不可靠**：
+| 误判 | 真相 | 教训 |
+|---|---|---|
+| 「生产部署了带 bug 的代码」 | 生产 git 与本地一致，代码早就在 | 先核对 git HEAD，别凭时间戳猜 |
+| 「jar 里没有到访类」 | **该机 `unzip` 不可用**，空输出被误读成"没有" | 远端命令**先验证可用性**，否则"空输出" ≠ "不存在" |
+| 「调度器没启用」 | `@EnableScheduling` 一直在启动类上 | grep 失败 ≠ 不存在 |
+| 「日志为空所以没执行」 | **服务真名是 `quwuting-service.service`**，我查的 `quwuting.service` 不存在 ⇒ journalctl 永远空 | 查日志前先 `systemctl list-units` 确认单元真名 |
+
+⇒ **纪律**：①任何"某物不存在"的结论必须有**独立**证据交叉验证（本例用了 DB 数据 +
+jar 内容 + git 三路）；② 远端取证命令先确认可用；③ 服务名/路径一律先列表确认，
+不凭部署脚本里的变量名猜。
+
+
 **已知残余（登记，未做）**：
 - **展示门槛 = 计分门槛（≥3）**：`VenueVisitBadgeService` 只在 `≥ VISIT_FREE_TIER+1` 时下发
   列表卡片的**到店足迹行**文案（保证"卡片上有数字 ⇔ 公式里有分"）。代价 = 到访 1~2 人的门店

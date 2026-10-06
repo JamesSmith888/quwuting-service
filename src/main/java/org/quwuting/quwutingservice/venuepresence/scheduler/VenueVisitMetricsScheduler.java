@@ -84,6 +84,12 @@ public class VenueVisitMetricsScheduler {
             LocalDateTime now = LocalDateTime.now();
             Map<Long, VenueVisitShare> shares =
                     venuePresenceService.visitSharesForRanking(heatExclusionService.excludedUserIds());
+            // ── 顺序不变式：先算完、再清零、后写入 ──
+            // 算与写之间没有外部依赖（shares 是内存快照），所以任何异常都发生在
+            // resetAll 之前 ⇒ 表要么被完整刷新、要么停在上一轮的完整值，**永不出现中间态**。
+            // ⚠️ 这条不变量是2026-10-06 事故修复的第二根：
+            //   首版把「取数 + 写库」放在同一 try 里且吞掉异常，一次 CCE 就让整表停在旧值，
+            //   而日志只有一行 ERROR —— 数字永久陈旧却无人发现。
             metricRepository.resetAll(now);
             shares.forEach((venueId, share) -> metricRepository.upsert(
                     venueId, share.visitUsers30d(), share.visitUsers7d(),
@@ -93,8 +99,13 @@ public class VenueVisitMetricsScheduler {
                 log.info("[venue-visit-metrics] 到访指标刷新：门店数={}", shares.size());
             }
         } catch (Exception e) {
-            // 本轮失败不影响公式其余项（公式读到的是上一轮的有效值，不是脏值），下一轮自动重试
-            log.error("[venue-visit-metrics] 到访指标刷新失败，本轮跳过", e);
+            // 本轮失败不影响公式其余项（公式读到的是上一轮的有效值，不是脏值），下一轮自动重试。
+            // ⚠️ **不要把catch 改成"吞掉"或"降级为warn"**：那正是本次事故让缺陷隐形的原因。
+            // 刷新是**周期性无人值守**任务，失败时没有任何调用方会感知 ⇒ 唯一能暴露问题的
+            // 出口就是这条 ERROR 日志（生产排查的唯一依据就是 journalctl）。
+            // 若未来要接监控，应在此基础上**上报指标**，而非削弱日志。
+            log.error("[venue-visit-metrics] 到访指标刷新失败，本轮跳过（下轮重试；"
+                    + "若持续失败，说明物化表已陈旧——列表页数字会停在上一轮值）", e);
         }
     }
 }

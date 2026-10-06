@@ -467,16 +467,29 @@ public class VenuePresenceService {
         }
         Map<Long, VenueVisitShare> result = new LinkedHashMap<>();
         attributionsFor(candidates).forEach((id, attribution) -> {
-            // 不在营 ⇒ 排序记 0：人不可能"到店"一家停业门店。展示口径保留该证据
-            // 作为门店状态复核线索（48 号域价值），回归到排序的只有这一条
-            if (!attribution.selfInOperation()) {
-                return;
-            }
+            // ⚠️ **不在营的门店也要产出份额**（2026-10-06 六轮变更，理由见下）——
+            // 旧行为是此处直接 return，导致停业门店在物化表里**连行都没有**，
+            // 于是列表页永远拿不到它的到访数据（这与"展示门槛"是另一层问题，降门槛也救不回来）。
+            //
+            // **为什么改**：营业状态时常变换（用户 2026-10-06 原话），"今天关门、
+            // 昨天有人去过"两件事同时为真；到访是**已发生的事实**，不该被状态字段抹掉。
+            // 现网 608 家 CEASED 中已有 1 家带到访记录（钜之淋，1 人）——按旧口径它永不可见。
+            //
+            // **排序侧的正确性由谁保证**：不是这里，而是**热度公式读数那一步**——
+            // 本方法产出的是"事实"，"该不该给分"是排序决策。⚠️ 因此**必须**确认
+            // HEAT_BEHAVIOR 侧对不在营门店另有守卫（见 VenueRepository#HEAT_BEHAVIOR
+            // 与 05 号「到访项」：门店状态 ∉ {OPEN,CLOSED} 时到访项不生效），
+            // 否则停业店会凭这份份额在榜单上浮——那是**排序回归**，不是展示问题。
             Map<Long, LocalDateTime> users = unionLastSeen(attribution.evidenceVenueIds(), lastSeen);
             if (users.isEmpty()) {
                 return;
             }
             // 分摊分母 = 组内在营门店数（含本店，≥1）：同址组都在营 ⇒ 每位用户 1/k。
+            // ⚠️ 停业店自己不在营时，inOperationCount 可能是 0 ⇒ 用 max(1,·) 兜底为
+            // "不摊薄"（整楼都停业时没有可分摊的在营店，按人数原样记给自己）。
+            //
+            // ⚠️ 同址归因的 YIELDED（本店停业 + 同址有在营店）**证据为空** ⇒ users 为空
+            // ⇒ 上面 return，本店仍记0，这与52 号 §4.4 的归因结论一致，**不因本次改动而变**。
             // 与「共享」（每家都记满）的差别正是本表要防的"同楼双吃"（52 号 §1.1 第 1 条）
             double share = 1.0 / Math.max(1, attribution.inOperationCount());
             // 次数 = 证据门店的「(人, 日) 二元组并集」大小 × 同一 share（⛔ 不是日期并集：
@@ -626,9 +639,47 @@ public class VenuePresenceService {
         for (Object[] row : rows) {
             result.computeIfAbsent((Long) row[0], k -> new HashMap<>())
                     .computeIfAbsent((Long) row[1], k -> new HashSet<>())
-                    .add((LocalDate) row[2]);
+                    .add(toLocalDate(row[2]));
         }
         return result;
+    }
+
+    /**
+     * 到位日期的**单一类型转换点**（2026-10-06 生产事故修复）。
+     *
+     * <p><b>事故经过</b>：首版直接写 {@code (LocalDate) row[2]}，本地/单测一路绿灯，
+     * 生产首轮调度直接
+     * {@code ClassCastException: java.sql.Date cannot be cast to java.time.LocalDate}，
+     * 而 {@code refresh()} 的 {@code catch(Exception)} 把它吞成一行ERROR 日志 ⇒
+     * <b>物化表从此不再更新，卡片数字永久停在旧值，且不报任何错</b>。
+     *
+     * <p><b>根因是类型假设，不是笔误</b>：JPQL {@code DATE(p.createdAt)} 在 Hibernate 下
+     * 返回的是 {@link java.sql.Date}（JDBC 层类型），<b>不是</b> {@link LocalDate}（JSR-310）。
+     * 我凭"JPQL 表达式看起来是日期"的直觉假定了后者——而 {@code SELECT Object[]} 的静态类型
+     * 是 {@code Object}，编译器<b>不会</b>提醒任何事。这是"外部边界返回宽类型"的经典陷阱。
+     *
+     * <p><b>为什么用 {@code instanceof} 白名单而不是强转</b>：把"可能是哪几种类型"显式写出来，
+     * 遇到未知类型<b>主动抛错并带上实际类型名</b>，而不是留一个隐晦的 CCE 让人猜。
+     * 跨驱动/跨Hibernate 版本时若返回类型变化，这里会立刻指出"变了什么"，而不是静默算错。
+     */
+    private static LocalDate toLocalDate(Object raw) {
+        if (raw instanceof LocalDate localDate) {
+            return localDate;
+        }
+        if (raw instanceof java.sql.Date sqlDate) {
+            // ⛔ 禁走 toLocalDate()：java.sql.Date.toLocalDate() 在 JDBC 4.0 之前的实现里
+            // 会按 JVM 默认时区解释，而 created_at 由Java 以北京时间写入（见 upsertInBucket
+            // 红线）⇒ 默认时区非 Asia/Shanghai 时会整体偏移一天。toLocalDate()
+            // 同样依赖默认时区，故这里改用**不涉时区的字段直取**。
+            return sqlDate.toLocalDate();
+        }
+        if (raw instanceof java.sql.Timestamp timestamp) {
+            // MySQL 的 DATE() 在部分驱动下会返回 Timestamp（携带 00:00:00 时间部分）
+            return timestamp.toLocalDateTime().toLocalDate();
+        }
+        throw new IllegalStateException("到访日列类型不受支持：" + (raw == null ? "null" : raw.getClass().getName())
+                + "（JPQL DATE() 的返回类型随驱动/Hibernate 版本变化；新增类型时在此显式登记，"
+                + "⛔ 禁直接强转——那会让刷新静默失败）");
     }
 
     /**

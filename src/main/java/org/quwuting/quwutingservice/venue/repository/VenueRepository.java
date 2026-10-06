@@ -1402,8 +1402,10 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                 WHERE pt.target_type = 'VENUE' AND pt.target_id = :venueId AND pt.delta < 0
                   AND pt.user_id NOT IN :excludedUserIds
                   AND pt.created_at >= :windowSince AND pt.created_at < :windowUntil) AS pointsreceived30d,
-              (SELECT m.visit_users_30d FROM qwt_venue_visit_metrics m
-                WHERE m.venue_id = :venueId AND m.deleted = false) AS visitusers30d
+              (SELECT CASE WHEN v.status IN ('OPEN','CLOSED')
+                  THEN COALESCE((SELECT m.visit_users_30d FROM qwt_venue_visit_metrics m
+                    WHERE m.venue_id = :venueId AND m.deleted = false), 0)
+                  ELSE 0 END) AS visitusers30d
             """, nativeQuery = true)
     HeatCounters countHeatCounters(@Param("venueId") Long venueId,
                                    @Param("viewSince") java.time.LocalDate viewSince,
@@ -1688,10 +1690,11 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                               WHERE pt.target_type = 'VENUE' AND pt.target_id = v.id AND pt.delta < 0
                                 AND pt.user_id NOT IN :excludedUserIds
                                 AND pt.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND pt.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * :pointsWeight
-                           + GREATEST(0, COALESCE((SELECT m.visit_users_30d FROM qwt_venue_visit_metrics m
-                              WHERE m.venue_id = v.id AND m.deleted = false), 0) - """
+                           + GREATEST(0, CASE WHEN v.status IN ('OPEN','CLOSED')
+                              THEN COALESCE((SELECT m.visit_users_30d FROM qwt_venue_visit_metrics m
+                                WHERE m.venue_id = v.id AND m.deleted = false), 0) - """
             + VenueHeatWeights.VISIT_FREE_TIER + """
-            ) * """
+                              ELSE 0 END) * """
             + VenueHeatWeights.VISIT + """
                            AS heat_score
                     FROM qwt_venues v
