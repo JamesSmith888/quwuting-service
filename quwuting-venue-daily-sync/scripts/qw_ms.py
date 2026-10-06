@@ -207,6 +207,7 @@ def main() -> int:
                 g = key in guard_news
                 nb = key in no_build
                 row = {"src_city": r["src_city"], "name": r["name"],
+                       "platform_city": r.get("platform_city"),
                        "hints": r.get("fuzzy_hints"), "cross": r.get("cross_check_candidates"),
                        "err": r.get("cross_check_error"), "guard": g,
                        "why": ("字典已定论不建库" if nb else "字典守卫条目" if g else "新店候选")}
@@ -286,6 +287,31 @@ def main() -> int:
             uniq.append(x)
         lst[:] = uniq
 
+    # ── 表③ 侧护栏（2026-10-05 固化）：UNMATCHED ↔ 同城「未点名 OPEN 门店」相似度检测 ──
+    # 为什么需要：2026-10-05 实证「芜湖·Ls丽莎」是 #1494 Is丽莎酒馆 的形近错字（I/L），
+    # 靠**人肉交叉表③×表⑤**才发现 —— 它同时制造「1 个假新店」+「1 家营业店误进暂停候选」
+    # 两道错（同一根因、两个方向）。本文件此前只做「被点名但没挂上」那一侧（suspects_of），
+    # **没做 UNMATCHED 这一侧** ⇒ 缺口已补。
+    # ⚠️ 只提示、**不自动动作**：判为同店即 `alias-import` 灌「舞讯原写法」+ 重跑回读（应升 EXACT）。
+    open_unmentioned: dict[str, list] = defaultdict(list)
+    for v in VEN:
+        if v["status"] == "OPEN" and v["venueId"] not in mentioned_ids:
+            open_unmentioned[v["city"]].append(v)
+    t3_suspect_pairs = []
+    for row in t3:
+        pc, n = row.get("platform_city"), row["name"]
+        if not pc:
+            continue
+        for v in open_unmentioned.get(pc, []):
+            cn, cv = _core(n), _core(v["name"])
+            rt = _ratio(n.lower(), v["name"].lower())
+            if (cn and cn == cv) or rt >= 0.5:
+                t3_suspect_pairs.append(
+                    {"src_city": row["src_city"], "name": n,
+                     "venueId": v["venueId"], "venue_name": v["name"],
+                     "district": v.get("district"), "ratio": round(rt, 2),
+                     "core_same": bool(cn and cn == cv)})
+
     out = {"reportDate": META.get("reportDate"), "sources": META.get("sources", []),
            "coveredCities": sorted(covered),
            "singleSourceCities": sorted(c for c in covered if len(S[c]) < 2),
@@ -294,6 +320,7 @@ def main() -> int:
            "t1_reversal": t1, "t2_manual": t2, "t3_new": t3, "t4_ref_count": len(t4),
            "t5_suspend": t5, "t5_single_source": t5_single,
            "t5_manual_hold": t5_manual_hold, "t5_suspect_hold": t5_suspect_hold,
+           "t3_suspect_pairs": t3_suspect_pairs,
            "guard_dropped": guard_drop,
            "confirm_open_ids": confirm}
     if args.out:
@@ -323,6 +350,13 @@ def main() -> int:
     for r in t3:
         print(f"  {r['src_city']}·{r['name']} 邻近={r.get('hints')} {r.get('cross') or ''} {r.get('err') or ''}")
     print(f"\n表④ 参考 {len(t4)} 条（折叠）")
+    if t3_suspect_pairs:
+        print(f"\n🆕 表③ 疑似同店对 {len(t3_suspect_pairs)} 组（**UNMATCHED ↔ 同城未点名 OPEN 门店**；"
+              f"只提示 ⇒ 判为同店请 `alias-import` 灌「舞讯原写法」+ 重跑回读）：")
+        for x in t3_suspect_pairs:
+            print(f"  「{x['src_city']}·{x['name']}」 ⇄ #{x['venueId']} {x['venue_name']}"
+                  f"（{x['district']}）相似={x['ratio']}"
+                  f"{' 核心词同一' if x['core_same'] else ''}")
     print(f"\n表⑤ 关门（|S|>=2）{len(t5)} 家 / {len({x['city'] for x in t5})} 城: "
           f"{dict(Counter(x['city'] for x in t5))}")
     print(f"表⑤′ 关门（|S|<2，**单源城市，09-29 起一并直接执行**）{len(t5_single)} 家 / "

@@ -27,8 +27,7 @@ import org.quwuting.quwutingservice.exception.BusinessException;
  *       热度是场所属性，不随请求者位置变化。</li>
  *   <li>NEWEST（最新收录）：按创建时间倒序（新增场所优先露出）。</li>
  * </ul>
- * 非法值抛业务异常（与 {@link org.quwuting.quwutingservice.venuereaction.ReactionWindow#from}
- * 的防御风格一致，400 而非静默降级）。
+ * 非法值抛业务异常（400 而非静默降级，与各枚举的防御风格一致）。
  */
 public enum VenueSortMode {
     RECOMMENDED("recommended"),

@@ -8,7 +8,6 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
-import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.repository.VenueReactionRepository;
 
@@ -92,7 +91,7 @@ class VenueReactionServiceTest {
                 .thenReturn(List.<Object[]>of(myRow(3L, "BAD_ENV")));
 
         Map<Long, List<ReactionBadge>> result =
-                service.batchGetBadges(List.of(3L), 2L, ReactionWindow.DAYS_7);
+                service.batchGetBadges(List.of(3L), 2L);
 
         List<ReactionBadge> badges = result.get(3L);
         assertEquals(5, badges.size(), "全部 count>0 的 code 均返回，不做任何截断");
@@ -115,7 +114,7 @@ class VenueReactionServiceTest {
                         row(3L, "QUIET", 1L)));
 
         Map<Long, List<ReactionBadge>> result =
-                service.batchGetBadges(List.of(3L), 2L, ReactionWindow.DAYS_7);
+                service.batchGetBadges(List.of(3L), 2L);
 
         List<ReactionBadge> badges = result.get(3L);
         assertEquals(2, badges.size(), "仅 count>0 的 code 返回");
@@ -134,7 +133,7 @@ class VenueReactionServiceTest {
                         row(3L, "BAD_ENV", 1L)));
 
         Map<Long, List<ReactionBadge>> result =
-                service.batchGetBadges(List.of(3L), null, ReactionWindow.DAYS_7);
+                service.batchGetBadges(List.of(3L), null);
 
         List<ReactionBadge> badges = result.get(3L);
         assertEquals(5, badges.size(), "匿名用户同样完整展示（无截断）");
@@ -161,7 +160,7 @@ class VenueReactionServiceTest {
                 .thenReturn(List.<Object[]>of(myRow(3L, "BAD_ENV")));
 
         Map<Long, List<ReactionBadge>> result =
-                service.batchGetBadges(List.of(3L, 13L), 2L, ReactionWindow.DAYS_7);
+                service.batchGetBadges(List.of(3L, 13L), 2L);
 
         // venue 3：全部 5 个 count>0 的 code，BAD_ENV 含参与态标注
         assertEquals(5, result.get(3L).size());

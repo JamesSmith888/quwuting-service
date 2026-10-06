@@ -1,6 +1,6 @@
 ---
 name: quwuting-miniprogram-change
-description: 去舞厅（quwuting）小程序前端改动工作流：改 TS/WXML/WXSS 后如何保证「编译镜像同步 + 门禁全绿 + 文档/记忆同步」且不越过验证红线。当需要修改 /Users/xin.y/WeChatProjects/quwuting/miniprogram 下的页面/组件、排查小程序布局与交互异常（定位/拖动/弹层/滚动）、或提交前跑校验时使用。含 .ts↔.js 镜像回拷法、npm run check 门禁、wxml 标签配对校验、根因纪律（症状 ≠ 机制）。
+description: 去舞厅（quwuting）小程序前端改动工作流：改 TS/WXML/WXSS 后如何保证「编译镜像同步 + 门禁全绿 + 文档/记忆同步」且不越过验证红线。当需要修改 /Users/yangxin/Downloads/xcxWork/quwuting/miniprogram 下的页面/组件、排查小程序布局与交互异常（定位/拖动/弹层/滚动）、或提交前跑校验时使用。含 .ts↔.js 镜像回拷法、npm run check 门禁、wxml 标签配对校验、根因纪律（症状 ≠ 机制）。
 agent_created: true
 ---
 
@@ -9,8 +9,10 @@ agent_created: true
 ## ⓪ 运行前必做 · Skill 双副本同步（2026-09-14 用户要求：每次跑 Skill 前都先同步）
 
 ```bash
-bash /Users/xin.y/WeChatProjects/quwuting-service/scripts/sync-skills.sh
+bash /Users/yangxin/Downloads/xcxWork/quwuting-service/scripts/sync-skills.sh
 ```
+
+（三仓父目录随工作区变化；上行为 2026-10-06 本机实际路径，脚本自身已自定位，换目录后按实际替换即可。）
 
 权威方向 = **项目路径**（`quwuting-service/quwuting-*`，Git 可回溯）→ 运行时镜像
 `~/.workbuddy/skills/`；脚本单向镜像 + 覆盖前自动备份，只读检查加 `--check`。
@@ -39,6 +41,12 @@ bash /Users/xin.y/WeChatProjects/quwuting-service/scripts/sync-skills.sh
   绝不要整体 `git add -A` / 整体还原 / 顺手"修"别人的文件；收尾汇报时也只说自己动过的那几个文件。
   （2026-09-10 实录：本会话改 index/venue-detail/venue-card，同时段另一会话在改 `danceTimer`/`43 号文档`；
    两端互相在日志里看到对方的半成品 TS6133，谁都没碰谁的文件。）
+- **「轮次编号」与「§号」是两套编号，都要防撞（2026-10-06 实录）**：`docs/agents/43-*` 里的
+  **"第 N 轮"藏在行文里、不在标题里**，只 grep 标题查不出来。实测：写完一整节才发现自己标的
+  "九十轮"早被 2026-10-03 的 §83.6 占用（同一文件、同一编号、两件不同的事），只好顺延到九十四轮。
+  **取号唯一依据 = 已注册编号**（`grep -rnoE "第?九十[0-9]?轮" docs/agents/*.md` + 读 `AGENTS.md`
+  索引行尾部的最新轮次），**不是**"我数着应该是第几轮"；撞号后**先注册者为准、后注册者顺延**，
+  并留痕。**动手写文档前先把两个水位各看一眼**（§号水位 = `grep -oE "^## [0-9]+\." <file> | tail`）。
 - **同一文件的多处 `Edit` 必须逐条串行发出（禁在同一条消息里并行）**（2026-09-16 实录）：同一条消息
   对 `VenueService.java` 并发发 3 个 `Edit`（加 import / 加字段 / 改方法），其中**加 import 那个静默丢失**
   ——工具返回 `Successfully edited`，但内容没落盘，直到 `./mvnw test-compile` 报
@@ -109,7 +117,7 @@ outDir + 只回拷有差异文件已脚本化）。⚠️ 依赖 `tsconfig.json`
 手动等价流程（脚本不可用时）：
 
 ```bash
-cd /Users/xin.y/WeChatProjects/quwuting
+cd /Users/yangxin/Downloads/xcxWork/quwuting
 npx tsc --noEmit                       # ① 类型检查（0 错误才算过；typings 环境性错误可忽略）
 rm -rf /tmp/qwt-ts-out                  # ② 全量编译到临时目录
 npx tsc --outDir /tmp/qwt-ts-out --rootDir ./miniprogram
@@ -137,23 +145,75 @@ git diff --stat -- <改动路径>            # ⑤ 确认只动了预期文件
 
 ```bash
 npx tsc --noEmit            # 类型
-npm run check               # 聚合入口，**以 package.json 的 `check` 为准**（2026-09-30 实测 = 二十二道：
+npm run check               # 聚合入口，**以 package.json 的 `check` 为准**（2026-10-06 实测 = 三十三道：
                             # tokens / positioning / float-corner / detailparams / surface / protocol /
-                            # tabbar-assets / bar-ruler / pattern-assets / list-selfheal / list-chrome /
-                            # list-filters / block-rhythm / empty-state / z-stack / location /
-                            # scrollview-flex / fold-reveal / bottom-track / dance-timer / venue-card /
-                            # auth-session —— 以 package.json 实时为准，本行只是快照）
+                            # tabbar-assets / tabbar-custom / bar-ruler / pattern-assets / list-selfheal /
+                            # list-chrome / list-filters / block-rhythm / empty-state / z-stack / location /
+                            # scrollview-flex / popover-width / fold-reveal / bottom-track / dance-timer /
+                            # direction-vocab / venue-card / press-feedback / auth-session /
+                            # first-paint-auth / first-frame / es-syntax / token-mirror / mirror /
+                            # presence / page-enter —— 以 package.json 实时为准，本行只是快照）
 ```
 
-> ⚠️ **别照抄"十一道 … 十九道"这类数字**——2026-09-30 一天之内从十七涨到二十二
+> ⚠️ **别照抄"十一道 … 三十三道"这类数字**——2026-09-30 一天之内从十七涨到二十二
 >（`check:list-chrome` / `check:auth-session` / `check:empty-state` / `check:block-rhythm` /
-> `check:z-stack` / `check:fold-reveal` + `check:bottom-track` 入链），本节清单已连续五次落后。
+> `check:z-stack` / `check:fold-reveal` + `check:bottom-track` 入链），2026-10-06 起为三十三道
+>（+ `check:direction-vocab`）。本节清单已连续多次落后。
 > **加/删门禁脚本时同步改 `package.json` 的 `check` 与本节这一行**，否则 Skill 会教人少跑。
 >
 > ⚠️ **聚合入口是 `&&` 串联 ⇒ 中途一道红，后面的门禁根本不跑**（本轮实测：`check:detailparams`
 > 因**另一个并发会话**在飞的 venue-detail 改动而红，导致日志里只剩前 3 条 ✓，看着像"大面积失败"）。
 > **判据：一道红先看它报的是不是你的文件**，然后 `for g in <你改动相关的门禁>; do npm run check:$g; done`
 > 逐个取证（比整链重跑快且能定位）。
+
+### 3.0 ⚠️ 仓内缺 typescript ⇒ 链上必有两道**恒定**红灯（2026-10-06 复核，仍未修）
+
+`quwuting/` 的 `package.json` / lock **未声明 typescript**，`node_modules/.bin/tsc` 不存在。
+后果两处，都与你的改动无关，**别误判成自己改坏了**：
+
+1. **链必断在 `check:empty-state`**：其 behavior 半段（`scripts/check-empty-state-behavior.js`）
+   先找仓内 tsc，找不到就回退 `npx tsc`（落到 5.9.x），而它传的 `--ignoreConfig` 是 **TS 6.x
+   选项** ⇒ `error TS5023: Unknown compiler option '--ignoreConfig'`，`&&` 链**就此中止，
+   其后十余道一道都没跑**。「日志里 13 条 ✓」≠ 全绿，这正是最容易被读成"通过了"的假象。
+2. **`check:mirror` 恒定红**：`scripts/check-mirror.js` 硬编码
+   `path.join(ROOT, 'node_modules', '.bin', 'tsc')`，不存在即 `exit 1`（只报「先执行 npm install」）。
+
+**不装依赖也能完成验证的等价做法**：
+
+① 镜像一致性 —— 用隔离工作区的 tsc 全量编译后逐个 `cmp`。它比 `check:mirror` **更严格**
+（不容忍 `exports.*` 前导行顺序差异），此处零差异 ⇒ 那边必过：
+
+```bash
+cd <quwuting 仓>          # 本机例：/Users/yangxin/Downloads/xcxWork/quwuting
+export PATH="$HOME/.workbuddy/binaries/node/workspace/node_modules/.bin:$PATH"   # tsc 5.9.3
+TMP=$(mktemp -d) && tsc --outDir "$TMP" \
+  && find miniprogram -name "*.ts" -not -path "*/node_modules/*" | while read ts; do
+       rel="${ts#miniprogram/}"; dst="miniprogram/${rel%.ts}.js"
+       [ -f "$dst" ] || echo "MISSING $dst"
+       cmp -s "$TMP/${rel%.ts}.js" "$dst" || echo "DIFF    $dst"
+     done; rm -rf "$TMP"
+```
+
+噪声（无害，勿追）：`components/qwt-icon/icons.d.js` = `.d.ts` 的产物，不是运行时文件。
+
+② 补跑断点之后的门禁 —— 逐道跑，别整链重跑（清单以 `package.json` 的 `check` 链在
+`empty-state` **之后**的项为准；下面为 2026-10-06 实测的 17 道）：
+
+```bash
+for g in z-stack location scrollview-flex popover-width fold-reveal bottom-track dance-timer \
+         direction-vocab venue-card press-feedback auth-session first-paint-auth first-frame \
+         es-syntax token-mirror presence page-enter; do
+  npm run check:$g > /tmp/ck-$g.log 2>&1 || echo "RED check:$g"
+done
+```
+
+⚠️ **一次跑十几道容易撞上工具的超时（实测 3~4 道即可能被 SIGTERM / exit 137）**：分批跑，
+或 `run_in_background` 起来后去干别的。**别把"SIGTERM 中断"读成"门禁红了"**——它连结论都没给。
+判据：日志文件 `/tmp/ck-$g.log` 存在且内容完整才有结论，否则那道门禁等于**没跑**。
+
+⛔ 真正的修法 = 在 `quwuting/` 装 typescript（并统一 `--ignoreConfig` 的版本前提），属工程决策，
+**别在业务改动里顺手做**（`node_modules` 已是 gitignored，临时软链只能骗过 `check:mirror`，
+骗不过 `--ignoreConfig`）。
 
 ### 3.1 两个「接线完整性」类门禁（新增同类东西时先看这两条）
 
@@ -860,7 +920,7 @@ JS 层既监听不到也拦不住；`disableSwipeBack` 自 7.0.5 废弃；`wx.en
 
 1. `AGENTS.md`：索引行摘要追加本轮（一行）+ 若是通用约定，改「最小事实」条目
 2. `docs/agents/NN-*.md`：本节详写「现象 → 误判史 → 真因 → 修复 → 防复发 → 验证边界」
-3. 记忆：追加**工作区记忆** `/Users/xin.y/WeChatProjects/.workbuddy/memory/` 下的
+3. 记忆：追加**工作区记忆** `/Users/yangxin/Downloads/xcxWork/.workbuddy/memory/` 下的
    `YYYY-MM-DD.md`（append-only）+ 对应主题子文件（如 `MEMORY-DANCE-TIMER.md`）+
    更新 `MEMORY.md` 索引行（本仓记忆是"索引 + 主题子文件"两级，别只写日历日志）
    ⚠️ **索引行有硬预算**：`MEMORY.md` 会被注入每轮上下文，超限会被系统截断（并弹

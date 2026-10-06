@@ -69,6 +69,31 @@ public interface VenuePresencePingRepository extends JpaRepository<VenuePresence
                                        @Param("maxAccuracyM") int maxAccuracyM);
 
     /**
+     * 窗口内 + 排除内部账号的 (venueId, userId, 最近命中时刻)（2026-10-06 新增，V38）：
+     * <b>热度排序口径</b>的唯一取数源，供定时刷新任务
+     * （{@code VenueVisitMetricsScheduler}）写入 {@code qwt_venue_visit_metrics}。
+     * <p>
+     * <b>为什么不能复用 {@link #findVisitorLastSeen}</b>（三条都与 admin 展示口径有意分叉）：
+     * <ul>
+     *   <li><b>时间窗</b>：admin 需要"从无到访"的真实判断，故全量扫描；排序只需要 30 天窗口内
+     *       的命中——本方法把下界推到 SQL 里，(venue_id, created_at) 索引前缀可直接裁掉
+     *       绝大多数行（这正是物化表要解决的量级问题）；</li>
+     *   <li><b>排除内部账号</b>：到访是低基数信号（2026-10-06 现网 51 条 ping 中 ADMIN 一人
+     *       占 26 条 = 51%），不排除等于平台自己人直接刷分。admin 展示**不排除**；</li>
+     *   <li><b>返回原始 (店,人,时刻) 而非计数</b>：本方法的结果还要经同址组归因与
+     *       <b>1/k 分摊</b>（同一用户在组内两家都有 ping 只算 1 人并分摊），
+     *       只能在用户粒度上合并，不能由 COUNT 相加得到。</li>
+     * </ul>
+     */
+    @Query(VISITOR_LAST_SEEN_SELECT + "WHERE " + HIT_PREDICATE
+            + " AND p.createdAt >= :since AND p.userId NOT IN :excludedUserIds"
+            + " GROUP BY p.venueId, p.userId")
+    List<Object[]> findVisitorLastSeenSinceExcluding(@Param("since") LocalDateTime since,
+                                                    @Param("radiusM") int radiusM,
+                                                    @Param("maxAccuracyM") int maxAccuracyM,
+                                                    @Param("excludedUserIds") Collection<Long> excludedUserIds);
+
+    /**
      * 幂等写入（15 分钟桶）：INSERT 新行 / 桶冲突时仅刷新 updated_at——
      * <b>不改写 distance_m / accuracy_m / created_at</b>：桶内首见时刻与首证距离
      * 是「该窗口的原始事实」，后到的重复采样（onShow 抖动）不覆盖首证。

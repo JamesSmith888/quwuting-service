@@ -9,7 +9,6 @@ import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
 import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.quwuting.quwutingservice.venuereaction.ReactionCode;
-import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionStat;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionStatsResponse;
@@ -52,15 +51,17 @@ import java.util.stream.Collectors;
 public class VenueReactionService {
 
     /**
-     * topReactions 是<b>纯众包完整展示</b>：返回所选窗口（默认近7天）内<b>所有用户</b>
-     * 点击过的<b>全部</b> Reaction 表情（count>0 的 code 一个不落，按所选窗口计数降序），
-     * **不做任何截断**（需求 2026-08-09：取所有用户的所有已点击表情全部展示）。
+     * topReactions 是<b>纯众包完整展示</b>：返回<b>有史以来所有用户</b>点击过的<b>全部</b>
+     * Reaction 表情（{@code countAll > 0} 的 code 一个不落，按<b>累计计数降序</b>），
+     * **不做任何截断**（需求 2026-08-09：取所有用户的所有已点击表情全部展示；
+     * 2026-10-06 起集合 / 数字 / 排序三口径统一为 {@code countAll}，与任何窗口无关——
+     * 见 {@link #buildTopBadgesFromCounts} javadoc 的现网取证）。
      * 个人参与状态（reactedByMe）只是徽标的标注属性（驱动"点击即知是否已参与"），
      * 不参与集合构成。
      * 前端卡片 chips 容器为 flex-wrap 换行布局，可容纳全部表情（见 venue-card.wxss
      * .reaction-chips——2026-08-09 契约纠正：原先"Top 4 截断"（含 2026-08-08 的"当前
      * 用户已参与 code 不受截断"豁免、以及 2026-08-09 上午的"纯 Top N"口径）均属错误
-     * 理解——需求本义是"近7天全部用户数据"的全部展示，不做截断。
+     * 理解——需求本义是"全部用户数据"的全部展示，不做截断。
      */
 
     private final VenueReactionRepository venueReactionRepository;
@@ -271,22 +272,21 @@ public class VenueReactionService {
     }
 
     /**
-     * 单场所的 Reaction 徽标（详情基础响应用），按所选窗口计数排序，count=0 的不展示。
-     * <b>完整展示</b>：返回所选窗口（默认近7天）内所有用户点击过的全部表情，**不做任何
-     * 截断**（2026-08-09 需求定稿，见 {@link #buildTopBadgesFromCounts} javadoc）。
+     * 单场所的 Reaction 徽标（详情基础响应用），按**累计计数**降序（`countAll` 大者在左），
+     * {@code countAll=0}（有史以来无人点过）的不展示。
+     * <b>完整展示</b>：返回<b>有史以来</b>所有用户点击过的全部表情，**不做任何截断**
+     * （2026-08-09 需求定稿 + 2026-10-06 三职责拆开，见 {@link #buildTopBadgesFromCounts} javadoc）。
      * 复用聚合缓存的窗口分量，个人状态（reactedByMe）单独实时查询（成本为一次按
      * userId+venueId+date 的索引查询），仅作徽标标注属性、不参与集合构成。
-     *
-     * @param window 徽标排序/筛选窗口（null → 默认近7天）
      */
     @Transactional(readOnly = true)
-    public List<ReactionBadge> getBadges(Long venueId, Long currentUserId, ReactionWindow window) {
+    public List<ReactionBadge> getBadges(Long venueId, Long currentUserId) {
         Map<String, long[]> aggregate = aggregateService.getAggregate(venueId);
         Set<String> myCodes = currentUserId != null
                 ? new HashSet<>(venueReactionRepository.findTodayCodesByUserAndVenue(
                         currentUserId, venueId, LocalDate.now()))
                 : Collections.emptySet();
-        return buildTopBadges(aggregate, myCodes, window);
+        return buildTopBadges(aggregate, myCodes);
     }
 
     /**
@@ -295,14 +295,14 @@ public class VenueReactionService {
      * + 一次 IN 查询覆盖个人状态。不缓存——列表页请求的场所集合每次不同（翻页/筛选变化），
      * 复用单场所聚合缓存收益低，与既有 batchGetTagLikeCounts 的"批量查询不缓存"约定一致。
      * <p>
-     * <b>完整展示</b>：集合构成 = 所选窗口（默认近7天）内所有用户点击过的全部表情
-     * （count>0 全返回，**不做任何截断**，2026-08-09 需求定稿）。个人状态（reactedByMe）
-     * 仅为徽标标注属性（驱动"点击即知是否已参与"），不参与集合构成。
-     *
-     * @param window 徽标排序/筛选窗口（null → 默认近7天）
+     * <b>完整展示</b>：集合构成 = <b>有史以来</b>所有用户点击过的全部表情
+     * （{@code countAll>0} 全返回，**不做任何截断**；2026-08-09 需求定稿 + 2026-10-06
+     * 三职责拆开——"这家店有什么声音"不该被时间戳抹掉，见 {@link #buildTopBadgesFromCounts}
+     * javadoc 的现网取证）。排序 = **累计计数降序**（大者在左，与展示数字同口径）。
+     * 个人状态（reactedByMe）仅为徽标标注属性（驱动"点击即知是否已参与"），不参与集合构成。
      */
     @Transactional(readOnly = true)
-    public Map<Long, List<ReactionBadge>> batchGetBadges(List<Long> venueIds, Long currentUserId, ReactionWindow window) {
+    public Map<Long, List<ReactionBadge>> batchGetBadges(List<Long> venueIds, Long currentUserId) {
         if (venueIds == null || venueIds.isEmpty()) {
             return Collections.emptyMap();
         }
@@ -310,7 +310,9 @@ public class VenueReactionService {
         LocalDateTime since7d = LocalDateTime.now().minusDays(7);
         LocalDateTime since30d = LocalDateTime.now().minusDays(30);
 
-        // 单条 SQL 同时聚合 countAll/count7d/count30d：排序/筛选按所选窗口，展示同窗口计数
+        // 单条 SQL 同时聚合 countAll/count7d/count30d：集合与排序均按 countAll（有史以来 / 累计），
+        // 展示数字同样由前端取 countAll（用户可见口径）；count7d/count30d 仍随徽标下发，
+        // 供前端乐观更新时本地 ±1（每日一记模型下全部窗口均精确）
         Map<Long, Map<String, Long>> countAllByVenue = new HashMap<>();
         Map<Long, Map<String, Long>> count7dByVenue = new HashMap<>();
         Map<Long, Map<String, Long>> count30dByVenue = new HashMap<>();
@@ -340,13 +342,12 @@ public class VenueReactionService {
             Map<String, Long> count7ds = count7dByVenue.getOrDefault(venueId, Collections.emptyMap());
             Map<String, Long> count30ds = count30dByVenue.getOrDefault(venueId, Collections.emptyMap());
             Set<String> myCodes = myCodesByVenue.getOrDefault(venueId, Collections.emptySet());
-            result.put(venueId, buildTopBadgesFromCounts(countAlls, count7ds, count30ds, myCodes, window));
+            result.put(venueId, buildTopBadgesFromCounts(countAlls, count7ds, count30ds, myCodes));
         }
         return result;
     }
 
-    private List<ReactionBadge> buildTopBadges(Map<String, long[]> aggregate, Set<String> myCodes,
-                                               ReactionWindow window) {
+    private List<ReactionBadge> buildTopBadges(Map<String, long[]> aggregate, Set<String> myCodes) {
         // aggregate value: long[]{countAll, countToday, count7d, count30d}
         Map<String, Long> countAllByCode = new HashMap<>();
         Map<String, Long> count7dByCode = new HashMap<>();
@@ -357,31 +358,53 @@ public class VenueReactionService {
             count7dByCode.put(entry.getKey(), v[2]);
             count30dByCode.put(entry.getKey(), v[3]);
         }
-        return buildTopBadgesFromCounts(countAllByCode, count7dByCode, count30dByCode, myCodes, window);
+        return buildTopBadgesFromCounts(countAllByCode, count7dByCode, count30dByCode, myCodes);
     }
 
     /**
-     * 从三窗口计数 Map 构建 Reaction 徽标（**全部 count>0 的 code，不做任何截断**）。
-     * 排序/筛选以所选窗口（{@link ReactionWindow}）的计数为准，徽标内同时携带三个窗口计数
-     * 供前端按窗口展示 + 乐观更新本地 ±1（每日一记模型下全部窗口均精确）——
-     * count=0 的条目不展示：Reaction 只在有人参与后才出现，创建新 Reaction 的入口是
+     * 从三窗口计数 Map 构建 Reaction 徽标（**全部 {@code countAll>0} 的 code，不做任何截断**）。
+     * **集合、展示数字、排序三者同口径 = {@code countAll}（有史以来 / 累计）**；
+     * {@code count7d/count30d} 仍随徽标下发，仅用于前端乐观更新时本地 ±1。
+     * countAll=0 的条目不展示：Reaction 只在有人参与后才出现，创建新 Reaction 的入口是
      * 前端 Picker 表情选择器（长按卡片 / 点击"+"触发），参见 AGENTS.md「Reaction 快速反馈系统」。
      * <p>
-     * <b>完整展示（2026-08-09 需求定稿）</b>：返回所选窗口内<b>所有用户</b>点击过的<b>全部</b>
+     * <b>完整展示（2026-08-09 需求定稿）</b>：返回<b>有史以来所有用户</b>点击过的<b>全部</b>
      * 表情（不做 Top N 截断）。历史口径演进：① 2026-08-08 "当前用户已参与的 code 不受
      * Top 4 截断"豁免——把交互层状态保持问题错误上升为数据契约变更；② 2026-08-09 上午
      * "纯 Top N"——仍保留 4 条截断，同样违背"全部展示"需求本义。两版均已撤销。
      * 个人参与状态（myCodes）只作徽标标注属性（reactedByMe），不参与集合构成。
+     * <p>
+     * <b>2026-10-06 三职责彻底拆开（用户驱动 + 生产数据取证）</b>：{@code ReactionWindow}
+     * 历史上同时兼任集合过滤、排序、展示数字三职责，本次全部摘除（该枚举与请求参数
+     * {@code window} 均已删除）：
+     * <ul>
+     *   <li><b>集合</b>：从"所选窗口计数 &gt; 0"改为 {@code countAll > 0}。旧口径下近 7 天
+     *       窗口隐藏了 82.6% 的表情实例（现网取证：92 个门店×表情实例中仅 16 个可见，
+     *       56 家中有数据的门店里 84% 卡片表情区为空；样本店「人气旺」累计被点 20 次，
+     *       仅因最近 16 天无人再点即从卡片消失）——"这家店有什么声音"不该被时间戳抹掉。</li>
+     *   <li><b>展示数字</b>：从"所选窗口计数"改为 {@code countAll} 累计。旧口径把后台统计
+     *       窗口直接泄漏给用户——用户感知不到"近 7 天"这个前提，看到的小数字对他就是失真
+     *       （用户原话："用户只关心有多少人点过，我们后台只统计近 7 天，用户是感知不到的"）。</li>
+     *   <li><b>排序</b>：从"所选窗口计数降序"改为 <b>{@code countAll} 降序</b>——与展示数字
+     *       同口径，用户看到的 chip 数字必然从大到小（旧口径下"小数字排在大数字前面"的
+     *       倒挂现网实测 56 家中 3 家）。</li>
+     * </ul>
+     * <p>
+     * <b>确定性兜底</b>：{@code countAll} 相同的 code 按字典序排列，避免次序退化到
+     * {@code HashMap} 迭代序 ⇒ 翻页/重取后卡片 chip 换位（前端 {@code venue-card.deriveRows}
+     * 用同序比较器，稳定排序保持本序）。
      */
     private List<ReactionBadge> buildTopBadgesFromCounts(Map<String, Long> countAllByCode,
                                                          Map<String, Long> count7dByCode,
                                                          Map<String, Long> count30dByCode,
-                                                         Set<String> myCodes,
-                                                         ReactionWindow window) {
-        Map<String, Long> sortKeyByCode = window == ReactionWindow.DAYS_30
-                ? count30dByCode
-                : (window == ReactionWindow.ALL ? countAllByCode : count7dByCode);
-        List<Map.Entry<String, Long>> ranked = sortKeyByCode.entrySet().stream()
+                                                         Set<String> myCodes) {
+        // 集合与排序同口径（countAll）：
+        // - 集合 = 有史以来有人点过（countAll > 0）
+        // - 排序 = 累计降序（大者在左，与徽标展示数字同口径 ⇒ 用户看到的数字必然从大到小）
+        Comparator<Map.Entry<String, Long>> byAllDesc = Comparator
+                .comparingLong((Map.Entry<String, Long> e) -> e.getValue())
+                .reversed();
+        List<Map.Entry<String, Long>> ranked = countAllByCode.entrySet().stream()
                 .filter(e -> e.getValue() != null && e.getValue() > 0)
                 // 2026-08-08 防御：枚举外的残留 code（历史数据/seed 旧值/未来误写）跳过不崩——
                 // 枚举删除/改名后，库中旧 code 仍可能被聚合查询返回（如 V3 迁移前的
@@ -389,9 +412,9 @@ public class VenueReactionService {
                 // 让整个详情/列表接口 500。与 getStats（ReactionCode.allCodes() 遍历 + filter）
                 // 和 VenueHeatService（极性列表流）的"字典外 code 优雅忽略"行为对齐。
                 .filter(e -> ReactionCode.isValid(e.getKey()))
-                .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+                .sorted(byAllDesc.thenComparing(Map.Entry.comparingByKey()))
                 .collect(Collectors.toList());
-        // 完整展示：全部 count>0 的 code 均返回，不做任何截断（2026-08-09 需求定稿，见方法 javadoc）
+        // 完整展示：全部 countAll>0 的 code 均返回，不做任何截断（2026-08-09 需求定稿，见方法 javadoc）
         List<ReactionBadge> badges = new ArrayList<>();
         for (Map.Entry<String, Long> e : ranked) {
             String code = e.getKey();

@@ -289,6 +289,17 @@ public class VenueHeatService {
         long negativeReactionCount30d = orZero(counters.getNegativereactioncount30d());
         long pointsReceivedTotal = orZero(counters.getPointsreceivedtotal());
         long pointsReceived30d = orZero(counters.getPointsreceived30d());
+        // ── 到访项（2026-10-06 V38：到店足迹进排名） ──
+        // 输入 = qwt_venue_visit_metrics.visit_users_30d（物化表，口径 = 归因 × 1/k 分摊 ×
+        // 排除内部账号），null ⇒ 该店无到访 ⇒ 0 分。
+        // 计分形态 = max(0, 人数 − 免计基数) × W（见 VenueHeatWeights.VISIT / VISIT_FREE_TIER）：
+        // 免计基数把"恰好一个人路过"的泊松噪声整体压掉——2026-10-06 生产实测 8 家有到访门店中
+        // 5 家只有 1 人，裸加（人数×8）会让西安某店 16 名→第 3、咸阳停业店 57→21。
+        // 该项是**唯一有刷新延迟**的项（物化表 30 分钟刷新一次），有意例外，见 05 号文档。
+        java.math.BigDecimal visitUsersRaw = counters.getVisitusers30d();
+        double visitUsers30d = visitUsersRaw != null ? visitUsersRaw.doubleValue() : 0d;
+        double visitCredit = Math.max(0d, visitUsers30d - VenueHeatWeights.VISIT_FREE_TIER);
+        long visitComponent = Math.round(visitCredit * VenueHeatWeights.VISIT);
         long ratingTotalCount = orZero(counters.getRaters());
         long suspensionCount30d = orZero(counters.getSuspensioncount());
         // 最新状态日志时间：实时事实（无窗口上界）。null = 从未有过任何状态日志
@@ -355,6 +366,7 @@ public class VenueHeatService {
                 + ratingCount30d * VenueHeatWeights.RATING
                 + positiveReactionCount30d * VenueHeatWeights.REACTION
                 + pointsReceived30d * pointsWeight
+                + visitComponent
                 + satisfactionComponent;
         // 非负收敛：满意度负偏移可能把总分拉负——热度指数语义非负（负热度无展示意义，
         // 前端详情页 chip 以 heatScore > 0 为"有数据"判据，负分会导致两端展示矛盾，
@@ -379,6 +391,7 @@ public class VenueHeatService {
                 + " · 新动态 " + newPostCount30d + "×" + VenueHeatWeights.POST
                 + " · 评分人数 " + ratingCount30d + "×" + VenueHeatWeights.RATING
                 + " · 正向反馈人数 " + positiveReactionCount30d + "×" + VenueHeatWeights.REACTION
+                + " · 到店人数 " + formatVisitCount(visitCredit) + "×" + VenueHeatWeights.VISIT
                 + " · 礼物 " + pointsReceived30d + "×" + pointsWeight
                 + satisfactionTerm + clampSuffix;
 
@@ -397,6 +410,14 @@ public class VenueHeatService {
                 .append(" 人（同一人评多个维度只计一次，避免单人被放大）\n");
         detail.append("· 近30天正向反馈人数×").append(VenueHeatWeights.REACTION).append("：当前 ").append(positiveReactionCount30d)
                 .append(" 人（同一人近30天多次反馈只计一次；服务问题、排队太久等负向反馈不计入，单独展示）\n");
+        detail.append("· 近30天到店人数×").append(VenueHeatWeights.VISIT).append("：当前 ")
+                .append(formatVisitCount(visitUsers30d)).append(" 人（到店足迹，由用户自愿开启后自动记录——")
+                .append("只覆盖开启该功能的用户，因此数字远小于真实到店人数，仅作参考；")
+                .append("同一人 30 天内多次到店只算一人；同楼门店之间按人数分摊，避免一栋楼被重复计数）。")
+                .append("其中前 ").append(VenueHeatWeights.VISIT_FREE_TIER)
+                .append(" 人不计分、第 ").append(VenueHeatWeights.VISIT_FREE_TIER + 1)
+                .append(" 人起每人 ×").append(VenueHeatWeights.VISIT)
+                .append(" —— 避免「恰好一个人路过」被当成热度；该项数据每 30 分钟更新一次\n");
         detail.append("· 近30天收到礼物价值×").append(pointsWeight).append("：当前 ").append(pointsReceived30d).append(" 分\n");
         detail.append(satisfactionScore != null
                 ? "当前满意度 " + satisfactionScore + " 分。"
@@ -443,6 +464,20 @@ public class VenueHeatService {
 
     private static long orZero(Long value) {
         return value != null ? value : 0L;
+    }
+
+    /**
+     * 到访人数/到访计分人数的文案格式化（2026-10-06，V38）。
+     * <p>
+     * <b>为什么需要它（而不是直接 Math.round）</b>：到访人数是同址组 1/k <b>分摊</b>的结果，
+     * 天然可能带小数（如 3.5 人 ⇒ 计分人数 1.5）。公式文案的契约是 <b>「N×W」形态且必须
+     * 能乘得起来</b>（前端与单测按该形态解析，见 computeHeat 文案注释）——把 1.5 四舍五入成
+     * "2×10" 会让文案显示 20 而实际得分 15，**文案与数值互相矛盾**。
+     * ⇒ 整数显示整数（"2"），小数保留一位（"1.5"），两种形态都乘得通。
+     */
+    private static String formatVisitCount(double value) {
+        return value == Math.floor(value) ? String.valueOf((long) value)
+                : String.format(java.util.Locale.ROOT, "%.1f", value);
     }
 
 

@@ -178,6 +178,60 @@ class VenueHeatServiceTest {
         assertTrue(resp.formulaDetail().contains("不足3人"), "详情应说明满意度未参与计算的原因");
     }
 
+    // ── 到访项（2026-10-06，V38：到店足迹进排名） ──────────────────────────────
+
+    @Test
+    void visitTermAppliesFreeTierBeforeScoring() {
+        stubZeroCounters();
+        // 到访 4 人：免计基数 2 ⇒ 计分人数 2 ⇒ 2×10 = 20
+        when(counters.getVisitusers30d()).thenReturn(new java.math.BigDecimal("4.00"));
+
+        VenueHeatResponse resp = heatService.getHeat(1L);
+
+        assertEquals(20L, resp.heatScore(), "到访项应扣除免计基数后计分（(4-2)×10）");
+        assertTrue(resp.formulaText().contains("到店人数 2×10"), "公式应展示扣除免计基数后的到访项");
+        assertTrue(resp.formulaDetail().contains("前 2 人不计分"),
+                "详情应说明免计基数（避免「恰好一个人路过」被当成热度）");
+    }
+
+    @Test
+    void visitTermBelowFreeTierScoresZero() {
+        stubZeroCounters();
+        // 到访 2 人 = 免计基数 ⇒ 0 分（单人到访不得改排序；生产实证：8 家有到访门店中 5 家只有 1 人）
+        when(counters.getVisitusers30d()).thenReturn(new java.math.BigDecimal("2.00"));
+
+        VenueHeatResponse resp = heatService.getHeat(1L);
+
+        assertEquals(0L, resp.heatScore(), "到访人数未超过免计基数时不得分");
+        assertTrue(resp.formulaText().contains("到店人数 0×10"), "公式应显式展示 0 分而非省略该项");
+    }
+
+    @Test
+    void visitTermScoresFractionalSharedCounts() {
+        stubZeroCounters();
+        // 同址组都在营 ⇒ 1/k 分摊，人数可能带小数：3.5 → 计分 1.5 → 15 分。
+        // 文案必须能乘得起来（"1.5×10"=15），四舍五入成 "2×10" 会与数值矛盾
+        when(counters.getVisitusers30d()).thenReturn(new java.math.BigDecimal("3.50"));
+
+        VenueHeatResponse resp = heatService.getHeat(1L);
+
+        assertEquals(15L, resp.heatScore(), "分摊小数应参与计分（(3.5-2)×10 = 15）");
+        assertTrue(resp.formulaText().contains("到店人数 1.5×10"),
+                "小数到访人数文案须保留一位（N×W 形态必须乘得起来）");
+    }
+
+    @Test
+    void visitTermAbsentWhenVenueHasNoVisitRow() {
+        stubZeroCounters();
+        // 物化表只落「曾经有过到访」的门店 ⇒ 无到访门店该列为 null（不是 0 行）
+        when(counters.getVisitusers30d()).thenReturn(null);
+
+        VenueHeatResponse resp = heatService.getHeat(1L);
+
+        assertEquals(0L, resp.heatScore(), "无到访记录不得分");
+        assertTrue(resp.formulaText().contains("到店人数 0×10"), "null 应按 0 参与公式并如实展示");
+    }
+
     @Test
     void trendSeriesArePopulatedFromTrendMegaQuery() {
         stubZeroCounters();

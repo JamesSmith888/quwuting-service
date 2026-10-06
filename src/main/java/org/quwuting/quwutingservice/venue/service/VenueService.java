@@ -11,7 +11,6 @@ import org.quwuting.quwutingservice.resourceaccess.enums.ResourceType;
 import org.quwuting.quwutingservice.resourceaccess.service.ResourceAccessService;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.venuereaction.ReactionCode;
-import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
 import org.quwuting.quwutingservice.venue.config.VenueDefaultsConfig;import org.quwuting.quwutingservice.venue.dto.PartnerFeeEntry;
@@ -58,6 +57,7 @@ import org.quwuting.quwutingservice.storage.ImageContentValidator;
 import org.quwuting.quwutingservice.venue.change.VenueChangePublisher;
 import org.quwuting.quwutingservice.venue.change.VenueFactChange;
 import org.quwuting.quwutingservice.venue.change.VenueFactsChangedEvent;
+import org.quwuting.quwutingservice.venuepresence.service.VenueVisitBadgeService;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
@@ -187,6 +187,13 @@ public class VenueService {
      * 判据与常量收在一个家，避免"常量在这里、语义在那边"。
      */
     private final CityCentroidService cityCentroidService;
+    /**
+     * 列表卡片「到店足迹」胶囊文案批量生成（2026-10-06，V38；docs/agents/52-venue-presence.md
+     * 「到访进排序」）：读 V38 物化表 {@code qwt_venue_visit_metrics} 的**分摊口径**到访人数，
+     * 过门槛才出文案「已记录 N 位舞友到店」。
+     * 注入边界同 {@code crowdBadgeText}：仅列表场景传真实值，详情/编辑回显恒 null。
+     */
+    private final VenueVisitBadgeService venueVisitBadgeService;
 
     /**
      * 详情接口「公共部分」缓存（2026-08-13 新增，性能优化：详情接口 DB 往返 5→2 次）。
@@ -989,15 +996,14 @@ public class VenueService {
 
     /**
      * 详情接口公共部分计算（缓存 loader，勿直接调用——经 {@link #venueDetailPublicCache}）。
-     * 与请求用户无关：默认窗口（近7天）徽标 + 累计浏览量 + 状态最近变更时间 + 认领事实
-     * + 门店别名（2026-09-07，录入顺序）。
+     * 与请求用户无关：Reaction 徽标（口径 2026-10-06 起与任何窗口无关）+ 累计浏览量
+     * + 状态最近变更时间 + 认领事实 + 门店别名（2026-09-07，录入顺序）。
      * 注意 getBadges 传 userId=null（公共聚合不含个人参与态——个人态在 /reactions/stats
      * 实时返回；base.topReactions 仅承载列表快照/兜底展示）。
      */
     private VenueDetailPublic computeVenueDetailPublic(Long id) {
         Venue venue = venueLookupService.findById(id);
-        List<ReactionBadge> topReactions = venueReactionService.getBadges(
-                id, null, ReactionWindow.DAYS_7);
+        List<ReactionBadge> topReactions = venueReactionService.getBadges(id, null);
         // 累计浏览量（全量历史口径，单店 COUNT 命中 (venue_id, view_date) 索引，毫秒级）：
         // viewCount 是 VenueResponse 事实字段，详情基础响应同样传真实值（见 Mapper 四参重载 javadoc）
         long viewCount = venueViewRepository.countByVenueId(id);
@@ -1071,8 +1077,9 @@ public class VenueService {
      * 热度最高/最新收录的排序本身不依赖坐标，仅在叠加半径时借用坐标作圆心——所以只有
      * "有坐标且有半径"才进入 WithRadius 变体，避免无谓地把坐标参数绑定进不含距离数学的查询。
      * <p>
-     * {@code window} 控制卡片 Top Reaction 徽标的排序/筛选窗口（近7天/近30天/全部，
-     * 默认近7天——舞厅强时间变化场景，列表默认展示近期热度，见 AGENTS.md「Reaction 快速反馈系统」）。
+     * Top Reaction 徽标（2026-10-06 起与任何请求参数无关）：集合 = 有史以来 {@code countAll>0}
+     * 的全部表情、展示数字与排序 = {@code countAll} 累计（大者在左）——原 {@code window} 参数与
+     * 后端 {@code ReactionWindow} 枚举已随之删除，见 AGENTS.md「Reaction 快速反馈系统」。
      * <p>
      * {@code hot}（可选，2026-08-08 新增「热门」快捷筛选）：true 时仅返回热门场所——
      * ID ∈ {@link VenueLookupService#getHotVenueIds()}（城市内 top 20% 且 热度分 ≥ 门槛，
@@ -1094,7 +1101,7 @@ public class VenueService {
     public Page<VenueResponse> listVenues(String city, String district,
                                           VenueStatus status, VenueType venueType, String keyword,
                                           Double latitude, Double longitude,
-                                          String window, String sort, Double radiusKm,
+                                          String sort, Double radiusKm,
                                           Boolean hot, String tag, Boolean hasActivity,
                                           int page, int size) {
         // 关键词检索模型 v2（2026-09-02，docs/agents/07-list-page.md「关键词匹配口径」）：
@@ -1147,8 +1154,7 @@ public class VenueService {
         // 批量查询整页场所的 Top Reaction 徽标，避免逐条查询造成的 N+1（见 VenueReactionService#batchGetBadges）
         List<Long> venueIds = result.getContent().stream().map(Venue::getId).toList();
         Map<Long, List<ReactionBadge>> reactionsByVenue =
-                venueReactionService.batchGetBadges(venueIds, UserContext.getCurrentUserId(),
-                        ReactionWindow.from(window));
+                venueReactionService.batchGetBadges(venueIds, UserContext.getCurrentUserId());
         // 批量累计浏览量（2026-08-12 列表卡片「👁 浏览数」数据源）：一次 IN + GROUP BY
         // 覆盖整页，避免逐条 COUNT 的 N+1；口径 = qwt_venue_views 全量行数（按天按来源去重 PV 含匿名，
         // 与 viewCount30d 同源同口径的全量版，见 VenueViewRepository#countByVenueIds javadoc）
@@ -1177,6 +1183,11 @@ public class VenueService {
         // docs/agents/38-venue-aliases.md §4.1）。无 keyword → 空 Map，全页恒 null，零额外
         // 查询（同 photos 等批量装配模式，一次 IN 覆盖整页规避 N+1；两张别名表规模极小）。
         Map<Long, VenueMatchHint> matchHints = loadMatchHints(result.getContent(), rawTerms);
+        // 批量「到店足迹」胶囊（2026-10-06，V38）：读 V38 物化表（归因 + 1/k 分摊 + 排除内部账号）
+        // 的分摊人数，≥ VISIT_FREE_TIER+1 才出文案——同门槛，保证"卡片上有数字 ⇔ 热度公式里有分"
+        // （口径与展示门槛依据见 VenueVisitBadgeService / VenueResponse#visitBadgeText）。
+        // 一次 IN 覆盖整页防 N+1，走 UNIQUE(venue_id) 主键点查，表只含有过到访的门店（稀疏量级）。
+        Map<Long, String> visitBadges = venueVisitBadgeService.visitBadgeTextsByVenue(venueIds);
         return result.map(v -> venueResponseMapper.toResponse(
                 v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),
                 hotVenueIds.contains(v.getId()),
@@ -1186,7 +1197,8 @@ public class VenueService {
                 crowdLatestTexts.get(v.getId()),
                 false,
                 statusLatestTexts.get(v.getId()),
-                matchHints.get(v.getId())));
+                matchHints.get(v.getId()),
+                visitBadges.get(v.getId())));
     }
 
     /**

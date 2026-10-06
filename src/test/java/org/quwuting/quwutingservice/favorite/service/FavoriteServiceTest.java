@@ -16,7 +16,6 @@ import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.quwuting.quwutingservice.venue.service.VenueService;
 import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportService;
-import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
 import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportLatestService;
 import org.quwuting.quwutingservice.venuestatuswatcher.service.VenueStatusWatcherService;
@@ -78,6 +77,12 @@ class FavoriteServiceTest {
     /** 门店报告「最新上报」行文案（2026-09-04 列表行轮播注入新增依赖） */
     @Mock
     private StatusReportLatestService statusReportLatestService;
+    /**
+     * 列表卡片「到店足迹」胶囊（2026-10-06 V38 新增依赖）：收藏列表与城市列表同为 venue-card
+     * 展示场景，须同口径注入（漏注入 = "城市列表有胶囊、收藏列表不显示"，同 isHot 历史缺陷模式）。
+     */
+    @Mock
+    private org.quwuting.quwutingservice.venuepresence.service.VenueVisitBadgeService venueVisitBadgeService;
     /** 站内信服务（2026-09-01 收藏门店「状态更新」角标数据源新增依赖） */
     @Mock
     private MessageService messageService;
@@ -92,7 +97,8 @@ class FavoriteServiceTest {
         service = new FavoriteService(favoriteRepository, venueResponseMapper,
                 venueReactionService, venueLookupService, venueHeatService,
                 venueViewRepository, venueService, crowdReportService,
-                statusReportLatestService, messageService, venueStatusWatcherService);
+                statusReportLatestService, venueVisitBadgeService,
+                messageService, venueStatusWatcherService);
     }
 
     private static Venue venue(Long id) {
@@ -104,8 +110,8 @@ class FavoriteServiceTest {
 
     /**
      * 按映射器入参回显构造响应（isHot/statusChanged 九参重载契约的观测点）。
-     * 末位 matchedHint 恒 null——收藏列表无 keyword 上下文，不做「匹配解释」
-     * （该字段仅列表搜索场景注入，见 VenueResponse#matchedHint 语义边界）。
+     * 末两位 matchedHint / visitBadgeText 恒 null——收藏列表无 keyword 上下文、且
+     * 到店足迹胶囊只在城市列表场景注入（同 isHot/crowdBadgeText 注入边界）。
      */
     private static VenueResponse response(Long id, boolean isHot, boolean statusChanged) {
         return new VenueResponse(
@@ -115,7 +121,7 @@ class FavoriteServiceTest {
                 null, null, Collections.emptyList(), Collections.emptyList(),
                 Collections.emptyList(), null, null, Collections.emptyList(),
                 Collections.emptyList(), Collections.emptyList(), 0,
-                0L, isHot, null, null, null, null, statusChanged, null, null);
+                0L, isHot, null, null, null, null, statusChanged, null, null, null);
     }
 
     /**
@@ -128,14 +134,14 @@ class FavoriteServiceTest {
         Venue hot = venue(1L);
         Venue cold = venue(2L);
         when(favoriteRepository.findFavoriteVenuesByUserId(42L)).thenReturn(List.of(hot, cold));
-        when(venueReactionService.batchGetBadges(anyList(), eq(42L), eq(ReactionWindow.DAYS_7)))
+        when(venueReactionService.batchGetBadges(anyList(), eq(42L)))
                 .thenReturn(Collections.emptyMap());
         when(venueLookupService.getHotVenueIds()).thenReturn(Set.of(1L));
         // 门店照片域（2026-08-20）：无公开照片时返回空 Map（调用方 getOrDefault 兜底）
         when(venueService.loadPublicPhotosByVenueIds(anyList())).thenReturn(Collections.emptyMap());
         // 收藏门店状态角标（2026-09-01）：venue 1 有未读状态提醒、venue 2 无
         when(messageService.findUnreadStatusChangedVenueIds(eq(42L), anyList())).thenReturn(Set.of(1L));
-        when(venueResponseMapper.toResponse(any(Venue.class), anyList(), anyBoolean(), anyLong(), anyList(), any(), any(), anyBoolean(), any()))
+        when(venueResponseMapper.toResponse(any(Venue.class), anyList(), anyBoolean(), anyLong(), anyList(), any(), any(), anyBoolean(), any(), any(), any()))
                 .thenAnswer(inv -> response(
                         ((Venue) inv.getArgument(0)).getId(), inv.getArgument(2), inv.getArgument(7)));
 
@@ -146,10 +152,11 @@ class FavoriteServiceTest {
         assertFalse(result.get(1).isHot(), "非热门集合内的场所不得误标热门");
         assertTrue(result.get(0).statusChanged(), "有未读状态提醒的收藏门店必须下发状态角标");
         assertFalse(result.get(1).statusChanged(), "无未读状态提醒的收藏门店不得误标状态角标");
-        // 防回归：必须走九参重载（七参重载 statusChanged 恒 false 是本缺陷模式；八参携带状态角标，
-        // 九参追加门店报告「最新上报」行文案 statusLatestText——末参 null = 无公示中报告不下发）
-        verify(venueResponseMapper).toResponse(hot, Collections.emptyList(), true, 0L, Collections.emptyList(), null, null, true, null);
-        verify(venueResponseMapper).toResponse(cold, Collections.emptyList(), false, 0L, Collections.emptyList(), null, null, false, null);
+        // 防回归：必须走十一参重载（末两参 = matchedHint 恒 null + visitBadgeText）。历史缺陷模式：
+        // 用更短的旧重载会让新增展示字段恒 null——"城市列表有、收藏列表不显示"（同 isHot / crowdBadgeText）。
+        // 本处 mock 的 venueVisitBadgeService 未打桩 ⇒ 返回空 Map ⇒ visitBadgeText 恒 null（本用例不测该字段）
+        verify(venueResponseMapper).toResponse(hot, Collections.emptyList(), true, 0L, Collections.emptyList(), null, null, true, null, null, null);
+        verify(venueResponseMapper).toResponse(cold, Collections.emptyList(), false, 0L, Collections.emptyList(), null, null, false, null, null, null);
     }
 
     /** 收藏列表为空时短路返回，不触发热门集合查询（无意义往返） */

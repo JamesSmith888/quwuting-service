@@ -15,7 +15,6 @@ import org.quwuting.quwutingservice.venue.service.VenueHeatService;
 import org.quwuting.quwutingservice.venue.service.VenueLookupService;
 import org.quwuting.quwutingservice.venue.service.VenueService;
 import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportService;
-import org.quwuting.quwutingservice.venuereaction.ReactionWindow;
 import org.quwuting.quwutingservice.venuereaction.dto.response.ReactionBadge;
 import org.quwuting.quwutingservice.venuereaction.service.VenueReactionService;
 import org.quwuting.quwutingservice.venuestatusreport.service.StatusReportLatestService;
@@ -51,6 +50,12 @@ public class FavoriteService {
     /** 门店报告列表角标（2026-09-04「有用户上报」：收藏列表与城市列表同为 venue-card
      * 展示场景，须同口径注入——同 isHot 历史缺陷模式；独立微服务规避构造器循环，见其类注释） */
     private final StatusReportLatestService statusReportLatestService;
+    /**
+     * 列表卡片「到店足迹」胶囊（2026-10-06，V38）：收藏列表与城市列表同为 venue-card 展示场景，
+     * <b>必须同口径注入</b>——漏注入 = "城市列表有胶囊、收藏列表不显示"（同 isHot / crowdBadgeText
+     * 的历史缺陷模式，见下方 getFavoriteVenues 注释）。
+     */
+    private final org.quwuting.quwutingservice.venuepresence.service.VenueVisitBadgeService venueVisitBadgeService;
     /** 站内信服务（收藏门店「状态更新」角标数据源，2026-09-01，见 {@link #getFavoriteVenues}） */
     private final MessageService messageService;
     /** 营业状态关注服务（「收藏即关注」2026-09-01：收藏自动建立状态通知，取消收藏同步取消） */
@@ -115,10 +120,11 @@ public class FavoriteService {
         if (venues.isEmpty()) {
             return Collections.emptyList();
         }
-        // 收藏 Tab 无窗口切换入口，徽标固定取默认窗口（近7天），与列表页默认一致
+        // Reaction 徽标口径 2026-10-06 起与窗口无关（集合 = 有史以来 countAll>0、数字与排序
+        // = 累计），收藏 Tab 与列表页天然同口径，无需再对齐窗口
         Map<Long, List<ReactionBadge>> reactionsByVenue =
                 venueReactionService.batchGetBadges(venues.stream().map(Venue::getId).toList(),
-                        userId, ReactionWindow.DAYS_7);
+                        userId);
         // 热门 ID 集合为全局缓存（5min TTL），收藏列表跨城市展示同样按"城市内
         // top 20% + 绝对门槛"标记——与城市列表同口径（见 VenueLookupService#getHotVenueIds）
         Set<Long> hotVenueIds = venueLookupService.getHotVenueIds();
@@ -142,6 +148,9 @@ public class FavoriteService {
         // 2026-09-04 用户拍板推翻同日「中性角标」方案；同 isHot 历史缺陷模式——收藏列表
         // 漏注入会出现"城市列表有文案、收藏不显示"，见 StatusReportLatestService#latestTextsByVenue）
         Map<Long, String> statusLatestTexts = statusReportLatestService.latestTextsByVenue(venueIds);
+        // 批量「到店足迹」胶囊（2026-10-06，V38）：与城市列表同源同门槛（≥3 才下发）——
+        // 收藏列表与城市列表同为 venue-card 展示场景，须同口径（同上方角标的「漏注入」历史缺陷模式）
+        Map<Long, String> visitBadges = venueVisitBadgeService.visitBadgeTextsByVenue(venueIds);
         // 批量未读状态变更门店 ID（2026-09-01「收藏即关注」）：一次 IN 覆盖整页收藏，
         // 无未读的门店不在集合中（与整页批量模式一致，避免 N+1）。数据源 = 未读
         // VENUE_STATUS_CHANGED 站内信（收藏自动建立关注 → 状态变更即有提醒 → 角标）。
@@ -156,7 +165,10 @@ public class FavoriteService {
                         crowdBadges.get(v.getId()),
                         crowdLatestTexts.get(v.getId()),
                         statusChangedVenueIds.contains(v.getId()),
-                        statusLatestTexts.get(v.getId())))
+                        statusLatestTexts.get(v.getId()),
+                        // matchedHint 恒 null：收藏列表无 keyword 上下文，不做匹配解释（同 DTO 契约）
+                        null,
+                        visitBadges.get(v.getId())))
                 .toList();
     }
 

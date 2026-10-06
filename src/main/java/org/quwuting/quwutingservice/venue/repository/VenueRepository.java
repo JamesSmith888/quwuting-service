@@ -690,6 +690,17 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * <b>展示字段不排除</b>（PV/UV/收藏总数/动态总数/评价总人数/负向反馈保持原始事实口径），
      * 排除只作用于<b>公式输入</b>——口径分叉是有意的：展示回答"发生了什么"，公式回答"有多火"。
      * <p>
+     * <b>2026-10-06 V38 新增到访项</b>：
+     * {@code + GREATEST(0, COALESCE((SELECT m.visitUsers30d FROM VenueVisitMetric m WHERE m.venueId = v.id), 0) - 2) * 10}
+     * —— 语义 = 「近30天<b>有效到访人数</b> × {@link VenueHeatWeights#VISIT}」，其中免计基数
+     * {@link VenueHeatWeights#VISIT_FREE_TIER}（= 2）把"恰好一个人路过"的泊松噪声压掉。
+     * <b>为什么不是标量子查询直读 ping 表</b>：到访人数是派生量（命中谓词 × 同址组几何 ≤50m ×
+     * 双方营业状态 × 用户并集），归因是 Java 侧计算 ⇒ 必须读物化表（V38，定时任务刷新）。
+     * 绕过归因直接写"距离 ≤150m 的 COUNT(DISTINCT userId)"会丢掉共享/让渡口径，52 号 §1.1 第 1 条明文禁止。
+     * <b>代价</b>：到访项有刷新延迟（30 分钟），与其余项"当日行为当天反映排序"不同——有意例外。
+     * <b>与 :excludedUserIds 的关系</b>：本项不需要该参数——排除在<b>物化时</b>已完成
+     * （排序口径排除内部账号；展示口径不排除），故此处只读已经是净值的列。
+     * <p>
      * 注意：本片段引用 {@code :positiveCodes}、{@code :pointsWeight} 与
      * {@code :excludedUserIds}——使用本片段的查询方法必须声明这三个参数。
      * <p>
@@ -756,7 +767,13 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                 WHERE pt.targetType = org.quwuting.quwutingservice.points.enums.PointsTargetType.VENUE
                   AND pt.targetId = v.id AND pt.delta < 0
                   AND pt.userId NOT IN :excludedUserIds
-                  AND pt.createdAt >= (CURRENT_DATE - 30 day) AND pt.createdAt < (CURRENT_DATE + 1 day)) * :pointsWeight)
+                  AND pt.createdAt >= (CURRENT_DATE - 30 day) AND pt.createdAt < (CURRENT_DATE + 1 day)) * :pointsWeight
+             + GREATEST(0, COALESCE((SELECT m.visitUsers30d FROM VenueVisitMetric m
+                WHERE m.venueId = v.id AND m.deleted = false), 0) - """
+            + VenueHeatWeights.VISIT_FREE_TIER + """
+            ) * """
+            + VenueHeatWeights.VISIT + """
+            )
             """;
 
     /**
@@ -1255,6 +1272,22 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
         Long getPointsreceivedtotal();
         /** 近30天收到积分（target_type='VENUE' 的窗口 SUM，热度公式积分输入项） */
         Long getPointsreceived30d();
+        /**
+         * 近30天<b>有效到访人数</b>（2026-10-06 V38 新增）——热度公式到访项输入。
+         * <p>
+         * 取值 = {@code qwt_venue_visit_metrics.visit_users_30d}（物化表，V38），口径 =
+         * <b>归因（同址组 × 营业状态）+ 1/k 分摊 + 排除内部账号</b>，三者都与展示字段分叉。
+         * <b>无到访的门店不落行 ⇒ 本列为 null</b>（调用方按 0 处理）。
+         * <p>
+         * <b>为什么读物化表而不是直接查 ping 表</b>：归因是 {@code VenuePresenceService} 的
+         * Java 侧计算，JPQL 无派生表能力；绕过归因写距离子查询会丢掉共享/让渡口径
+         * （52 号 §1.1 第 1 条）。物化表由 {@code VenueVisitMetricsScheduler} 定时刷新
+         * ⇒ <b>本项有刷新延迟</b>（有意例外，见 05 号文档）。
+         * <p>
+         * 类型为 {@link java.math.BigDecimal} 而非 Long：分摊会产生 1/k 的小数
+         * （同址组都在营时每位用户按 1/k 分给 k 家在营店）。
+         */
+        java.math.BigDecimal getVisitusers30d();
     }
 
     /**
@@ -1368,7 +1401,9 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
               (SELECT COALESCE(SUM(-pt.delta), 0) FROM qwt_points_transactions pt
                 WHERE pt.target_type = 'VENUE' AND pt.target_id = :venueId AND pt.delta < 0
                   AND pt.user_id NOT IN :excludedUserIds
-                  AND pt.created_at >= :windowSince AND pt.created_at < :windowUntil) AS pointsreceived30d
+                  AND pt.created_at >= :windowSince AND pt.created_at < :windowUntil) AS pointsreceived30d,
+              (SELECT m.visit_users_30d FROM qwt_venue_visit_metrics m
+                WHERE m.venue_id = :venueId AND m.deleted = false) AS visitusers30d
             """, nativeQuery = true)
     HeatCounters countHeatCounters(@Param("venueId") Long venueId,
                                    @Param("viewSince") java.time.LocalDate viewSince,
@@ -1653,6 +1688,11 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                               WHERE pt.target_type = 'VENUE' AND pt.target_id = v.id AND pt.delta < 0
                                 AND pt.user_id NOT IN :excludedUserIds
                                 AND pt.created_at >= (DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)) AND pt.created_at < (CURRENT_DATE + INTERVAL 1 DAY)) * :pointsWeight
+                           + GREATEST(0, COALESCE((SELECT m.visit_users_30d FROM qwt_venue_visit_metrics m
+                              WHERE m.venue_id = v.id AND m.deleted = false), 0) - """
+            + VenueHeatWeights.VISIT_FREE_TIER + """
+            ) * """
+            + VenueHeatWeights.VISIT + """
                            AS heat_score
                     FROM qwt_venues v
                     WHERE v.deleted = false

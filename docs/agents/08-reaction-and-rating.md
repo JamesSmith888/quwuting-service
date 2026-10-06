@@ -170,18 +170,18 @@ Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对�
 |------|------|------|------|
 | GET | `/venues/{venueId}/reactions/stats` | 公开（软鉴权） | 字典内全部 Reaction 的四窗口统计 + 当前用户"今日已参与"状态，详情页"大家对这里的感受"+"查看更多"用 |
 | POST | `/venues/{venueId}/reactions/{code}` | 需登录 | toggle 语义（2026-08-14 每日一票：今日未参与=参与、今日已参与=取消、已选其他=**换票**），返回 `{reacted, replacedFrom}`；`code` 为路径变量而非请求体（字典固定，路径更简洁） |
-| GET | `/venues?...&window=7d/30d/all` | 公开（软鉴权） | 列表接口新增 `window` 参数：控制卡片 Top Reaction 徽标的排序/筛选窗口，默认 `7d`（近7天） |
+| GET | `/venues?...&window=7d/30d/all` | 公开（软鉴权） | 列表接口 `window` 参数：控制卡片 Top Reaction 徽标的**排序与展示计数**窗口，默认 `7d`（近7天）；**不影响集合构成**（集合恒为有史以来 `countAll>0`，2026-10-06 起） |
 
 **toggle 并发**：每日一票模式下同日并发由 `pg_advisory_xact_lock` 事务级咨询锁串行化（见上「每日一票」章节）；多选模式（开关关闭）下同日并发重复插入触发唯一约束冲突 → 幂等视为已参与（`DataIntegrityViolationException` 捕获 + `entityManager.clear()`）。前端每 code 一个 in-flight 守卫（见前端 AGENTS.md）已把同端连点串行化，本防御兜底多端竞态。
 
 ### 列表页 Top Reaction 徽标（VenueResponse.topReactions，替代原 tagLikeCounts）
 
-`GET /venues`（按 `window` 参数）、`GET /favorites`（固定默认窗口 7d）等复用 `VenueResponseMapper` 的接口在 `VenueResponse.tags` 之外携带 `topReactions: List<ReactionBadge>`（**完整展示**：所选窗口内所有用户点击过的全部表情，count>0 的 code 一个不落、按所选窗口计数降序，**不做任何截断**）。创建新 Reaction 的入口是前端 Picker 表情选择器（长按卡片触发），不是 count=0 的占位 chips——此决策的根因分析见[前端 AGENTS.md](../../quwuting/AGENTS.md) · 「Reaction 快速反馈系统 → 设计决策 → 展示与创建职责分离」。
+`GET /venues`（按 `window` 参数）、`GET /favorites`（固定默认窗口 7d）等复用 `VenueResponseMapper` 的接口在 `VenueResponse.tags` 之外携带 `topReactions: List<ReactionBadge>`（**完整展示**：**有史以来**所有用户点击过的全部表情，`countAll>0` 的 code 一个不落、按所选窗口计数降序，**不做任何截断**）。创建新 Reaction 的入口是前端 Picker 表情选择器（长按卡片触发），不是 count=0 的占位 chips——此决策的根因分析见[前端 AGENTS.md](../../quwuting/AGENTS.md) · 「Reaction 快速反馈系统 → 设计决策 → 展示与创建职责分离」。
 
-**完整展示契约（2026-08-09 需求定稿）**：topReactions 的集合构成 = **所选窗口（默认近7天）内所有用户点击过的全部表情**，不做任何截断。列表页/收藏列表/详情基础响应的默认窗口均为近7天（列表页可经 `window` 参数切换）——需求本义是"查询近7天全部（所有用户）的 reaction 数据，全部展示"。
+**完整展示契约（2026-08-09 需求定稿；2026-10-06 集合放开为"有史以来"）**：topReactions 的集合构成 = **有史以来所有用户点击过的全部表情**（`countAll>0`），不做任何截断。列表页/收藏列表/详情基础响应的**默认统计窗口**均为近7天（列表页可经 `window` 参数切换）——**该参数只影响排序与展示数字，不影响集合构成**（见下「2026-10-06 集合与统计窗口解耦」）。
 
 - **历史错误（2026-08-08 / 2026-08-09 上午引入、2026-08-09 下午撤销）**：① 2026-08-08 为修复"列表卡片 toggle 后被重取抹掉 chip"的交互层状态保持缺陷，错误地把"当前用户已参与的 code 不受 Top N 截断"上升为数据契约（保留 Top 4 截断 + 豁免个人项）——交互层问题错误升级为数据契约；② 2026-08-09 上午"纯 Top N"——仍保留 4 条截断，同样违背"全部展示"需求本义。**撤销后（最终口径）**：返回所选窗口内全部 count>0 的 code，无任何截断——用户刚参与的 code 必在返回中（count>0 即返回），"chip 被重取抹掉"从根上消失；个人参与状态（reactedByMe）仅作徽标标注属性、不参与集合构成
-- **长期规则**：topReactions 这类"列表摘要"数据契约**返回所选窗口内所有用户点击过的全部表情（无截断）**，个人状态（reactedByMe）只作徽标标注属性、不参与集合构成；交互层状态保持问题（chip 被重取抹掉等）一律在前端交互层解决（乐观更新 + 幂等 reconcile），**禁止通过修改数据契约豁免**——数据契约只表达数据口径，交互层状态由前端自洽
+- **长期规则**：topReactions 这类"列表摘要"数据契约**返回有史以来所有用户点击过的全部表情（无截断）**，个人状态（reactedByMe）只作徽标标注属性、不参与集合构成；**统计窗口（`window`）只决定排序与展示数字，不得再兼任集合过滤**（2026-10-06 解耦，取证见下节）；交互层状态保持问题（chip 被重取抹掉等）一律在前端交互层解决（乐观更新 + 幂等 reconcile），**禁止通过修改数据契约豁免**——数据契约只表达数据口径，交互层状态由前端自洽
 
 **三窗口计数语义（2026-08 每日一记模型确立）**：`ReactionBadge` 携带 `countAll` / `count7d` / `count30d` 三个窗口计数 + `reactedByMe`。服务端只做"按所选窗口排序/筛选（count=0 不返回）"，前端展示数字 = 所选窗口计数，切换窗口仅本地重算（无需为每个窗口重复请求）。排序/展示统一所选窗口（不再是旧模型的"排序 count30d、展示 countAll"双计数分离）——每日一记模型下取消只作用于当日记录，三窗口的本地 ±1 全部精确，乐观更新无需回滚校正窗口计数。
 
@@ -237,3 +237,37 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 - **双端同步配方**：改目录必须三处同步（后端 `EmojiCatalog.java` → 前端 `constants/emoji-catalog.ts` → `types/emoji.ts` 联合类型）；域枚举/域字典自动适配。
 
 **验证**：`./mvnw -q clean test-compile` 通过；前端 tsc 零新错误 + `check:tokens` 通过；双端目录逐项脚本比对一致。
+
+---
+
+## 2026-10-06 集合与统计窗口解耦（`ReactionWindow` 只保留排序职责）
+
+**需求（用户驱动，两次表述合并）**：列表页 reaction 表情**展示全部**（不被 7 天窗口筛掉）；**展示数字 = 累计总数**（用户原话："用户只关心有多少人点过，我们后台只统计近 7 天，用户是感知不到的"）；**7 天只留在后台排序里**。即"后台统计口径 ≠ 用户可见口径"。
+
+**根因**：`ReactionWindow` 同时兼任三职责——集合过滤、排序、徽标内计数。而它**与列表排序正交**（列表排序走独立 `sort` 参数 / `VenueSortMode`），本质是纯 reaction 统计口径；兼任"可见性开关"属越权，兼任"用户可见数字"属口径泄漏（用户看到 7 天切片却以为是总数）。
+
+**生产取证（2026-10-06，`qwt_venue_reactions` 只读统计）**：
+
+| 指标 | 值 |
+|---|---|
+| 有 reaction 数据的门店 | 56（全站 1714） |
+| 表情实例（门店×code） | 92 |
+| 近 7 天窗口可见 | **16（隐藏 76，82.6%）** |
+| **近 7 天卡片表情区为空的门店** | **47 / 56 = 84%** |
+| 仅 1 次点击的实例 | 52.2%（日均仅 2~20 票） |
+
+样本门店 14「抖舞跳舞俱乐部」：9 个 chip → 近 7 天仅剩 1 个；其中 **`HOT` 累计被点 20 次，因最后点击在 16 天前而被隐藏**——窗口抹掉的是"这家店曾有过的声音"，而非仅仅降权。
+
+**实现（`VenueReactionService.buildTopBadgesFromCounts`）**：
+
+- 集合过滤判据：`sortKeyByCode > 0`（所选窗口计数）→ **`countAllByCode > 0`（有史以来）**
+- 排序：`sortKey desc` → **`sortKey desc → countAll desc → code 字典序`**（后两级为必需 tie-break：集合取全量后大量 `7d=0` 表情并列同分位，缺则次序退化到 `HashMap` 迭代序 ⇒ 翻页/重取后 chip 换位；前端 `deriveRows` 用同序前两级 + 稳定排序保持本序）
+- 徽标内计数（`ReactionBadge.countAll/count7d/count30d`）：**全部不变**（API 契约零变更）；前端**展示数字取 `countAll`（累计，用户可见口径）**，所选窗口计数只用于**排序**
+- 前端消费方：`venue-card.deriveRows`（`count: b.countAll`）、`buildReactionTagRows`（`map` 覆盖 `count = countAll`）、详情页折叠头摘要按 `countAll` 求和；列表页筛选面板 section 由「热度统计」更名**「表情排序」**（该参数如今只剩排序作用，标签恒等于结果）
+- **API 契约、DB schema 零变更**；`getStats`（详情页四窗口全量下发）与 `ReactionWindow.from` 默认值均不变
+
+**有意保持分叉的一处**：详情页「近期风险」区块（前端 `buildRiskRows`）**仍守 7 天口径**——风险区定位是"近期风险预警"（文案即"近7天有 N 人反馈"），历史旧账长期挂在门店主页与「平台裁决事实、不翻旧账」取向相悖。故：标签云 = 全量集合 + **累计**数字；风险区 = 7 天集合 + 7 天数字。
+
+**已知副作用（数字与排序口径分离的必然结果）**：可能出现"小数字排在大数字前面"——老表情累计 8 次但近 7 天无人点，会排在近 7 天有 2 次点击的新表情之后；**现网实测 56 家中 3 家存在此类倒挂**。若改为同口径（排序也用 `countAll`），卡片将彻底不依赖所选窗口，届时窗口切换器应同步移除——当前保持分离（用户明确"后台统计按 7 天"）。
+
+**验证**：`./mvnw -q test-compile` 通过；前端 tsc 编译通过（隔离工作区 tsc 5.9.3）、`check:tokens` / `check:es-syntax` / `check:venue-card`（33 项）通过。前端细节见[前端文档](../../quwuting/docs/agents/08-reaction-system.md) · 「2026-10-06 集合与统计窗口解耦」。

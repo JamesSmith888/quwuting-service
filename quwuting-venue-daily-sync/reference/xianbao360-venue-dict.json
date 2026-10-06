@@ -1,7 +1,7 @@
 {
   "source": "xianbao360",
   "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-10-04",
+  "updated": "2026-10-05",
   "entries": [
     {
       "city": "西安市",
@@ -5962,6 +5962,14 @@
       "venue_id": 1723,
       "kind": "exact",
       "note": "2026-10-04 用户表建档（第 34 波 · **大同市首覆** 1 + 太原 1；本波收尾并**更新今日新增公告**）。太原迎泽区山西剧院北侧小院电梯上三层，单时段 `营业时间 20:00-02:00`，SUSPENDED（表格「今日停业」）。无源公告。⚠️ 🔴 **同址两家（第 4 次实证）**：与第 33 波 **#1715「夜曲酒馆」**（**地址逐字相同**：山西剧院北侧小院电梯上三层）**同址同楼** —— 店名不同、**时段不同**（20:00-02:00 vs 19:19-02:00）⇒ 按用户 10-04 口径「这种都是两家店」**判两家独立门店**。⚠️ 全库「玖别重逢」零命中"
+    },
+    {
+      "city": "芜湖市",
+      "news_name": "Ls丽莎",
+      "platform_name": "Is丽莎酒馆",
+      "kind": "typo",
+      "venue_id": 1494,
+      "note": "形近字（I/L）。2026-10-05 首见即固化：源站写「Ls丽莎」→ UNMATCHED 造成 1 个假新店 + 1 家营业店误进暂停候选（两道错同源）；已灌平台别名（venueId=1494），重跑回读 via=alias-domain:ls丽莎 / EXACT"
     }
   ],
   "removed_duplicates": [

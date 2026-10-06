@@ -169,6 +169,23 @@ public class VenueResponseMapper {
     public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot, long viewCount,
                                     List<String> photos, String crowdBadgeText, String crowdLatestText,
                                     boolean statusChanged, String statusLatestText, VenueMatchHint matchedHint) {
+        return toResponse(v, topReactions, isHot, viewCount, photos, crowdBadgeText, crowdLatestText,
+                statusChanged, statusLatestText, matchedHint, null);
+    }
+
+    /**
+     * 十一参重载（2026-10-06 V38 新增）：visitBadgeText = 「已记录 N 位舞友到店」
+     * （近 30 天到访人数 ≥ {@code VenueHeatWeights.VISIT_FREE_TIER + 1} 才生成，
+     * 见 {@code VenueService#listVenues} 批量装配），驱动列表卡片标签行的到访胶囊。
+     * 语义边界与门槛依据见 {@link VenueResponse#visitBadgeText()}。
+     * <p>
+     * 注入边界同 isHot / crowdBadgeText 先例：仅列表场景（城市列表/收藏列表）传真实值；
+     * 详情/编辑/创建回显走十参重载（恒 null）——详情页不重复承载（同一事实只呈现一次）。
+     */
+    public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot, long viewCount,
+                                    List<String> photos, String crowdBadgeText, String crowdLatestText,
+                                    boolean statusChanged, String statusLatestText, VenueMatchHint matchedHint,
+                                    String visitBadgeText) {
         List<String> customTags = deserializeStringList(v.getTags(), "tags");
         List<String> effectiveTags = defaultsConfig.merge(customTags);
         List<String> defaultTags = defaultsConfig.tags();
@@ -221,7 +238,8 @@ public class VenueResponseMapper {
                 v.getUpdatedAt(),
                 statusChanged,
                 statusLatestText,
-                demaskMatchHint(matchedHint, cityOnly)
+                demaskMatchHint(matchedHint, cityOnly),
+                visitBadgeText
         );
     }
 

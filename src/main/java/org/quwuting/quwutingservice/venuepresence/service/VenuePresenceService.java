@@ -23,6 +23,8 @@ import org.quwuting.quwutingservice.venuepresence.repository.VenuePresencePingRe
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -177,6 +179,22 @@ public class VenuePresenceService {
     /** 每用户写频控（次/窗口，协议常量）：桶幂等已限 (user, venue) 粒度，此处限用户总写入速率 */
     private static final int WRITE_RATE_LIMIT = 10;
     private static final long WRITE_RATE_WINDOW_MS = 60_000L;
+
+    /**
+     * 排序口径的到访窗口（天，2026-10-06 V38）：与热度公式其余各项同窗（近 30 天滚动）。
+     * 改本值必须与 V38 注释 / 52 号文档 / {@code VenueHeatWeights.VISIT} 论证同步。
+     */
+    private static final int RANKING_WINDOW_DAYS = 30;
+
+    /** 展示用的近 7 天窗口（天）：物化表同列下发，**不进公式**（避免第二处时间项） */
+    private static final int VISIT_RECENT_WINDOW_DAYS = 7;
+
+    /**
+     * 排除集合为空时的哨兵（2026-10-06）：{@code userId NOT IN :excludedUserIds} 在空集合上
+     * 会生成 {@code NOT IN ()} 语法错误。公式侧由 {@code HeatAccountExclusionService} 恒非空保证，
+     * 本类不依赖该服务（分层），故自带同款防御——哨兵是负数 id，任何真实用户都不可能命中。
+     */
+    private static final long NO_EXCLUSION_SENTINEL = -1L;
 
     private final VenuePresencePingRepository pingRepository;
     private final VenuePresenceConsentRepository consentRepository;
@@ -400,6 +418,71 @@ public class VenuePresenceService {
         return status == null || IN_OPERATION_STATUSES.contains(status);
     }
 
+    // ── 读侧：排序口径到访份额（2026-10-06，V38） ─────────────────────────────────
+
+    /**
+     * 排序口径的到访份额：**排除内部账号 + 同址分摊 + 不在营记 0**，供定时刷新任务写入
+     * {@code qwt_venue_visit_metrics}（唯一消费方 = {@code VenueVisitMetricsScheduler}）。
+     * <p>
+     * <b>为什么必须由本类产出、不能由公式侧自己算</b>：到访人数是派生量
+     * （命中谓词 × 同址组几何 × 双方营业状态 × 用户并集），其中归因是 Java 侧计算，
+     * JPQL 无 FROM 派生表能力 ⇒ 公式只能读物化结果。见 {@code VenueVisitMetric} 类注释。
+     * <p>
+     * <b>与 admin 展示口径 {@link #visitedVenueSummaries()} 的三处分叉</b>（有意，见
+     * {@link VenueVisitShare}）：排除内部账号、分摊（1/k）而非共享、不在营门店不产出。
+     * <p>
+     * 时间窗只取 30 天（{@link #RANKING_WINDOW_DAYS}）：7 天份额由同一份命中集在内存里
+     * 二次判定，不额外查库（"用户在某窗口内到访过 ⟺ 其最近命中时刻 ≥ 窗口起点"）。
+     *
+     * @param excludedUserIds 内部账号排除集合（恒非空由调用方保证；本方法对空集合退化为
+     *                        哨兵值，避免 {@code NOT IN ()} 语法错误——与公式侧同款防御）
+     * @return venueId → 份额；<b>缺席 = 排序记 0</b>（无到访 / 已让渡 / 不在营）
+     */
+    @Transactional(readOnly = true)
+    public Map<Long, VenueVisitShare> visitSharesForRanking(Collection<Long> excludedUserIds) {
+        LocalDateTime now = LocalDateTime.now();
+        Collection<Long> exclusions = (excludedUserIds == null || excludedUserIds.isEmpty())
+                ? List.of(NO_EXCLUSION_SENTINEL) : excludedUserIds;
+        Map<Long, Map<Long, LocalDateTime>> lastSeen = toLastSeenByVenue(
+                pingRepository.findVisitorLastSeenSinceExcluding(
+                        now.minusDays(RANKING_WINDOW_DAYS), HIT_RADIUS_M, HIT_MAX_ACCURACY_M, exclusions));
+        if (lastSeen.isEmpty()) {
+            return Map.of();
+        }
+        // 候选 = 有证据的门店 + 它们的同址邻居（邻居可能经共享 / 并入获得到访），
+        // 与 admin 全量路径同一手法（52 号 §6.1）
+        Set<Long> candidates = new LinkedHashSet<>(lastSeen.keySet());
+        for (VenueRepository.CoLocatedVenueRow row
+                : venueRepository.findCoLocatedPairs(lastSeen.keySet(), CO_LOCATED_RADIUS_M)) {
+            candidates.add(row.getCoLocatedId());
+        }
+        Map<Long, VenueVisitShare> result = new LinkedHashMap<>();
+        attributionsFor(candidates).forEach((id, attribution) -> {
+            // 不在营 ⇒ 排序记 0：人不可能"到店"一家停业门店。展示口径保留该证据
+            // 作为门店状态复核线索（48 号域价值），回归到排序的只有这一条
+            if (!attribution.selfInOperation()) {
+                return;
+            }
+            Map<Long, LocalDateTime> users = unionLastSeen(attribution.evidenceVenueIds(), lastSeen);
+            if (users.isEmpty()) {
+                return;
+            }
+            // 分摊分母 = 组内在营门店数（含本店，≥1）：同址组都在营 ⇒ 每位用户 1/k。
+            // 与「共享」（每家都记满）的差别正是本表要防的"同楼双吃"（52 号 §1.1 第 1 条）
+            double share = 1.0 / Math.max(1, attribution.inOperationCount());
+            result.put(id, new VenueVisitShare(
+                    scaleVisits(countSince(users, now.minusDays(RANKING_WINDOW_DAYS)) * share),
+                    scaleVisits(countSince(users, now.minusDays(VISIT_RECENT_WINDOW_DAYS)) * share),
+                    attribution.areaVenueIds().size()));
+        });
+        return result;
+    }
+
+    /** 份额落库精度（decimal(8,2)）：1/k 分之后四舍五入到 2 位，避免把 1/3 存成无限小数 */
+    private static BigDecimal scaleVisits(double value) {
+        return BigDecimal.valueOf(value).setScale(2, RoundingMode.HALF_UP);
+    }
+
     // ── 同址归因 ────────────────────────────────────────────────────────────────
 
     /** 同址邻居（几何 + 状态事实，来自 {@link VenueRepository#findCoLocatedPairs}） */
@@ -413,9 +496,16 @@ public class VenuePresenceService {
      * @param peers            同址邻居（不含本店）
      * @param evidenceVenueIds 到访证据取自哪些门店上的 ping（YIELDED = 空 ⇒ 本店计 0）
      * @param areaVenueIds     片区范围（本店 + 全部同址门店；附近人数用，不做营业归因）
+     * @param selfInOperation  本店是否在营（2026-10-06 新增，V38）：**仅排序口径消费**——
+     *                         不在营的门店排序记 0（人不可能"到店"一家停业门店）；admin 展示
+     *                         不消费本字段（保留证据作为门店状态复核线索，见 52 号「到访进排序」）
+     * @param inOperationCount 组内在营门店数（含本店，2026-10-06 新增）：**排序口径的分摊分母**——
+     *                         同址组都在营时每位用户按 1/k 分给 k 家在营店，避免同楼各家
+     *                         各吃一份整楼人流（52 号 §1.1 第 1 条）
      */
     private record Attribution(CoLocatedAttribution kind, List<Peer> peers,
-                               Set<Long> evidenceVenueIds, Set<Long> areaVenueIds) {
+                               Set<Long> evidenceVenueIds, Set<Long> areaVenueIds,
+                               boolean selfInOperation, int inOperationCount) {
     }
 
     /**
@@ -425,23 +515,31 @@ public class VenuePresenceService {
      *   <li>本店在营：同址另有在营店 → SHARED（分不出，共享）；否则 → ABSORBED（同址不在营店的证据并入本店）；</li>
      *   <li>本店不在营：同址有在营店 → YIELDED（证据归它们，本店 0）；全组都不在营 → SHARED（无从归属，如实共享）。</li>
      * </ul>
+     * 2026-10-06（V38）：额外产出 {@code selfInOperation} 与 {@code inOperationCount} 两个
+     * **只有排序口径消费**的字段（展示口径不受影响，见 {@link Attribution} 参数注释）。
      */
     private static Attribution attribute(Long venueId, VenueStatus selfStatus, List<Peer> peers) {
         Set<Long> area = new LinkedHashSet<>();
         area.add(venueId);
         peers.forEach(p -> area.add(p.id()));
+        boolean selfInOperation = isInOperation(selfStatus);
+        int inOperationCount = (selfInOperation ? 1 : 0)
+                + (int) peers.stream().filter(p -> isInOperation(p.status())).count();
         if (peers.isEmpty()) {
-            return new Attribution(CoLocatedAttribution.NONE, peers, area, area);
+            return new Attribution(CoLocatedAttribution.NONE, peers, area, area,
+                    selfInOperation, inOperationCount);
         }
         boolean anyPeerInOperation = peers.stream().anyMatch(p -> isInOperation(p.status()));
-        if (isInOperation(selfStatus)) {
+        if (selfInOperation) {
             CoLocatedAttribution kind = anyPeerInOperation ? CoLocatedAttribution.SHARED : CoLocatedAttribution.ABSORBED;
-            return new Attribution(kind, peers, area, area);
+            return new Attribution(kind, peers, area, area, selfInOperation, inOperationCount);
         }
         if (anyPeerInOperation) {
-            return new Attribution(CoLocatedAttribution.YIELDED, peers, Set.of(), area);
+            return new Attribution(CoLocatedAttribution.YIELDED, peers, Set.of(), area,
+                    false, inOperationCount);
         }
-        return new Attribution(CoLocatedAttribution.SHARED, peers, area, area);
+        return new Attribution(CoLocatedAttribution.SHARED, peers, area, area,
+                false, inOperationCount);
     }
 
     /**
