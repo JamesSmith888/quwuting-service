@@ -7,11 +7,20 @@ import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
 import org.quwuting.quwutingservice.spend.enums.WireEnums;
+import org.quwuting.quwutingservice.user.entity.User;
+import org.quwuting.quwutingservice.user.enums.UserRole;
+import org.quwuting.quwutingservice.user.repository.UserRepository;
+import org.quwuting.quwutingservice.user.service.UserCode;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.enums.VenueType;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuepresence.dto.request.ReportPresenceRequest;
+import org.quwuting.quwutingservice.venuepresence.dto.response.AdminUserVisitRecord;
+import org.quwuting.quwutingservice.venuepresence.dto.response.AdminUserVisitsResponse;
+import org.quwuting.quwutingservice.venuepresence.dto.response.AdminUserVisitsResponse.AdminUserVisitVenueGroup;
+import org.quwuting.quwutingservice.venuepresence.dto.response.AdminVenueVisitorItem;
+import org.quwuting.quwutingservice.venuepresence.dto.response.AdminVenueVisitorPage;
 import org.quwuting.quwutingservice.venuepresence.dto.response.PresenceReportResponse;
 import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceConsentStats;
 import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceStats;
@@ -30,6 +39,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -198,10 +208,62 @@ public class VenuePresenceService {
      */
     private static final long NO_EXCLUSION_SENTINEL = -1L;
 
+    /**
+     * 名单下钻的时间窗（天，2026-10-06）：缺省值 = {@link #RANKING_WINDOW_DAYS}，
+     * 使「点进名单看到的总人数」与「列表行写的 30 天人数」<b>同值</b>。
+     * 可由请求放大（运营查历史），但<b>不能小于 30</b>——否则与列表行的数字对不上，
+     * 「点进去比列表写的人少」是一个无法解释的不一致。
+     */
+    private static final int VISITOR_WINDOW_MIN_DAYS = 30;
+
+    /** 名单分页上限（防深翻页拖库；admin-web 端 PAGE_SIZE=20，上限 100 兜住误传） */
+    private static final int VISITOR_PAGE_MAX_SIZE = 100;
+
+    /**
+     * 单次「用户到访足迹」响应的<b>到访次数上限</b>（2026-10-06）。
+     * <p>
+     * 到访是稀疏信号（2026-10-06 现网全网 52 条 ping / 9 家店），正常用户远达不到；
+     * 上限只防「长期高频到店 + 大窗口」的极端组合把响应撑爆。超限时置
+     * {@code truncated=true} 让前端明说，⛔ 禁静默截断（那会让运营以为「就这些次」）。
+     */
+    private static final int USER_VISIT_MAX_RECORDS = 200;
+
+    /**
+     * 一次到店 = 连续命中桶的合并阈值（2026-10-06，单位 = 桶）。
+     * <p>
+     * <b>为什么需要合并</b>：采集主力 = 每次打开小程序（onShow）+ 店内每 15 分钟补采一次
+     * （{@code WRITE_WINDOW_MINUTES}），同一次到店必然留下<b>多个 15 分钟桶</b>。
+     * 不合并的后果很具体：跳一支舞 3 小时（18:00~21:00）≈ 12 个桶 ⇒ 被记成 12 次到店，
+     * 「到访次数」会从「来过几次」退化成「停留了几小时」（后者还随补采频率线性放大——
+     * 改一次采样间隔就改一次「次数」，这是最坏的指标性质）。
+     * <p>
+     * <b>为什么阈值 = 2 桶（30 分钟）</b>：相邻桶之间隔 ≤ 2 桶才认为是同一次到店。
+     * <ul>
+     *   <li>正常连场：补采间隔 15 分钟 = 1 桶 ⇒ 恒 ≤ 阈值，合并为一次（这是本值要保证的）；</li>
+     *   <li>阈值取 1 太紧：只要有<b>一次</b>补采抖动（onShow 未触发 / 定位超时 /
+     *       网络失败，当次周期没补上）就断成两次到店，把「到店次数」放大成噪声；</li>
+     *   <li>阈值取 3 太松：用户离店 15~30 分钟后又回来（结账、买水、挪车、见朋友）
+     *       会被并成一次——舞厅场景里「出去一趟又回来」很常见，30 分钟是最容易踩到的边界；</li>
+     *   <li>本值只影响<b>足迹明细的展示</b>，不影响任何聚合数字（人数/次数/排序份额
+     *       各自走独立口径，见 {@code countVisitEvents}），改它不需要迁移、不影响历史数据。</li>
+     * </ul>
+     */
+    private static final int VISIT_SESSION_GAP_BUCKETS = 2;
+
+
     private final VenuePresencePingRepository pingRepository;
     private final VenuePresenceConsentRepository consentRepository;
     private final VenueRepository venueRepository;
     private final OpsConfigService opsConfigService;
+    /**
+     * 用户仓储（2026-10-06 到访名单下钻的唯一新增依赖）。
+     * <p>
+     * <b>为什么名单要读用户表</b>：聚合统计只需计数（到访域可自闭环），
+     * 但「这 12 个人是谁」必须 join 用户公开资料。⚠️ 只取<b>公开字段</b>
+     * （id / 昵称 / 头像 / 角色 / 审核标记），⛔ {@code openId} 等敏感字段绝不下发
+     * （同 {@code AdminUserItem} 的展示边界）。
+     */
+    private final UserRepository userRepository;
 
     /**
      * 每用户写入频控（滑动窗口）：键 = userId，值 = 窗口内写入时刻队列。
@@ -420,6 +482,243 @@ public class VenuePresenceService {
         return status == null || IN_OPERATION_STATUSES.contains(status);
     }
 
+    // ── 读侧：到访名单下钻（2026-10-06，admin 名单页 / 用户足迹页） ─────────────────
+
+    /**
+     * 单店到访用户名单（admin 名单页，GET /admin/venues/{venueId}/visitors 的实现）。
+     * <p>
+     * <b>与 {@link #statsFor} / {@link #visitSummaries} 同源</b>：同一个
+     * {@link #attributionsFor} 归因 + 同一个 {@link #unionLastSeen} 用户并集，
+     * ⛔ 禁在本方法里另写一份口径。否则会出现「列表写 5 人、点进去 8 人」——
+     * 运营无法判断哪个对，只能怀疑系统（52 号 §4 的同源纪律）。
+     * <p>
+     * <b>窗口语义</b>：名单默认窗口 = {@link #RANKING_WINDOW_DAYS}（30 天），
+     * 与列表行 {@code visitUsers30d} <b>逐人相等</b>（同一个并集 + 同一个
+     * {@code lastSeenAt >= 窗口起点} 判定）；{@code windowDays} 可放大（查历史），
+     * 但被钳到 ≥ 30 天——放大后名单变长是可以解释的，变短则与列表行冲突。
+     * <p>
+     * <b>分页在内存切</b>：候选 = 命中证据的用户并集（百级，同
+     * {@link #findVisitorLastSeenByVenueIds} 的量级边界），排序键 = 最近到访倒序 +
+     * userId 升序（并列时翻页确定）。
+     * <p>
+     * <b>不排除内部账号</b>（{@code AdminVenueVisitorItem#internalAccount} 打标签）：
+     * admin 展示要完整，与排序口径的排除<b>有意不同</b>。
+     */
+    @Transactional(readOnly = true)
+    public AdminVenueVisitorPage visitorsFor(Long venueId, int windowDays, int page, int size) {
+        LocalDateTime now = LocalDateTime.now();
+        int window = Math.max(windowDays, VISITOR_WINDOW_MIN_DAYS);
+        int sizeBound = Math.min(Math.max(size, 1), VISITOR_PAGE_MAX_SIZE);
+        int pageBound = Math.max(page, 0);
+        Attribution attribution = attributionsFor(List.of(venueId)).get(venueId);
+        Map<Long, Map<Long, LocalDateTime>> lastSeen =
+                lastSeenByVenue(attribution.evidenceVenueIds(), HIT_RADIUS_M);
+        Map<Long, LocalDateTime> users = unionLastSeen(attribution.evidenceVenueIds(), lastSeen);
+        LocalDateTime windowStart = now.minusDays(window);
+        // 窗口内访客：与 countSince 同一条判据（最近命中时刻 ≥ 窗口起点）⇒ 与 visitUsers30d 逐人相等
+        Map<Long, LocalDateTime> inWindow = new HashMap<>();
+        users.forEach((user, at) -> {
+            if (!at.isBefore(windowStart)) {
+                inWindow.put(user, at);
+            }
+        });
+        // 次数列：同址组内 (user, day) 取并集（⛔ 不能各店 count 相加，52 号 §4.2 第 1 条）
+        Map<Long, Set<LocalDate>> daysByUser = new HashMap<>();
+        if (!inWindow.isEmpty()) {
+            for (Object[] row : pingRepository.findVisitorDaysByVenueIdsSince(
+                    attribution.evidenceVenueIds(), windowStart, HIT_RADIUS_M, HIT_MAX_ACCURACY_M)) {
+                Long user = (Long) row[1];
+                if (inWindow.containsKey(user)) {
+                    daysByUser.computeIfAbsent(user, k -> new HashSet<>()).add(toLocalDate(row[2]));
+                }
+            }
+        }
+        List<Map.Entry<Long, LocalDateTime>> ordered = new ArrayList<>(inWindow.entrySet());
+        ordered.sort((a, b) -> {
+            int byTime = b.getValue().compareTo(a.getValue());
+            return byTime != 0 ? byTime : Long.compare(a.getKey(), b.getKey());
+        });
+        long totalElements = ordered.size();
+        int totalPages = totalElements == 0 ? 0 : (int) ((totalElements + sizeBound - 1) / sizeBound);
+        int from = Math.min(pageBound * sizeBound, ordered.size());
+        int to = Math.min(from + sizeBound, ordered.size());
+        Map<Long, User> profiles = userRepository.findAllById(
+                ordered.subList(from, to).stream().map(Map.Entry::getKey).toList())
+                .stream().collect(java.util.stream.Collectors.toMap(User::getId, u -> u));
+        List<AdminVenueVisitorItem> content = ordered.subList(from, to).stream()
+                .map(entry -> toVisitorItem(entry.getKey(), entry.getValue(),
+                        daysByUser.getOrDefault(entry.getKey(), Set.of()), profiles))
+                .toList();
+        List<VenuePresenceStats.CoLocatedVenue> peers = attribution.peers().stream()
+                .map(p -> new VenuePresenceStats.CoLocatedVenue(
+                        p.id(), p.name(), displayOf(p.status()), isInOperation(p.status())))
+                .toList();
+        return new AdminVenueVisitorPage(content, totalElements, totalPages, pageBound, sizeBound,
+                from + sizeBound >= totalElements, window, HIT_RADIUS_M, attribution.kind(), peers);
+    }
+
+    /**
+     * 名单行装配：<b>用户资料缺失也要出行</b>（软删账号的到访痕迹是运营核查线索，
+     * 静默丢行会让 {@code totalElements} 与行数对不上，又变成一个说不清的不一致）。
+     * 缺资料时只给代号（{@code UserCode.format} 纯派生，不依赖用户行存在）。
+     */
+    private static AdminVenueVisitorItem toVisitorItem(Long userId, LocalDateTime lastVisitAt,
+                                                       Set<LocalDate> visitDays,
+                                                       Map<Long, User> profiles) {
+        User user = profiles.get(userId);
+        boolean custom = UserCode.isCustomNickname(user);
+        return new AdminVenueVisitorItem(
+                userId,
+                UserCode.format(userId),
+                user == null ? null : user.getNickname(),
+                custom,
+                user == null ? null : user.getAvatarUrl(),
+                visitDays.size(),
+                lastVisitAt,
+                isInternalAccount(user));
+    }
+
+    /**
+     * 内部账号判据（名单打标签用，单点定义）：ADMIN 运营号或微信审核号。
+     * <p>
+     * <b>为什么展示口径要标它、排序口径要排它</b>：到访是低基数信号
+     * （2026-10-06 现网 51 条 ping 里 ADMIN 一人占 26 条），排序不排除 = 平台自己人刷分；
+     * 而 admin 名单若不标它，运营看到「这家店只有一个用户来过」时无法判断那是真舞友
+     * 还是自己人测试留下的。<b>排除集合、可见性是两个决策</b>，不是一个口径的两种实现。
+     */
+    static boolean isInternalAccount(User user) {
+        return user == null || user.getRole() == UserRole.ADMIN
+                || Boolean.TRUE.equals(user.getWechatReview());
+    }
+
+    /**
+     * 某用户的到访足迹（admin 用户详情页「到访足迹」卡，GET /admin/users/{userId}/visits 的实现）。
+     * <p>
+     * <b>逐桶合并为「一次次到店」</b>：命中桶按 {@code writeBucket} 升序，
+     * 相邻桶间隔 ≤ {@link #VISIT_SESSION_GAP_BUCKETS} 视为同一次到店（同一次跳舞的连续补采），
+     * 合并后取首桶 {@code created_at} = 到店时刻、末桶 {@code updated_at} = 最后被记录时刻、
+     * 桶数 = 采样次数、桶内最小 {@code distance_m} = 距店最近距离。
+     * <p>
+     * <b>为什么不用聚合查询直接出「次数」</b>：聚合能回答「来过几次」，
+     * 但回答不了「每次多久 / 什么时候」——那些信息在 {@code MAX(created_at)} 里已被抹掉
+     * （同 V39 注释）。要展示逐次明细就必须取桶序列在内存里合并。
+     * <p>
+     * <b>超限截断</b>：超过 {@link #USER_VISIT_MAX_RECORDS} 次时保留最近的若干次并置
+     * {@code truncated=true}——⛔ 禁静默截断（运营会把上限读成「他就这么多次来过」）。
+     * <p>
+     * 用户不存在 / 已软删 → 1004（与 {@code AdminUserService} 同码）。
+     */
+    @Transactional(readOnly = true)
+    public AdminUserVisitsResponse visitsFor(Long userId, int windowDays) {
+        if (!userRepository.findByIdAndDeletedFalse(userId).isPresent()) {
+            throw new BusinessException(1004, "用户不存在");
+        }
+        int window = Math.max(windowDays, 1);
+        LocalDateTime windowStart = LocalDateTime.now().minusDays(window);
+        List<Object[]> rows = pingRepository.findHitsByUserIdSince(
+                userId, windowStart, HIT_RADIUS_M, HIT_MAX_ACCURACY_M);
+        // 门店名/状态：一次批量取回，避免逐条记录查库（N+1）。
+        // ⛔ 空集合必须短路：原生 IN () 是语法错误（同 NO_EXCLUSION_SENTINEL 防御的同款理由）
+        Map<Long, Venue> venues = rows.isEmpty() ? Map.of()
+                : venueRepository.findByIdInAndDeletedFalse(
+                        rows.stream().map(row -> (Long) row[0]).distinct().toList())
+                    .stream().collect(java.util.stream.Collectors.toMap(Venue::getId, v -> v));
+        Map<Long, List<AdminUserVisitRecord>> recordsByVenue = new LinkedHashMap<>();
+        long keptTotal = 0;
+        boolean truncated = false;
+        outer:
+        for (List<List<Object[]>> sessions : mergeBucketsIntoSessions(rows).values()) {
+            for (List<Object[]> session : sessions) {
+                // 全局上限：按 (店, 到店时刻) 倒序保留最近次，超出即截断并明说
+                if (keptTotal >= USER_VISIT_MAX_RECORDS) {
+                    truncated = true;
+                    break outer;
+                }
+                Long venueId = (Long) session.get(0)[0];
+                Venue venue = venues.get(venueId);
+                LocalDateTime arrivedAt = (LocalDateTime) session.get(0)[2];
+                LocalDateTime lastSeenAt = (LocalDateTime) session.get(session.size() - 1)[3];
+                int minDistance = Integer.MAX_VALUE;
+                for (Object[] bucket : session) {
+                    minDistance = Math.min(minDistance, (Integer) bucket[4]);
+                }
+                recordsByVenue.computeIfAbsent(venueId, k -> new ArrayList<>())
+                        .add(new AdminUserVisitRecord(
+                                venueId,
+                                venue == null ? null : venue.getName(),
+                                venue == null ? null : venue.getCity(),
+                                venue == null ? null : displayOf(venue.getStatus()),
+                                arrivedAt,
+                                lastSeenAt,
+                                stayMinutes(arrivedAt, lastSeenAt),
+                                session.size(),
+                                minDistance == Integer.MAX_VALUE ? null : minDistance));
+                keptTotal++;
+            }
+        }
+        // 会话已在 mergeBucketsIntoSessions 内按到店倒序 ⇒ 组内天然「最近在前」；
+        // 组间按最近一次到访倒序（records 首条即该店最近一次）
+        List<AdminUserVisitVenueGroup> groups = new ArrayList<>();
+        recordsByVenue.forEach((venueId, records) -> {
+            Venue venue = venues.get(venueId);
+            groups.add(new AdminUserVisitVenueGroup(venueId,
+                    venue == null ? null : venue.getName(),
+                    venue == null ? null : venue.getCity(),
+                    venue == null ? null : displayOf(venue.getStatus()),
+                    records.size(), records.get(0).arrivedAt(), records));
+        });
+        groups.sort((a, b) -> b.lastVisitAt().compareTo(a.lastVisitAt()));
+        LocalDateTime lastVisitAt = groups.isEmpty() ? null : groups.get(0).lastVisitAt();
+        return new AdminUserVisitsResponse(userId, groups, groups.size(), keptTotal,
+                lastVisitAt, window, HIT_RADIUS_M, truncated);
+    }
+
+    /**
+     * 逐桶明细 → 按门店分组的「一次次到店」（同一次到店的连续桶合并为一条）。
+     * <p>
+     * 返回 {@code venueId → 该店的到店会话列表}，每个会话 = 一次到店的全部命中桶。
+     * 会话内与门店间<b>均按到店时刻倒序</b>（最近的在前）——这不只是展示顺序：
+     * 调用方按此顺序取到 {@link #USER_VISIT_MAX_RECORDS} 上限，<b>保留的必然是最近的那些次</b>
+     * （截断语义正确；若按升序截断，被留下的会是三年前的记录，而最近的被丢掉）。
+     * <p>
+     * 输入已按 {@code (venueId, writeBucket)} 升序（{@code findHitsByUserIdSince} 的 ORDER BY），
+     * 因此每个门店内桶天然按时间有序，只需线性扫描判「间隔是否超过阈值」。
+     * 桶内 {@code created_at} 恒 ≤ {@code updated_at}（后者是桶内末次触发时刻），
+     * 但仍显式钳非负——「停留时长为负」在页面上是一个无法解释的数字。
+     */
+    private static Map<Long, List<List<Object[]>>> mergeBucketsIntoSessions(List<Object[]> rows) {
+        Map<Long, List<List<Object[]>>> byVenue = new LinkedHashMap<>();
+        Long currentVenue = null;
+        List<Object[]> currentSession = null;
+        long previousBucket = Long.MIN_VALUE;
+        for (Object[] row : rows) {
+            Long venueId = (Long) row[0];
+            long bucket = (Long) row[1];
+            boolean newSession = currentSession == null
+                    || !venueId.equals(currentVenue)
+                    || previousBucket == Long.MIN_VALUE
+                    || bucket - previousBucket > VISIT_SESSION_GAP_BUCKETS;
+            if (newSession) {
+                currentSession = new ArrayList<>();
+                byVenue.computeIfAbsent(venueId, k -> new ArrayList<>()).add(currentSession);
+                currentVenue = venueId;
+            }
+            currentSession.add(row);
+            previousBucket = bucket;
+        }
+        byVenue.values().forEach(sessions -> sessions.sort(
+                Comparator.comparing((List<Object[]> s) -> (LocalDateTime) s.get(0)[2]).reversed()));
+        return byVenue;
+    }
+
+    /** 已观测停留时长（分钟，≥ 0）：桶内首见 → 桶内末次触发 */
+    private static long stayMinutes(LocalDateTime arrivedAt, LocalDateTime lastSeenAt) {
+        if (arrivedAt == null || lastSeenAt == null) {
+            return 0L;
+        }
+        return Math.max(0L, java.time.Duration.between(arrivedAt, lastSeenAt).toMinutes());
+    }
+
     // ── 读侧：排序口径到访份额（2026-10-06，V38） ─────────────────────────────────
 
     /**
@@ -499,7 +798,11 @@ public class VenuePresenceService {
                     scaleVisits(countSince(users, windowStart) * share),
                     scaleVisits(countSince(users, now.minusDays(VISIT_RECENT_WINDOW_DAYS)) * share),
                     scaleVisits(eventCount * share),
-                    attribution.areaVenueIds().size()));
+                    attribution.areaVenueIds().size(),
+                    // 被分摊 ⇔ 分摊系数 < 1（组内 ≥2 家在营，每位用户只算 1/k）。
+                    // 供文案层决定用词：未分摊可断言"到这家店"，被分摊只能说"这附近"
+                    // （20m 定位精度分不清同址组里哪家店，V40）。
+                    share >= 1.0));
         });
         return result;
     }

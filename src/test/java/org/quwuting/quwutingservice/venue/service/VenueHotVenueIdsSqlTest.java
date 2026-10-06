@@ -93,4 +93,39 @@ class VenueHotVenueIdsSqlTest {
         assertTrue(page.getContent().stream().allMatch(v -> hotIds.contains(v.getId())),
                 "hotOnly=true 时返回的场所必须全部属于热门集合");
     }
+
+    /**
+     * 执行 {@code countHeatCounters}（热度页 mega-query，2026-10-06 补）。
+     * <p>
+     * <b>为什么必须补这条</b>：该查询是<b>纯标量子查询、没有任何 FROM 子句</b>
+     * （24 列全是 {@code (SELECT ...)}），而 V38 到访项最初写
+     * {@code CASE WHEN v.status IN ('OPEN','CLOSED')}——{@code v} 别名在本作用域内
+     * 不存在 ⇒ MySQL {@code Unknown column 'v.status'} ⇒ {@code GET /venues/{id}/heat}
+     * 详情热度页整体 500（同批 V38 改动的第二处缺陷，第一处是 {@code -2ELSE} 粘连）。
+     * <p>
+     * <b>为什么静态门禁不够</b>：本仓已有括号配平 + HQL grammar + 「数字粘连」+「别名作用域」
+     * 四条静态门禁，但它们<b>都无法证明一条 native SQL 真能被 MySQL 解析</b>——native 无启动期
+     * 校验（Spring Data repository 的 native query 首次调用才懒创建）。本方法是唯一真库证据。
+     * <p>
+     * 取一个真实存在的 venueId（取列表首条，避免硬编码 id 随数据变化失效）。
+     */
+    @Test
+    void heatCountersQueryExecutesAgainstRealDatabase() {
+        org.quwuting.quwutingservice.venue.entity.Venue any =
+                venueRepository.findAll().stream().findFirst().orElse(null);
+        org.junit.jupiter.api.Assumptions.assumeTrue(any != null, "库内无门店数据，跳过");
+
+        java.time.LocalDate today = java.time.LocalDate.now();
+        VenueRepository.HeatCounters counters = venueRepository.countHeatCounters(
+                any.getId(),
+                today.minusDays(30), today.minusDays(7), today.plusDays(1),
+                today.minusDays(30).atStartOfDay(), java.time.LocalDateTime.now(),
+                java.time.LocalDateTime.now(),
+                org.quwuting.quwutingservice.venuereaction.ReactionCode.positiveCodeNames(),
+                org.quwuting.quwutingservice.venuereaction.ReactionCode.negativeCodeNames(),
+                java.util.List.of(-1L));
+        assertNotNull(counters, "热度计数器应执行成功（SQL 可被 MySQL 解析即证明列引用/别名作用域合法）");
+        // 到访项（V38）：无到访的门店不落物化表行 ⇒ 本列为 null，调用方按 0 处理
+        assertTrue(counters.getPv() != null, "pv 计数不应为 null（恒有值聚合）");
+    }
 }

@@ -3,12 +3,14 @@ package org.quwuting.quwutingservice.venuepresence.controller;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.venuepresence.dto.response.AdminVenueVisitorPage;
 import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceConsentStats;
 import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceStats;
 import org.quwuting.quwutingservice.venuepresence.service.VenuePresenceService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -38,6 +40,29 @@ public class AdminVenuePresenceController {
     public ApiResponse<VenuePresenceStats> stats(@PathVariable Long venueId) {
         UserContext.requireAdmin();
         return ApiResponse.ok(venuePresenceService.statsFor(venueId));
+    }
+
+    /**
+     * 单店到访用户名单（仅 ADMIN，2026-10-06 名单下钻第一级）。
+     * GET /admin/venues/{venueId}/visitors?windowDays=30&page=0&size=20
+     * <p>
+     * 把行内聚合数字下钻到具体的人（头像 / 昵称 / 代号 / 到访次数 / 最近到访时刻，
+     * 内部账号打标签而非排除）。人数与 {@link #stats} 的 30 天口径<b>逐人相等</b>
+     * （同一次归因与并集计算，服务端保证）——⛔ 前端不得用本地过滤近似这个名单。
+     * <p>
+     * {@code windowDays} 缺省 30（= 列表行的 30 天，点进去看到的总数就是列表写的人数），
+     * 可放大查历史，但被钳到 ≥ 30（小于 30 会与列表行冲突）。
+     * 口径参数（windowDays / hitRadiusM / coLocated*）随响应回显，admin 端必须与数值同屏。
+     */
+    @GetMapping("/{venueId}/visitors")
+    public ApiResponse<AdminVenueVisitorPage> visitors(
+            @PathVariable Long venueId,
+            @RequestParam(required = false) Integer windowDays,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(venuePresenceService.visitorsFor(
+                venueId, windowDays == null ? 0 : windowDays, page, size));
     }
 
     /**

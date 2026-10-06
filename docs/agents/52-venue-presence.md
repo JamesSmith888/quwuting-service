@@ -3,7 +3,8 @@
 > 后端权威文档。采集端（小程序）= quwuting 仓 `docs/agents/52-venue-presence.md`；
 > admin 展示 = quwuting-admin-web 仓 README「门店列表 / 门店详情」节。
 > 迁移 = `db/migration-mysql/V33__venue_presence_pings.sql`（头注含完整根因）/ `V34__venue_presence_consents.sql`
-> / `V39__venue_visit_metrics_events.sql`（到访**次数**列 = `(人,店,自然日)` 去重，2026-10-06）
+> / `V39__venue_visit_metrics_events.sql`（到访**次数**列 = `(人,店,自然日)` 去重，2026-10-06）。
+> **2026-10-06 admin 到访下钻（名单页 + 用户足迹卡，§6.1）零迁移**——只读既有 ping / venues / users 表。
 >
 > ⚠️ **V39 已于 2026-10-06 15:45 落库**（checksum `-508391010`，与仓内一致）⇒ **禁改一字节**
 > （Flyway checksum 红线）。后续口径修订一律只改 Java /本文档，不回改迁移文件。
@@ -76,6 +77,33 @@
   - **1~2 人时省略「N 次」**（方案 A）：1 人来 1 天时"1 位 · 1 次"两数字同一个数、零信息量；
     现网 8/9 家是 1~2 人 ⇒ 满屏"1 次"让功能像"什么都没干"。故「次」只在 ≥3 人时出现。
   - **「无到访」仍不渲染**（唯一硬约束）：显示"0 人到店"是负面失实陈述，且会给每张卡片凭空加一行。
+
+
+### V40：被同址分摊时文案改「附近」语义（2026-10-06，用户裁决方案 B）
+
+**触发**：用户发现「admin 显示 4 人、小程序只显示 2 人」。取证结论 = **两个数字都对**，
+差异来自三处叠加（真实数据，13 寻梦缘 / 14 抖舞 / 111 南来北往，坐标互相 20~40m）：
+
+| 口径 | 寻梦缘 | 机制 |
+|---|---|---|
+| admin 展示 | 3~4 人 | 共享**不**分摊、含同址停业店证据、不排除内部账号 |
+| 小程序 | 2 人 | 同址 3 家在营 2 家 ⇒ 每人 1/2 ⇒ 1.5 ⇒ HALF_UP = 2 |
+
+**发现的真问题（不是 bug，是用词错误）**：20m 定位精度**分不清**到访者去的是同址组里哪家店。
+分摊后的数字本身没错，但用「这家店的舞友 / 真实到店足迹」陈述它，等于**替系统断言一个
+无法证实的事实** —— 用户到店发现无人去过 ⇒ 对整个功能失去信任。
+
+**解法（V40，`share_in_operation` TINYINT）**：
+- `1` = 未被分摊 ⇒ 文案照旧（`感谢 N 位舞友 · N 次真实到店足迹`）；
+- `0` = 被同址在营店分摊 ⇒ **改「附近」语义**（`感谢 N 位舞友 · N 次到过这附近的足迹` /
+  `N 位舞友来过这附近`）。
+- ⚠️ **只存二值不存分摊小数**：分摊多少已由 `visit_users_30d` 小数部分承载；
+  存具体数值会诱使后人拿它做计算。⛔ 不进公式（只是展示用词依据）。
+- ⚠️ `isUnallocated` **取不到时按「已分摊」处理**（保守用词）——
+  这与 `displayEvents` 的「下限钳 1」（宁可略高不略低）**方向相反**：
+  那是数值，这是**断言强度**，各自 fail-safe 方向由语义决定，不强制统一。
+- ⚠️ 标记必须与那批数字**来自同一轮归因**（随行返回，不二次查询），
+  否则会出现"按未分摊用词、却给着分摊后的数"。
 
 
 ### 🔴 P0 事故复盘：`ClassCastException` 让整表永久陈旧（2026-10-06）
@@ -465,11 +493,46 @@ DEFAULT）。教训：**涉及个人信息的默认值，先过合规判据，�
 | `GET /admin/venues` | requireAdmin | 管理端门店列表（无业务裁剪全量分页，`AdminVenueQueryService`）；`sort` = `LATEST`（缺省，SQL 分页）/ `VISITS_30D` / `LAST_VISIT`、`visitedOnly`（近 30 天有到访），见 §6.1；行内带到访摘要（7d / 30d / 最近到访 / 同址归因 / 同址数）批量注入；status / sort 经 `WireEnums.parse` 宽容解析（非法 = 不筛 / 默认序） |
 | `GET /admin/venues/{id}/presence` | requireAdmin | 单店到访统计（口径参数随响应回显，admin 展示必须与数值同屏；DTO 全字段 `@JsonInclude(ALWAYS)`——non_null 全局策略会删 null，35 号教训）；2026-10-03 增 `coLocatedRadiusM` / `coLocatedAttribution` / `coLocatedVenues`（含营业状态），`lastPresenceAt` 改名 `lastVisitAt` 并改为命中口径（§4.4） |
 | `GET /admin/venues/presence-consent-stats` | requireAdmin | 授权统计：已允许 / 已关闭 / 待补问 + 首问回答分布 + 近 30 天设置变更次数（2026-10-03 字段 `defaultUsers` → `legacyDefaultUsers` 且语义改变，admin-web 须同版发布） |
+| `GET /admin/venues/{id}/visitors` | requireAdmin | **到访用户名单**（2026-10-06，下钻第一级）；`windowDays`（缺省 30，服务端钳 ≥30）、`page` / `size`（上限 100）。人数与 `GET /admin/venues` 行内 `visitUsers30d` **逐人相等**（同一次归因 + 并集，⛔ 前端不得本地过滤列表近似）；`visitTimes` = 窗口内去重到店日（**≠ 人数口径**，§4）；**内部账号打标签不排除**（`internalAccount`）；软删用户仍出行（只给代号）；口径（`windowDays` / `hitRadiusM` / `coLocated*`）随响应回显 |
+| `GET /admin/users/{id}/visits` | requireAdmin | **某用户的到访足迹**（2026-10-06，下钻第二级 = 用户详情页「到访足迹」卡）；`windowDays`（缺省 90）。按门店分组、组内展开**一次次到店**（到店时刻 / 已观测停留时长 / 采样次数 / 最近距离）；**连续采样桶在服务端合并为一条**（阈值 `VISIT_SESSION_GAP_BUCKETS` = 2 桶）；⚠️ 用户不存在/已软删 → **1004**；超上限 `truncated=true`（⛔ 禁静默截断）。路由前缀 `/admin/users` 而非 `/admin/venues`（以用户为主键、页面归属用户详情页） |
+
+### 6.1 admin 到访下钻：名单 → 用户足迹（2026-10-06）
+
+**两级结构**（不是一级）：门店列表行内到访数字 → 名单页「这家店来过哪些人」→ 点某人 →
+用户详情页「到访足迹」卡展开他一次次到店。聚合数字不对应单用户，运营的问题分两种：
+「谁来了」从门店进（人数 → 名单），「他常去哪家」从用户进（画像 → 足迹），合成一页会让两个方向都别扭。
+
+**口径纪律（三条，都是「运营看到两个数字能不能自洽」）**：
+
+| 纪律 | 根因 | 实现 |
+|---|---|---|
+| 名单人数 ≡ 列表行 `visitUsers30d` | 两个数字不一致 ⇒ 运营无从判断哪个对，只能怀疑系统 | 同一个 `attributionsFor` + 同一个 `unionLastSeen`（`visitorsFor`）；窗口同一条 `lastSeenAt >= 窗口起点` 判据 |
+| 窗口**只能放大不能缩小** | 缩到 7 天 ⇒ 点进去的人比列表写的少，且无法解释 | `VISITOR_WINDOW_MIN_DAYS = 30` 钳制；响应回显实际 `windowDays` |
+| 内部账号**打标签不排除** | 现网 ADMIN 一人占到访记录约一半，排除 ⇒ 名单首行永远是平台自己人，运营以为统计出错 | `isInternalAccount`（ADMIN ∪ 微信审核 ∪ 资料缺失）；**与排序口径的排除有意不同**——「展示要完整、排序要公平」是两个决策，不是一个口径的两种实现 |
+
+**逐桶合并为「一次次到店」**：`write_bucket` 序列里相邻桶间隔 ≤ `VISIT_SESSION_GAP_BUCKETS`（=2 桶 / 30 分钟）
+视为同一次到店。不合并的后果很具体：跳一支舞 3 小时 ≈ 12 个桶 ⇒ 被记成 **12 次到店**，
+「到访次数」从「来过几次」退化成「停留了几小时」，还随采样间隔线性放大（改一次采样频率就改一次「次数」）。
+阈值取 1 太紧（一次补采抖动就断成两次）、取 3 太松（离店 15~30 分钟又回来会被并成一次，舞厅常态）。
+本值只影响**足迹明细展示**，不进任何聚合数字 ⇒ 改它零迁移、历史数据不受影响。
+
+**⛔ 三条不得照抄的语义边界**（页面必须如实说明，否则会被读成「精确到店计数」）：
+
+1. `arrivedAt` = **首次被记录到**的时刻，**不是**物理上跨进店门的那一刻（到店后第一次打开小程序才留痕）；
+2. `stayMinutes` = **已观测**停留时长，是真实时长的**下界**（末次采样后人还在店里，库内无从得知）；
+   单桶记录显示「单次」而**非**「0 分钟」——后者会被读成「进去就出来了」；
+3. 名单的 `visitTimes`（自然日去重）与人数（时间窗去重）**口径不同**，⛔ 禁止互相推算（§4 已登记）。
+
+**admin-web 侧**：`views/VenueVisitorsView.vue`（名单）+ `UserDetailView.vue`「到访足迹」卡；
+`services/venueAdmin.ts` 的 `listVenueVisitors` / `getUserVisits`。列表行到访数字用 `@click.stop`
+（⛔ 整卡 `@click` 已是 `openDetail`，不拦住会双跳），命中区声明在容器 `.visit-entry` 上
+（⛔ 禁挂行内 `<b>`，那会让「7」与「30」两个数字的可点范围不一致）。
+零迁移：全部读既有 `qwt_venue_presence_pings` / `qwt_venues` / `qwt_users`。
 
 admin-web 门店基础信息详情复用既有公开 `GET /venues/{id}`（该响应无 venueType——
 管理列表行的类型来自本清单第二个接口，两处字段面不同是有意的）。
 
-### 6.1 admin 按足迹排序 / 筛选（2026-10-03）
+### 6.2 admin 按足迹排序 / 筛选（2026-10-03）
 
 **为什么不能 `ORDER BY`**：到访人数是**派生量**（命中谓词 × 同址归因 × 用户并集），不是任何一列；
 先分页再注入（原做法）只能排当前页。**两条分页路径、同一组筛选谓词**（`VenueRepository.ADMIN_LIST_FILTERS`，
@@ -502,3 +565,20 @@ last_visit_at, refreshed_at`），admin 侧标注刷新时刻——届时排序�
 2026-10-03 同址半径 20 → 50m：`VenuePresenceAttributionTest` 增至 10 条（新增京扬三店：停业店 YIELDED、两家在营 SHARED
 且组内用户并集不重复计；半径下限断言 ≥ 44m = 实测同楼散布），与 ConsentGate 7 / FootprintOrder 3 / HQL 语法 2 共 22 条全绿；
 `findCoLocatedPairs` 在 50m 下生产只读跑通（13 ↔ 14 / 111 互为同址，1155 魅莎 ↔ 100 魅恋）；§4.3 ④（17 对待人工看）/ ⑤（0 家）只读跑通。
+2026-10-06 admin 下钻（§6.1）：`VenueVisitorDrilldownTest` **14 条全绿**——名单与聚合数字同源、窗口钳制 ≥30、
+内部账号打标签不排除、匿名用户主标题回退代号、软删用户仍出行、分页边界（负页码归零 / size 上限）、
+连续桶合并为一次到店、间隔超阈值断成新次、单桶停留 = 0 不为负、门店分组与组序、未知用户 1004 且不触达仓储、
+空窗口短路（⛔ 空集合进原生 `IN ()` 是语法错误）、两条新 JPQL 过 `HqlSyntaxAssertions`。
+`rm -rf target/maven-status` 后 compile + 全量 test：**383 条中 382 绿**，
+唯一红 = `QuwutingServiceApplicationTests#contextLoads`，根因 `Failed to determine a suitable driver class`
+（`application.yaml` 未设 active profile，datasource 只存在于 gitignored 的 `application-mysql.yaml`）
+—— **与本次改动无关的环境红灯**，⛔ 不得为过它而把生产连接串写进仓内 yml。
+⛔ 两条新查询均为 JPQL 且**未连真库验证**（`findVisitorDaysByVenueIdsSince` / `findHitsByUserIdSince`）：
+`HqlSyntaxAssertions` 只保证 HQL 词法可解析，**JPQL 侧绿灯 ≠ MySQL 侧绿灯**（10-06 事故教训）。
+上线前须按 `VenueVisitDayQuerySqlTest` 同款方式补 `-Drun.db.tests=true` 的连库契约测试，
+尤其 `DATE(p.createdAt)` 的返回类型（`java.sql.Date` vs `LocalDate`，走 `toLocalDate` 白名单）。
+admin-web：`npm run build`（vue-tsc -b + vite）全绿，`VenueVisitorsView` 产物已生成；
+两接口均在 `/admin` 前缀下 ⇒ vite proxy 与生产 nginx **零改动**。
+⛔ 路由顺序：`venues/:venueId/visitors`（3 段）与 `venues/:id`（2 段）**实测不会互撞**
+（与 `users/behavior-analysis` 的 2 段对 2 段不同），前置只为书写惯例一致——⛔ 禁把
+「必须前置否则被吞」当成本路由的理由（那是照抄别处结论，未验证）。

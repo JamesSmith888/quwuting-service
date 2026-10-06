@@ -51,18 +51,20 @@ public interface VenueVisitMetricRepository extends JpaRepository<VenueVisitMetr
      */
     @Modifying
     @Query(value = "INSERT INTO qwt_venue_visit_metrics "
-            + "(created_at, updated_at, deleted, venue_id, visit_users_30d, visit_users_7d, visit_events_30d, group_size, refreshed_at) "
-            + "VALUES (:now, :now, false, :venueId, :visitUsers30d, :visitUsers7d, :visitEvents30d, :groupSize, :now) "
+            + "(created_at, updated_at, deleted, venue_id, visit_users_30d, visit_users_7d, visit_events_30d, group_size, share_in_operation, refreshed_at) "
+            + "VALUES (:now, :now, false, :venueId, :visitUsers30d, :visitUsers7d, :visitEvents30d, :groupSize, :shareInOperation, :now) "
             + "ON DUPLICATE KEY UPDATE "
             + "visit_users_30d = VALUES(visit_users_30d), visit_users_7d = VALUES(visit_users_7d), "
             + "visit_events_30d = VALUES(visit_events_30d), "
-            + "group_size = VALUES(group_size), refreshed_at = VALUES(refreshed_at), updated_at = VALUES(updated_at)",
+            + "group_size = VALUES(group_size), share_in_operation = VALUES(share_in_operation), "
+            + "refreshed_at = VALUES(refreshed_at), updated_at = VALUES(updated_at)",
             nativeQuery = true)
     void upsert(@Param("venueId") Long venueId,
                 @Param("visitUsers30d") BigDecimal visitUsers30d,
                 @Param("visitUsers7d") BigDecimal visitUsers7d,
                 @Param("visitEvents30d") BigDecimal visitEvents30d,
                 @Param("groupSize") int groupSize,
+                @Param("shareInOperation") boolean shareInOperation,
                 @Param("now") LocalDateTime now);
 
     /**
@@ -70,10 +72,13 @@ public interface VenueVisitMetricRepository extends JpaRepository<VenueVisitMetr
      * 返回 Object[]{venueId, visitUsers30d, visitEvents30d}；无到访的门店不在结果里
      * （调用方按缺席处理）。
      * <p>
-     * 次数随行返回而非二次查询：两者同源同窗，列表页只渲染这一行，
-     * 拆成两次取数会让"人数与次数"之间多一个可能不一致的时间窗。
+     * <p>次数与分摊标记随行返回而非二次查询：三者同源同窗，列表页只渲染这一行，
+     * 拆成多次取数会让"人数/ 次数 / 用词依据"之间多出可能不一致的时间窗
+     * （分摊标记必须与那批数字来自同一轮归因，否则会出现"按未分摊用词、却给着分摊后的数"）。
+     *
+     * <p>返回 Object[]{venueId, visitUsers30d, visitEvents30d, shareInOperation}。
      */
-    @Query("SELECT m.venueId, m.visitUsers30d, m.visitEvents30d FROM VenueVisitMetric m "
+    @Query("SELECT m.venueId, m.visitUsers30d, m.visitEvents30d, m.shareInOperation FROM VenueVisitMetric m "
             + "WHERE m.deleted = false AND m.venueId IN :venueIds")
     List<Object[]> findVisitUsersByVenueIds(@Param("venueIds") Collection<Long> venueIds);
 }

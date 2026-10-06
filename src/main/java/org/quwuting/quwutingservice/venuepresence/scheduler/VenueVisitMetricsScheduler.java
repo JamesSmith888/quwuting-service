@@ -93,7 +93,8 @@ public class VenueVisitMetricsScheduler {
             metricRepository.resetAll(now);
             shares.forEach((venueId, share) -> metricRepository.upsert(
                     venueId, share.visitUsers30d(), share.visitUsers7d(),
-                    share.visitEvents30d(), share.groupSize(), now));
+                    share.visitEvents30d(), share.groupSize(),
+                    share.shareInOperation(), now));
             // 无到访（或全被让渡 / 不在营）的轮次很常见——只在真有数据时记日志，避免 30 分钟一条噪音
             if (!shares.isEmpty()) {
                 log.info("[venue-visit-metrics] 到访指标刷新：门店数={}", shares.size());

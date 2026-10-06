@@ -111,6 +111,24 @@ public class VenueVisitMetric extends BaseEntity {
     private BigDecimal visitEvents30d;
 
     /** 同址组规模（含本店，≥1）——口径说明用，<b>不参与计算</b> */
+    /**
+     * 同址分摊标记（2026-10-06，V40）：{@code true} = 本店**未被分摊**，
+     * {@code false} = 证据被同址在营店按 1/k 分摊。
+     *
+     * <p><b>为什么需要它</b>：20m 的定位精度<b>无法分辨</b>到访者去的是同址组里哪家店。
+     * 分摊后的数字本身没错，但用「这家店的舞友」来陈述它，等于替系统断言了一个
+     * <b>无法证实的事实</b>（用户到店发现无人去过 ⇒ 对整个功能失去信任）。
+     * ⇒ 该标记只影响<b>展示用词</b>：未分摊时可断言"到这家店"；被分摊时必须改「附近」语义。
+     *
+     * <p>⚠️ 刻意<b>不存分摊小数</b>（TINYINT 而非 DECIMAL）："分摊了多少"已由
+     * {@link #visitUsers30d} 的小数部分承载；本列只承载<b>二值事实</b>，
+     * 存具体数值会诱使后人拿它做计算。
+     *
+     * <p>⛔ <b>不进公式</b>：它只是展示层的用词依据，热度仍只读 {@link #visitUsers30d}。
+     */
+    @Column(name = "share_in_operation", nullable = false)
+    private boolean shareInOperation;
+
     @Column(name = "group_size", nullable = false)
     private int groupSize;
 

@@ -1332,6 +1332,18 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      *       {@code pv ≥ weightedviews 的原始计数} 一类关系不再严格成立，是<b>有意的口径分叉</b>，
      *       勿"顺手统一"（那会让内部/测试账号的浏览重新污染排序）。</li>
      * </ol>
+     * <b>2026-10-06 事故修复（勿再犯，V38 到访项引入的第二处缺陷）</b>：到访项原本写
+     * {@code CASE WHEN v.status IN ('OPEN','CLOSED')}——但<b>本查询是纯标量子查询、
+     * 没有任何 FROM 子句</b>（全部 24 列都是 {@code (SELECT ...)}），{@code v} 别名
+     * <b>在本作用域内不存在</b> ⇒ MySQL {@code Unknown column 'v.status' in 'field list'}
+     * ⇒ {@code GET /venues/{id}/heat} 详情热度页整体 500。
+     * <b>根因是从 {@link #findHotVenueIds} 复制粘贴</b>——那边有 {@code FROM qwt_venues v}，
+     * 别名成立；本查询没有。<b>正确写法 = 换成自身的标量子查询</b>
+     * {@code (SELECT vv.status FROM qwt_venues vv WHERE vv.id = :venueId AND vv.deleted = false)}。
+     * <b>⛔ 纪律</b>：跨查询复制 SQL 片段后必须核对<b>别名作用域</b>（本查询的别名一律是
+     * 子查询内自己声明的 {@code vv/f/p/ti/r/pt/m/l}，禁直接写裸 {@code v.}）。
+     * 门禁 {@code VenueListQueryHqlSyntaxTest#noNativeQueryReferencesUndeclaredAlias}。
+     * <p>
      * {@code :excludedUserIds} 由 {@code HeatAccountExclusionService} 供给且恒非空（含哨兵），
      * 调用方无需判空。
      */
@@ -1402,7 +1414,8 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
                 WHERE pt.target_type = 'VENUE' AND pt.target_id = :venueId AND pt.delta < 0
                   AND pt.user_id NOT IN :excludedUserIds
                   AND pt.created_at >= :windowSince AND pt.created_at < :windowUntil) AS pointsreceived30d,
-              (SELECT CASE WHEN v.status IN ('OPEN','CLOSED')
+              (SELECT CASE WHEN (SELECT vv.status FROM qwt_venues vv
+                                   WHERE vv.id = :venueId AND vv.deleted = false) IN ('OPEN','CLOSED')
                   THEN COALESCE((SELECT m.visit_users_30d FROM qwt_venue_visit_metrics m
                     WHERE m.venue_id = :venueId AND m.deleted = false), 0)
                   ELSE 0 END) AS visitusers30d

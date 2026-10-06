@@ -232,6 +232,23 @@ SQL 侧镜像一致性由 `VenueHeatServiceTest` 公式测试 + 本 AGENTS.md �
   与 `#sharedSqlFragmentsHaveNoNumberGluedToFollowingIdentifier`（扫 HEAT_SCORE 等 8 个共享片段）；
   ③ 这与 **2026-08-29 `DancerRepository.PUBLIC_PAGE_ORDER_BY` 同款事故**（`*3/THEN2ELSE`）是同一缺陷类，
   当时只靠注释提醒未进门禁 ⇒ 同类拼接点现已全部收敛为显式空格写法。
+- 🔴 **native SQL 别名作用域（2026-10-06 P0 事故之二，详情热度页 500）**：
+  `countHeatCounters` 的到访项写 `CASE WHEN v.status IN ('OPEN','CLOSED')`，但该查询是
+  **纯标量子查询、没有任何 FROM 子句**（24 列全是 `(SELECT ...)`）⇒ `v` 别名不存在
+  ⇒ MySQL `Unknown column 'v.status' in 'field list'` ⇒ `GET /venues/{id}/heat` 整体 500。
+  **根因 = 从 `findHotVenueIds` 复制粘贴**（那边有 `FROM qwt_venues v`，别名成立）。
+  **修法** = 换成自身标量子查询 `(SELECT vv.status FROM qwt_venues vv WHERE vv.id = :venueId AND vv.deleted = false)`。
+  ⛔ 纪律：**跨查询复制 SQL 片段后必须核对别名作用域**；本查询的别名一律是子查询内
+  自声明的 `vv/f/p/ti/r/pt/m/l`，禁写裸 `v.`。已入两条门禁：
+  `VenueListQueryHqlSyntaxTest#noNativeQueryReferencesUndeclaredAlias`（按括号深度两层
+  收集 FROM/JOIN **与派生表** `) alias` 声明，内层可见外层 = 关联子查询语义）
+  与 `VenueHotVenueIdsSqlTest#heatCountersQueryExecutesAgainstRealDatabase`（真库执行）。
+  **四条静态门禁（括号配平 / HQL grammar / 数字粘连 / 别名作用域）全绿而生产 500**
+  ——native SQL 无启动期校验，**真库执行是唯一可靠证据**，改 native SQL 后必跑。
+  **真库双向实证**（2026-10-06，pymysql 绕开本机 mysql 9.2 缺 `mysql_native_password` 插件）：
+  修复写法返回 `6.00`（门店 121 丽莎歌舞厅 OPEN、6 人到访），线上写法复现 1054。
+  顺带核实到访项影响面：9 家有到访记录中**仅 1 家过免计基数**（南通丽莎 +40 分），
+  其余 8 家 ≤2 人得 0 分 ⇒ 与 10-06 设计预期（门槛延迟生效）一致。
 
 ### 数据采集层
 

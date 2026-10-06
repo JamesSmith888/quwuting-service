@@ -136,6 +136,52 @@ public interface VenuePresencePingRepository extends JpaRepository<VenuePresence
                                                  @Param("excludedUserIds") Collection<Long> excludedUserIds);
 
     /**
+     * 指定门店集合上的<b>去重到访日</b>（2026-10-06，admin「到访用户名单」的次数列数据源）：
+     * {@code (venueId, userId, visitDay)}，形态与 {@link #findVisitorDaysSinceExcluding} 同构。
+     * <p>
+     * <b>与 {@link #findVisitorDaysSinceExcluding} 的两处分叉（都是刻意的，勿"顺手统一"）</b>：
+     * <ul>
+     *   <li><b>不排除内部账号</b>：admin 展示要看到全量（现网 51 条 ping 里 ADMIN 一人占 26 条，
+     *       名单页打「内部」标签区分，见 {@code AdminVenueVisitorItem#internalAccount}）；
+     *       排序口径才需要排除（{@code findVisitorDaysSinceExcluding}）；</li>
+     *   <li><b>按门店集合过滤</b>：名单是单店下钻，{@code (venue_id, created_at)} 索引前缀可直接裁剪，
+     *       不必全表 GROUP BY。</li>
+     * </ul>
+     * 同址共享时消费方须对多个证据门店的 (user, day) 取<b>并集</b>再计数（与人数侧
+     * {@code unionLastSeen} 同构，⛔ 不能把各店 count 相加——52 号 §4.2 第 1 条）。
+     */
+    @Query("SELECT DISTINCT p.venueId, p.userId, DATE(p.createdAt) FROM VenuePresencePing p "
+            + "WHERE p.venueId IN :venueIds AND " + HIT_PREDICATE + " AND p.createdAt >= :since")
+    List<Object[]> findVisitorDaysByVenueIdsSince(@Param("venueIds") Collection<Long> venueIds,
+                                                 @Param("since") LocalDateTime since,
+                                                 @Param("radiusM") int radiusM,
+                                                 @Param("maxAccuracyM") int maxAccuracyM);
+
+    /**
+     * 单用户的<b>逐桶命中明细</b>（2026-10-06，admin「用户到访足迹」列表的数据源）：
+     * {@code (venueId, writeBucket, createdAt, updatedAt, distanceM, accuracyM)}，按门店 + 桶升序。
+     * <p>
+     * <b>为什么返回原始桶而不是聚合行</b>：用户要看的「具体到访记录」是<b>一次次到店</b>
+     * （到店时间 / 停留多久 / 采样几次），而这些只能从桶序列还原——
+     * {@code MAX(createdAt)} 形态（{@link #findVisitorLastSeenByVenueIds}）一天多次到店会并成一条，
+     * 「来过几天」的信息不可恢复（同 V39 的理由）。
+     * <p>
+     * <b>一次到店 = 连续桶的合并</b>，合并规则（间隔阈值）在
+     * {@code VenuePresenceService#VISIT_SESSION_GAP_BUCKETS}，本方法只负责把桶交出去。
+     * <p>
+     * 量级 = Σ(该用户 × 每店 × 每个命中桶)；{@code (user_id, created_at)} 索引前缀可裁掉窗口外行
+     * （与 {@link #findVisitorDaysSinceExcluding} 同索引，登记于 52 号文档）。
+     */
+    @Query("SELECT p.venueId, p.writeBucket, p.createdAt, p.updatedAt, p.distanceM, p.accuracyM "
+            + "FROM VenuePresencePing p "
+            + "WHERE p.userId = :userId AND " + HIT_PREDICATE + " AND p.createdAt >= :since "
+            + "ORDER BY p.venueId ASC, p.writeBucket ASC")
+    List<Object[]> findHitsByUserIdSince(@Param("userId") Long userId,
+                                         @Param("since") LocalDateTime since,
+                                         @Param("radiusM") int radiusM,
+                                         @Param("maxAccuracyM") int maxAccuracyM);
+
+    /**
      * 幂等写入（15 分钟桶）：INSERT 新行 / 桶冲突时仅刷新 updated_at——
      * <b>不改写 distance_m / accuracy_m / created_at</b>：桶内首见时刻与首证距离
      * 是「该窗口的原始事实」，后到的重复采样（onShow 抖动）不覆盖首证。

@@ -187,19 +187,45 @@ public class VenueVisitBadgeService {
             // 「次」只在 ≥ MIN_VISIT_USERS 人时出现：1 人来 1 天时"1 位 · 1 次"两个数字
             // 是同一个数，第二个数字零信息量；现网 8/9 家只有 1~2 人，满屏"1 次"会让
             // 功能显得"什么都没干"（用户 2026-10-06 六轮裁决，方案 A）。
-            // ⚠️ 分支内**不重复计算** events（该列取数在 else 分支才需要，省一次转型）。
+            //
+            // ⛔ **「真实」二字与「到这家店」的断言，只在未被分摊时才能用**（V40）：
+            // 被同址在营店分摊（share_in_operation = false）时，20m 定位精度**分不清**
+            // 到访者去的是同址组里哪家店 —— 此时说"真实到店足迹"是替系统断言一个
+            // 无法证实的事实（用户 2026-10-06 裁决方案 B）。改说「这附近」是诚实的。
+            boolean allocated = !isUnallocated(row[3]);
             String text;
             if (displayed >= MIN_VISIT_USERS) {
                 // row[2] 来自 JPQL 原生返回的 Object[]，元素声明为 Object（不像 row[1] 有赋值
                 // 处的向下转型）⇒ 必须显式转型，漏了就是编译错误（不会静默出 null）
                 text = "感谢 " + displayed + " 位舞友 · " + displayEvents((BigDecimal) row[2])
-                        + " 次真实到店足迹";
+                        + " 次" + (allocated ? "真实到店足迹" : "到过这附近的足迹");
             } else {
-                text = "感谢 " + displayed + " 位舞友分享真实到店足迹";
+                text = "感谢 " + displayed + " 位舞友" + (allocated ? "分享真实到店足迹" : "来过这附近");
             }
             badges.put((Long) row[0], text);
         }
         return badges;
+    }
+
+    /**
+     * 读取「未被分摊」标记（V40）。
+     *
+     * <p>⚠️ <b>取不到时按「已分摊」处理</b>（{@code false}）—— 宁可少断言"真实到店"，
+     * 也不在证据不足时替系统说话（fail-safe 方向 = 保守用词）。
+     * 这一点与 {@link #displayEvents} 的"下限钳 1"（宁可略高不略低）**方向相反**：
+     * 那是数值，这是<b>断言强度</b>，两者各自的fail-safe 方向由语义决定，不统一。
+     *
+     * <p>正常返回类型是 {@link Boolean}（Hibernate 对tinyint(1) 的映射）；
+     * 也接受 {@link Number}（某些驱动返回 0/1）⇒ 避免 JDBC 映射差异导致误判为"已分摊"。
+     */
+    private static boolean isUnallocated(Object raw) {
+        if (raw instanceof Boolean flag) {
+            return flag;
+        }
+        if (raw instanceof Number number) {
+            return number.intValue() != 0;
+        }
+        return false;
     }
 
     /**
