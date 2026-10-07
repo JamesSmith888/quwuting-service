@@ -17,11 +17,11 @@ public record AdminCrowdReportSummary(
         String venueName,
         /** 最近 24h 上报条数（含同日修改的 UPDATE，非独立人数） */
         int reportCount24h,
-        /** 最近 24h 在店舞伴档位分布（按条数，降序；众数占比 < 0.6 → conflict） */
+        /** 最近 24h 在店舞伴档位分布（按条数，降序；原始事实，不参与 conflict 判定） */
         List<LevelCount> femaleDistribution,
         /** 最近 24h 男客密度分布（按条数，降序；无男客上报时空列表） */
         List<LevelCount> maleDistribution,
-        /** 说法不一（众数条数占比 < 0.6）——运营需关注的「各执一词」门店 */
+        /** 说法不一（与详情页同一个判定函数：一人一票取最新 + 中位数 ±1 档内占比不足）——运营需关注的「各执一词」门店 */
         boolean conflict,
         /** 同日修改 ≥ 3 次的用户（刷量/反复改嫌疑，运营核实） */
         List<HighModifyUser> highModifyUsers,

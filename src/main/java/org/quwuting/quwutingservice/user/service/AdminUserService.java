@@ -72,7 +72,7 @@ public class AdminUserService {
     private final AdminUserStatsService statsService;
 
     /**
-     * 用户分页列表（keyword 昵称模糊 + role/city 筛选 + 排序模式，全部可空/可缺省；
+     * 用户分页列表（keyword 昵称模糊 / 代号 / 裸数据库 id + role/city 筛选 + 排序模式，全部可空/可缺省；
      * 2026-09-19 增 {@code activeWithinDays}「近期活跃」筛选——仅支持 7/30，
      * 口径 = ACTIVE_FACT_UNION 用户主动行为（不含登录自动打卡），非法值 → 1007）。
      * <p>
@@ -105,6 +105,15 @@ public class AdminUserService {
           Long codeUserId = UserCode.parse(kw);
           if (codeUserId != null) {
               return codeUserPage(codeUserId, role, city, activeFilterIds, page, pageable, active7dIds);
+          }
+          // 裸数据库 id（纯数字，2026-10-07）：弱信号——命中存活用户（且过三道筛选）则精确返回，
+          // 未命中回落昵称模糊搜索，纯数字昵称不会被吞成空结果（与代号「强信号、不回落」刻意不同）
+          Long bareUserId = UserCode.parseBareId(kw);
+          if (bareUserId != null) {
+              Optional<User> idHit = findFilteredUser(bareUserId, role, city, activeFilterIds);
+              if (idHit.isPresent()) {
+                  return singleUserPage(idHit.get(), page, pageable, active7dIds);
+              }
           }
           Page<User> users = switch (sort == null ? UserSortMode.LATEST_JOINED : sort) {
             case POINTS_DESC -> activeFilterIds != null
@@ -156,17 +165,32 @@ public class AdminUserService {
       private Page<AdminUserItem> codeUserPage(Long userId, UserRole role, String city,
                                                Collection<Long> activeFilterIds, int page,
                                                PageRequest pageable, Set<Long> active7dIds) {
-          if (page > 0) {
-              return Page.empty(pageable); // 单元素只有第一页
-          }
-          Optional<User> found = userRepository.findByIdAndDeletedFalse(userId)
-                  .filter(u -> role == null || u.getRole() == role)
-                  .filter(u -> city == null || city.equals(u.getCity()))
-                  .filter(u -> activeFilterIds == null || activeFilterIds.contains(u.getId()));
+          Optional<User> found = findFilteredUser(userId, role, city, activeFilterIds);
           if (found.isEmpty()) {
               return Page.empty(pageable);
           }
-          List<AdminUserItem> content = toItems(List.of(found.get()), active7dIds);
+          return singleUserPage(found.get(), page, pageable, active7dIds);
+      }
+
+      /**
+       * 按 id 取存活用户并过三道筛选（role / city / 活跃窗口）——代号精确查找与裸 id 搜索共用，
+       * 「定位方式不是绕过筛选的后门」的规则只写这一处。
+       */
+      private Optional<User> findFilteredUser(Long userId, UserRole role, String city,
+                                              Collection<Long> activeFilterIds) {
+          return userRepository.findByIdAndDeletedFalse(userId)
+                  .filter(u -> role == null || u.getRole() == role)
+                  .filter(u -> city == null || city.equals(u.getCity()))
+                  .filter(u -> activeFilterIds == null || activeFilterIds.contains(u.getId()));
+      }
+
+      /** 单个用户包成单元素页（只有第一页；page &gt; 0 → 空页，分页器不会无限翻） */
+      private Page<AdminUserItem> singleUserPage(User user, int page, PageRequest pageable,
+                                                 Set<Long> active7dIds) {
+          if (page > 0) {
+              return Page.empty(pageable);
+          }
+          List<AdminUserItem> content = toItems(List.of(user), active7dIds);
           return new PageImpl<>(content, pageable, content.size());
       }
 

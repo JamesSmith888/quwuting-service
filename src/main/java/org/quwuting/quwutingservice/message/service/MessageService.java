@@ -65,6 +65,33 @@ public class MessageService {
         messageRepository.save(message);
     }
 
+    /**
+     * 创建或合并未读站内信（2026-10-07，通知折叠原语）。
+     * <p>
+     * 同一收件人已有<b>同类型、同业务关联、仍未读、且创建于 {@code mergeSince} 之后</b>的消息时，
+     * 就地更新那一条的标题与正文（创建时间与未读态不变 ⇒ 未读徽标数不增加），否则新建。
+     * 用于「一件事被多次触发」的通知（热门上报被 10 人点赞 = 10 条消息会淹没消息中心）：
+     * 调用方把<b>累计结果</b>写进正文（如「收到 N 个赞」），本方法只负责「别再多出一行」。
+     * <p>
+     * 已读之后再触发 ⇒ 新建（用户已经看过上一条，这是新的信息）。并发两次触发可能各自新建一条
+     * （无锁、无唯一键）——接受：窗口极小、后果只是多一行提示。
+     */
+    @Transactional
+    public void createOrMergeUnread(Long userId, MessageType type, String title, String content,
+                                    String relatedType, Long relatedId, LocalDateTime mergeSince) {
+        Message existing = messageRepository
+                .findFirstByUserIdAndTypeAndRelatedTypeAndRelatedIdAndReadAtIsNullAndDeletedFalseAndCreatedAtGreaterThanEqualOrderByCreatedAtDesc(
+                        userId, type, relatedType, relatedId, mergeSince)
+                .orElse(null);
+        if (existing == null) {
+            create(userId, type, title, content, relatedType, relatedId);
+            return;
+        }
+        existing.setTitle(TextSanitizer.sanitize(title, TITLE_MAX));
+        existing.setContent(TextSanitizer.sanitize(content, CONTENT_MAX));
+        messageRepository.save(existing);
+    }
+
     /** 我的站内信（按创建时间倒序分页） */
     @Transactional(readOnly = true)
     public Page<MessageResponse> list(Long userId, int page, int size) {

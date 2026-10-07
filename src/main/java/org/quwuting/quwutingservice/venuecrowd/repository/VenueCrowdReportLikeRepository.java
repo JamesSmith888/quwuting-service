@@ -67,4 +67,10 @@ public interface VenueCrowdReportLikeRepository extends JpaRepository<VenueCrowd
 
     /** 单条上报赞数（like/unlike 响应回读） */
     long countByReportIdAndDeletedFalse(@Param("reportId") Long reportId);
+
+    /**
+     * 单条上报的点赞者名单（2026-10-07「谁觉得有用」数据源）：最近点赞（含取消后恢复）在前。
+     * 行数 = 该行赞数（日活 5~36 规模，无需分页）；观察者分层由 Service 决定是否下发名单。
+     */
+    List<VenueCrowdReportLike> findByReportIdAndDeletedFalseOrderByUpdatedAtDesc(@Param("reportId") Long reportId);
 }

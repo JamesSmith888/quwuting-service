@@ -9,7 +9,7 @@ import org.quwuting.quwutingservice.base.BaseEntity;
  * 评分交互记录：用户对舞厅评分维度的打分。
  * <p>
  * 一个用户对一个舞厅的一个评分维度至多一行记录（唯一约束）。
- * tag 字段存储评分维度名称（服务/环境/音响效果/性价比，见 RatingDimensions）。
+ * tag 字段存储评分维度名称（服务/环境，见 RatingDimensions）。
  * <p>
  * 历史遗留：表名/字段名沿用早期"标签点赞 + 评分"合并设计的命名。liked 列已完全废弃
  * （Java 代码零引用），但因 ddl-auto 不删列，数据库仍保留该列——其 NOT NULL 约束已由
@@ -36,7 +36,7 @@ public class TagInteraction extends BaseEntity {
     @Column(nullable = false)
     private Long venueId;
 
-    /** 评分维度名称（服务/环境/音响效果/性价比），最长 50 字符 */
+    /** 评分维度名称（服务/环境），最长 50 字符；历史 legacy 行可能存已下线维度名 */
     @Column(nullable = false, length = 50)
     private String tag;
 

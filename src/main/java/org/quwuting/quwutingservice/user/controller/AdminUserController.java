@@ -62,7 +62,9 @@ public class AdminUserController {
 
     /**
      * 用户分页列表（GET /admin/users?page=&size=&keyword=&role=&city=&sort=&activeWithin=）。
-     * keyword = 昵称模糊；role = 角色筛选（ADMIN/USER）；city = 城市精确匹配；
+     * keyword = 昵称模糊，另识别两种“找人”写法：代号（{@code U#00472}，精确命中不回落）与
+     * 裸数据库 id（纯数字 {@code 472}，命中存活用户则精确返回，<b>未命中回落昵称模糊</b>，2026-10-07）；
+     * role = 角色筛选（ADMIN/USER）；city = 城市精确匹配；
      * sort = 排序模式（LATEST_JOINED 默认 / POINTS_DESC / LAST_ACTIVE_DESC）；
      * activeWithin = 近期活跃筛选（2026-09-19，可空；仅支持 7/30 = 近 N 日（含今日）
      * 有过主动行为，口径 = {@code UserStatsSql.ACTIVE_FACT_UNION}，<b>不含登录自动

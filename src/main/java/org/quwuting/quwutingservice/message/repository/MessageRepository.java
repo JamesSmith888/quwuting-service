@@ -32,6 +32,13 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
     /** 按 ID 取本人消息（越权校验：非本人消息返回 empty） */
     Optional<Message> findByIdAndUserIdAndDeletedFalse(Long id, Long userId);
 
+    /**
+     * 通知合并用（2026-10-07）：同收件人、同类型、同业务关联、<b>仍未读</b>、创建于 {@code since}
+     * 及之后的最新一条。见 {@code MessageService#createOrMergeUnread}。
+     */
+    Optional<Message> findFirstByUserIdAndTypeAndRelatedTypeAndRelatedIdAndReadAtIsNullAndDeletedFalseAndCreatedAtGreaterThanEqualOrderByCreatedAtDesc(
+            Long userId, MessageType type, String relatedType, Long relatedId, LocalDateTime since);
+
     /** 单条标记已读（只更新本人未读消息；越权/已读时影响行数为 0，幂等） */
     @Modifying(clearAutomatically = true)
     @Query("UPDATE Message m SET m.readAt = :readAt WHERE m.id = :id AND m.userId = :userId AND m.readAt IS NULL")

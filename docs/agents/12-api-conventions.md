@@ -119,6 +119,8 @@ public record ApiResponse<T>(int code, String message, T data) {
 | 1035 | 快讯越过内容红线（只写服务可得性，命中原因/事件/负面词；`BulletinContentPolicy`，2026-10-01） |
 | 1036 | 批量置暂停影响面熔断（单城本批暂停占比超上限，需 dryRun 核对 + confirmedCities 确认；`SuspendBlastRadiusGuard`，2026-10-01） |
 | 1040 | 计价规则快照载荷非法（空 / 超过 32KB，结构校验归客户端） |
+| 1041 | 计时同步读数 / 规则 / 场次标识非法（`TimerShareService`，文案固定，细节只进日志；2026-10-07） |
+| 1043 | 计时同步二维码不存在或不是自己的（主持方轮询；2026-10-07） |
 | 5000 | 未知服务器错误（兜底），HTTP 500 |
 | 5001 | 微信接口响应异常（无响应 / 解析失败） |
 | 5002 | 文件保存失败（IO 异常） |

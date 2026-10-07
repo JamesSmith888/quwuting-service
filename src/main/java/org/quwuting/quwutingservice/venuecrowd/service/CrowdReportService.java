@@ -7,7 +7,6 @@ import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.favorite.repository.FavoriteRepository;
 import org.quwuting.quwutingservice.message.enums.MessageType;
 import org.quwuting.quwutingservice.message.service.MessageService;
-import org.quwuting.quwutingservice.points.service.ContributionService;
 import org.quwuting.quwutingservice.points.service.PointsService;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.user.entity.User;
@@ -18,12 +17,22 @@ import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuecrowd.dto.request.SubmitCrowdReportRequest;
 import org.quwuting.quwutingservice.venuecrowd.dto.response.AdminCrowdReportDetail;
 import org.quwuting.quwutingservice.venuecrowd.dto.response.AdminCrowdReportSummary;
+import org.quwuting.quwutingservice.venuecrowd.dto.response.CrowdBaseline;
 import org.quwuting.quwutingservice.venuecrowd.dto.response.CrowdSummary;
 import org.quwuting.quwutingservice.venuecrowd.entity.VenueCrowdReport;
 import org.quwuting.quwutingservice.venuecrowd.enums.CrowdFemaleLevel;
 import org.quwuting.quwutingservice.venuecrowd.enums.CrowdMaleLevel;
 import org.quwuting.quwutingservice.venuecrowd.enums.CrowdTier;
 import org.quwuting.quwutingservice.venuecrowd.repository.VenueCrowdReportRepository;
+import org.quwuting.quwutingservice.venuecrowd.stat.BusinessDay;
+import org.quwuting.quwutingservice.venuecrowd.stat.CrowdBaselineBuilder;
+import org.quwuting.quwutingservice.venuecrowd.stat.CrowdConsensus;
+import org.quwuting.quwutingservice.venuecrowd.stat.CrowdHeadline;
+import org.quwuting.quwutingservice.venuecrowd.stat.CrowdPolicy;
+import org.quwuting.quwutingservice.venuecrowd.stat.CrowdTimeText;
+import org.quwuting.quwutingservice.venuecrowd.stat.CrowdVerdict;
+import org.quwuting.quwutingservice.venuecrowd.stat.CrowdVote;
+import org.quwuting.quwutingservice.venuecrowd.stat.SampleTier;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
@@ -35,6 +44,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -46,39 +56,31 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
- * 门店热度上报服务（2026-08-29，docs/agents/27-venue-crowd-report.md）。
+ * 门店热度上报服务（2026-08-29，docs/agents/27-venue-crowd-report.md；
+ * 2026-10-07 统计口径重定，docs/agents/53-venue-crowd-stats.md）。
  * <p>
  * 设计要点：
  * <ul>
  *   <li><b>双维信号</b>：femaleLevel（在店舞伴，主）+ maleLevel（男客，次，可空）；</li>
- *   <li><b>每日一记防刷</b>：UNIQUE(venue,user,report_date) + ON CONFLICT 幂等 upsert，
- *       同日再次上报 = UPDATE 原行 + modify_count+1；<b>确认后积分</b>（2026-09-03
- *       推翻首版零积分，见下）——上报本身零分，被 ≥3 人确认才发，防「为分而报」污染
- *       信号（懒懒Q 教训仍约束"上报即给分"路径）；</li>
- *   <li><b>6 小时窗口</b>：聚合只取最近 {@link #CROWD_WINDOW_HOURS} 小时记录（强时效，
- *       过时自动撤下）；<b>全部历史记录</b>（2026-08-29 用户需求）——详情页右下角
- *       「查看全部热度」链接 → 独立历史页（{@link #history}，分页全量，过期行
- *       expired 标记），不塞进详情页表格（120rpx 定宽列放不下长文案）；</li>
- *   <li><b>上报者可信度加权</b>（2026-08-29 用户补充需求）：聚合非简单计数——
- *       每票权重 = 1.0 + 历史上报采纳加成 + 打卡加成（社区贡献信号，复用
- *       {@link ContributionService#aggregatesFor}，不发明新信任分体系、不公开）；
- *       众数按权重和计，权重高者（资深/常客）票更重，新号刷票被稀释；</li>
- *   <li><b>置信度分层</b>：{@link CrowdTier}（EMPTY/UNVERIFIED/VETERAN/CONFIRMED/CONFLICT），
- *       展示文案服务端权威派生，前端零拼接。</li>
- *   <li><b>确认后积分 + 反馈闭环</b>（2026-09-03，docs/agents/27「确认后积分」）：
- *       submit() 重算命中 CONFIRMED（≥3 人档位一致）时，给「与众数一致且未拿过奖」
- *       的上报者发放确认奖励（PointsSourceType.CROWD_CONFIRMED，幂等键 = 上报行 id）
- *       ——奖励与信号质量对齐；被确认者收到站内信（不含本次触发者，其提交响应
- *       即时告知）；该店<b>首次</b>达确认时给收藏者发联动通知（受众放大互惠闭环）；
- *       提交响应带 rewardText/upgradedBadgeText 即时反馈文案（服务端权威）。</li>
+ *   <li><b>每营业夜一记防刷</b>：UNIQUE(venue,user,business_date)（V41，05:00 分界）+ ON DUPLICATE KEY
+ *       幂等 upsert，同夜再次上报（含跨午夜）= UPDATE 原行 + modify_count+1；<b>确认后积分</b>
+ *       （2026-09-03 推翻首版零积分）——上报本身零分，被 ≥3 人确认才发，防「为分而报」污染信号；</li>
+ *   <li><b>统计口径只有一处</b>：一人一票 → （加权）下中位数 → 中位数 ±1 档内算一致 → 置信度分层，
+ *       全在 {@link CrowdConsensus}（纯函数），本类<b>只负责取数、组装、落库</b>，不含任何统计判定
+ *       （门禁 {@code CrowdDomainSingleSourceTest}）。常量唯一出处 {@link CrowdPolicy}；</li>
+ *   <li><b>6 小时窗口</b>：聚合只取最近 {@link CrowdPolicy#TONIGHT_WINDOW_HOURS} 小时记录；窗口外的数据
+ *       走独立历史页（{@link #history}）、折叠头摘要（{@link CrowdHeadline}）与常态人气（{@link #baseline}）；</li>
+ *   <li><b>认领人不进统计</b>：商家自报有营销动机；其上报照常落库与展示（标「店家」），
+ *       但不参与中位数 / 确认积分 / 列表角标 / 最新上报行；</li>
+ *   <li><b>确认后积分 + 反馈闭环</b>（2026-09-03）：submit() 重算命中确认态时，给「与中位数一致」的
+ *       上报者发放确认奖励（PointsSourceType.CROWD_CONFIRMED，幂等键 = 上报行 id）；被确认者收到站内信
+ *       （不含本次触发者）；该店<b>首次</b>达确认时给收藏者发联动通知；提交响应带
+ *       rewardText/upgradedBadgeText 即时反馈文案（服务端权威）。</li>
  * </ul>
  */
 @Service
 @RequiredArgsConstructor
 public class CrowdReportService {
-
-    /** 聚合窗口（小时）：人数是「此刻」的信号，6 小时后数据自动撤下（区别于门店报告 2 天公示期） */
-    public static final int CROWD_WINDOW_HOURS = 6;
 
     /** 站内信 relatedType（VENUE = 深链场所详情页；与 MessageType 注释约定一致） */
     private static final String RELATED_TYPE_VENUE = "VENUE";
@@ -86,31 +88,23 @@ public class CrowdReportService {
     /** 历史页单页大小上限（分页查询防深翻页） */
     static final int HISTORY_PAGE_SIZE_LIMIT = 50;
 
-    /** 单条上报标记「资深舞友」的可信度权重阈值（N==1 时升级 UNVERIFIED_VETERAN 呈现） */
-    static final double VETERAN_WEIGHT = 2.0;
-
-    /** 明细标识「常客」的权重阈值（1.2 ≤ w < 2.0；有贡献（打卡/少量采纳）但未达资深） */
-    static final double REGULAR_WEIGHT = 1.2;
-
-    /** 众数确认占比阈值：众数权重和 / 总权重和 ≥ 该值视为「一致」（否则 CONFLICT 不站队） */
-    static final double CONFIRM_SHARE = 0.6;
-
-    /** 确认态最小独立人数（≥3 人一致才有统计意义；1-2 人一律中性降级） */
-    static final int CONFIRM_MIN_REPORTERS = 3;
-
-    /** 列表角标最小独立上报人数（公共面克制：<3 人不上列表，防误伤与商家刷量） */
-    static final int BADGE_MIN_REPORTERS = 3;
-
     /** 管理端聚合窗口（小时）：运营看「今天有什么异常」，24h 覆盖前晚场次 */
     static final int ADMIN_WINDOW_HOURS = 24;
 
     /** 高频修改阈值（modify_count ≥ 3 = 反复改，刷量/反复横跳嫌疑，运营核实） */
     static final int HIGH_MODIFY_THRESHOLD = 3;
 
+    /** 空态文案 */
+    public static final String EMPTY_TEXT = "暂无舞友上报，来报第一个";
+
+    /** 窗口内只有认领人上报时的主文案（统计里没有舞友，但明细表里有店家行——不能让卡片静默空白） */
+    public static final String OWNER_ONLY_TEXT = "仅店家自报，暂无其他舞友上报";
+
     private final VenueCrowdReportRepository crowdReportRepository;
     private final VenueRepository venueRepository;
     private final UserRepository userRepository;
-    private final ContributionService contributionService;
+    /** 可信度权重 + 徽标分档（2026-10-07 抽出，与点赞名单共享） */
+    private final CrowdTrustService crowdTrustService;
     /** 确认后积分发放（2026-09-03：CROWD_CONFIRMED 来源，幂等键 = 上报行 id） */
     private final PointsService pointsService;
     /** 确认结果站内信 + 收藏联动通知（2026-09-03，MessageType.CROWD_CONFIRMED） */
@@ -120,51 +114,42 @@ public class CrowdReportService {
     /** 行级点赞「有用」聚合（2026-09-03：summary/history 行赞数 + likedByMe 回填） */
     private final CrowdReportLikeService crowdReportLikeService;
 
-    // ===== 列表/详情公共读缓存（2026-08-30 性能优化，根因见 AGENTS.md「首页性能优化」） =====
+    // ===== 列表公共读缓存（2026-08-30 性能优化，根因见 AGENTS.md「首页性能优化」） =====
     //
-    // 背景：列表接口每次请求 8~9 次跨洲 DB 往返（ECS↔Supabase 东京单次 300~500ms），
-    // 其中门店热度角标（badgeTextsByVenue / latestTextsByVenue）是「6h 窗口 + 每日一记」
-    // 的低频变化数据，却每次列表都重查；信任权重（trustWeights → ContributionService
-    // .aggregatesFor 内部 7 表聚合）是用户历史行为事实，同样低频变化。三者均为「与
-    // 请求用户无关 / 低频变化」的公共数据，短 TTL 缓存 + 写路径显式失效（不串用户、
-    // 相对时间文案实时渲染——见各缓存注释）。
+    // 背景：列表接口每次请求 8~9 次 DB 往返，其中门店热度角标（badgeTextsByVenue /
+    // latestTextsByVenue）是「6h 窗口 + 每夜一记」的低频变化数据，却每次列表都重查。
+    // 两者均为「与请求用户无关 / 低频变化」的公共数据，短 TTL 缓存 + 写路径显式失效
+    // （不串用户、相对时间文案实时渲染）。
     //
     // 相对时间语义约束（latestReportsCache）：列表行文案含「N 分钟前」相对时间，
-    // 不能缓存渲染后的文案（缓存期间相对时间失真）——缓存「最新上报原始行」
-    // （userId + createdAt），渲染时实时重算 ageTextFor。
+    // 不能缓存渲染后的文案——缓存「最新上报原始行」（userId + createdAt），
+    // 渲染时实时重算 ageTextFor。
 
-    /** 列表角标「N人报过」人数缓存（venueId → 6h 窗口独立人数），TTL 30s。
-     *  人数是「此刻」信号的统计输入，30s 内变化对公共面无感知差异；上报后写路径
-     *  显式失效（{@link #invalidateVenueCrowdCaches}）。 */
+    /** 列表角标「N人报过」人数缓存（venueId → 6h 窗口独立人数，已剔除认领人），TTL 30s。 */
     private final Cache<Long, Long> badgeCountsCache = Caffeine.newBuilder()
             .maximumSize(500)
             .expireAfterWrite(30, TimeUnit.SECONDS)
             .build();
 
-    /** 列表「最新上报」行原始数据缓存（venueId → 最新上报行），TTL 30s。
-     *  只缓存 userId + createdAt（相对时间文案渲染时实时计算，避免缓存期失真）。 */
+    /** 列表「最新上报」行原始数据缓存（venueId → 最新上报行，已剔除认领人），TTL 30s。 */
     private final Cache<Long, LatestReport> latestReportsCache = Caffeine.newBuilder()
             .maximumSize(500)
             .expireAfterWrite(30, TimeUnit.SECONDS)
             .build();
 
-    /** 上报者可信度权重缓存（userId → 权重），TTL 60s。
-     *  权重 = 1.0 + 采纳加成 + 打卡加成（用户历史行为，低频变化）；aggregatesFor
-     *  内部 7 表聚合（跨洲多往返），列表/详情/历史页共享本缓存。 */
-    private final Cache<Long, Double> trustWeightsCache = Caffeine.newBuilder()
-            .maximumSize(1000)
-            .expireAfterWrite(60, TimeUnit.SECONDS)
-            .build();
-
     /** 列表「最新上报」行缓存值：上报者 + 上报时刻（渲染相对时间文案用） */
     private record LatestReport(Long userId, LocalDateTime createdAt) {}
 
+    /** 今晚窗口快照：窗口内全部行 + 权重 + 女 / 男两个维度的统计结论（认领人已剔除出统计，但仍在 rows 里）。 */
+    private record Tonight(List<VenueCrowdReport> rows, Map<Long, Double> weights,
+                           CrowdVerdict female, CrowdVerdict male) {}
+
     /**
-     * 提交 / 更新今晚热度（需登录；每日一记，同日幂等 UPDATE）。
+     * 提交 / 更新今晚热度（需登录；每营业夜一记，同夜幂等 UPDATE）。
      * 返回提交后的聚合摘要（前端立即刷新展示）。
      * <p>
-     * 2026-09-03「确认后积分」反馈闭环：upsert 后重算确认态——命中 CONFIRMED
-     * （≥3 人档位一致）→ 给「与众数一致且未拿过奖」的上报者发确认奖励 + 站内信
+     * 2026-09-03「确认后积分」反馈闭环：upsert 后重算确认态——命中确认态
+     * （≥3 人且一致占比达标）→ 给「与中位数一致」的上报者发确认奖励 + 站内信
      * （不含触发者本人，见 {@link #confirmAndReward}）；提交响应带两类即时反馈文案：
      * rewardText（本次新触发确认奖励）/ upgradedBadgeText（身份升级 普通→常客→资深），
      * 均为服务端权威（CrowdSummary 字段注释），前端零拼接零推导。
@@ -185,22 +170,23 @@ public class CrowdReportService {
         CrowdFemaleLevel female = CrowdFemaleLevel.of(request.femaleLevel());
         CrowdMaleLevel male = request.maleLevel() != null ? CrowdMaleLevel.of(request.maleLevel()) : null;
         // ⚠️ 时间口径：created_at/updated_at 必须传 JVM LocalDateTime.now()（北京时间），
-        // 禁 DB now()（Supabase 会话 UTC → 与 6h 窗口比较错位 → 上报恒不可见，见
-        // VenueCrowdReportRepository.upsert 注释，2026-08-29 修复）。
+        // 禁 DB now()（见 VenueCrowdReportRepository.upsert 注释，2026-08-29 修复）。
+        // 本次请求内只取一次时钟：营业日、窗口、写入时刻同源，跨 05:00 / 窗口边界时不会前后不一致。
         LocalDateTime now = LocalDateTime.now();
+        Long claimantId = venue.getClaimedBy();
         // 反馈闭环基线（2026-09-03）：升级检测需「提交前」身份（信任权重刷新为新鲜值——
         // 60s 缓存可能掩盖刚由他人提交触发的确认奖励对权重的贡献）；收藏联动只在
         // 「该店首次达确认」时通知（防骚扰），需提交前确认态做差。
-        trustWeightsCache.invalidate(userId);
-        String oldBadge = badgeFor(userId, trustWeights(Set.of(userId)));
-        boolean wasConfirmed = isConfirmedWindow(venueId);
+        crowdTrustService.invalidate(userId);
+        String oldBadge = CrowdTrustService.badgeFor(userId, crowdTrustService.weights(Set.of(userId)), claimantId);
+        boolean wasConfirmed = tonight(venueId, claimantId, now).female().confirmed();
         crowdReportRepository.upsert(venueId, userId, female.getLevel(),
-                male != null ? male.getLevel() : null, LocalDate.now(), now, now);
+                male != null ? male.getLevel() : null, now.toLocalDate(), BusinessDay.of(now), now, now);
         // 上报写路径：该店角标人数/最新上报行缓存立即失效（新数据此刻生效，不依赖 TTL）；
         // 信任权重缓存不失效——权重是用户历史行为事实，与本次上报无关（确认奖励会
         // 影响权重，由 confirmAndReward 内对获奖用户显式失效）
         invalidateVenueCrowdCaches(venueId);
-        ConfirmOutcome outcome = confirmAndReward(venueId, userId, venue.getName(), wasConfirmed);
+        ConfirmOutcome outcome = confirmAndReward(venue, userId, wasConfirmed, now);
         CrowdSummary summary = summary(venueId);
         // 升级检测（新身份以提交后摘要明细行为准——确认奖励计入贡献 → 权重提升可能
         // 恰好跨档；摘要行的 badgeText 为服务端权威派生）
@@ -228,7 +214,7 @@ public class CrowdReportService {
     private CrowdSummary withSubmitTexts(CrowdSummary s, String rewardText, String upgradedBadgeText) {
         return new CrowdSummary(s.hasData(), s.female(), s.male(), s.reporterCount(), s.tier(),
                 s.tierText(), s.mainText(), s.maleText(), s.ageText(), s.emptyText(), s.mine(),
-                s.rows(), rewardText, upgradedBadgeText);
+                s.rows(), rewardText, upgradedBadgeText, s.headlineText());
     }
 
     /**
@@ -244,55 +230,64 @@ public class CrowdReportService {
     /** 聚合摘要（公开读，无需登录；mine 字段仅在登录时回填） */
     @Transactional(readOnly = true)
     public CrowdSummary summary(Long venueId) {
-        LocalDateTime since = LocalDateTime.now().minusHours(CROWD_WINDOW_HOURS);
-        List<VenueCrowdReport> rows =
-                crowdReportRepository.findByVenueIdAndCreatedAtAfterAndDeletedFalse(venueId, since);
-        String emptyText = "暂无舞友上报，来报第一个";
-        if (rows.isEmpty()) {
+        LocalDateTime now = LocalDateTime.now();
+        Long claimantId = claimantOf(venueId);
+        Tonight t = tonight(venueId, claimantId, now);
+        CrowdSummary.CrowdMineView mine = mine(venueId, now);
+        if (t.rows().isEmpty()) {
             return new CrowdSummary(false, null, null, 0, CrowdTier.EMPTY.name(),
-                    CrowdTier.EMPTY.getText(), null, null, null, emptyText, mine(venueId), List.of(),
-                    null, null);
+                    CrowdTier.EMPTY.getText(), null, null, null, EMPTY_TEXT, mine, List.of(),
+                    null, null, recentHeadline(venueId, claimantId, now));
         }
-        // 上报者可信度权重（批量聚合，一次查询；明细行用户标识亦由权重分档，
-        // 见 buildDetailRows——不展示用户名）
-        Set<Long> userIds = rows.stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
-        Map<Long, Double> weights = trustWeights(userIds);
         // 明细用户资料批量回填（2026-08-29 昵称防 N+1；2026-09-03 用户要求详情表格
         // 直接展示头像 + 名称——头像/昵称一次查全，空昵称兜底「匿名」、空头像前端
         // 首字占位；isMine 按当前登录用户逐行打标）
+        Set<Long> userIds = t.rows().stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
         Map<Long, User> users = usersByIds(userIds);
         Long currentUserId = UserContext.getCurrentUserId();
-        // 加权众数（双维独立聚合）
-        Map<Integer, Double> femaleSums = new HashMap<>();
-        Map<Integer, Double> maleSums = new HashMap<>();
-        Map<Integer, Integer> femaleCounts = new HashMap<>();
-        Map<Integer, Integer> maleCounts = new HashMap<>();
-        for (VenueCrowdReport r : rows) {
-            double w = weights.getOrDefault(r.getUserId(), 1.0);
-            femaleSums.merge(r.getFemaleLevel(), w, Double::sum);
-            femaleCounts.merge(r.getFemaleLevel(), 1, Integer::sum);
-            if (r.getMaleLevel() != null) {
-                maleSums.merge(r.getMaleLevel(), w, Double::sum);
-                maleCounts.merge(r.getMaleLevel(), 1, Integer::sum);
-            }
+        List<CrowdSummary.CrowdReportRow> detailRows = buildDetailRows(t.rows(), t.weights(), users,
+                currentUserId, claimantId, likeAggregates(t.rows(), currentUserId), now);
+
+        CrowdVerdict female = t.female();
+        if (female.isEmpty()) {
+            // 窗口内只有认领人的上报：统计里没有舞友，但明细表里有店家行——不能让卡片静默空白
+            return new CrowdSummary(true, null, null, 0, CrowdTier.EMPTY.name(),
+                    CrowdTier.EMPTY.getText(), OWNER_ONLY_TEXT, null, null, EMPTY_TEXT, mine, detailRows,
+                    null, null, recentHeadline(venueId, claimantId, now));
         }
-        int reporterCount = userIds.size();
-        Winner femaleWinner = winnerOf(femaleSums, femaleCounts);
-        CrowdSummary.CrowdLevelView femaleView = femaleLevelView(femaleWinner);
-        CrowdSummary.CrowdLevelView maleView = maleSums.isEmpty()
-                ? null : maleLevelView(winnerOf(maleSums, maleCounts));
-        // 置信度分层
-        CrowdTier tier = resolveTier(reporterCount, femaleView.share(), rows, weights);
+        CrowdTier tier = CrowdConsensus.tierOf(female);
+        CrowdSummary.CrowdLevelView femaleView = femaleLevelView(female);
+        CrowdSummary.CrowdLevelView maleView = t.male().isEmpty() ? null : maleLevelView(t.male());
         // 展示文案（服务端权威）
-        String ageText = ageText(rows);
-        String mainText = buildMainText(femaleView, reporterCount, ageText, tier);
-        String maleText = maleView != null ? buildMaleText(maleView) : null;
-        List<CrowdSummary.CrowdReportRow> detailRows =
-                buildDetailRows(rows, weights, users, currentUserId,
-                        likeAggregates(rows, currentUserId));
-        return new CrowdSummary(true, femaleView, maleView, reporterCount, tier.name(),
-                tier.getText(), mainText, maleText, ageText, emptyText, mine(venueId), detailRows,
-                null, null);
+        String ageText = ageTextFor(latestVoterAt(t.rows(), claimantId));
+        String mainText = buildMainText(female, ageText, tier);
+        String maleText = maleView != null ? buildMaleText(t.male()) : null;
+        return new CrowdSummary(true, femaleView, maleView, female.voterCount(), tier.name(),
+                tier.getText(), mainText, maleText, ageText, EMPTY_TEXT, mine, detailRows,
+                null, null, CrowdHeadline.tonight(female));
+    }
+
+    /**
+     * 常态人气（2026-10-07，公开读，热度页「实时人气」卡消费）：前 7 / 30 个营业日（不含今晚）
+     * 的中位数按样本量诚实表达 + 今晚 vs 常态的比较结论。统计与措辞全在
+     * {@link CrowdBaselineBuilder}（纯函数），本方法只取数。
+     */
+    @Transactional(readOnly = true)
+    public CrowdBaseline baseline(Long venueId) {
+        Venue venue = venueRepository.findById(venueId)
+                .orElseThrow(() -> new BusinessException(1017, "门店不存在"));
+        LocalDateTime now = LocalDateTime.now();
+        Long claimantId = venue.getClaimedBy();
+        Tonight t = tonight(venueId, claimantId, now);
+        LocalDate today = BusinessDay.of(now);
+        int longestWindowDays = Collections.max(CrowdPolicy.BASELINE_WINDOW_DAYS);
+        List<VenueCrowdReport> past = crowdReportRepository
+                .findByVenueIdAndCreatedAtGreaterThanEqualAndCreatedAtLessThanAndDeletedFalse(venueId,
+                        BusinessDay.startOf(today.minusDays(longestWindowDays)), BusinessDay.startOf(today));
+        Set<Long> userIds = past.stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
+        List<CrowdVote> votes = votesOf(past, claimantId, crowdTrustService.weights(userIds),
+                VenueCrowdReport::getFemaleLevel);
+        return CrowdBaselineBuilder.build(now, t.female(), votes);
     }
 
     /**
@@ -300,7 +295,7 @@ public class CrowdReportService {
      * 详情页右下角「查看全部热度」链接 → 独立历史页；公开读，无需登录）。
      * <p>
      * 全量分页（createdAt 倒序，不过滤窗口）；行字段全部服务端权威派生——
-     * badgeText（资深/常客/普通）、档位名/锚点、ageText（相对时间）、
+     * badgeText（资深/常客/普通/店家）、档位名/锚点、ageText（相对时间）、
      * reportAt（绝对时间 yyyy-MM-dd HH:mm:ss）、expired（是否已出 6h 窗口，
      * 前端仅据此派生「已过期」标签 + 置灰，不参与任何聚合）。
      * <p>
@@ -309,9 +304,11 @@ public class CrowdReportService {
      */
     @Transactional(readOnly = true)
     public Page<CrowdSummary.CrowdHistoryRow> history(Long venueId, int page, int size) {
-        requireVenue(venueId);
+        Venue venue = venueRepository.findById(venueId)
+                .orElseThrow(() -> new BusinessException(1017, "门店不存在"));
+        Long claimantId = venue.getClaimedBy();
         LocalDateTime now = LocalDateTime.now();
-        LocalDateTime since = now.minusHours(CROWD_WINDOW_HOURS);
+        LocalDateTime since = now.minusHours(CrowdPolicy.TONIGHT_WINDOW_HOURS);
         Page<VenueCrowdReport> result = crowdReportRepository
                 .findByVenueIdAndDeletedFalseOrderByCreatedAtDesc(venueId,
                         PageRequest.of(page, Math.min(size, HISTORY_PAGE_SIZE_LIMIT)));
@@ -320,7 +317,7 @@ public class CrowdReportService {
             return new PageImpl<>(List.of(), result.getPageable(), result.getTotalElements());
         }
         Set<Long> userIds = rows.stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
-        Map<Long, Double> weights = trustWeights(userIds);
+        Map<Long, Double> weights = crowdTrustService.weights(userIds);
         // 用户资料批量回填（昵称防 N+1；2026-09-03 头像 + 本人标记 isMine 同源一次查全）
         Map<Long, User> users = usersByIds(userIds);
         Long currentUserId = UserContext.getCurrentUserId();
@@ -335,7 +332,7 @@ public class CrowdReportService {
                     return new CrowdSummary.CrowdHistoryRow(
                             r.getId(),
                             r.getUserId(),
-                            badgeFor(r.getUserId(), weights),
+                            CrowdTrustService.badgeFor(r.getUserId(), weights, claimantId),
                             nicknameOf(users.get(r.getUserId())),
                             avatarOf(users.get(r.getUserId())),
                             currentUserId != null && currentUserId.equals(r.getUserId()),
@@ -351,14 +348,14 @@ public class CrowdReportService {
         return new PageImpl<>(content, result.getPageable(), result.getTotalElements());
     }
 
-    /** 我今天的上报（可改；未登录 / 未上报 → null） */
-    private CrowdSummary.CrowdMineView mine(Long venueId) {
+    /** 我今晚（本营业日）的上报（可改；未登录 / 未上报 → null） */
+    private CrowdSummary.CrowdMineView mine(Long venueId, LocalDateTime now) {
         Long userId = UserContext.getCurrentUserId();
         if (userId == null) {
             return null;
         }
         List<VenueCrowdReport> mine = crowdReportRepository
-                .findByVenueIdAndUserIdAndReportDateAndDeletedFalse(venueId, userId, LocalDate.now());
+                .findByVenueIdAndUserIdAndBusinessDateAndDeletedFalse(venueId, userId, BusinessDay.of(now));
         if (mine.isEmpty()) {
             return null;
         }
@@ -367,141 +364,112 @@ public class CrowdReportService {
                 CrowdFemaleLevel.of(row.getFemaleLevel()).getDisplayName());
     }
 
-    /**
-     * 上报者可信度权重（内部，不公开展示）：
-     * base 1.0 + min(历史上报采纳,5)×0.5 + min(打卡天数,10)×0.1（封顶 4.5）。
-     * 信号选择逻辑（对齐「每信号须预测目标行为」）：上报采纳 = 之前报得准；
-     * 打卡 = 真实到店行为。认领/收藏/认可/分享与「报人数可信」弱相关，不进入权重；
-     * 认领人（门店主）不享受加成（商家自报有营销动机，用中性权重稀释）。
-     */
-    /**
-     * 上报者可信度权重（2026-08-30 缓存版）：1.0 + 采纳加成 + 打卡加成。
-     * 权重是用户历史行为事实（低频变化），经 {@link #trustWeightsCache} 缓存（TTL 60s）——
-     * 底层 aggregatesFor 内部 7 表聚合（跨洲多往返），列表/详情/历史页共享本缓存；
-     * 批量回源：先查缓存，miss 的 userIds 一次聚合补齐并回填（含零贡献用户默认 1.0，
-     * 避免"查了但无记录"的用户反复 miss）。
-     */
-    private Map<Long, Double> trustWeights(Set<Long> userIds) {
-        if (userIds == null || userIds.isEmpty()) {
-            return Map.of();
-        }
-        Map<Long, Double> weights = new HashMap<>();
-        List<Long> misses = new ArrayList<>();
-        for (Long userId : userIds) {
-            Double cached = trustWeightsCache.getIfPresent(userId);
-            if (cached != null) {
-                weights.put(userId, cached);
-            } else {
-                misses.add(userId);
-            }
-        }
-        if (!misses.isEmpty()) {
-            Map<Long, ContributionService.ContributionAggregate> aggs =
-                    contributionService.aggregatesFor(misses);
-            for (Long userId : misses) {
-                ContributionService.ContributionAggregate agg = aggs.get(userId);
-                long adoptions = agg != null ? agg.reportedCount() : 0L;
-                long checkins = agg != null ? agg.checkInDays() : 0L;
-                double w = 1.0 + Math.min(adoptions, 5) * 0.5 + Math.min(checkins, 10) * 0.1;
-                trustWeightsCache.put(userId, w);
-                weights.put(userId, w);
-            }
-        }
-        return weights;
+    // ===== 取数 → 票 → 统计（统计本身全在 CrowdConsensus） =====
+
+    /** 门店认领人（无认领 / 门店不存在 → null） */
+    private Long claimantOf(Long venueId) {
+        return venueRepository.findById(venueId).map(Venue::getClaimedBy).orElse(null);
+    }
+
+    /** 取今晚窗口并统计（认领人剔除出票，仍保留在 rows 里供明细展示）。 */
+    private Tonight tonight(Long venueId, Long claimantId, LocalDateTime now) {
+        List<VenueCrowdReport> rows = crowdReportRepository.findByVenueIdAndCreatedAtAfterAndDeletedFalse(
+                venueId, now.minusHours(CrowdPolicy.TONIGHT_WINDOW_HOURS));
+        Set<Long> userIds = rows.stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
+        Map<Long, Double> weights = crowdTrustService.weights(userIds);
+        CrowdVerdict female = CrowdConsensus.evaluate(CrowdConsensus.latestPerVoter(
+                votesOf(rows, claimantId, weights, VenueCrowdReport::getFemaleLevel)));
+        CrowdVerdict male = CrowdConsensus.evaluate(CrowdConsensus.latestPerVoter(
+                votesOf(rows, claimantId, weights, VenueCrowdReport::getMaleLevel)));
+        return new Tonight(rows, weights, female, male);
     }
 
     /**
-     * 置信度分层（单一事实源，CrowdTier 注释同步规则）：
-     * N==0 → EMPTY；N==1 → UNVERIFIED（权重 ≥ VETERAN_WEIGHT 升级 UNVERIFIED_VETERAN）；
-     * N==2 且 share≥CONFIRM_SHARE → UNVERIFIED（两人一致仍中性，未达统计意义）；
-     * N≥3 且 share≥CONFIRM_SHARE → CONFIRMED；N≥2 且 share&lt;CONFIRM_SHARE → CONFLICT。
+     * 上报行 → 票（某个维度）：剔除认领人与该维度未填的行。
+     * 同一人的多行（跨 05:00 边界的两个营业日）此处保留，由调用方选择折票语义
+     * （今晚 = latestPerVoter；常态 = typicalPerVoter）。
      */
-    private CrowdTier resolveTier(int reporterCount, double femaleShare,
-                                  List<VenueCrowdReport> rows, Map<Long, Double> weights) {
-        if (reporterCount == 1) {
-            VenueCrowdReport only = rows.get(0);
-            double w = weights.getOrDefault(only.getUserId(), 1.0);
-            return w >= VETERAN_WEIGHT ? CrowdTier.UNVERIFIED_VETERAN : CrowdTier.UNVERIFIED;
-        }
-        if (reporterCount >= CONFIRM_MIN_REPORTERS && femaleShare >= CONFIRM_SHARE) {
-            return CrowdTier.CONFIRMED;
-        }
-        if (femaleShare < CONFIRM_SHARE) {
-            return CrowdTier.CONFLICT;
-        }
-        return CrowdTier.UNVERIFIED;
-    }
-
-    /** 加权众数（winnerLevel + 权重占比 + 独立人数） */
-    private Winner winnerOf(Map<Integer, Double> sums, Map<Integer, Integer> counts) {
-        int winnerLevel = 0;
-        double winnerSum = -1;
-        for (Map.Entry<Integer, Double> e : sums.entrySet()) {
-            if (e.getValue() > winnerSum) {
-                winnerSum = e.getValue();
-                winnerLevel = e.getKey();
+    private static List<CrowdVote> votesOf(List<VenueCrowdReport> rows, Long ownerId,
+                                           Map<Long, Double> weights,
+                                           Function<VenueCrowdReport, Integer> levelOf) {
+        List<CrowdVote> votes = new ArrayList<>(rows.size());
+        for (VenueCrowdReport r : rows) {
+            Integer level = levelOf.apply(r);
+            if (level == null || r.getCreatedAt() == null || r.getUserId().equals(ownerId)) {
+                continue;
             }
+            votes.add(new CrowdVote(r.getUserId(), level, weights.getOrDefault(r.getUserId(), 1.0),
+                    r.getCreatedAt(), r.getId()));
         }
-        double total = sums.values().stream().mapToDouble(Double::doubleValue).sum();
-        double share = total > 0 ? winnerSum / total : 0;
-        return new Winner(winnerLevel, Math.round(share * 100.0) / 100.0, counts.getOrDefault(winnerLevel, 0));
+        return votes;
     }
 
-    /** 主信号视图（levelName/levelHint 后端权威） */
-    private CrowdSummary.CrowdLevelView femaleLevelView(Winner w) {
-        CrowdFemaleLevel female = CrowdFemaleLevel.of(w.level());
+    /** 窗口外回看摘要（窗口内没有任何行时才调用；多一次按店回看查询）。 */
+    private String recentHeadline(Long venueId, Long claimantId, LocalDateTime now) {
+        LocalDateTime from = BusinessDay.startOf(
+                BusinessDay.of(now).minusDays(CrowdPolicy.HEADLINE_LOOKBACK_DAYS));
+        List<VenueCrowdReport> rows =
+                crowdReportRepository.findByVenueIdAndCreatedAtAfterAndDeletedFalse(venueId, from);
+        if (rows.isEmpty()) {
+            return null;
+        }
+        Set<Long> userIds = rows.stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
+        return CrowdHeadline.recent(now, votesOf(rows, claimantId, crowdTrustService.weights(userIds),
+                VenueCrowdReport::getFemaleLevel)).orElse(null);
+    }
+
+    /** 窗口内最新一条「计入统计」的上报时刻（认领人的不算，否则「N 分钟前」会被店家刷新）。 */
+    private static LocalDateTime latestVoterAt(List<VenueCrowdReport> rows, Long ownerId) {
+        return rows.stream()
+                .filter(r -> !r.getUserId().equals(ownerId))
+                .map(VenueCrowdReport::getCreatedAt)
+                .filter(at -> at != null)
+                .max(LocalDateTime::compareTo).orElse(null);
+    }
+
+    /** 主信号视图（levelName/levelHint 后端权威；level = 下中位档，count = 独立投票人数） */
+    private CrowdSummary.CrowdLevelView femaleLevelView(CrowdVerdict v) {
+        CrowdFemaleLevel female = CrowdFemaleLevel.of(v.medianLevel());
         return new CrowdSummary.CrowdLevelView(female.getLevel(), female.getDisplayName(),
-                female.getAnchor(), w.count(), w.share());
+                female.getAnchor(), v.voterCount(), round2(v.agreementShare()));
     }
 
     /** 次信号视图（男客 1-8，细粒度档位同女） */
-    private CrowdSummary.CrowdLevelView maleLevelView(Winner w) {
-        CrowdMaleLevel male = CrowdMaleLevel.of(w.level());
+    private CrowdSummary.CrowdLevelView maleLevelView(CrowdVerdict v) {
+        CrowdMaleLevel male = CrowdMaleLevel.of(v.medianLevel());
         return new CrowdSummary.CrowdLevelView(male.getLevel(), male.getDisplayName(),
-                male.getAnchor(), w.count(), w.share());
+                male.getAnchor(), v.voterCount(), round2(v.agreementShare()));
     }
 
-    /** 加权众数中间结果 */
-    private record Winner(int level, double share, int count) {
+    private static double round2(double share) {
+        return Math.round(share * 100.0) / 100.0;
     }
 
-    /** 主信号展示文案：「舞伴 约100 · 3 位舞友 · 1 小时前」 */
-    private String buildMainText(CrowdSummary.CrowdLevelView female, int reporterCount,
-                                 String ageText, CrowdTier tier) {
-        String core = "舞伴 " + female.levelName() + " · "
-                + reporterCount + " 位舞友 · " + ageText;
+    /**
+     * 主信号展示文案：「舞伴 约100 · 3 位舞友 · 1 小时前」；样本充足（SOLID）时带中间一半区间：
+     * 「舞伴 约100（约80~约150）· 6 位舞友 · 刚刚」。
+     */
+    private String buildMainText(CrowdVerdict female, String ageText, CrowdTier tier) {
+        String range = female.sampleTier() == SampleTier.SOLID && female.q1Level() != female.q3Level()
+                ? "（" + CrowdFemaleLevel.of(female.q1Level()).getDisplayName() + "~"
+                + CrowdFemaleLevel.of(female.q3Level()).getDisplayName() + "）"
+                : "";
+        String core = "舞伴 " + CrowdFemaleLevel.of(female.medianLevel()).getDisplayName() + range + " · "
+                + female.voterCount() + " 位舞友 · " + ageText;
         if (tier == CrowdTier.CONFLICT) {
             return core + " · 请以现场为准";
         }
         return core;
     }
 
-    /** 次信号展示文案：「男客 约50 · 2 人」 */
-    private String buildMaleText(CrowdSummary.CrowdLevelView male) {
-        CrowdMaleLevel maleLevel = CrowdMaleLevel.of(male.level());
-        return "男客 " + maleLevel.getDisplayName() + " · " + male.count() + " 人";
+    /** 次信号展示文案：「男客 约50 · 2 人」（人数 = 报了男客档位的独立人数） */
+    private String buildMaleText(CrowdVerdict male) {
+        return "男客 " + CrowdMaleLevel.of(male.medianLevel()).getDisplayName() + " · " + male.voterCount() + " 人";
     }
 
-    /** 相对时间（「刚刚 / N 分钟前 / N 小时前」）——服务端权威，前端零拼接 */
-    private String ageText(List<VenueCrowdReport> rows) {
-        LocalDateTime latest = rows.stream().map(VenueCrowdReport::getCreatedAt)
-                .max(LocalDateTime::compareTo).orElse(null);
-        return ageTextFor(latest);
-    }
-
-    /** 单条上报的相对时间（明细行逐条复用；createdAt 为 null 时返回空串） */
+    /** 单条上报的相对时间（「刚刚 / N 分钟前 / N 小时前」）；createdAt 为 null 时返回空串 */
     private String ageTextFor(LocalDateTime at) {
-        if (at == null) {
-            return "";
-        }
-        long minutes = Duration.between(at, LocalDateTime.now()).toMinutes();
-        if (minutes < 1) {
-            return "刚刚";
-        }
-        if (minutes < 60) {
-            return minutes + " 分钟前";
-        }
-        return (minutes / 60) + " 小时前";
+        return CrowdTimeText.ageText(at, LocalDateTime.now());
     }
 
     /**
@@ -510,7 +478,7 @@ public class CrowdReportService {
      * 「列表行不展示用户名」旧决策；列表页卡片仍维持匿名——公共面不点名，N人报过/
      * 最新上报行不带头像昵称）：
      * createdAt 倒序（最新在前）；male 未报时 maleLevelName/maleLevelHint 为 null；
-     * badgeText = 上报者可信度权重分档（服务端权威三档 资深/常客/普通）；
+     * badgeText = 上报者可信度权重分档（服务端权威，认领人恒为「店家」）；
      * nickname = 完整昵称（空兜底「匿名」）；avatarUrl = 头像（空 = 未设头像，
      * 前端首字占位）；isMine = 当前登录用户本人（高亮 +「我」标记，登录后回填）。
      * <p>
@@ -521,7 +489,9 @@ public class CrowdReportService {
                                                               Map<Long, Double> weights,
                                                               Map<Long, User> users,
                                                               Long currentUserId,
-                                                              CrowdLikeAggregates likes) {
+                                                              Long claimantId,
+                                                              CrowdLikeAggregates likes,
+                                                              LocalDateTime now) {
         return rows.stream()
                 .sorted(Comparator.comparing(VenueCrowdReport::getCreatedAt).reversed())
                 .map(r -> {
@@ -530,7 +500,7 @@ public class CrowdReportService {
                             ? CrowdMaleLevel.of(r.getMaleLevel()) : null;
                     return new CrowdSummary.CrowdReportRow(
                             r.getUserId(),
-                            badgeFor(r.getUserId(), weights),
+                            CrowdTrustService.badgeFor(r.getUserId(), weights, claimantId),
                             nicknameOf(users.get(r.getUserId())),
                             avatarOf(users.get(r.getUserId())),
                             currentUserId != null && currentUserId.equals(r.getUserId()),
@@ -540,9 +510,20 @@ public class CrowdReportService {
                             ageTextFor(r.getCreatedAt()),
                             r.getId(),
                             likes.counts().getOrDefault(r.getId(), 0L).intValue(),
-                            currentUserId != null && likes.liked().contains(r.getId()));
+                            currentUserId != null && likes.liked().contains(r.getId()),
+                            likeExpiresInSec(r.getCreatedAt(), now));
                 })
                 .toList();
+    }
+
+    /** 还能被点赞的剩余秒数（&lt;=0 = 已过有效窗口；与点赞服务的窗口校验同一个常量） */
+    public static int likeExpiresInSec(LocalDateTime createdAt, LocalDateTime now) {
+        if (createdAt == null) {
+            return 0;
+        }
+        long left = Duration.ofHours(CrowdPolicy.TONIGHT_WINDOW_HOURS).getSeconds()
+                - Duration.between(createdAt, now).getSeconds();
+        return (int) Math.max(0, left);
     }
 
     /** 行级点赞聚合快照（详情页热度卡行「有用」按钮数据源；窗口/行数小，无缓存） */
@@ -575,109 +556,50 @@ public class CrowdReportService {
                 ? u.getAvatarUrl() : null;
     }
 
-    /**
-     * 用户标识分档（2026-08-29 用户要求「至少三个级别」+「删除『舞友』两字」——
-     * 表头已有「舞友」列名，行内只显示级别词）：
-     * 权重 ≥ {@link #VETERAN_WEIGHT} → 资深；≥ {@link #REGULAR_WEIGHT} → 常客；
-     * 其余 → 普通（无贡献记录按 1.0 兜底）。
-     */
-    private String badgeFor(Long userId, Map<Long, Double> weights) {
-        double w = weights.getOrDefault(userId, 1.0);
-        if (w >= VETERAN_WEIGHT) {
-            return "资深";
-        }
-        if (w >= REGULAR_WEIGHT) {
-            return "常客";
-        }
-        return "普通";
-    }
-
     // ===== 确认后积分 + 反馈闭环（2026-09-03，docs/agents/27「确认后积分」） =====
-
-    /**
-     * 窗口聚合快照（确认判定专用——判定口径必须与 {@link #resolveTier} 一致：
-     * reporterCount ≥ CONFIRM_MIN_REPORTERS(3) 且女主信号众数<b>权重占比</b>
-     * share ≥ CONFIRM_SHARE(0.6) ⇔ CONFIRMED）。
-     */
-    private WindowSnapshot windowSnapshot(Long venueId, LocalDateTime since) {
-        List<VenueCrowdReport> rows =
-                crowdReportRepository.findByVenueIdAndCreatedAtAfterAndDeletedFalse(venueId, since);
-        if (rows.isEmpty()) {
-            return new WindowSnapshot(false, 0, 0.0, 0, List.of(), Map.of());
-        }
-        Set<Long> userIds = rows.stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
-        Map<Long, Double> weights = trustWeights(userIds);
-        Map<Integer, Double> femaleSums = new HashMap<>();
-        Map<Integer, Integer> femaleCounts = new HashMap<>();
-        for (VenueCrowdReport r : rows) {
-            double w = weights.getOrDefault(r.getUserId(), 1.0);
-            femaleSums.merge(r.getFemaleLevel(), w, Double::sum);
-            femaleCounts.merge(r.getFemaleLevel(), 1, Integer::sum);
-        }
-        Winner winner = winnerOf(femaleSums, femaleCounts);
-        return new WindowSnapshot(true, userIds.size(), winner.share(), winner.level(), rows, weights);
-    }
-
-    /** 窗口内当前是否已达确认态（CONFIRMED；提交前基线用） */
-    private boolean isConfirmedWindow(Long venueId) {
-        WindowSnapshot snap = windowSnapshot(venueId, LocalDateTime.now().minusHours(CROWD_WINDOW_HOURS));
-        return snap.confirmed();
-    }
 
     /**
      * 提交后确认重算 + 激励闭环（与 submit 同事务，任一失败整体回滚）：
      * <ol>
-     *   <li><b>确认判定</b>：窗口 ≥3 人且女主信号众数权重占比 ≥0.6（= 详情页
-     *       CONFIRMED 态，与 resolveTier 同口径）才进入发放；</li>
-     *   <li><b>确认后积分</b>：对「上报档位 == 众数档位」的上报者逐人调用
-     *       {@link PointsService#rewardCrowdConfirm}（幂等键 = 上报行 id，每行至多
-     *       一次——同日改档再次命中确认不重复发，去重后发放）；触发者本人获奖 →
-     *       outcome 标记（提交响应即时展示），其余获奖者 → 站内信 CROWD_CONFIRMED
-     *       （不含触发者——其提交响应已即时告知，避免双通道重复打扰）；</li>
-     *   <li><b>收藏联动（受众放大）</b>：该店<b>本次提交前未达确认</b>、提交后首次
-     *       达成 → 给收藏该店的用户发联动站内信（受益者 = 关注者，互惠闭环；
-     *       跳过本次触发者与已收确认信的上报者，每店每晚仅首次达成触发一次）。</li>
+     *   <li><b>确认判定</b>：读 {@link CrowdVerdict#confirmed()}——与详情页 CONFIRMED 态是<b>同一个函数的
+     *       同一次结论</b>（2026-10-07 前这里曾是另一份独立实现，靠注释维系一致）；</li>
+     *   <li><b>确认后积分</b>：对结论里「与中位数一致」的上报者（一人一票，票上携带其代表行 id）逐人调用
+     *       {@link PointsService#rewardCrowdConfirm}（幂等键 = 上报行 id，每行至多一次；V41 起每营业夜
+     *       每人只有一行，同一夜不可能靠跨午夜重报拿两次）；触发者本人获奖 → outcome 标记
+     *       （提交响应即时展示），其余获奖者 → 站内信 CROWD_CONFIRMED（不含触发者）；</li>
+     *   <li><b>收藏联动（受众放大）</b>：该店<b>本次提交前未达确认</b>、提交后首次达成 → 给收藏该店的
+     *       用户发联动站内信（跳过触发者与已收确认信的上报者，每店每晚仅首次达成触发一次）。</li>
      * </ol>
+     * 认领人不在票里，因此既不会被确认也不会拿奖励。
      */
-    private ConfirmOutcome confirmAndReward(Long venueId, Long actorId, String venueName,
-                                            boolean wasConfirmedBefore) {
-        LocalDateTime since = LocalDateTime.now().minusHours(CROWD_WINDOW_HOURS);
-        WindowSnapshot snap = windowSnapshot(venueId, since);
-        if (!snap.confirmed() || snap.winnerLevel() <= 0) {
+    private ConfirmOutcome confirmAndReward(Venue venue, Long actorId, boolean wasConfirmedBefore,
+                                            LocalDateTime now) {
+        Long venueId = venue.getId();
+        CrowdVerdict verdict = tonight(venueId, venue.getClaimedBy(), now).female();
+        if (!verdict.confirmed()) {
             return ConfirmOutcome.none();
         }
-        int winnerLevel = snap.winnerLevel();
-        // 与众数一致的上报者（每日一记 ⇒ 每人每店每自然日至多一行，但 6h 窗口跨日
-        // 边界时同一用户可能有两行——按 userId 保留最近一行去重，避免双发）
-        Map<Long, VenueCrowdReport> agreeingByUser = snap.rows().stream()
-                .filter(r -> r.getFemaleLevel() != null && r.getFemaleLevel() == winnerLevel)
-                .sorted(Comparator.comparing(VenueCrowdReport::getCreatedAt).reversed())
-                .collect(Collectors.toMap(VenueCrowdReport::getUserId, Function.identity(),
-                        (a, b) -> a)); // keep latest (first in reversed order)
-        if (agreeingByUser.isEmpty()) {
-            return ConfirmOutcome.none();
-        }
-        int agreeCount = agreeingByUser.size();
+        List<CrowdVote> agreeing = verdict.agreeingVotes();
+        int agreeCount = agreeing.size();
         int reward = pointsService.crowdConfirmReward();
         Set<Long> newlyRewardedIds = new HashSet<>();
         boolean actorRewarded = false;
-        for (Map.Entry<Long, VenueCrowdReport> e : agreeingByUser.entrySet()) {
-            Long reportUserId = e.getKey();
-            Long reportRowId = e.getValue().getId();
+        for (CrowdVote vote : agreeing) {
+            Long reportUserId = vote.userId();
             // 发放（幂等：该行已拿过确认奖 → null，跳过；已发放用户权重可能因
             // 新流水提升——显式失效其权重缓存，供本次提交的升级检测读到新鲜值）
-            Long balance = pointsService.rewardCrowdConfirm(reportUserId, reportRowId);
+            Long balance = pointsService.rewardCrowdConfirm(reportUserId, vote.sourceId());
             if (balance == null) {
                 continue;
             }
-            trustWeightsCache.invalidate(reportUserId);
+            crowdTrustService.invalidate(reportUserId);
             newlyRewardedIds.add(reportUserId);
             if (reportUserId.equals(actorId)) {
                 actorRewarded = true; // 触发者本人：提交响应即时告知，不发站内信
             } else {
                 messageService.create(reportUserId, MessageType.CROWD_CONFIRMED,
                         "今晚热度已确认",
-                        "您在「" + venueName + "」的今晚热度上报已被 " + agreeCount
+                        "您在「" + venue.getName() + "」的今晚热度上报已被 " + agreeCount
                                 + " 位舞友确认 · +" + reward + " 积分已到账",
                         RELATED_TYPE_VENUE, venueId);
             }
@@ -693,22 +615,12 @@ public class CrowdReportService {
                 }
                 messageService.create(favoriterId, MessageType.CROWD_CONFIRMED,
                         "收藏门店 · 今晚热度",
-                        "您收藏的「" + venueName + "」今晚热度已被 " + agreeCount
+                        "您收藏的「" + venue.getName() + "」今晚热度已被 " + agreeCount
                                 + " 位舞友确认（数据仅供参考）",
                         RELATED_TYPE_VENUE, venueId);
             }
         }
         return new ConfirmOutcome(actorRewarded, agreeCount);
-    }
-
-    /** 提交后确认重算快照（判定与 resolveTier 同口径） */
-    private record WindowSnapshot(boolean hasRows, int reporterCount, double femaleShare,
-                                  int winnerLevel, List<VenueCrowdReport> rows,
-                                  Map<Long, Double> weights) {
-        /** 是否达确认态：≥3 人 且 众数权重占比 ≥ 0.6（与 CrowdTier.CONFIRMED 同判据） */
-        boolean confirmed() {
-            return hasRows && reporterCount >= CONFIRM_MIN_REPORTERS && femaleShare >= CONFIRM_SHARE;
-        }
     }
 
     /** 确认激励结果（submit 响应即时反馈数据源） */
@@ -718,23 +630,17 @@ public class CrowdReportService {
         }
     }
 
-    private void requireVenue(Long venueId) {
-        if (!venueRepository.existsById(venueId)) {
-            throw new BusinessException(1017, "门店不存在");
-        }
-    }
-
     /**
      * 列表角标批量生成（2026-08-29，VenueService.listVenues 调用）：
      * 一次 IN + GROUP BY 覆盖整页（防 N+1），返回 venueId → 中性文案「N人报过」。
-     * 门槛 = 最近 6h 窗口独立上报人数 ≥ {@link #BADGE_MIN_REPORTERS}（3）——
-     * 列表是公共面，<3 人不上（防误伤/防商家找两三个朋友刷「火爆」）；
+     * 门槛 = 最近 6h 窗口独立上报人数 ≥ {@link CrowdPolicy#BADGE_MIN_VOTERS}（3）——
+     * 列表是公共面，&lt;3 人不上（防误伤/防商家找两三个朋友刷「火爆」）；
      * 文案中性不带档位词（「热闹/冷清」不上列表——给门店贴正负定性有商家争议
      * 与数据误伤风险，具体档位留给详情页，同一事实只呈现一次）。
+     * 认领人上报不计入（2026-10-07，SQL 层排除）。
      * <p>
      * 2026-08-30 性能优化：人数经 {@link #badgeCountsCache} 缓存（TTL 30s）——
-     * 6h 窗口聚合是低频变化数据，逐店缓存 + 批量回源，上报写路径显式失效
-     * （{@link #invalidateVenueCrowdCaches}），列表接口省 1 次跨洲往返。
+     * 逐店缓存 + 批量回源，上报写路径显式失效（{@link #invalidateVenueCrowdCaches}）。
      */
     @Transactional(readOnly = true)
     public Map<Long, String> badgeTextsByVenue(Collection<Long> venueIds) {
@@ -746,7 +652,7 @@ public class CrowdReportService {
         for (Long venueId : venueIds) {
             Long count = badgeCountsCache.getIfPresent(venueId);
             if (count != null) {
-                if (count >= BADGE_MIN_REPORTERS) {
+                if (count >= CrowdPolicy.BADGE_MIN_VOTERS) {
                     badges.put(venueId, count + "人报过");
                 }
             } else {
@@ -754,12 +660,14 @@ public class CrowdReportService {
             }
         }
         if (!misses.isEmpty()) {
-            LocalDateTime since = LocalDateTime.now().minusHours(CROWD_WINDOW_HOURS);
+            LocalDateTime since = LocalDateTime.now().minusHours(CrowdPolicy.TONIGHT_WINDOW_HOURS);
             for (Object[] row : crowdReportRepository.countDistinctUsersByVenueIdsSince(misses, since)) {
-                Long venueId = (Long) row[0];
+                // 原生 SQL 返回的数值列类型由驱动决定（BIGINT → Long，但不同驱动 / 版本可能是 BigInteger）：
+                // 一律经 Number 转，禁直接强转（2026-10-06 到访调度 ClassCastException 事故同款）
+                Long venueId = ((Number) row[0]).longValue();
                 Long count = ((Number) row[1]).longValue();
                 badgeCountsCache.put(venueId, count);
-                if (count >= BADGE_MIN_REPORTERS) {
+                if (count >= CrowdPolicy.BADGE_MIN_VOTERS) {
                     badges.put(venueId, count + "人报过");
                 }
             }
@@ -775,16 +683,17 @@ public class CrowdReportService {
      *   <li>**不显示档位词**：单条档位贴公共列表有商家自报营销/数据误伤风险，
      *       档位留详情页（同 {@link #badgeTextsByVenue} 决策）；本行只表达
      *       「此刻有人刚报过」的实时动态 + 上报者信任标识；</li>
-     *   <li>**不公开昵称**：标识由上报者可信度权重分档（{@link #badgeFor}，
-     *       服务端权威，资深/常客/普通 + 「舞友」后缀——列表无表头，需自解释）；</li>
+     *   <li>**不公开昵称**：标识由上报者可信度权重分档（服务端权威，资深/常客/普通 + 「舞友」后缀——
+     *       列表无表头，需自解释）；</li>
      *   <li>展示门槛：窗口内有上报即返回（「有人刚报过」是事实非结论，
-     *       与 ≥3 人角标语义解耦、互补：胶囊 = 多少人，本行 = 最新动态）。</li>
+     *       与 ≥3 人角标语义解耦、互补：胶囊 = 多少人，本行 = 最新动态）；</li>
+     *   <li>认领人的上报不参与（2026-10-07，SQL 层排除）。</li>
      * </ul>
      * 返回 venueId → 文案；无上报的店不在 map（前端 null 不渲染）。
      * <p>
      * 2026-08-30 性能优化：最新上报行经 {@link #latestReportsCache} 缓存（TTL 30s，
      * 只缓存 userId + createdAt——相对时间文案渲染时实时计算，缓存期不失真）；
-     * 上报写路径显式失效（{@link #invalidateVenueCrowdCaches}），列表接口省 1 次跨洲往返。
+     * 上报写路径显式失效（{@link #invalidateVenueCrowdCaches}）。
      */
     @Transactional(readOnly = true)
     public Map<Long, String> latestTextsByVenue(Collection<Long> venueIds) {
@@ -802,7 +711,7 @@ public class CrowdReportService {
             }
         }
         if (!misses.isEmpty()) {
-            LocalDateTime since = LocalDateTime.now().minusHours(CROWD_WINDOW_HOURS);
+            LocalDateTime since = LocalDateTime.now().minusHours(CrowdPolicy.TONIGHT_WINDOW_HOURS);
             for (VenueCrowdReport r : crowdReportRepository.findLatestByVenueIdsSince(misses, since)) {
                 // 同一店同一时刻多条（理论罕见，子查询等值匹配）→ 每店只取首条
                 if (latestByVenue.containsKey(r.getVenueId())) {
@@ -818,15 +727,18 @@ public class CrowdReportService {
         }
         Set<Long> userIds = latestByVenue.values().stream()
                 .map(LatestReport::userId).collect(Collectors.toSet());
-        Map<Long, Double> weights = trustWeights(userIds);
+        Map<Long, Double> weights = crowdTrustService.weights(userIds);
         Map<Long, String> texts = new HashMap<>();
         for (Map.Entry<Long, LatestReport> e : latestByVenue.entrySet()) {
             LatestReport entry = e.getValue();
             texts.put(e.getKey(),
-                    ageTextFor(entry.createdAt()) + " · " + badgeFor(entry.userId(), weights) + "舞友上报");
+                    ageTextFor(entry.createdAt()) + " · "
+                            + CrowdTrustService.badgeFor(entry.userId(), weights, null) + "舞友上报");
         }
         return texts;
     }
+
+    // ===== 管理端 =====
 
     /**
      * 管理端热度上报聚合（2026-08-29，GET /admin/crowd-reports 数据源，仅 ADMIN）：
@@ -850,12 +762,13 @@ public class CrowdReportService {
         Set<Long> userIds = rows.stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
         Map<Long, String> nicknames = userRepository.findByIdInAndDeletedFalse(userIds).stream()
                 .collect(Collectors.toMap(User::getId, u -> u.getNickname() != null ? u.getNickname() : "匿名"));
+        Map<Long, Double> weights = crowdTrustService.weights(userIds);
         List<AdminCrowdReportSummary> summaries = new ArrayList<>();
         for (Map.Entry<Long, List<VenueCrowdReport>> e : byVenue.entrySet()) {
             List<VenueCrowdReport> venueRows = e.getValue();
             summaries.add(buildAdminSummary(e.getKey(),
                     venueNames.getOrDefault(e.getKey(), "门店" + e.getKey()),
-                    venueRows, nicknames));
+                    venueRows, nicknames, weights));
         }
         summaries.sort(Comparator.comparingInt(AdminCrowdReportSummary::reportCount24h).reversed());
         return summaries;
@@ -877,8 +790,9 @@ public class CrowdReportService {
         if (rows.isEmpty()) {
             return new PageImpl<>(List.of(), result.getPageable(), result.getTotalElements());
         }
+        Long claimantId = claimantOf(venueId);
         Set<Long> userIds = rows.stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
-        Map<Long, Double> weights = trustWeights(userIds);
+        Map<Long, Double> weights = crowdTrustService.weights(userIds);
         Map<Long, String> nicknames = userRepository.findByIdInAndDeletedFalse(userIds).stream()
                 .collect(Collectors.toMap(User::getId,
                         u -> u.getNickname() != null && !u.getNickname().isBlank()
@@ -892,7 +806,7 @@ public class CrowdReportService {
                             r.getId(),
                             r.getUserId(),
                             nicknames.getOrDefault(r.getUserId(), "匿名"),
-                            badgeFor(r.getUserId(), weights),
+                            CrowdTrustService.badgeFor(r.getUserId(), weights, claimantId),
                             female.getLevel(), female.getDisplayName(), female.getAnchor(),
                             male != null ? male.getLevel() : null,
                             male != null ? male.getDisplayName() : null,
@@ -911,9 +825,8 @@ public class CrowdReportService {
      * 均带 deleted=false 过滤，删除后自动生效；该店角标与最新上报行缓存显式失效
      * （{@link #invalidateVenueCrowdCaches}，不依赖 TTL）。
      * <p>
-     * 删除后用户当日可重新上报：每日一记部分唯一索引谓词 WHERE deleted=false，
-     * 删除行不再命中约束 → 再次提交 upsert 生成新行（管理员删了错误记录，
-     * 用户可报回正确数据）。
+     * 删除后用户同一营业夜可重新上报：唯一键谓词 WHERE deleted=0，删除行不再命中约束
+     * → 再次 upsert 生成新行（管理员删了错误记录，用户可报回正确数据）。
      */
     @Transactional
     public void adminDelete(Long reportId) {
@@ -927,15 +840,15 @@ public class CrowdReportService {
 
     private AdminCrowdReportSummary buildAdminSummary(Long venueId, String venueName,
                                                       List<VenueCrowdReport> rows,
-                                                      Map<Long, String> nicknames) {
+                                                      Map<Long, String> nicknames,
+                                                      Map<Long, Double> weights) {
         // 档位分布（按条数，降序；male 用 CrowdMaleLevel 解析，勿复用 female 枚举）
         List<AdminCrowdReportSummary.LevelCount> femaleDist = femaleDistribution(rows);
         List<AdminCrowdReportSummary.LevelCount> maleDist = maleDistribution(rows);
-        boolean conflict = false;
-        if (!femaleDist.isEmpty()) {
-            long total = femaleDist.stream().mapToLong(AdminCrowdReportSummary.LevelCount::count).sum();
-            conflict = femaleDist.get(0).count() * 1.0 / total < CONFIRM_SHARE;
-        }
+        // 「说法不一」与详情页同一个判定函数（一人一票取最新 + 中位数 ±1 档）；运营视角看原始事实，
+        // 所以不剔除认领人（ownerId = null）。旧实现是「众数条数占比 < 0.6」——又一份独立口径。
+        boolean conflict = CrowdConsensus.isConflicting(CrowdConsensus.evaluate(CrowdConsensus.latestPerVoter(
+                votesOf(rows, null, weights, VenueCrowdReport::getFemaleLevel))));
         // 高频修改用户（modify_count ≥ 3，按 modifyCount 降序）
         List<AdminCrowdReportSummary.HighModifyUser> highModifiers = rows.stream()
                 .filter(r -> r.getModifyCount() != null && r.getModifyCount() >= HIGH_MODIFY_THRESHOLD)

@@ -1,7 +1,7 @@
 {
   "source": "xianbao360",
   "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-10-06",
+  "updated": "2026-10-07",
   "entries": [
     {
       "city": "西安市",
@@ -5995,11 +5995,11 @@
       "note": "2026-10-06 新表③候选（字母名）。⛔ 勿用末字补搜挂店：补搜「e」会命中 #1109 欧曼酒吧（CEASED）——2026-10-06 已修 qw_match.py（纯拉丁名不做末字补搜）"
     },
     {
-      "city": "苏州市",
+      "city": "常州市",
       "news_name": "浪集",
       "platform_name": null,
       "kind": "unmatched-new-store",
-      "note": "2026-10-06 新表③候选（常熟）；源站 10-05 同段写「老朱」无浪集，判当日新增点名"
+      "note": "2026-10-06 新表③候选（常熟）；源站 10-05 同段写「老朱」无浪集，判当日新增点名；【2026-10-07 更正】城市应为常州市（10-06 源站网页与 10-07 图片双证「常州* 绮梦 老朱 浪集」）——原记「常熟/苏州」有误"
     },
     {
       "city": "杭州市",
@@ -6021,6 +6021,38 @@
       "platform_name": null,
       "kind": "unmatched-new-store",
       "note": "2026-10-06 新表③候选；源文「嘉兴交谊舞*余新 舞魅」——「余新」疑为镇名（嘉兴余新镇）而非店名，keyword=余新 零命中"
+    },
+    {
+      "city": "芜湖市",
+      "news_name": "潮音",
+      "platform_name": "CY潮音CLUB",
+      "venue_id": 1493,
+      "kind": "alias",
+      "note": "2026-10-07 低置信长尾别名固化（平台名 = 舞讯名 + CY 前缀/CLUB 后缀；自 10-02 连续多轮 fuzzy-prefix CONTAINED）。已双写平台别名 + 本条目；重跑回读 via=alias-domain:潮音 / EXACT；同日 SUSPENDED→OPEN"
+    },
+    {
+      "city": "黄山市",
+      "news_name": "爱沙尼娅",
+      "platform_name": "爱沙尼亚酒馆",
+      "venue_id": 1497,
+      "kind": "alias",
+      "note": "2026-10-07 低置信长尾别名固化（娅/亚 一字之差 + 去「酒馆」后缀；自 10-02 连续多轮）。已双写平台别名 + 本条目；重跑回读 via=alias-domain:爱沙尼娅 / EXACT；同日 SUSPENDED→OPEN"
+    },
+    {
+      "city": "佛山市",
+      "news_name": "尚酷音乐",
+      "platform_name": "尚酷音乐吧",
+      "venue_id": 1677,
+      "kind": "alias",
+      "note": "2026-10-07 低置信长尾别名固化（去「吧」后缀；自 10-02 连续多轮）。已双写平台别名 + 本条目；重跑回读 via=alias-domain:尚酷音乐 / EXACT；同日 SUSPENDED→OPEN"
+    },
+    {
+      "city": "广州市",
+      "news_name": "金汇清",
+      "platform_name": "金汇清吧",
+      "venue_id": 1642,
+      "kind": "alias",
+      "note": "2026-10-07 低置信长尾别名固化（去「吧」后缀；自 10-02 连续多轮）。已双写平台别名 + 本条目；重跑回读 via=alias-domain:金汇清 / EXACT；同日 SUSPENDED→OPEN。⚠️ 同段「夜色音乐」因佛山有双候选（#1672 夜色音乐吧·禅城 / #1683 夜色音乐酒馆·高明）未固化，见 run-history 2026-10-07"
     }
   ],
   "removed_duplicates": [

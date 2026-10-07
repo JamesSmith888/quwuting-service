@@ -136,9 +136,7 @@ class VenueHeatServiceTest {
         when(tagInteractionRepository.aggregateScoresByVenueSinceGroupByTag(anyLong(), any(), any()))
                 .thenReturn(List.of(
                         new Object[]{"服务", 4.0, 5},
-                        new Object[]{"环境", 4.0, 5},
-                        new Object[]{"音响效果", 4.0, 5},
-                        new Object[]{"性价比", 4.0, 5}));
+                        new Object[]{"环境", 4.0, 5}));
 
         VenueHeatResponse resp = heatService.getHeat(1L);
 
@@ -155,14 +153,34 @@ class VenueHeatServiceTest {
         when(tagInteractionRepository.aggregateScoresByVenueSinceGroupByTag(anyLong(), any(), any()))
                 .thenReturn(List.of(
                         new Object[]{"服务", 8.0, 5},
-                        new Object[]{"环境", 8.0, 5},
-                        new Object[]{"音响效果", 8.0, 5},
-                        new Object[]{"性价比", 8.0, 5}));
+                        new Object[]{"环境", 8.0, 5}));
 
         VenueHeatResponse resp = heatService.getHeat(1L);
 
         assertEquals(40L, resp.heatScore(), "满意度 8 分应加 40 分（(8-6)×20）");
         assertTrue(resp.formulaText().contains("2.0×20"), "公式应展示满意度正偏移项");
+    }
+
+    /**
+     * 已下线维度的历史评分行（2026-10-07 删除的「音响效果」「性价比」，以及更早的
+     * 「舞伴氛围」等"现场状况"维度）不参与满意度计算——否则旧行会把满意度拉偏。
+     */
+    @Test
+    void retiredDimensionsAreExcludedFromSatisfaction() {
+        stubZeroCounters();
+        when(counters.getRaters()).thenReturn(5L);
+        when(tagInteractionRepository.aggregateScoresByVenueSinceGroupByTag(anyLong(), any(), any()))
+                .thenReturn(List.of(
+                        new Object[]{"服务", 8.0, 5},
+                        new Object[]{"环境", 8.0, 5},
+                        new Object[]{"音响效果", 1.0, 5},
+                        new Object[]{"性价比", 1.0, 5},
+                        new Object[]{"舞伴氛围", 1.0, 5}));
+
+        VenueHeatResponse resp = heatService.getHeat(1L);
+
+        assertEquals(40L, resp.heatScore(), "仅服务/环境参与计算（8 分 → +40），已下线维度须被isValid 过滤");
+        assertTrue(resp.formulaText().contains("2.0×20"), "满意度偏移应按 8 分计算而非被旧行拉低");
     }
 
     @Test

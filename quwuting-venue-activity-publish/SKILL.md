@@ -86,6 +86,16 @@ bash scripts/sync-skills.sh --check  # 只读检查差异（退出码 1 = 有差
 
 内层生效窗口 = 纯数据（不设枚举）：`weekdays`（可空/空 = 每天）× `windows`（可空/空 = 全时段）。
 
+⭐ **「每天/天天」= 常态票务，不是单日促销**（2026-10-07 南通寻梦缘 id=2 复活实战）。
+群消息里的「每天正常营业！13:30前门票1元」是**门店长期票务口径**，通知日期每天在变、
+条件不变 ⇒ `outerType=ALWAYS` + `weekdays=[]` + `windows=[营业开始-截止时刻]`，
+⛔ 不要因为"今天是 10/7 收到的"就写成 `DATE_RANGE(10/07)`——那会让活动 30s 后自动下线，
+而门店明天还在卖 1 元票。同时 ⛔ **正文里不写日期**（有效期只由结构化字段表达）。
+
+**「x 点前 xx 价」的 `windows` 起止怎么定**（同一实战）：`open` 填**门店开门时间**
+（`businessHours[0].open`），`close` 填优惠截止时刻。⛔ 不要从 `00:00` 起填（会与门店
+档案营业时间同屏冲突）；过点后用户端自动转 `ENDED_TODAY`，恰好是想要的表达。
+
 #### `windows` 只管「此刻能否参与」，不证明「这次到访是否达标」（2026-10-01 富都汇实战）
 
 `ActivityStateResolver` 只拿**当前一个时刻**调用 `ActivityWindow.contains(now)`，多条窗口之间是
@@ -122,6 +132,23 @@ bash scripts/sync-skills.sh --check  # 只读检查差异（退出码 1 = 有差
 # 中文参数必须 URL 编码，否则 400
 curl -sS -G "https://api.starseek.online/venues" \
   --data-urlencode "keyword=寻梦缘" --data-urlencode "size=50" --data-urlencode "sort=newest"
+```
+
+⭐ **最短路径（2026-10-07 实测固化）**：列表接口的分页字段是 **`data.content`**
+（⛔ 不是 `items` / `list` —— 写错会静默得到 0 条，误判「查无此店」）。
+且**每条候选已带 `description` / `tickets` / `businessHours` / `viewCount` / `status` /
+`matchedHint`** ⇒ **一次请求就能完成全部判据比对**，不必逐个 `GET /venues/{id}`
+（后者 `data.venue` 多包一层，是另一处易错点）。
+
+```bash
+curl -sS -G "https://api.starseek.online/venues" \
+  --data-urlencode "keyword=寻梦缘" --data-urlencode "size=50" --data-urlencode "sort=newest" \
+| python3 -c "
+import json,sys
+for v in json.load(sys.stdin)['data']['content']:
+    print(v['id'], v['name'], v['city'], v['status'], v['viewCount'],
+          repr(v.get('address'))[:60], repr(v.get('tickets'))[:80], v.get('matchedHint'))
+"
 ```
 
 **判据（按证据强度从高到低）**：

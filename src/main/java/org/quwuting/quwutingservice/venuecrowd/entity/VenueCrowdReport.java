@@ -15,9 +15,9 @@ import java.time.LocalDate;
  * 去中文定性词为 8 档——本文件字段注释与构造注释随之更新，勿回退为 1-4/1-3 口径）。
  * <p>
  * 双维实时众包信号：{@code femaleLevel}（1-8，主信号）+ {@code maleLevel}
- * （1-8，次信号，可空；细粒度档位同女，0-20/约30/…/约300+）。每日一记（每人每店
- * 每天一票）——唯一约束经 V59 部分唯一索引（WHERE deleted=false）保证，应用层
- * MySQL ON DUPLICATE KEY 幂等 upsert。
+ * （1-8，次信号，可空；细粒度档位同女，0-20/约30/…/约300+）。<b>每营业夜一记</b>（每人每店每个营业日一票，
+ * 2026-10-07 V41 起由 business_date 生成列部分唯一索引保证；此前为自然日 report_date）——
+ * 应用层 MySQL ON DUPLICATE KEY 幂等 upsert。
  * <p>
  * 与 {@link org.quwuting.quwutingservice.venuestatusreport.entity.VenueStatusReport}
  * 的边界：status report = 突发事件（暂停/恢复/临检，2 天公示期，管理端处置）；
@@ -50,9 +50,21 @@ public class VenueCrowdReport extends BaseEntity {
     @Column
     private Integer maleLevel;
 
-    /** 上报归属自然日（每日一记键的一部分；凌晨营业时段跨夜仍按自然日归属） */
+    /**
+     * 上报归属<b>自然日</b>（首次上报当天）。⚠️ 不再是唯一键的一部分（2026-10-07 V41）：
+     * 它是行为统计口径的「日列」（UserStatsSql / UserBehaviorSql / UserBehaviorEvent 把它当作
+     * 用户当天有过该动作的自然日），与其它事件表同坐标系，<b>禁改成营业日</b>。
+     */
     @Column(nullable = false)
     private LocalDate reportDate;
+
+    /**
+     * 上报归属<b>营业日</b>（05:00 分界，{@link org.quwuting.quwutingservice.venuecrowd.stat.BusinessDay}）。
+     * 「一人一夜一票」的唯一键 = (venue_id, user_id, business_date)——V41 生成列部分唯一索引
+     * （WHERE deleted=0）。23:50 与次日 00:10 是同一夜，只能投一票（改报 = UPDATE 原行）。
+     */
+    @Column(nullable = false)
+    private LocalDate businessDate;
 
     /** 同日修改次数（审计：管理端可见「谁在同一天反复改」） */
     @Column(nullable = false)

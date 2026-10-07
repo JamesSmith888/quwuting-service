@@ -18,7 +18,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>搜索解析与展示<b>互为逆运算</b>：列表展示 {@code U#00472}，用户照着搜必须命中
  *       同一个 id（含大小写、有无 #、前导零三种写法）；</li>
  *   <li><b>纯数字不当代号</b>：否则「搜昵称 123」会变成「找 id=123 的用户」，
- *       把昵称搜索静默劫持；</li>
+ *       把昵称搜索静默劫持；纯数字另走 {@code parseBareId}（2026-10-07，运营按库里 user_id 查人），
+ *       但 Service 层只把它当<b>候选</b>——未命中回落昵称模糊；</li>
  *   <li>默认昵称判定与注册写入同值：判定漏了一种（比如空白串），
  *       默认态用户就会被当成有自定义昵称，列表主标题显示成「微信用户」——
  *       正是本次要消除的那一片无辨认力行。</li>
@@ -47,12 +48,39 @@ class AdminUserCodeTest {
 
     @Test
     void parseRejectsNonCodeKeywordsSoNicknameSearchStillWorks() {
-        assertNull(UserCode.parse("472"), "纯数字必须留给昵称模糊搜索，不能被劫持成 id 查找");
+        assertNull(UserCode.parse("472"), "纯数字不是代号：代号（强信号）不回落，纯数字走 parseBareId（弱信号、未命中回落昵称）");
         assertNull(UserCode.parse("微信用户"));
         assertNull(UserCode.parse("U#"));
         assertNull(UserCode.parse(""));
         assertNull(UserCode.parse(null));
         assertNull(UserCode.parse("X#472"));
+    }
+
+    @Test
+    void parseBareIdAcceptsOnlyWholeStringDigits() {
+        assertEquals(472L, UserCode.parseBareId("472"));
+        assertEquals(472L, UserCode.parseBareId("00472"), "前导零与代号同样不敏感");
+        assertEquals(472L, UserCode.parseBareId("  472  "));
+        assertEquals(1234567L, UserCode.parseBareId("1234567"));
+        // 整串必须是数字：昵称里夹数字、代号写法、带符号都不是裸 id
+        assertNull(UserCode.parseBareId("老张123"));
+        assertNull(UserCode.parseBareId("U#472"), "代号走 parse，不重复落到裸 id");
+        assertNull(UserCode.parseBareId("12 34"));
+        assertNull(UserCode.parseBareId("-5"));
+        assertNull(UserCode.parseBareId("4.5"));
+        assertNull(UserCode.parseBareId("0"), "id 从 1 起，0 不是合法 id");
+        assertNull(UserCode.parseBareId("0000"));
+        assertNull(UserCode.parseBareId("1234567890123456789"), "超过 18 位挡住，避免 Long 溢出");
+        assertNull(UserCode.parseBareId(""));
+        assertNull(UserCode.parseBareId(null));
+    }
+
+    @Test
+    void codeAndBareIdNeverBothClaimTheSameKeyword() {
+        // 两个解析器互斥：同一 keyword 不会既是代号又是裸 id，Service 的分支顺序才无歧义
+        for (String kw : new String[]{"U#00472", "u472", "472", "00472", "老张", "U#", ""}) {
+            assertFalse(UserCode.parse(kw) != null && UserCode.parseBareId(kw) != null, kw);
+        }
     }
 
     @Test

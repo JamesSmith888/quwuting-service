@@ -83,6 +83,38 @@ public final class UserCode {
         }
     }
 
+    /**
+     * 裸数据库 id 搜索正则（2026-10-07）：整串是纯数字（前导零可选）。
+     * 与 {@link #PATTERN} <b>分开声明、分开解析</b>：代号是「明确要找这个人」的强信号，
+     * 裸数字是弱信号（可能是昵称里的数字），二者命中后的回落策略不同——见 {@link #parseBareId}。
+     */
+    private static final Pattern BARE_ID_PATTERN = Pattern.compile("^0*(\\d{1,18})$");
+
+    /**
+     * 解析裸数据库 id keyword（{@code 472} / {@code 00472} → 472）；非纯数字返回 null。
+     * <p>
+     * <b>与 {@link #parse} 的刻意区别</b>：{@code parse} 不认纯数字（否则「搜昵称 123」被静默劫持成
+     * 「找 id=123」）；运营拿着数据库 id（工单 / 库里查到的 user_id）来搜又是真实需求。
+     * 两者的调和在调用方：裸 id <b>只是候选</b>——命中存活用户则精确返回，<b>未命中回落昵称模糊搜索</b>
+     * （见 {@code AdminUserService#list}），所以纯数字昵称不会被吞成空结果。
+     * 返回 null 的还包括 id 为 0。
+     */
+    public static Long parseBareId(String keyword) {
+        if (keyword == null) {
+            return null;
+        }
+        Matcher matcher = BARE_ID_PATTERN.matcher(keyword.trim());
+        if (!matcher.matches()) {
+            return null;
+        }
+        try {
+            long id = Long.parseLong(matcher.group(1));
+            return id > 0 ? id : null;
+        } catch (NumberFormatException e) {
+            return null; // >18 位已被正则挡住，这里是双保险
+        }
+    }
+
     /** 昵称是否仍是注册默认值（空 / 空白 / 等于 {@link #DEFAULT_NICKNAME}） */
     public static boolean isDefaultNickname(String nickname) {
         return nickname == null || nickname.isBlank() || DEFAULT_NICKNAME.equals(nickname.trim());

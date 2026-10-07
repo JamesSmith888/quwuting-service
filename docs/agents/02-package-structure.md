@@ -111,7 +111,7 @@ taginteraction/ ← 评分交互模块（维度评分；原"标签点赞"已被 
   dto/
     request/    ← ScoreTagRequest
     response/   ← TagStatsResponse / DimensionScoreStats / WindowScore
-  RatingDimensions ← 系统评分维度常量（服务、环境、音响效果、性价比——原"现场状况"三维度已被 Reaction 替代）
+  RatingDimensions ← 系统评分维度常量（服务、环境——原"现场状况"三维度已被 Reaction 替代，2026-10-07 再删「音响效果」「性价比」）
 
 venuereaction/  ← Reaction 快速反馈模块（Telegram Reaction 式表情反馈，替代原"标签点赞"，详见「Reaction 快速反馈系统」章节）
   controller/   ← VenueReactionController（GET /venues/{id}/reactions/stats, POST /venues/{id}/reactions/{code}）
