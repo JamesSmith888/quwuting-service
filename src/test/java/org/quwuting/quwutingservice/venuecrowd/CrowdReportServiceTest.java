@@ -218,8 +218,7 @@ class CrowdReportServiceTest {
         CrowdSummary.CrowdReportRow row = summary.rows().get(0);
         assertEquals("约100", row.femaleLevelName());
         assertEquals("约50", row.maleLevelName());
-        assertTrue(row.likeExpiresInSec() > 5 * 3600, "还能赞的剩余秒数 ≈ 窗口 6h − 已过 10 分钟");
-        assertTrue(row.likeExpiresInSec() <= 6 * 3600 - 10 * 60);
+        assertFalse(row.expired(), "10 分钟前的上报仍在 6h 窗口内");
     }
 
     @Test
@@ -351,8 +350,6 @@ class CrowdReportServiceTest {
         assertEquals(3, summary.rows().size(), "窗口外也要展示最近 3 条（本轮根因：这里原本是空表）");
         assertTrue(summary.rows().stream().allMatch(CrowdSummary.CrowdReportRow::expired),
                 "全部出 6h 窗口 ⇒ 每行都要标 expired，前端据此置灰 +「已过期」");
-        summary.rows().forEach(row ->
-                assertEquals(0, row.likeExpiresInSec(), "过期行不可赞（点赞窗口与 expired 同一常量）"));
         // 统计侧：一步不退
         assertFalse(summary.hasData(), "过期票绝不能让「今晚有数据」为真");
         assertNull(summary.female(), "过期票绝不能进中位数");
@@ -552,14 +549,5 @@ class CrowdReportServiceTest {
 
         assertEquals("3人报过", badges.get(5L));
         assertNull(badges.get(6L), "不足 3 人不上列表");
-    }
-
-    @Test
-    void likeExpiresInSecIsTheWindowMinusAge() {
-        LocalDateTime now = LocalDateTime.of(2026, 10, 7, 23, 0);
-        assertEquals(6 * 3600 - 600, CrowdReportService.likeExpiresInSec(now.minusMinutes(10), now));
-        assertEquals(0, CrowdReportService.likeExpiresInSec(now.minusHours(6), now), "恰好 6h ⇒ 已到期");
-        assertEquals(0, CrowdReportService.likeExpiresInSec(now.minusHours(7), now));
-        assertEquals(0, CrowdReportService.likeExpiresInSec(null, now));
     }
 }

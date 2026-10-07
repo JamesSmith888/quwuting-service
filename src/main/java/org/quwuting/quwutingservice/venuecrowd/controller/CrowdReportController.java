@@ -82,7 +82,8 @@ public class CrowdReportController {
      * POST /venues/{venueId}/crowd-reports/{reportId}/like
      * <p>
      * 每人每行至多 1 票（全量唯一 (liker_id, report_id)，再点取消）；仅 6h 窗口内行
-     * 可赞（1019 行不存在/1019 归属不一致/1020 过窗）；首次赞且非自赞 → 触达上报者
+     * 可赞（1019 行不存在 / 1019 归属不一致；<b>无窗口限制</b>——2026-10-07 起过期上报同样可赞）；
+     * 首次赞且非自赞 → 触达上报者
      * （CROWD_REPORT_LIKED 站内信，2026-10-07 起未读合并为「收到 N 个赞」；同事务、取消再赞不重发）。
      * 响应 = 服务端权威当前态（likeCount/likedByMe），前端直接回写零拼接。赞数纯展示、永不进算法。
      */

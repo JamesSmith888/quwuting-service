@@ -554,20 +554,9 @@ public class CrowdReportService {
                             r.getId(),
                             likes.counts().getOrDefault(r.getId(), 0L).intValue(),
                             currentUserId != null && likes.liked().contains(r.getId()),
-                            likeExpiresInSec(r.getCreatedAt(), now),
                             r.getCreatedAt() != null && r.getCreatedAt().isBefore(windowStart));
                 })
                 .toList();
-    }
-
-    /** 还能被点赞的剩余秒数（&lt;=0 = 已过有效窗口；与点赞服务的窗口校验同一个常量） */
-    public static int likeExpiresInSec(LocalDateTime createdAt, LocalDateTime now) {
-        if (createdAt == null) {
-            return 0;
-        }
-        long left = Duration.ofHours(CrowdPolicy.TONIGHT_WINDOW_HOURS).getSeconds()
-                - Duration.between(createdAt, now).getSeconds();
-        return (int) Math.max(0, left);
     }
 
     /** 行级点赞聚合快照（详情页热度卡行「有用」按钮数据源；窗口/行数小，无缓存） */

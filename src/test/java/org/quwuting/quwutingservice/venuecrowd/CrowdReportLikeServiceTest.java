@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -264,12 +265,38 @@ class CrowdReportLikeServiceTest {
                 anyLong(), any());
     }
 
+    /**
+     * 2026-10-07 用户改判：<b>过期上报永远可以点赞</b>（原「仅 6h 窗口内可赞」+ 业务码 1020 已取消）。
+     *
+     * <p>为什么这不是刷分口子：赞数<b>永不进算法</b>（可信度加权 / 置信度 / 热度公式 / 列表角标），
+     * 一人一行的唯一键已封死多刷；原窗口锁拦的是一个不存在的威胁。而明细表已改为展示
+     * 最近 3 条<b>含过期行</b>——过期行照常可读可赞，「过期不可赞」的前提本身不成立。
+     */
     @Test
-    void likingAnExpiredReportIsRefusedWithBusinessCode1020() {
+    void likingAnExpiredReportIsAllowed() {
         UserContext.set(20L, UserRole.USER);
         when(crowdReportRepository.findById(REPORT_ID)).thenReturn(Optional.of(reportCreatedMinutesAgo(60 * 7)));
-        BusinessException e = assertThrows(BusinessException.class, () -> service.like(VENUE_ID, REPORT_ID));
-        assertEquals(1020, e.getCode());
-        verify(likeRepository, never()).like(anyLong(), anyLong(), any(), any());
+        when(likeRepository.like(eq(REPORT_ID), eq(20L), any(), any())).thenReturn(1);
+        when(likeRepository.countByReportIdAndDeletedFalse(REPORT_ID)).thenReturn(1L);
+
+        CrowdLikeResponse resp = service.like(VENUE_ID, REPORT_ID);
+
+        assertEquals(1, resp.likeCount());
+        assertTrue(resp.likedByMe());
+        verify(likeRepository).like(eq(REPORT_ID), eq(20L), any(), any());
+    }
+
+    /** 取消赞与赞对称：过期行同样可取消（否则会出现「赞得了却取消不了」的悬空态）。 */
+    @Test
+    void unlikingAnExpiredReportIsAllowed() {
+        UserContext.set(20L, UserRole.USER);
+        when(crowdReportRepository.findById(REPORT_ID)).thenReturn(Optional.of(reportCreatedMinutesAgo(60 * 7)));
+        when(likeRepository.countByReportIdAndDeletedFalse(REPORT_ID)).thenReturn(0L);
+
+        CrowdLikeResponse resp = service.unlike(VENUE_ID, REPORT_ID);
+
+        assertEquals(0, resp.likeCount());
+        assertFalse(resp.likedByMe());
+        verify(likeRepository).unlike(eq(REPORT_ID), eq(20L), any());
     }
 }

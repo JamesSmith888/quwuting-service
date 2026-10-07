@@ -16,7 +16,6 @@ import org.quwuting.quwutingservice.venuecrowd.entity.VenueCrowdReport;
 import org.quwuting.quwutingservice.venuecrowd.entity.VenueCrowdReportLike;
 import org.quwuting.quwutingservice.venuecrowd.repository.VenueCrowdReportLikeRepository;
 import org.quwuting.quwutingservice.venuecrowd.repository.VenueCrowdReportRepository;
-import org.quwuting.quwutingservice.venuecrowd.stat.CrowdPolicy;
 import org.quwuting.quwutingservice.venuecrowd.stat.CrowdTimeText;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -47,8 +46,9 @@ import java.util.stream.Collectors;
  *   <li><b>被赞通知去重 + 合并</b>：仅当 toggle 返回受影响行数 == 1（该对<b>首次赞</b>）且
  *       <b>非自赞</b>时触达上报者——2026-10-07 起<b>同一条上报的未读被赞通知合并成一条</b>
  *       （「收到 N 个赞」），不再每位新赞者一行；判定全由 DB 派生，无额外标志列；</li>
- *   <li><b>窗口锁定</b>：like/unlike 仅允许 6h 窗口内行（业务码 1020）——过期信息不可用即不可赞，
- *       封死「赞远古行」刷法；</li>
+ *   <li><b>无窗口锁</b>（2026-10-07 用户改判）：原「like/unlike 仅允许 6h 窗口内行（1020）」已取消
+ *       ——过期上报<b>永远可以点赞</b>。理由见 {@code requireLikeableReport} 注释；
+ *       1020 业务码已随之退役（前端不再有「过窗不可赞」分支）；</li>
  *   <li><b>谁觉得有用（分层披露）</b>：{@link #likers}——上报者本人 / 管理员看完整名单，
  *       其他人只看分层汇总（推翻 2026-09-03「赞者匿名」，理由见 {@link CrowdLikersResponse}）；</li>
  *   <li>🚫 <b>红线</b>：赞数永不进算法（可信度加权/置信度/列表角标/热度公式）——
@@ -102,8 +102,9 @@ public class CrowdReportLikeService {
     }
 
     /**
-     * 取消赞（幂等）：未赞过 → 返回当前态不报错。窗口外行同 like 一律拒绝（1020，
-     * 与赞对称——过期后本无展示/按钮场景，无需放行「撤销过期赞」的旁路）。
+     * 取消赞（幂等）：未赞过 → 返回当前态不报错。
+     * 与赞对称——同一条上报永远可赞可取消（2026-10-07 取消窗口锁后两端窗口一致，
+     * 不存在「赞得了但取消不了」的悬空态）。
      */
     @Transactional
     public CrowdLikeResponse unlike(Long venueId, Long reportId) {
@@ -227,15 +228,17 @@ public class CrowdReportLikeService {
         return report;
     }
 
-    /** 点赞前校验：行存在未删（1019）、归属门店一致（防串店，1019）、6h 窗口内（1020） */
+    /** 点赞前校验：行存在未删（1019）、归属门店一致（防串店，1019） */
     private VenueCrowdReport requireLikeableReport(Long venueId, Long reportId) {
-        VenueCrowdReport report = requireReport(venueId, reportId);
-        LocalDateTime since = LocalDateTime.now().minusHours(CrowdPolicy.TONIGHT_WINDOW_HOURS);
-        if (report.getCreatedAt() == null || report.getCreatedAt().isBefore(since)) {
-            throw new BusinessException(1020, "该条热度已过 " + CrowdPolicy.TONIGHT_WINDOW_HOURS
-                    + " 小时有效窗口，暂不可点赞");
-        }
-        return report;
+        // 2026-10-07 用户拍板：**取消点赞窗口锁**——过期上报也永远可以点赞。
+        // 原口径是「like/unlike 仅允许 6h 窗口内行（1020）」，理由是「过期信息不可用即不可赞，
+        // 封死赞远古行刷法」。该理由在本轮被两件事同时推翻：
+        //   ① 明细表已改为展示最近 3 条**含过期行**（用户明确要求「不管它是否过期」），
+        //      既然过期行在详情页照常上屏、逐条可读，「不可用」的判断就不成立了；
+        //   ② 刷法风险本来就不由窗口承担——赞数**永不进算法**（见类注释红线），
+        //      一人一行的唯一键已经封死了多刷；窗口锁是在拦一个不存在的威胁。
+        // 保留：行存在未删 + 归属门店一致（防串店，1019）——那是数据完整性，与窗口无关。
+        return requireReport(venueId, reportId);
     }
 
     /** 单条赞数（like/unlike 响应权威回读） */
