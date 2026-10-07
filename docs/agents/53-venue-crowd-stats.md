@@ -47,10 +47,34 @@
 
 | 接口 | 说明 |
 |---|---|
-| `GET /venues/{id}/crowd-reports` | 摘要新增 `headlineText`；`female/male.level` 改为中位档，`count` = 该维度独立投票人数，`share` = ±1 档一致占比；明细行新增 `likeExpiresInSec`（剩余可赞秒数，≤0 = 已过窗口）；认领人行 `badgeText = 店家` |
+| `GET /venues/{id}/crowd-reports` | 摘要新增 `headlineText`；`female/male.level` 改为中位档，`count` = 该维度独立投票人数，`share` = ±1 档一致占比；明细行新增 `likeExpiresInSec`（剩余可赞秒数，≤0 = 已过窗口）与 **`expired`（是否已出 6h 窗口，2026-10-07）**；认领人行 `badgeText = 店家`。**明细行不再只含窗口内记录** = 最近 `CrowdPolicy.DETAIL_ROWS_LIMIT`（3）条、含过期（见 §4.1） |
 | `GET /venues/{id}/crowd-reports/baseline` | 常态人气：前 7 / 30 个**营业日**（不含今晚所在营业日）；每窗口按 `SampleTier` 分档出文案（NONE 邀请 / SPARSE 原值 / LIMITED 中位+最低~最高 / SOLID 中位+四分位）；`deviationText` 仅在今晚 ≥2 人、常态 ≥3 人、偏差 ≥2 档（或「差不多」）时下发；`noteText` 口径小字 |
 | `GET /venues/{id}/crowd-reports/{reportId}/likers` | 谁觉得有用：上报者本人 / ADMIN ⇒ `FULL`（完整名单，最近点赞在前）；其他人（含未登录）⇒ `SUMMARY`（人数 + 分层汇总，名单恒空）。不受 6h 窗口限制；行不存在 / 已删 / 串店 ⇒ 1019 |
 | `POST …/like` / `…/unlike` | 行为不变；**自赞放开**（2026-10-07 用户再次确认），赞数永不进算法；被赞通知改为未读合并 |
+
+## 4.1 明细展示 vs 统计口径的分离（2026-10-07 用户拍板）
+
+用户诉求：「门店详情页今晚热度必须展示最近的三条上报记录，不管它是否过期」。根因：6h 窗口一过，
+整张卡退化成「暂无舞友上报」——清晨 / 次日白天查「昨晚怎么样」时恰恰什么都看不到。
+
+`summary()` 因此**刻意分成两路取数**，这是本轮最关键的结构约束：
+
+| | 数据源 | 消费者 |
+|---|---|---|
+| **统计** | `tonight()` — 6h 窗口 | `hasData` / `female` / `male` / `tier` / `mainText` / `ageText` / `headlineText` |
+| **展示** | `recentDetailRows()` — 最近 `DETAIL_ROWS_LIMIT`(3) 条，不过滤窗口 | `rows`（明细表，每行带 `expired`） |
+
+⛔ **让过期票进统计 = 用昨晚的数据冒充「今晚人气」**。`hasData=false` 时 `female` 恒 null、
+`tier=EMPTY`、`headline` 走回看口径——由
+`CrowdReportServiceTest#expiredRowsAreStillShownButNeverCountedIntoTheTonightStatistics` 逐字段钉住。
+
+- 条数常量 `DETAIL_ROWS_LIMIT` 声明在 `CrowdPolicy`（本类的「数值口径只在 CrowdPolicy」门禁
+  `CrowdDomainSingleSourceTest` fail-closed 强制），分页参数经 `PageRequest.of(0, DETAIL_ROWS_LIMIT)`
+  传入——禁内联字面量，由 `detailRowsArePagedWithThePolicyLimit` 用 ArgumentCaptor 钉住。
+- 复用 `history()` 的同一仓储查询（全量 createdAt 倒序分页），**不新增 SQL**：展示条数是上限裁剪，不是新口径。
+- 认领人行照常保留在明细里（如实标「店家」），只是不计入任何统计——与原口径一致。
+- 前端连带判据（`npm run check:crowd` A11 钉住）：表格渲染条件必须是 `crowdRows.length > 0`，
+  **不得用 `hasData`**（那是统计口径，窗口过期时为 false 会把明细表一起藏掉 = 本轮 bug 原样留着）。
 
 ## 5. 认领人（门店主）
 

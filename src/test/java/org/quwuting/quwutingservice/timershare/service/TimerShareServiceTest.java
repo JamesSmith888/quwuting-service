@@ -25,6 +25,7 @@ import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataIntegrityViolationException;
 
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -65,12 +66,14 @@ class TimerShareServiceTest {
     private VenueRepository venueRepository;
 
     private final long[] now = {T0};
+    /** 预热任务录制器（只记录不执行）：暖启动的执行语义（生成 / 失败静默 / 不重复外呼）在 TimerShareQrServiceTest */
+    private final List<Runnable> prewarmTasks = new ArrayList<>();
     private TimerShareService service;
     private TimerShareQrService qrService;
 
     @BeforeEach
     void setUp() {
-        qrService = new TimerShareQrService(wechatService, "wx-test-appid", "release");
+        qrService = new TimerShareQrService(wechatService, "wx-test-appid", "release", prewarmTasks::add);
         service = new TimerShareService(store, qrService, venueRepository, () -> now[0]);
     }
 
@@ -139,6 +142,7 @@ class TimerShareServiceTest {
                 new CreateTimerShareRequest("k", 600_000L, 540, true,
                         new RuleInput(List.of(new TierInput(4.0, 20.0, "weird"))), null, null)));
         verifyNoInteractions(store);
+        assertEquals(0, prewarmTasks.size(), "被拒的请求不得提交码图预热");
     }
 
     @Test
@@ -174,6 +178,7 @@ class TimerShareServiceTest {
         assertNull(anchors.getValue().pausedAtServerMs());
         assertEquals("{\"tiers\":[{\"durationMinutes\":4.0,\"price\":20.0}]}", ruleJson.getValue());
         assertTrue(TimerShareTokens.isWellFormed(token.getValue()), "交给 Store 的新 token 必须格式合法");
+        assertEquals(1, prewarmTasks.size(), "创建成功后应提交一次码图预热（2026-10-07 加载优化）");
     }
 
     @Test

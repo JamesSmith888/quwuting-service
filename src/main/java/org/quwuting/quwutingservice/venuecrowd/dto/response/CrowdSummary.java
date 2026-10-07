@@ -30,7 +30,10 @@ import java.util.List;
  *       ≥ REGULAR_WEIGHT 常客 / 普通，行内与昵称并列）；avatarUrl = 上报者头像
  *       （空则前端首字占位）；isMine = 是否本人（登录态回填，前端高亮 +「我」标记）；
  *       nickname = 完整昵称（空昵称兜底「匿名」）；male 未报时 maleLevelName 为 null；
- *       **仅含 6h 窗口内有效行**——历史/过期记录走 {@code CrowdHistoryRow} 历史页）。</li>
+ *       <b>2026-10-07 起为「最近 {@code CrowdPolicy#DETAIL_ROWS_LIMIT} 条，不管过没过期」</b>
+ *       （每行带 {@code expired} 标记，前端置灰 +「已过期」）——过期记录不再只走历史页；
+ *       但 {@code expired = true} 的行<b>绝不进统计</b>，本记录的 hasData/female/male/tier/
+ *       mainText/headlineText 全部仍只由 6h 窗口内的票决定。</li>
  *   <li>{@code rewardText}/{@code upgradedBadgeText}：<b>仅 POST 提交响应填充</b>的
  *       即时反馈（GET 恒 null）——rewardText = 本次提交新触发「确认后积分」的服务端
  *       权威文案（如「你的上报被 3 位舞友确认 · +3 积分已到账」）；upgradedBadgeText =
@@ -85,6 +88,11 @@ public record CrowdSummary(
      * 用户要求表格直接展示<b>头像 + 名称（超长省略）</b>；同日追加行级点赞
      * 「有用」——reportId 行主键 + likeCount 赞数 + likedByMe 我是否已赞
      * （登录态回填，前端渲染点亮态；未登录恒 false）。
+     * <p>
+     * <b>2026-10-07 用户拍板：不再只含 6h 窗口内有效行</b>，改为「最近
+     * {@code CrowdPolicy#DETAIL_ROWS_LIMIT} 条，<b>不管过没过期</b>」——窗口一过整卡退化成
+     * 空态，恰好是用户最想看的时候。每行带 {@code expired} 标记，前端据此派生「已过期」
+     * 标签 + 置灰；<b>过期行不参与任何统计</b>（{@code hasData}/mainText/tier/headline 仍只看窗口内）。
      */
     public record CrowdReportRow(
             Long userId,
@@ -112,7 +120,14 @@ public record CrowdSummary(
              * 前端据此把过期行的拇指置灰并在点击时直接提示，而不是点了才被服务端 1020 拒绝；
              * 下发「剩余秒数」而非「截止时刻」是为了不依赖客户端与服务端时钟一致。
              */
-            int likeExpiresInSec
+            int likeExpiresInSec,
+            /**
+             * 是否已出 6h 有效窗口（2026-10-07；true = 历史参考，前端置灰 +「已过期」）。
+             * 明细行不再只含窗口内记录，此标记是「过期数据不当成此刻」的如实告知——
+             * 与 {@code likeExpiresInSec <= 0} 同源同判（同一个窗口常量），但语义不同：
+             * 后者是「能不能赞」，这个是「能不能当现状读」。
+             */
+            boolean expired
     ) {
     }
 

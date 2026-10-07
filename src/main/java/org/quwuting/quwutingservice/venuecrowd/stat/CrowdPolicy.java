@@ -108,4 +108,19 @@ public final class CrowdPolicy {
 
     /** 列表角标「N人报过」的最小独立人数（公共面克制：&lt;3 人不上列表，防误伤与商家刷量）。 */
     public static final int BADGE_MIN_VOTERS = 3;
+
+    // ── 明细展示 ─────────────────────────────────────────────────────────────
+
+    /**
+     * 详情页「今晚热度」明细展示的最近记录条数（2026-10-07 用户拍板：<b>最近 3 条</b>）。
+     *
+     * <p><b>为什么过期记录也展示</b>：6h 窗口一过（清晨 / 次日白天查「昨晚怎么样」）
+     * 整张卡退化成「暂无舞友上报」——恰恰是用户最想看的时候什么都看不到。展示层放宽到
+     * 「最近 {@code DETAIL_ROWS_LIMIT} 条，不管过没过期」，每行自带 {@code expired} 标记由前端置灰，
+     * 如实告知「这不是此刻」。
+     * <p><b>边界（不可越）</b>：<b>只有展示放宽，统计口径一步不退</b>——{@code hasData} /
+     * {@code mainText} / {@code tier} / {@code headlineText} 仍只由 6h 窗口内的票决定
+     * （{@code CrowdConsensus}）。让过期票进统计 = 用昨晚的数据冒充「今晚人气」。
+     */
+    public static final int DETAIL_ROWS_LIMIT = 3;
 }

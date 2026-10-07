@@ -149,7 +149,8 @@ npm run check               # 聚合入口，**以 package.json 的 `check` 为�
                             # tokens / positioning / float-corner / detailparams / surface / protocol /
                             # tabbar-assets / tabbar-custom / bar-ruler / pattern-assets / list-selfheal /
                             # list-chrome / list-filters / block-rhythm / empty-state / reaction-empty /
-                            # z-stack / location / scrollview-flex / popover-width / fold-reveal /
+                            # z-stack / location / scrollview-flex / **search-capsule（2026-10-07 新增）** /
+                            # popover-width / fold-reveal /
                             # bottom-track / dance-timer / direction-vocab / round-vocab / venue-card /
                             # press-feedback / auth-session / first-paint-auth / first-frame / es-syntax /
                             # token-mirror / mirror / presence / encoding / page-enter
@@ -275,6 +276,21 @@ done
   状态进入**吸收态**（控件带是整页唯一导航入口 ⇒ 只能杀进程重进）；同日把「边沿事件驱动的
   状态必须配电平式自愈」从分页细则升格为通用规则（详见 §5 同名条与
   `docs/agents/07-list-page.md`「顶部控件带显隐的电平式自愈」）。
+
+- `check:search-capsule` = `scripts/check-search-capsule.py`（2026-10-07 新增）：**「搜索胶囊内
+  历史回显条」是同一个形态的第二个实例**（列表页「最近看过」足迹条 + 城市选择器「最近选择」条，
+  见 35 号 v6 / 06 号 v5），而**手抄的同形态必然漂移**——本仓已因「逐字同改」类约定长期漂移
+  吃过亏（43 号 §22，文档写「必须逐字同改」而没有机器断言 ⇒ 漂移几个月无人发现）。
+  五条：S1 实例在位且显隐绑**派生字段**（不在模板里写判据）/ S2 该信息在模板里**只许出现一次**
+  （加回独立区块 = 第二份真值）/ S3 派生字段的 `setData` 写入点**唯一**（⚠️ 必须扫每一次
+  `setData` 调用，塞进别的调用的**非首键**同样算第二个写入点——只匹配 `setData({ recentsVisible`
+  会漏，是本轮变异测试实测暴露的）/ S4 **最小同构集**（竖线 + `scroll-x` + 48rpx 命中区 +
+  **无悬空类名**：wxml 用到的类名在 wxss 必须有规则，否则改样式时类名漂移、元素静默失去样式）/
+  S5 胶囊内 chip 恒**翻白**（`--color-card-bg` + `--color-chip-line`；胶囊底是
+  `--color-bg-secondary`，同色会糊成一片）。8 条变异全拦截。
+  **推广判据**：凡「同一个形态的第二个实例」（同一套 chips 行 / 同一张卡 / 同一组按钮），
+  都要么抽共用组件，要么落一条断言两者同源的最小集——**注释不是约束**。
+  新增第三个实例须在该脚本 `INSTANCES` 登记（登记缺失是显式的，不是隐式的）。
 
 - `check:tabbar-assets` = `scripts/check-tabbar-assets.py`（2026-09-11 新增）：**原生 tabBar 的
   24 张图标必须真的有墨且颜色正确** + 三处镜像（`constants/tabbar.ts` / `app.json` /

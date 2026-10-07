@@ -29,6 +29,9 @@ import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportLikeService;
 import org.quwuting.quwutingservice.venuecrowd.service.CrowdReportService;
 import org.quwuting.quwutingservice.venuecrowd.service.CrowdTrustService;
 import org.quwuting.quwutingservice.venuecrowd.stat.BusinessDay;
+import org.quwuting.quwutingservice.venuecrowd.stat.CrowdPolicy;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
 
 import java.math.BigInteger;
 import java.time.LocalDate;
@@ -139,11 +142,30 @@ class CrowdReportServiceTest {
         return u;
     }
 
-    /** 读路径共用桩：权重默认 1.0；用户资料；点赞聚合为空。 */
+    /**
+     * 读路径共用桩：权重默认 1.0；用户资料；点赞聚合为空。
+     *
+     * <p><b>两条取数都要桩</b>（2026-10-07）：{@code summary()} 现在刻意分成两路——
+     * 统计走 6h 窗口（{@code findByVenueIdAndCreatedAtAfterAndDeletedFalse}），
+     * 展示走最近 N 条（{@code findByVenueIdAndDeletedFalseOrderByCreatedAtDesc}，
+     * 含过期）。只桩一条会让明细取数拿到 Mockito 默认的 null → NPE，
+     * 且这类失败会被误读成"环境问题"，故在此一次性说明白。
+     *
+     * @param detailRows 明细展示行（不传 = 与窗口行相同，即"窗口内数据足够"的常见场景）
+     */
     private void stubReadPath(Long claimedBy, List<VenueCrowdReport> windowRows, long... userIds) {
+        stubReadPath(claimedBy, windowRows, List.of(), userIds);
+    }
+
+    /** 读路径共用桩（显式区分统计窗口行与展示明细行 —— 窗口外仍有历史数据的场景）。 */
+    private void stubReadPath(Long claimedBy, List<VenueCrowdReport> windowRows,
+                              List<VenueCrowdReport> detailRows, long... userIds) {
         when(venueRepository.findById(VENUE_ID)).thenReturn(Optional.of(venue(claimedBy)));
         when(crowdReportRepository.findByVenueIdAndCreatedAtAfterAndDeletedFalse(eq(VENUE_ID), any()))
                 .thenReturn(windowRows);
+        when(crowdReportRepository.findByVenueIdAndDeletedFalseOrderByCreatedAtDesc(eq(VENUE_ID), any()))
+                .thenReturn(new PageImpl<>(detailRows.isEmpty() ? windowRows : detailRows,
+                        PageRequest.of(0, CrowdPolicy.DETAIL_ROWS_LIMIT), (long) detailRows.size()));
         Map<Long, Double> weights = new java.util.HashMap<>();
         List<User> users = new java.util.ArrayList<>();
         for (long id : userIds) {
@@ -272,28 +294,113 @@ class CrowdReportServiceTest {
         LocalDateTime now = LocalDateTime.now();
         // 上一个营业日内的时刻（营业日起点前 1 小时）
         LocalDateTime lastNight = BusinessDay.startOf(BusinessDay.of(now)).minusHours(1);
+        VenueCrowdReport lastNightReport = report(9L, 10L, 3, null, lastNight);
         when(venueRepository.findById(VENUE_ID)).thenReturn(Optional.of(venue(null)));
         when(crowdReportRepository.findByVenueIdAndCreatedAtAfterAndDeletedFalse(eq(VENUE_ID), any()))
                 .thenReturn(List.of())                                             // 今晚窗口
-                .thenReturn(List.of(report(9L, 10L, 3, null, lastNight)));         // 回看范围
+                .thenReturn(List.of(lastNightReport));                             // 回看范围
+        // 明细展示（2026-10-07）：窗口空但历史有行 ⇒ 表格照常展示这 1 条（已过期）
+        when(crowdReportRepository.findByVenueIdAndDeletedFalseOrderByCreatedAtDesc(eq(VENUE_ID), any()))
+                .thenReturn(new PageImpl<>(List.of(lastNightReport),
+                        PageRequest.of(0, CrowdPolicy.DETAIL_ROWS_LIMIT), 1L));
         when(crowdTrustService.weights(any())).thenReturn(Map.of(10L, 1.0));
+        when(crowdReportLikeService.likeCountsByReportIds(any())).thenReturn(Map.of());
+        when(crowdReportLikeService.likedReportIds(any(), any())).thenReturn(Set.of());
 
         CrowdSummary summary = crowdReportService.summary(VENUE_ID);
 
-        assertFalse(summary.hasData());
+        assertFalse(summary.hasData(), "窗口内无有效票 ⇒ 统计仍为空态（统计口径一步不退）");
         assertEquals("昨晚 " + String.format("%02d:%02d", lastNight.getHour(), lastNight.getMinute()) + " 约50 · 1人",
                 summary.headlineText());
         assertEquals(CrowdReportService.EMPTY_TEXT, summary.emptyText());
     }
 
     @Test
-    void noReportsAtAllMeansNoHeadline() {
+    void noReportsAtAllMeansNoHeadlineAndNoRows() {
         when(venueRepository.findById(VENUE_ID)).thenReturn(Optional.of(venue(null)));
         when(crowdReportRepository.findByVenueIdAndCreatedAtAfterAndDeletedFalse(eq(VENUE_ID), any()))
                 .thenReturn(List.of());
+        when(crowdReportRepository.findByVenueIdAndDeletedFalseOrderByCreatedAtDesc(eq(VENUE_ID), any()))
+                .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, CrowdPolicy.DETAIL_ROWS_LIMIT), 0L));
         CrowdSummary summary = crowdReportService.summary(VENUE_ID);
         assertNull(summary.headlineText());
         assertFalse(summary.hasData());
+        assertTrue(summary.rows().isEmpty(), "从来没人报过 ⇒ 明细确实为空（此时才轮到空态文案）");
+    }
+
+    // ── 明细展示 vs 统计口径的边界（2026-10-07 用户拍板「最近三条、不管过没过期」）────
+
+    /**
+     * 本轮的核心契约：<b>展示放宽、统计不放宽</b>。
+     * 场景 = 用户最在意的那种：清晨进门店页，昨晚有 3 条上报但全出 6h 窗口。
+     * 期望 = 明细表照常展示那 3 条（每行标 expired），而统计字段一律按窗口外处理
+     * （hasData=false / mainText=null / headline 走回看）——两条取数互不串味。
+     */
+    @Test
+    void expiredRowsAreStillShownButNeverCountedIntoTheTonightStatistics() {
+        LocalDateTime now = LocalDateTime.now();
+        // 三条都是昨晚（窗口外）的上报
+        VenueCrowdReport r1 = report(1L, 10L, 5, null, now.minusHours(9));
+        VenueCrowdReport r2 = report(2L, 11L, 6, null, now.minusHours(10));
+        VenueCrowdReport r3 = report(3L, 12L, 5, null, now.minusHours(11));
+        stubReadPath(null, List.of(), List.of(r1, r2, r3), 10L, 11L, 12L);
+
+        CrowdSummary summary = crowdReportService.summary(VENUE_ID);
+
+        // 展示侧：三条都在，且逐行标过期
+        assertEquals(3, summary.rows().size(), "窗口外也要展示最近 3 条（本轮根因：这里原本是空表）");
+        assertTrue(summary.rows().stream().allMatch(CrowdSummary.CrowdReportRow::expired),
+                "全部出 6h 窗口 ⇒ 每行都要标 expired，前端据此置灰 +「已过期」");
+        summary.rows().forEach(row ->
+                assertEquals(0, row.likeExpiresInSec(), "过期行不可赞（点赞窗口与 expired 同一常量）"));
+        // 统计侧：一步不退
+        assertFalse(summary.hasData(), "过期票绝不能让「今晚有数据」为真");
+        assertNull(summary.female(), "过期票绝不能进中位数");
+        assertNull(summary.mainText(), "过期票绝不能被写成「今晚人气」");
+        assertEquals("EMPTY", summary.tier(), "置信度分层同样按窗口外处理");
+    }
+
+    /** 新旧行为的关键差别：窗口内只有 1 条 + 历史另有 2 条 ⇒ 展示补齐到 3 条，但统计仍只看那 1 条。 */
+    @Test
+    void detailRowsTopUpToThreeWhileStatisticsStayWindowOnly() {
+        LocalDateTime now = LocalDateTime.now();
+        VenueCrowdReport live = report(1L, 10L, 5, null, now.minusMinutes(20));   // 窗口内
+        VenueCrowdReport old1 = report(2L, 11L, 8, null, now.minusHours(8));      // 窗口外
+        VenueCrowdReport old2 = report(3L, 12L, 8, null, now.minusHours(9));      // 窗口外
+        stubReadPath(null, List.of(live), List.of(live, old1, old2), 10L, 11L, 12L);
+
+        CrowdSummary summary = crowdReportService.summary(VENUE_ID);
+
+        assertEquals(3, summary.rows().size(), "最近 3 条全展示，不因为过期被裁掉");
+        assertEquals(1, summary.rows().stream().filter(r -> !r.expired()).count(),
+                "只有窗口内那 1 条未过期");
+        assertTrue(summary.hasData());
+        assertEquals(5, summary.female().level(), "中位数只由窗口内那 1 条决定（历史两档 8 不参与）");
+        assertEquals(1, summary.reporterCount());
+    }
+
+    /**
+     * 展示条数上限 = {@link CrowdPolicy#DETAIL_ROWS_LIMIT}（3，用户拍板），且**分页参数取自该常量**。
+     * 这里用 Mockito 捕获传给仓储的 PageRequest，而不是断言一个写死的字面量——
+     * 后者只在"恰好等于 3"时通过，改成 5 也会红，而真正该防的是
+     * 「有人另写一个 PageRequest.of(0, 5) 绕过口径常量」。
+     */
+    @Test
+    void detailRowsArePagedWithThePolicyLimit() {
+        ArgumentCaptor<PageRequest> captor = ArgumentCaptor.forClass(PageRequest.class);
+        // 只桩本测试真正走到的两路：统计窗口（空）+ 明细分页（空列表 ⇒ 不触发后续用户/点赞查询）
+        when(venueRepository.findById(VENUE_ID)).thenReturn(Optional.of(venue(null)));
+        when(crowdReportRepository.findByVenueIdAndCreatedAtAfterAndDeletedFalse(eq(VENUE_ID), any()))
+                .thenReturn(List.of());
+        when(crowdReportRepository.findByVenueIdAndDeletedFalseOrderByCreatedAtDesc(eq(VENUE_ID), any()))
+                .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, CrowdPolicy.DETAIL_ROWS_LIMIT), 0L));
+
+        crowdReportService.summary(VENUE_ID);
+
+        verify(crowdReportRepository).findByVenueIdAndDeletedFalseOrderByCreatedAtDesc(eq(VENUE_ID), captor.capture());
+        assertEquals(CrowdPolicy.DETAIL_ROWS_LIMIT, captor.getValue().getPageSize(),
+                "明细分页条数必须取自 CrowdPolicy.DETAIL_ROWS_LIMIT（禁内联字面量）");
+        assertEquals(3, CrowdPolicy.DETAIL_ROWS_LIMIT, "用户拍板：最近三条");
     }
 
     // ── 写：营业日 / 自然日分坐标 ───────────────────────────────────────────────
@@ -350,6 +457,11 @@ class CrowdReportServiceTest {
                 .thenReturn(List.of(user(10L, "舞友10"), user(11L, "舞友11"), user(12L, "舞友12")));
         when(crowdReportLikeService.likeCountsByReportIds(any())).thenReturn(Map.of());
         when(crowdReportLikeService.likedReportIds(any(), any())).thenReturn(Set.of());
+        // 明细展示取数（2026-10-07 summary() 的第二路）：submit() 末尾也会组摘要，
+        // 未桩会拿到 null Page → NPE（与统计窗口那路是两回事，故单独一条）
+        when(crowdReportRepository.findByVenueIdAndDeletedFalseOrderByCreatedAtDesc(eq(VENUE_ID), any()))
+                .thenReturn(new PageImpl<>(List.of(r10, r11, r12),
+                        PageRequest.of(0, CrowdPolicy.DETAIL_ROWS_LIMIT), 3L));
         when(pointsService.crowdConfirmReward()).thenReturn(3);
         when(pointsService.rewardCrowdConfirm(10L, 101L)).thenReturn(13L);
         when(pointsService.rewardCrowdConfirm(11L, 102L)).thenReturn(23L);
@@ -385,6 +497,9 @@ class CrowdReportServiceTest {
         when(userRepository.findByIdInAndDeletedFalse(any())).thenReturn(List.of());
         when(crowdReportLikeService.likeCountsByReportIds(any())).thenReturn(Map.of());
         when(crowdReportLikeService.likedReportIds(any(), any())).thenReturn(Set.of());
+        // 明细展示取数（2026-10-07 summary() 的第二路，与统计窗口那路分开）
+        when(crowdReportRepository.findByVenueIdAndDeletedFalseOrderByCreatedAtDesc(eq(VENUE_ID), any()))
+                .thenReturn(new PageImpl<>(rows, PageRequest.of(0, CrowdPolicy.DETAIL_ROWS_LIMIT), rows.size()));
         when(pointsService.crowdConfirmReward()).thenReturn(3);
         when(pointsService.rewardCrowdConfirm(anyLong(), anyLong())).thenReturn(1L);
 

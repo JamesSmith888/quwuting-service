@@ -122,6 +122,9 @@ public class TimerShareService {
         log.info("[timer-share] {} shareId={} host={} paused={} joinCount={} refreshCount={}",
                 upserted.created() ? "created" : "refreshed", share.getId(), hostUserId,
                 anchors.paused(), share.getJoinCount(), share.getRefreshCount());
+        // 预热码图（2026-10-07 加载优化）：响应发出后立即异步生成，与前端渲染窗口并行；
+        // 失败静默（图片请求会重试），绝不影响本响应的返回。
+        qrService.prewarm(share.getToken());
         return new TimerShareResponse(share.getToken(), qrPath(share.getToken()), share.getExpiresAtMs(),
                 clock.getAsLong(), share.getJoinCount(), share.getMaxJoins());
     }

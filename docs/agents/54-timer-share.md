@@ -134,6 +134,12 @@
   归「个性化码」一类（36 号文档的分层）：内容随 token 变、键空间无界、可再生无损失 ⇒ **内存缓存（Caffeine，15 分钟）**，
   不物化进 `qwt_wxacode_assets`。
 - 响应头 `ETag` + `Cache-Control: private, max-age=600`（与二维码有效期同量级，不是 24h：会话失效后不该再被缓存命中）。
+- **加载优化 = 预热（2026-10-07 晚）**：码图是「POST 返回后前端才发起」的第二跳，链路上唯一的外部依赖 = 微信外呼
+  （首次未命中缓存时 300ms~3s 量级）。`createOrRefresh` 在**响应发出后**异步预热码图（`TimerShareQrService#prewarm`，
+  单线程 daemon 队列；可注入提交口供单测直跑），把外呼提前到与前端渲染窗口并行。**不会重复外呼**：预热与随后的
+  图片请求命中同一 Caffeine 键，`cache.get(key, fn)` 对同一 key 的并发调用至多执行一次 `fn`。失败一律静默
+  （图片请求自然重试；连提交被拒也不波及主路径）。观测：`render` 打 `[timer-share] qr render: costMs= bytes=`
+  日志（命中 ≈0ms；未命中 ≈ 外呼耗时；**不打 token**——它是加入凭据，不落日志）。
 
 ## 八、无运营开关与上线顺序
 
@@ -198,8 +204,9 @@ SELECT COUNT(*) FROM qwt_timer_shares WHERE parent_share_id IS NOT NULL;
 ## 十一、验证（2026-10-07）
 
 - **单测**（Mockito / standalone MockMvc，不连库、不起 Spring 容器）`-Dtest='TimerShare*Test,SlidingWindowLimiterTest'`：
-  时间算术、规则白名单、token 格式、判定链、编排（开关 / 校验 / 限流 / 重试预算 / 响应装配）、线上 JSON 形态（含全局 `non_null`
-  下的显式 null 契约）、HTTP 层（路由与动词、鉴权先于副作用、`.jpg` 后缀、码图 404/304/缓存头）——共 89 条；
+  时间算术、规则白名单、token 格式、判定链、编排（开关 / 校验 / 限流 / 重试预算 / 响应装配 / **预热提交时机**）、线上 JSON 形态（含全局 `non_null`
+  下的显式 null 契约）、HTTP 层（路由与动词、鉴权先于副作用、`.jpg` 后缀、码图 404/304/缓存头）——共 89 条、0 失败
+  （2026-10-07 晚复跑；其中 `TimerShareQrServiceTest` 3 条为本轮新增：预热不重复外呼 / 失败静默不缓存 / 提交被拒不波及主路径）；
   全量 `-Dtest='!QuwutingServiceApplicationTests'` 0 失败（DB 用例按既有约定跳过）。
 - **真实 MySQL 8.0.41（本机 Homebrew `mysql@8.0`，独立数据目录 + 端口 33999，不碰生产）**——未入库的一次性脚手架，方法记在这里以便复现：
   1. 用 Flyway 跑**完整的 V1 → V42 链**（含另一条工作流的 V41）：42 条迁移全部成功，`flyway validate` 通过；
