@@ -25,7 +25,12 @@ import java.util.List;
  * 谁在用（记账用户/计时用户）、用多少（条目/场次）、怎么用（计时结算 vs 手动
  * 补记、分类、门店）。数据源只有 {@code qwt_spend_entries} 一张表：计时器的
  * 云端痕迹 = 结算自动入账（source=DANCE），账目表即使用事实表（无独立上报表，
- * 禁为统计新建第二套数据源）。口径单一权威 = {@link SpendStatsRepository}。
+ * 禁为统计新建第二套数据源）。口径单一权威 = {@link SpendStatsRepository} +
+ * {@link SpendStatsSql}。
+ * <p>
+ * <b>双口径（2026-10-07 根因修复）</b>：计数类含软删行（用户撤回数据撤不回使用
+ * 行为），金额类仅未删行（撤回的金额不算消费）——旧实现二者都过滤软删，导致
+ * 用户删一条账目、admin 使用盘子集体下跌。详见 {@link SpendStatsSql}。
  * <p>
  * 使用约束：<b>MySQL 8 方言查询</b>（生产 RDS MySQL），勿在 PG 环境执行。
  */
@@ -83,7 +88,8 @@ public class AdminSpendStatsService {
                         nz(summary.getDanceEntries()),
                         nz(summary.getManualEntries()),
                         z(summary.getExpenseTotal()),
-                        z(summary.getIncomeTotal())),
+                        z(summary.getIncomeTotal()),
+                        nz(summary.getRetractedEntries())),
                 daily,
                 byCategory,
                 byVenue);
@@ -111,7 +117,11 @@ public class AdminSpendStatsService {
 
     /**
      * 单用户计时/记账流水（用户详情「计时 · 账本」卡片）：summary = 全量历史
-     * 汇总，entries = 按业务时刻降序的最近流水（只回未软删）。
+     * 汇总（<b>计数字段含软删、金额字段仅未删</b>），entries = 按业务时刻降序的
+     * 最近流水（<b>只回未软删</b>——它回答"账上现在有什么"，不是"用过没有"）。
+     * <p>
+     * 两者口径不同<b>是设计意图</b>：因此 summary 的计数可能大于 entries 的条数，
+     * 差额即该用户已删除的条目——运营应读作"他记过又删了"，而非数据不一致。
      *
      * @param userId 用户 id（路由参数）
      * @param limit  流水条数（钳制 10~200；缺省 50）
@@ -137,7 +147,8 @@ public class AdminSpendStatsService {
                 nz(s.getDanceEntries()),
                 nz(s.getManualEntries()),
                 z(s.getExpenseTotal()),
-                z(s.getIncomeTotal()));
+                z(s.getIncomeTotal()),
+                nz(s.getRetractedEntries()));
         return new AdminSpendUserEntriesResponse(summary, entries);
     }
 

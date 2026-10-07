@@ -61,23 +61,141 @@
    `constants/spendWire.ts SPEND_AMOUNT_MAX` 由 `check:protocol` 与 `SpendEntryLimits.AMOUNT_MAX` 比对，
    记账键盘的整数位上限由它派生。
 
+## 管理端口径：使用事实 vs 账面金额（2026-10-07 根因修复）
+
+**症状**：用户删除一条记账记录后，admin「计时 · 账本使用」的记账用户数 / 场次 /
+活跃 / 分类 / 门店排行**集体下跌**。
+
+**数据其实没丢**：删除走软删（墓碑携带原始 ts/amount，`SpendService#upsert`
+只置 `deleted=true`），行连同金额、分类、门店、时刻**完整保留**在
+`qwt_spend_entries`；全库无任何硬删路径。丢的是**统计可见性**。
+
+**根因不是"少写了一个条件"**，而是把两种不相容的语义塞进了同一列：
+
+| 语义 | 回答的问题 | 是否含软删 | 常量 |
+|---|---|---|---|
+| **使用事实** | 有多少人**用过**、用��多少次 | ✅ 含 | `SpendStatsSql.FACT_ENTRY` |
+| **账面金额** | 他**当前账面**实际花了多少 | ❌ 仅未删 | `SpendStatsSql.LEDGER_ENTRY` |
+
+用户删除一条账目，撤回的是**数据**，撤不回**行为**（与既有约定同源：
+`UserBehaviorEvent#VENUE_FAVORITE` 明写"事实口径 = 收藏动作发生过，取消收藏
+不改写历史"）。但金额口径下"删除"恰恰是在表达"这笔不算"。旧实现让**计数也走
+账面口径**，于是用户的正常纠错动作被误读成使用行为的否定——且**完全静默**
+（SQL 正常执行、无异常、无告警，数字只是悄悄变小）。
+
+**结构性缺陷**：判定"算不算"的谓词以**文本抄写**散落在 7 条查询里，无声明、
+无命名、无门禁。这与 `UserStatsSql` 建立前「`USER_SCOPE` 被抄 5 份」**同构**
+（同一个病，第二处发作）。故本次不只改条件，而是把口径下沉为编译期常量。
+
+### 新增统计消费方的两条不变量
+
+1. **计数走事实口径**（`FACT_ENTRY`）——用户撤回数据不会让"用过没有"消失；
+2. **金额走账面口径**（`LEDGER_ENTRY`）——撤回的金额不进入消费总额。
+
+两列回答不同问题，**同屏出现"笔数 ≥ 金额覆盖面"是设计意图而非缺陷**；
+差异量由 `retractedEntries` 显式暴露在汇总里，避免明细条数与汇总对不上时
+无人能解释。
+
+### ⚠️ 两处易错（都是本次实际踩到的）
+
+- **分组聚合必须 `LEFT JOIN`，不可 `CROSS JOIN`**：分类 / 门店 / 用户列表的
+  账面侧派生表是**分组**的，若某分类/门店的条目**全部**被软删，该组在账面侧
+  没有行——`CROSS JOIN` 会让这一组**整个消失**，即本次要修的现象换个维度复发。
+  必须 `LEFT JOIN` + `COALESCE(金额, 0)`。汇总查询的两个派生表是**无 GROUP BY
+  的标量聚合**，恒各返回一行，`CROSS JOIN` 才安全。
+- **事实口径禁写成恒真条件**（`1 = 1`）：必须显式写 `deleted IN (0,1)`，
+  否则无法区分"有意包含软删"与"忘了写过滤"，门禁也失去反查能力。
+
+### ⚠️ 文本块拼接事故（2026-10-07，同日二次踩坑，**必读**）
+
+改造上述查询时踩到：**接口 500、前端「计时 · 账本」查不出数据，而编译 + 既有 4 项
+门禁 + tsc 全绿**。
+
+**根因**：Java **文本块会剥掉结束定界符前的那个换行**（incidental whitespace）。
+于是：
+
+```java
+// 源码看着完全正常
+WHERE e.user_id = :userId AND""" + " " + LEDGER_ENTRY + """
+ORDER BY e.ts DESC
+```
+
+拼接结果是 `... AND e.deleted = 0ORDER BY e.ts DESC` —— **token 粘连 → SQL 语法
+错误 → 接口 500**。同理 `AND e.deleted IN (0, 1)) c`（粘连到 `)`）。
+
+**为什么既有门禁没拦住**：所有门禁都断言「SQL 里**是否引用**了口径常量」，
+而 `@Query.value()` 在**编译期**已完成字符串拼接——没有任何一处校验
+**拼接之后**的文本长什么样。
+
+**结构性修复**：把换行**放进常量本身**（`FACT_ENTRY = "\n" + ... + "\n"`），
+让「拼接处必须补换行」从 N 个调用点的隐性责任，变成常量的一条**显式契约**。
+
+**新增门禁判据**（`SpendStatsScopeMirrorTest`，7 项）：
+- `scopeConstantsCarrySurroundingNewlines` —— 两常量必须自带首尾换行；
+- `noTokenGlueInAssembledSql` —— 断言运行期真实值无 token 粘连。
+
+> 已做变异自测：把常量改回不带换行 ⇒ 两项立刻红，其中
+> `noTokenGlueInAssembledSql` 直接点出 `sumUserSummary 拼接后出现 token 粘连`，
+> 即事故本体可被静态拦住。
+
+**推广判据（凡「文本块 + 常量」拼 SQL 的地方都适用）**：
+> 拼接点的前一行**不得以裸 `AND` 等 token 结尾**；若以 token 结尾，必须由常量自带
+> 换行来兜。**验证深度要加一档**：编译绿不等于拼接结果对，须断言**拼接后的文本**
+> （反射读 `@Query.value()` 即运行期真值），不要只读源码。
+
+### 口径边界（勿越界）
+
+本口径**只管 admin 的「使用盘子 / 账面」**。用户自己的 `/spend/overview`、
+`/spend/entries` **不受约束**——那里是"我的账本"，用户撤回数据后理应不可见。
+两类消费方语义本就不同，**禁把 admin 口径倒灌回用户侧**。
+
+单用户明细 `listUserEntries` 亦维持账面口径（只回未删）：它回答的是
+"账上现在有什么"，是**明细读取**而非"用过没有"的聚合；与双口径汇总并存时，
+`entryCount > entries.size()` 应读作"记过又删了"。
+
+## 门禁
+
+`SpendStatsScopeMirrorTest`（零依赖，7 项，与 `UserStatsSqlMirrorTest` /
+`UserBehaviorCatalogMirrorTest` 同族）：断言两常量显式表态 deleted、**常量自带
+首尾换行**、**拼接后无 token 粘连**、计数查询引用事实口径、金额查询引用账面口径、
+**扣除常量与 `USER_SCOPE` 后无内联 `e.deleted`**、分组查询禁 `CROSS JOIN`。
+
+> 内联检测只查 `e.deleted` 前缀：`USER_SCOPE` 本身合法含 `u.deleted = false`，
+> 按裸 `deleted` 检测会把合规引用误判成抄写——**门禁误报一次，团队就会整体
+> 忽略它**，故必须精确到不可能误报。
+
+`./mvnw -s settings-central.xml test -Dtest=SpendStatsScopeMirrorTest`
+
 ## 文件
 
 ```
 spend/
   controller/SpendController.java    三个接口（@RequestMapping("/spend")）
-  service/SpendService.java          sync 逐条归一化+归因 / overview 聚合 / entries 游标
-  enums/WireEnums.java               协议字面量解析唯一入口
-  enums/SpendSource.java             DANCE / MANUAL
-  enums/SpendCategory.java           固定 6 类
+  controller/AdminSpendStatsController.java  管理端三个只读统计接口
+  service/SpendService.java         sync 逐条归一化+归因 / overview 聚合 / entries 游标
+  service/AdminSpendStatsService.java管理端统计服务（双口径映射 + retractedEntries）
+  repository/SpendStatsRepository.java  admin 统计查询（双口径，引用常量）
+  repository/SpendStatsSql.java     ★ 口径单一事实源（事实口径 / 账面口径两常量）
+  enums/WireEnums.java              协议字面量解析唯一入口
+  enums/SpendSource.java            DANCE / MANUAL
+  enums/SpendCategory.java          固定 6 类
   entity/SpendEntryEntity.java
   repository/SpendEntryRepository.java  原生 SQL 聚合（user_id 恒在 WHERE 首位）
-  dto/*                              请求/响应 record
-src/test/java/.../spend/service/SpendServiceTest.java   9 项（含小写载荷回归）
+  dto/*                             请求/响应 record
+src/test/java/.../spend/service/SpendServiceTest.java        15 项
+src/test/java/.../spend/repository/SpendStatsScopeMirrorTest.java  7 项（新增）
 ```
 
 ## 验证
 
 `./mvnw -s settings-central.xml test -Dtest=SpendServiceTest`（Mockito，不依赖数据库）
-——9 项断言覆盖：小写与混合大小写接受、未知枚举拒绝、非正金额/非法 ts/超长 id 拒绝、
+——15 项断言覆盖：小写与混合大小写接受、未知枚举拒绝、非正金额/非法 ts/超长 id 拒绝、
 部分拒绝逐条点名、空载荷与 null 请求、幂等更新、软删载荷携带原始 ts/amount。
+
+## 待评审项（显式登记，避免沉默）
+
+**账本使用行为尚未纳入 `UserBehaviorEvent` 事件目录**，故不进大盘活跃/留存
+口径（用户 2026-10-07 拍板「暂不纳入，本次只修 admin 统计口径」）。
+后果：用户行为**轨迹里看不到「记过账/用过计时器」**这一行为。
+纳入会改变大盘历史 DAU / 留存数字（按 `UserBehaviorEvent` 判据第 3 条须立项
+评审）。此项登记在此，使「未纳入」从沉默变成显式。

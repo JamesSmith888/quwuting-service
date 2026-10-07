@@ -43,7 +43,18 @@ public record AdminUserVisitsResponse(
          * 否则运营会把「上限」误读成「他就这么多次来过」——
          * 同 UserDetailView 行为轨迹的 {@code truncated} 纪律。
          */
-        boolean truncated) {
+        boolean truncated,
+        /**
+         * 该用户的到访足迹开关当前态 + 变更流水（2026-10-07 新增）。
+         * <p>
+         * <b>为什么与足迹同响应</b>：运营在同一屏要同时回答「他是否允许我们记录」与「他来过哪家店」——
+         * 看到 20 条到访却不知道对方早已关闭采集，会直接误判为隐私事故。拆成两个接口必然出现
+         * 「足迹已出、开关还在加载」的中间态，那种不一致比慢 100ms 危险。
+         * <p>
+         * ⛔ 恒非 null（即便用户从未确立也返回 {@code state=NEVER_ASKED} 的对象）：
+         * 字段缺失与「未询问」是两件事，前端不该靠 null 推断语义。
+         */
+        AdminUserConsentResponse consent) {
 
     /**
      * 一个门店分组：该用户在这家店的窗口内到访记录（按到店时间倒序）。

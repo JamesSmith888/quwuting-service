@@ -220,13 +220,28 @@ qwt_dance_records_v1），账目表即使用事实表——**禁为统计新建�
   一次往返返回 summary + daily + byCategory + byVenue 四块。
 - **口径（与大盘完全同族）**：全部聚合 `JOIN qwt_users` 过滤
   `deleted=false AND role='USER' AND open_id NOT LIKE 'test\_%' AND wechat_review=false`
-  ——剔除 ADMIN 运营号 / test_ 开发联调号 / 微信审核账号；软删账目不入任何计数。
+  ——剔除 ADMIN 运营号 / test_ 开发联调号 / 微信审核账号。
   支出分类分布走 `direction='EXPENSE'`（同小程序统计页「消费分析」口径，
   GUEST 收入向不入图，收入在汇总行体现）；门店 TOP = `venue_id IS NOT NULL`
   按账目笔数降序（金额进 tooltip），venue_name 快照取 MAX 规避多快照分裂。
+- **⚠️ 软删口径已变更（2026-10-07 根因修复，勿回退）**：原文「软删账目不入任何
+  计数」**已作废**——它把「使用事实」与「账面金额」两种不相容的语义塞进同一列，
+  导致用户删除一条账目、整个使用盘子集体下跌（数据其实没丢，软删行完整保留、
+  全库无硬删路径；丢的是统计可见性）。现行为**双口径**，单一事实源 =
+  `spend/repository/SpendStatsSql.java`：
+  - **计数走事实口径**（`FACT_ENTRY` = `deleted IN (0,1)`）：用户撤回的是**数据**，
+    撤不回**行为**（同 `UserBehaviorEvent#VENUE_FAVORITE`"取消收藏不改写历史"）；
+  - **金额走账面口径**（`LEDGER_ENTRY` = `deleted = 0`）：删除即表达"这笔不算"，
+    计入消费总额会让运营误判真实消费水平。
+  - 同屏「笔数 ≥ 金额覆盖面」是**设计意图**，差额由 `retractedEntries` 显式暴露。
+  - **分组聚合必须 LEFT JOIN**（分类/门店/用户列表）：账面侧整组无行时
+    CROSS JOIN 会让该组整个消失 = 同一现象换个维度复发。
+  - **口径边界**：本口径只管 admin 使用盘子；用户自己的 `/spend/*` 与
+    `listUserEntries` 明细**维持账面口径**（"我的账本"/"账上现在有什么"）。
+  - 门禁 `SpendStatsScopeMirrorTest`（5 项）。详见 **40-spend-ledger.md**。
 - **MySQL 8 方言**（WITH RECURSIVE 骨架补零，PG 环境勿执行，同上节）。
-- **后端文件**：`spend/repository/SpendStatsRepository.java`（口径唯一权威，
-  独立只读仓库，参考 UserDailyStatsRepository 先例）+
+- **后端文件**：`spend/repository/SpendStatsRepository.java`（查询 + 口径引用）+
+  `spend/repository/SpendStatsSql.java`（★口径**单一事实源**，两常量）+
   `spend/service/AdminSpendStatsService.java` + `spend/controller/AdminSpendStatsController.java`
   + `spend/dto/response/AdminSpendUsageStatsResponse.java`。
 - **前端文件（admin-web）**：`services/spendStats.ts`（零派生只搬运）+
@@ -243,10 +258,14 @@ qwt_dance_records_v1），账目表即使用事实表——**禁为统计新建�
     （昵称/头像随行），行点击**复用资料协作 user-detail 路由**（/users/{id}）。
     admin-web 新页 `views/SpendUsersView.vue`（router `/spend-users`）。
   - `GET /admin/spend/users/{userId}/entries?limit=50`（钳制 10~200）：用户详情
-    「计时 · 账本」卡数据源——summary 全量汇总 + 最近流水（**只回未软删**，与
-    统计口径一致）。`UserDetailView.vue` 卡片：meta 行（笔数/计时场次/收支）+
-    流水行（分类 + 来源 tag 计时/手动 + 门店/时长/时间 + 金额，收入绿 `+` 前缀），
+    「计时 · 账本」卡数据源——summary 双口径汇总（计数字段含软删、金额仅未删）
+    + 最近流水（**只回未软删**，它是明细读取、回答"账上现在有什么"）。
+    `UserDetailView.vue` 卡片：meta 行（笔数/计时场次/收支）+ 流水行
+    （分类 + 来源 tag 计时/手动 + 门店/时长/时间 + 金额，收入绿 `+` 前缀），
     非阻塞加载失败静默（同资料协作卡口径）。
+    **⚠️ 由此 `summary.entryCount` 可能 > `entries.length`**，前端判"已截断"
+    **必须先扣除 `retractedEntries`**（否则用户删过账就会恒显"仅显示最近 50 笔"，
+    把「删过账」误报成「已截断」——`UserDetailView#spendTruncated` 2026-10-07 修正）。
   - **明细端点不做用户表口径过滤**（指定用户读取，入口列表已过滤；
     用户详情本身保留可见性——与 2026-09-09「列表不排除」判据同族）。
 

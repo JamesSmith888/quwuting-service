@@ -16,6 +16,7 @@ import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.enums.VenueType;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuepresence.dto.request.ReportPresenceRequest;
+import org.quwuting.quwutingservice.venuepresence.dto.response.AdminUserConsentResponse;
 import org.quwuting.quwutingservice.venuepresence.dto.response.AdminUserVisitRecord;
 import org.quwuting.quwutingservice.venuepresence.dto.response.AdminUserVisitsResponse;
 import org.quwuting.quwutingservice.venuepresence.dto.response.AdminUserVisitsResponse.AdminUserVisitVenueGroup;
@@ -27,8 +28,10 @@ import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceStat
 import org.quwuting.quwutingservice.venuepresence.entity.VenuePresenceConsent;
 import org.quwuting.quwutingservice.venuepresence.enums.CoLocatedAttribution;
 import org.quwuting.quwutingservice.venuepresence.enums.ConsentSource;
+import org.quwuting.quwutingservice.venuepresence.enums.PresenceConsentState;
 import org.quwuting.quwutingservice.venuepresence.repository.VenuePresenceConsentRepository;
 import org.quwuting.quwutingservice.venuepresence.repository.VenuePresencePingRepository;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -229,6 +232,15 @@ public class VenuePresenceService {
     private static final int USER_VISIT_MAX_RECORDS = 200;
 
     /**
+     * 单次「用户到访足迹」响应中<b>开关变更流水</b>的条数上限（2026-10-07）。
+     * <p>
+     * 开关是低频动作（正常用户一生个位数次），上限只防异常端循环上报把响应撑爆；
+     * 超限置 {@code historyTruncated=true} 让前端明说，⛔ 同 {@link #USER_VISIT_MAX_RECORDS}
+     * 禁静默截断（否则上限会被读成「他只改过这么多次」）。
+     */
+    private static final int USER_CONSENT_HISTORY_MAX = 50;
+
+    /**
      * 一次到店 = 连续命中桶的合并阈值（2026-10-06，单位 = 桶）。
      * <p>
      * <b>为什么需要合并</b>：采集主力 = 每次打开小程序（onShow）+ 店内每 15 分钟补采一次
@@ -385,12 +397,11 @@ public class VenuePresenceService {
             boolean enabled = Boolean.TRUE.equals(row[0]);
             ConsentSource source = WireEnums.parse(ConsentSource.class, String.valueOf(row[1]));
             long users = ((Number) row[2]).longValue();
-            if (isExplicitlyEnabled(enabled, source)) {
-                enabledUsers += users;
-            } else if (enabled) {
-                legacyDefaultUsers += users;
-            } else {
-                disabledUsers += users;
+            // 判据走 consentStateOf 单点：门禁 / 单用户展示 / 本分布三处必须同数
+            switch (consentStateOf(enabled, source)) {
+                case ENABLED -> enabledUsers += users;
+                case PENDING_PROMPT -> legacyDefaultUsers += users;
+                default -> disabledUsers += users;
             }
         }
         long promptAllowed = 0;
@@ -670,7 +681,78 @@ public class VenuePresenceService {
         groups.sort((a, b) -> b.lastVisitAt().compareTo(a.lastVisitAt()));
         LocalDateTime lastVisitAt = groups.isEmpty() ? null : groups.get(0).lastVisitAt();
         return new AdminUserVisitsResponse(userId, groups, groups.size(), keptTotal,
-                lastVisitAt, window, HIT_RADIUS_M, truncated);
+                lastVisitAt, window, HIT_RADIUS_M, truncated, consentFor(userId));
+    }
+
+    // ── 读侧：单用户开关态（2026-10-07，零迁移 = 读既有 qwt_venue_presence_consents） ──
+
+    /**
+     * 采集态派生（<b>单点</b>，2026-10-07）：{@code (enabled, source)} → 四态。
+     * <p>
+     * 三个消费方共用本判据，⛔ 禁各自重写：
+     * <ol>
+     *   <li>采集门禁（{@link #hasExplicitConsent}）——只认 {@link PresenceConsentState#ENABLED}；</li>
+     *   <li>分布统计（{@link #consentStats()}）——ENABLED / DISABLED / PENDING_PROMPT 三档；</li>
+     *   <li>admin 单用户展示（{@link #consentFor}）——含 NEVER_ASKED（无行）。</li>
+     * </ol>
+     * 三处同数是纪律：任一处自行判断就会出现「列表写着已允许、门禁却在拒收」这类无法排查的分裂。
+     * <p>
+     * ⚠️ {@code enabled=null} 只可能来自「无行」调用方（{@link #consentFor}），
+     * 其余调用方的列非空；为免 NPE，此处按 {@code false} 处理。
+     */
+    public static PresenceConsentState consentStateOf(Boolean enabled, ConsentSource source) {
+        if (source == null) {
+            return PresenceConsentState.NEVER_ASKED;
+        }
+        if (isExplicitlyEnabled(enabled, source)) {
+            return PresenceConsentState.ENABLED;
+        }
+        return Boolean.TRUE.equals(enabled)
+                ? PresenceConsentState.PENDING_PROMPT
+                : PresenceConsentState.DISABLED;
+    }
+
+    /**
+     * 单用户的开关当前态 + 变更流水（admin 足迹卡的开关区，2026-10-07）。
+     * <p>
+     * <b>零迁移</b>：只读既有 {@code qwt_venue_presence_consents}，与足迹读的是不同的表
+     * （ping = 位置痕迹 / consent = 授权证据），两者<b>刻意不 join</b>——一个用户可能从未到过店
+     * 却在设置页关过开关（consent 有行、ping 无行），也可能到过店却从未确立状态（旧版端）。
+     * join 会把这两类事实都吃掉。
+     * <p>
+     * 流水取 {@code USER_CONSENT_HISTORY_MAX + 1} 条：多取一条只用于判断是否超限，
+     * ⛔ 不用「取 N 条再猜有没有更多」（那会让恰好 N 条时被误标为截断）。
+     * 包含 DEFAULT 历史行是<b>刻意</b>的：运营需要看见「他曾被默认开启、后来才被问到」这段，
+     * 抹掉它就只剩一行「已允许」，把一次合规缺陷读成了正常状态。
+     */
+    private AdminUserConsentResponse consentFor(Long userId) {
+        List<VenuePresenceConsent> rows = consentRepository
+                .findByUserIdAndDeletedFalseOrderByCreatedAtDescIdDesc(
+                        userId, PageRequest.of(0, USER_CONSENT_HISTORY_MAX + 1));
+        boolean historyTruncated = rows.size() > USER_CONSENT_HISTORY_MAX;
+        List<VenuePresenceConsent> kept = historyTruncated
+                ? rows.subList(0, USER_CONSENT_HISTORY_MAX)
+                : rows;
+        List<AdminUserConsentResponse.ConsentChange> history = new ArrayList<>(kept.size());
+        for (VenuePresenceConsent c : kept) {
+            PresenceConsentState state = consentStateOf(c.getEnabled(), c.getSource());
+            history.add(new AdminUserConsentResponse.ConsentChange(
+                    c.getEnabled(), c.getSource().name(), c.getSource().getDisplayName(),
+                    state.name(), state.getDisplayName(), c.getCreatedAt()));
+        }
+        VenuePresenceConsent latest = kept.isEmpty() ? null : kept.get(0);
+        PresenceConsentState state = consentStateOf(
+                latest == null ? null : latest.getEnabled(),
+                latest == null ? null : latest.getSource());
+        return new AdminUserConsentResponse(
+                userId,
+                state.name(), state.getDisplayName(),
+                latest == null ? null : latest.getEnabled(),
+                latest == null ? null : latest.getSource().name(),
+                latest == null ? null : latest.getSource().getDisplayName(),
+                latest == null ? null : latest.getCreatedAt(),
+                history, historyTruncated,
+                opsConfigService.isEnabled(OpsConfigService.KEY_PRESENCE_COLLECT_ENABLED, true));
     }
 
     /**

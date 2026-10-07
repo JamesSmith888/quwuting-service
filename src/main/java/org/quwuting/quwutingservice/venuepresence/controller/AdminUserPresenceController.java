@@ -48,6 +48,11 @@ public class AdminUserPresenceController {
      * <p>
      * 用户不存在 / 已软删 → 1004。记录超上限时 {@code truncated=true}，admin 端必须显示
      * 「仅显示最近 N 次」——⛔ 静默截断会让运营把上限读成「他就这么多次来过」。
+     * <p>
+     * <b>同时下发开关段 {@code consent}</b>（2026-10-07）：当前是否启用到访足迹（四态，
+     * 含「待补问」= 默认开启期未经询问）+ 开关变更流水 + 全站采集总开关。
+     * 与足迹同响应的理由 = 运营在同一屏要同时回答「他是否允许我们记」与「他来过哪家店」，
+     * 看到一堆到访却不知道对方早已关闭采集，会直接误判成隐私事故。
      */
     @GetMapping("/{userId}/visits")
     public ApiResponse<AdminUserVisitsResponse> userVisits(

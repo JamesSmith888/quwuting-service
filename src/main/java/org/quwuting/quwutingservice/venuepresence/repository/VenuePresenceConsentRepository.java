@@ -1,6 +1,7 @@
 package org.quwuting.quwutingservice.venuepresence.repository;
 
 import org.quwuting.quwutingservice.venuepresence.entity.VenuePresenceConsent;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -29,6 +30,18 @@ public interface VenuePresenceConsentRepository extends JpaRepository<VenuePrese
      * 次序键 id DESC：同一毫秒连拨两次时以后写者为准，与分布统计的窗口函数次序一致。
      */
     Optional<VenuePresenceConsent> findFirstByUserIdAndDeletedFalseOrderByCreatedAtDescIdDesc(Long userId);
+
+    /**
+     * 该用户的开关变更流水（admin「到访足迹」卡的开关记录区，2026-10-07），按确立时刻倒序。
+     * <p>
+     * 次序键与当前态一致（{@code created_at DESC, id DESC}）——同一毫秒连拨两次时，
+     * 流水首行 = 当前态，两处不会各说各话。
+     * <p>
+     * ⚠️ 调用方<b>必须</b>传上限（{@code Pageable} / {@code Limit}）：本表无按用户的条数约束，
+     * 一次异常端循环上报就能堆出成千行，明细响应必须封顶（服务层再据此置 truncated 显式告知）。
+     */
+    List<VenuePresenceConsent> findByUserIdAndDeletedFalseOrderByCreatedAtDescIdDesc(
+            Long userId, Pageable pageable);
 
     /**
      * 当前态分布（admin 统计数据源）：每用户最新一条的 (enabled, source) → 用户数。
