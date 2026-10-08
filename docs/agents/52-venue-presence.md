@@ -12,6 +12,40 @@
 > 不是改迁移——物化表现存错值由 30 分钟一轮的调度任务自愈（**需先部署修复后的代码**）。
 > （状态确立流水）/ `V37__presence_consent_source_comment.sql`（2026-10-03 来源列注释）。
 
+### 2026-10-08 V46：坐标随足迹入库（用户裁决，隐私形态修订）
+
+> 触发判例：user 210 在丽莎 295m 处打开小程序 → ping 落库但不入到访统计，
+> 而「不落坐标」让系统无法回答「他当时到底在哪」。用户裁决 = **坐标随足迹入库、
+> 复用既有采样（不新增任何定位调用）**，供 admin 轨迹分析。
+
+- **迁移** `V46__presence_ping_coordinates.sql`（头注含完整决策与隐私形态论证）：
+  ping 表加 `latitude` / `longitude`（`double NULL`，gcj02 与门店坐标同系；**历史行恒 NULL、
+  不可追溯**）。写侧校验：坐标非空必须**成对** + 域内（否则 1022）；桶幂等语义不变
+  （首证含坐标一并保留，`ON DUPLICATE` 仍只刷 updated_at）。
+- **端侧**（quwuting 仓）：上报 body 增 `latitude` / `longitude`（来自本次定位快照，
+  原样上报不裁剪）；`check:presence` 增 **P10**（足迹 body 必带坐标，且只在同意路径上出现）。
+- **同意文案同批改真（⛔ 四处同改；「不会保存您的具体位置」承诺退役）**：
+  首问 = 「自动记录店名、时间和位置信息，**仅用于门店统计，不会对外展示**」；
+  关闭挽留删去该承诺句、记录项含「位置」；设置页隐私行 = 「位置仅用于门店统计，不对外展示」；
+  presence-detail「这是什么 / 记录什么 / 您的隐私」三节同改。
+- **新接口** `GET /admin/users/{userId}/track`（缺省 7 天、钳 1~90）：返回窗口内**全部**
+  采样点（时间升序）+ 涉及门店（含坐标供画圈）+ `pointsWithoutCoordinates`（无坐标旧行
+  **显式计数**，⛔ 禁静默丢）+ 距离带分级 **`PresenceTrackGrade`（≤150 命中 / ≤300 附近 /
+  其余留痕）**——「附近」语义（150~300m）在 admin 的可见化落点。上限 `USER_TRACK_MAX_POINTS`
+  = 800（保留最近点、`truncated=true` 显式）。**与 visits 是两个问题两个面**：本端点不过命中
+  谓词、含 150m 外样本（判例 295m 正是此类）。
+- **admin-web**：用户详情页「位置轨迹」卡（腾讯地图折线 + 分级着色 + 门店 150/300m 半径圈 +
+  点列表）；地图 = 腾讯 GL JS（国内合规源，gcj02 免转换），key 走构建期 `VITE_TMAP_KEY`
+  （缺失时降级为文字说明、列表仍全量可用；⛔ 仓内不落真实 key）。
+- **验证（2026-10-08）**：后端全量 `test-compile` SUCCESS（726 主源 + 77 测试源）；
+  `AdminUserTrackTest` 7 + `PresenceCoordinateReportTest` 4 + 回归 `VenuePresenceConsentGateTest` 7
+  = **18 条全绿**；小程序隔离 tsc 全仓 0 错 + 镜像 cmp 一致 + `check:presence`（含 P10）/
+  encoding / es-syntax / tokens 绿；admin-web `vue-tsc` 0 错 + `vite build` 通过。未启动服务、未部署。
+- **上线前待办（非代码）**：① 微信侧《用户隐私保护指引》需同步说明坐标收集（运营侧动作）；
+  ② 存量「已允许」用户是否按新版文案补一次告知——**待用户裁决**；③ `PresenceTrackQuerySqlTest`
+  （连库契约）属**部署窗口项**（运行会对生产库做启动级动作：Flyway 落迁移 + 调度器激活），
+  部署前随迁移一并执行——别在部署窗口之外随手跑。
+
 ## 1. 定位与边界（先读这个再动代码）
 
 **一行 ping = 一次「用户此刻在门店附近」的可证实事实**，采样主力 = 小程序每次打开（onShow）。
@@ -584,6 +618,7 @@ DEFAULT）。教训：**涉及个人信息的默认值，先过合规判据，�
 | `GET /admin/venues/presence-consent-stats` | requireAdmin | 授权统计：已允许 / 已关闭 / 待补问 + 首问回答分布 + 近 30 天设置变更次数（2026-10-03 字段 `defaultUsers` → `legacyDefaultUsers` 且语义改变，admin-web 须同版发布） |
 | `GET /admin/venues/{id}/visitors` | requireAdmin | **到访用户名单**（2026-10-06，下钻第一级）；`windowDays`（缺省 30，服务端钳 ≥30）、`page` / `size`（上限 100）。人数与 `GET /admin/venues` 行内 `visitUsers30d` **逐人相等**（同一次归因 + 并集，⛔ 前端不得本地过滤列表近似）；`visitTimes` = 窗口内去重到店日（**≠ 人数口径**，§4）；**内部账号打标签不排除**（`internalAccount`）；软删用户仍出行（只给代号）；口径（`windowDays` / `hitRadiusM` / `coLocated*`）随响应回显 |
 | `GET /admin/users/{id}/visits` | requireAdmin | **某用户的到访足迹**（2026-10-06，下钻第二级 = 用户详情页「到访足迹」卡）；`windowDays`（缺省 90）。按门店分组、组内展开**一次次到店**（到店时刻 / 已观测停留时长 / 采样次数 / 最近距离）；**连续采样桶在服务端合并为一条**（阈值 `VISIT_SESSION_GAP_BUCKETS` = 2 桶）；⚠️ 用户不存在/已软删 → **1004**；超上限 `truncated=true`（⛔ 禁静默截断）。路由前缀 `/admin/users` 而非 `/admin/venues`（以用户为主键、页面归属用户详情页）。**2026-10-07 增 `consent` 段**（开关四态 + 变更流水 + 全站总开关，恒非 null，见 §6.3）——admin-web 须同版发布 |
+| `GET /admin/users/{id}/track` | requireAdmin | **某用户的坐标轨迹**（2026-10-08 V46，用户详情页「位置轨迹」卡）；`windowDays` 缺省 7、服务端钳 1~90；返回窗口内全部采样点（时间升序，剔除无坐标行并计数下发 `pointsWithoutCoordinates`）+ 涉及门店（含坐标供画圈）+ 距离带分级 `HIT/NEARBY/FAR`（`PresenceTrackGrade`）；上限 `USER_TRACK_MAX_POINTS`=800（保留最近点，`truncated` 显式）。⛔ 与 visits 是两个问题两个面（本端点不过命中谓词、含 150m 外「附近/留痕」点） |
 
 ### 6.1 admin 到访下钻：名单 → 用户足迹（2026-10-06）
 

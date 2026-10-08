@@ -33,6 +33,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -61,7 +62,8 @@ class VenuePresenceConsentGateTest {
     @InjectMocks
     private VenuePresenceService service;
 
-    private static final ReportPresenceRequest AT_LISA = new ReportPresenceRequest(88, 65);
+    /** 旧端形态（不带坐标）：V46 增坐标后仍须正常受理（协议向后兼容） */
+    private static final ReportPresenceRequest AT_LISA = new ReportPresenceRequest(88, 65, null, null);
 
     @Test
     void neverAskedUserIsRejectedWithoutWriting() {
@@ -110,7 +112,7 @@ class VenuePresenceConsentGateTest {
         PresenceReportResponse res = service.report(LISA, USER_ID, AT_LISA);
 
         assertTrue(res.accepted());
-        verify(pingRepository).upsertInBucket(eq(USER_ID), eq(LISA), anyLong(), eq(88), eq(65), any());
+        verify(pingRepository).upsertInBucket(eq(USER_ID), eq(LISA), anyLong(), eq(88), eq(65), isNull(), isNull(), any());
     }
 
     @Test
@@ -172,7 +174,7 @@ class VenuePresenceConsentGateTest {
     }
 
     private void verifyNoPingWritten() {
-        verify(pingRepository, never()).upsertInBucket(any(), any(), anyLong(), anyInt(), any(), any());
+        verify(pingRepository, never()).upsertInBucket(any(), any(), anyLong(), anyInt(), any(), any(), any(), any());
         verify(venueRepository, never()).findById(any());
     }
 }

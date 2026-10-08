@@ -17,6 +17,7 @@ import org.quwuting.quwutingservice.venue.enums.VenueType;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuepresence.dto.request.ReportPresenceRequest;
 import org.quwuting.quwutingservice.venuepresence.dto.response.AdminUserConsentResponse;
+import org.quwuting.quwutingservice.venuepresence.dto.response.AdminUserTrackResponse;
 import org.quwuting.quwutingservice.venuepresence.dto.response.AdminUserVisitRecord;
 import org.quwuting.quwutingservice.venuepresence.dto.response.AdminUserVisitsResponse;
 import org.quwuting.quwutingservice.venuepresence.dto.response.AdminUserVisitsResponse.AdminUserVisitVenueGroup;
@@ -29,6 +30,7 @@ import org.quwuting.quwutingservice.venuepresence.entity.VenuePresenceConsent;
 import org.quwuting.quwutingservice.venuepresence.enums.CoLocatedAttribution;
 import org.quwuting.quwutingservice.venuepresence.enums.ConsentSource;
 import org.quwuting.quwutingservice.venuepresence.enums.PresenceConsentState;
+import org.quwuting.quwutingservice.venuepresence.enums.PresenceTrackGrade;
 import org.quwuting.quwutingservice.venuepresence.repository.VenuePresenceConsentRepository;
 import org.quwuting.quwutingservice.venuepresence.repository.VenuePresencePingRepository;
 import org.springframework.data.domain.PageRequest;
@@ -70,11 +72,14 @@ import java.util.concurrent.TimeUnit;
  * （{@link #isExplicitlyEnabled}）——服务端是「先有同意、后有足迹」证据链的唯一收敛点，
  * 旧版默认开启端未经询问的采集在上线即被拒收，不依赖端上升级覆盖率（52 号 §5）。
  * <p>
- * <b>隐私红线</b>：本域数据面 = (venueId, distanceM, accuracyM) 三个标量 +
- * 开关偏好布尔（V34，consent 流水——不含任何位置信息），用户经纬度在协议上
- * 不存在（端侧经 /venues/nearby 取服务端算好的距离后原样回传）。
+ * <b>隐私形态（2026-10-08 V46 修订）</b>：本域数据面 = (venueId, distanceM, accuracyM)
+ * 三个标量 + 定位快照坐标（gcj02，2026-10-08 起随行）+ 开关偏好布尔（V34 consent 流水）。
+ * 原「坐标在协议上不存在」的红线经用户裁决修订为「主动同意 + 用途限定」形态：
+ * 采集门禁不变（仅显式同意用户），用途限定 = admin 内部统计与轨迹分析，同意文案
+ * 四处已同批改真；见 V46 迁移头注与 52 号文档。
  * <p>
- * <b>信任边界</b>：distance_m 是端侧自报值，服务端不复算（复算需要坐标，与红线冲突）。
+ * <b>信任边界</b>：distance_m 是端侧自报值，服务端不复算——V46 后坐标虽已随行
+ * （复算在技术上可行），但复算会让新旧行口径不同源，属独立决策，暂不做。
  * 防刷面 = 伪造 distance 刷「到访」；缓解 = 15 分钟桶幂等（本表唯一约束）+ 每用户
  * 滑动窗口频控 + admin 侧距离分布观察。完整论证见 52 号文档 §「信任边界」。
  */
@@ -279,6 +284,19 @@ public class VenuePresenceService {
     private static final int USER_CONSENT_HISTORY_MAX = 50;
 
     /**
+     * 单次「用户位置轨迹」响应中的<b>轨迹点上限</b>（2026-10-08 V46）。
+     * <p>
+     * 轨迹点是逐采样明细（每次打开至多 1 条 + 店内每 15 分钟补采），比到访次数稠密：
+     * 一个整晚泡店的用户一夜可达十余点，90 天窗口理论上限在数百级。上限只防
+     * 「长期高频 + 大窗口」把响应撑爆；超限保留<b>最近</b>点并置 {@code truncated=true}
+     * 让前端明说（⛔ 禁静默截断——同 {@link #USER_VISIT_MAX_RECORDS} 纪律）。
+     */
+    private static final int USER_TRACK_MAX_POINTS = 800;
+
+    /** 轨迹窗口上限（天，2026-10-08 V46）：缺省 7（controller），服务端钳制 1~本值 */
+    private static final int TRACK_WINDOW_MAX_DAYS = 90;
+
+    /**
      * 一次到店 = 连续命中桶的合并阈值（2026-10-06，单位 = 桶）。
      * <p>
      * <b>为什么需要合并</b>：采集主力 = 每次打开小程序（onShow）+ 店内每 15 分钟补采一次
@@ -331,7 +349,8 @@ public class VenuePresenceService {
      * 上报一次到访痕迹（POST /venues/{venueId}/presence 的实现）。
      * 调用方必须已 {@code UserContext.requireAuth()}（重放安全不变量：鉴权在副作用之前）。
      * <p>
-     * 判定序：运营总开关 → 用户写频控 → <b>同意门禁</b> → 门店与参数校验 → 桶幂等写入。
+     * 判定序：运营总开关 → 用户写频控 → <b>同意门禁</b> → 门店与参数校验
+     * （距离 / 精度 / 坐标成对与域）→ 桶幂等写入。
      * 门禁不通过返回 {@code accepted=false(CONSENT_REQUIRED)} 而非错误码：旧版默认开启端对失败
      * 静默，拒收不该在它们的日志里制造 4xx 噪音。
      */
@@ -363,9 +382,21 @@ public class VenuePresenceService {
         if (accuracyM != null && (accuracyM < 0 || accuracyM > WRITE_MAX_ACCURACY_M)) {
             throw new BusinessException(1022, "精度参数越界");
         }
+        // 坐标（V46，2026-10-08）：非空必须成对（半套坐标 = 端侧 bug，拒收暴露之，不静默丢）；
+        // 域内校验防脏数据。两值全缺 = 旧端请求，照常收（协议向后兼容）。
+        Double latitude = request.latitude();
+        Double longitude = request.longitude();
+        if ((latitude == null) != (longitude == null)) {
+            throw new BusinessException(1022, "坐标参数不完整");
+        }
+        if (latitude != null
+                && (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180)) {
+            throw new BusinessException(1022, "坐标参数越界");
+        }
         // UTC epoch 分钟派生，与时区无关（V33 迁移头注 §防刷与幂等）
         long bucket = System.currentTimeMillis() / 60_000L / WRITE_WINDOW_MINUTES;
-        pingRepository.upsertInBucket(userId, venueId, bucket, distanceM, accuracyM, LocalDateTime.now());
+        pingRepository.upsertInBucket(userId, venueId, bucket, distanceM, accuracyM,
+                latitude, longitude, LocalDateTime.now());
         return new PresenceReportResponse(true, null);
     }
 
@@ -804,6 +835,73 @@ public class VenuePresenceService {
         LocalDateTime lastVisitAt = groups.isEmpty() ? null : groups.get(0).lastVisitAt();
         return new AdminUserVisitsResponse(userId, groups, groups.size(), keptTotal,
                 lastVisitAt, window, HIT_RADIUS_M, truncated, consentFor(userId));
+    }
+
+    /**
+     * 某用户的位置轨迹（admin 用户详情页「位置轨迹」卡，GET /admin/users/{userId}/track 的实现）。
+     * <p>
+     * <b>与 {@link #visitsFor} 的分工</b>：到访足迹 = 命中口径的「一次次到店」（分组 / 停留 /
+     * 采样数）；本方法 = <b>全部</b>采样点的原始轨迹（含 150m 外的「附近 / 留痕」带）——
+     * 2026-10-08 判例（user 210 在丽莎 295m 上报、超命中线不入到访）正是它要回答的问题。
+     * <p>
+     * <b>取数形态</b>：原始行**倒序**取最近 {@link #USER_TRACK_MAX_POINTS} 条（超限保留最近的，
+     * 同截断方向纪律），内存反转为时间升序（绘制序）。坐标缺失的历史行不进 points，
+     * 以 {@code pointsWithoutCoordinates} 显式计数（⛔ 禁静默丢）。
+     * <p>
+     * <b>分级恒为距离带</b>（{@link PresenceTrackGrade}：≤150 命中 / ≤300 附近 / 其余留痕）——
+     * 只表达「距最近门店多远」，不是到访判定的替代（到访另需精度达标 + 同址归因）。
+     * <p>
+     * 用户不存在 / 已软删 → 1004（与 {@link #visitsFor} 同码）。
+     */
+    @Transactional(readOnly = true)
+    public AdminUserTrackResponse trackFor(Long userId, int windowDays) {
+        if (!userRepository.findByIdAndDeletedFalse(userId).isPresent()) {
+            throw new BusinessException(1004, "用户不存在");
+        }
+        int window = Math.min(Math.max(windowDays, 1), TRACK_WINDOW_MAX_DAYS);
+        LocalDateTime windowStart = LocalDateTime.now().minusDays(window);
+        // 倒序 + 上限 +1：多取一条只用于判超限（同 consent 流水取 N+1 同款），保留最近点
+        List<Object[]> rows = pingRepository.findTrackByUserIdSince(
+                userId, windowStart, PageRequest.of(0, USER_TRACK_MAX_POINTS + 1));
+        boolean truncated = rows.size() > USER_TRACK_MAX_POINTS;
+        List<Object[]> kept = truncated ? rows.subList(0, USER_TRACK_MAX_POINTS) : rows;
+        int noCoordinate = 0;
+        List<AdminUserTrackResponse.TrackPoint> points = new ArrayList<>(kept.size());
+        Set<Long> venueIds = new LinkedHashSet<>();
+        // 倒序遍历 = 时间升序输出（不引入 Collections 依赖，也让「升序」与取数方向解耦）
+        for (int i = kept.size() - 1; i >= 0; i--) {
+            Object[] row = kept.get(i);
+            Long venueId = (Long) row[1];
+            Double latitude = (Double) row[4];
+            Double longitude = (Double) row[5];
+            if (latitude == null || longitude == null) {
+                noCoordinate++;
+                continue;
+            }
+            venueIds.add(venueId);
+            int distanceM = (Integer) row[2];
+            PresenceTrackGrade grade = PresenceTrackGrade.ofDistance(distanceM);
+            points.add(new AdminUserTrackResponse.TrackPoint(
+                    (LocalDateTime) row[6], latitude, longitude, (Integer) row[3],
+                    venueId, distanceM, grade.name(), grade.getDisplayName()));
+        }
+        // 门店：一次批量取回（防 N+1）；⛔ 空集合必须短路（原生 IN () 是语法错误，同 NO_EXCLUSION_SENTINEL 理由）
+        Map<Long, Venue> venues = venueIds.isEmpty() ? Map.of()
+                : venueRepository.findByIdInAndDeletedFalse(new ArrayList<>(venueIds))
+                    .stream().collect(java.util.stream.Collectors.toMap(Venue::getId, v -> v));
+        List<AdminUserTrackResponse.TrackVenue> venueItems = venueIds.stream()
+                .map(id -> {
+                    Venue venue = venues.get(id);
+                    return new AdminUserTrackResponse.TrackVenue(
+                            id,
+                            venue == null ? null : venue.getName(),
+                            venue == null ? null : venue.getLatitude(),
+                            venue == null ? null : venue.getLongitude(),
+                            venue == null ? null : displayOf(venue.getStatus()));
+                })
+                .toList();
+        return new AdminUserTrackResponse(userId, window, HIT_RADIUS_M, NEARBY_RADIUS_M,
+                points, venueItems, noCoordinate, truncated);
     }
 
     // ── 读侧：单用户开关态（2026-10-07，零迁移 = 读既有 qwt_venue_presence_consents） ──

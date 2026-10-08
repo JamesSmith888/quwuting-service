@@ -3,6 +3,7 @@ package org.quwuting.quwutingservice.venuepresence.controller;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
+import org.quwuting.quwutingservice.venuepresence.dto.response.AdminUserTrackResponse;
 import org.quwuting.quwutingservice.venuepresence.dto.response.AdminUserVisitsResponse;
 import org.quwuting.quwutingservice.venuepresence.service.VenuePresenceService;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -61,5 +62,27 @@ public class AdminUserPresenceController {
         UserContext.requireAdmin();
         return ApiResponse.ok(venuePresenceService.visitsFor(
                 userId, windowDays == null ? 90 : windowDays));
+    }
+
+    /**
+     * 某用户的坐标轨迹（仅 ADMIN，2026-10-08 V46）。
+     * GET /admin/users/{userId}/track?windowDays=7
+     * <p>
+     * 与 {@link #userVisits} 的分工：visits = 命中口径的「一次次到店」（分组 / 停留 /
+     * 采样数）；本端点 = <b>全部</b>坐标采样点的原始轨迹（升序，含 150m 外的
+     * 「附近 / 留痕」带）——2026-10-08 判例（user 210 在丽莎 295m 处上报但超命中线、
+     * 到访不可见）正是本端点要回答的「他当时在哪」。
+     * <p>
+     * 窗口缺省 7 天、服务端钳制 1~90；无坐标的历史记录不在 points 里，以
+     * {@code pointsWithoutCoordinates} 显式计数（⛔ 禁静默丢）。
+     * 用户不存在 / 已软删 → 1004。
+     */
+    @GetMapping("/{userId}/track")
+    public ApiResponse<AdminUserTrackResponse> userTrack(
+            @PathVariable Long userId,
+            @RequestParam(required = false) Integer windowDays) {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(venuePresenceService.trackFor(
+                userId, windowDays == null ? 7 : windowDays));
     }
 }

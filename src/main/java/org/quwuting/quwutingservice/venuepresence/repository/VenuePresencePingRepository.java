@@ -1,6 +1,7 @@
 package org.quwuting.quwutingservice.venuepresence.repository;
 
 import org.quwuting.quwutingservice.venuepresence.entity.VenuePresencePing;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -182,24 +183,54 @@ public interface VenuePresencePingRepository extends JpaRepository<VenuePresence
                                          @Param("maxAccuracyM") int maxAccuracyM);
 
     /**
+     * 单用户的<b>坐标轨迹明细</b>（2026-10-08 V46，admin「位置轨迹」卡的数据源）：
+     * {@code (id, venueId, distanceM, accuracyM, latitude, longitude, createdAt)}，
+     * 按时间<b>倒序</b> + id 倒序（同刻并列确定），由 {@code Pageable} 施加「最近 N 条」上限。
+     * <p>
+     * <b>为什么倒序取</b>：截断时保留的必须是<b>最近</b>的点（同 {@code findHitsByUserIdSince}
+     * 的截断方向纪律——升序截断会把最近的全丢、只剩历史）；消费方反转成升序绘制。
+     * <p>
+     * <b>与命中查询刻意不同</b>：不过命中谓词——轨迹要的是<b>全部</b>采样点，
+     * 含 150m 外的「附近 / 留痕」带（2026-10-08 判例：user 210 的 295m 样本不进到访统计，
+     * 但必须能在轨迹里看到）。坐标缺失的历史行也一并取回，由消费方计数展示
+     * （⛔ 禁静默丢弃）。
+     * <p>
+     * 量级 = 该用户窗口内 ping 数（每人每次打开至多 1 条 + 店内 15 分钟补采）；
+     * {@code (user_id, created_at)} 索引前缀可裁掉窗口外行。
+     */
+    @Query("SELECT p.id, p.venueId, p.distanceM, p.accuracyM, p.latitude, p.longitude, p.createdAt "
+            + "FROM VenuePresencePing p "
+            + "WHERE p.userId = :userId AND p.deleted = false AND p.createdAt >= :since "
+            + "ORDER BY p.createdAt DESC, p.id DESC")
+    List<Object[]> findTrackByUserIdSince(@Param("userId") Long userId,
+                                          @Param("since") LocalDateTime since,
+                                          Pageable pageable);
+
+    /**
      * 幂等写入（15 分钟桶）：INSERT 新行 / 桶冲突时仅刷新 updated_at——
-     * <b>不改写 distance_m / accuracy_m / created_at</b>：桶内首见时刻与首证距离
-     * 是「该窗口的原始事实」，后到的重复采样（onShow 抖动）不覆盖首证。
+     * <b>不改写 distance_m / accuracy_m / latitude / longitude / created_at</b>：
+     * 桶内首见时刻与首证（距离、精度、坐标）是「该窗口的原始事实」，后到的重复
+     * 采样（onShow 抖动）不覆盖首证。
      * <p>
      * ⚠️ 时间口径（对齐热度上报同款约束）：created_at/updated_at 必须由 Java 传
      * LocalDateTime.now()（JVM 时区 = 北京时间），禁止 DB now()——RDS 会话时区
      * 为 UTC，混用会让时间窗统计错位。
+     * <p>
+     * ⚠️ 坐标列（V46，2026-10-08）：null = 旧端（协议向后兼容，服务层已校验
+     * 「成对或全缺」）。拼接点两侧补空格是硬约束（文本块拼接漏空格事故，10-06）。
      */
     @Modifying
-    @Query(value = "INSERT INTO qwt_venue_presence_pings " +
-            "(created_at, updated_at, deleted, user_id, venue_id, write_bucket, distance_m, accuracy_m) " +
-            "VALUES (:now, :now, false, :userId, :venueId, :writeBucket, :distanceM, :accuracyM) " +
-            "ON DUPLICATE KEY UPDATE updated_at = VALUES(updated_at)",
+    @Query(value = "INSERT INTO qwt_venue_presence_pings "
+            + "(created_at, updated_at, deleted, user_id, venue_id, write_bucket, distance_m, accuracy_m, latitude, longitude) "
+            + "VALUES (:now, :now, false, :userId, :venueId, :writeBucket, :distanceM, :accuracyM, :latitude, :longitude) "
+            + "ON DUPLICATE KEY UPDATE updated_at = VALUES(updated_at)",
             nativeQuery = true)
     void upsertInBucket(@Param("userId") Long userId,
                         @Param("venueId") Long venueId,
                         @Param("writeBucket") long writeBucket,
                         @Param("distanceM") int distanceM,
                         @Param("accuracyM") Integer accuracyM,
+                        @Param("latitude") Double latitude,
+                        @Param("longitude") Double longitude,
                         @Param("now") LocalDateTime now);
 }

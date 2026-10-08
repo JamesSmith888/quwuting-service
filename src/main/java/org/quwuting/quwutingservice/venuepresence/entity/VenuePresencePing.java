@@ -13,7 +13,9 @@ import org.quwuting.quwutingservice.base.BaseEntity;
  * 门店到访痕迹（presence ping，2026-09-29，V33；文档 = docs/agents/52-venue-presence.md）。
  * <p>
  * 一行 = 一次「用户在门店附近的可证实事实」，采样主力 = 小程序每次打开（onShow）。
- * <b>不落用户经纬度</b>（隐私红线，见 V33 迁移头注）：只存端侧自报的
+ * <b>2026-10-08（V46）起携带用户坐标</b>（{@link #latitude} / {@link #longitude}，gcj02）：
+ * 原「坐标不出端」红线的正当性形态经用户裁决修订为「主动同意 + 用途限定」
+ * （见 V46 迁移头注），采集门禁不变；历史行恒 NULL。另仍存端侧自报的
  * {@code distanceM}（来自 /venues/nearby 服务端 Haversine 结果）与 {@code accuracyM}。
  * <p>
  * 写宽松读严格：本表存原始距离，{@code HIT_RADIUS_M} 等「到访/附近」口径在查询侧
@@ -64,4 +66,17 @@ public class VenuePresencePing extends BaseEntity {
     /** 端侧定位精度（米，wx.getLocation accuracy；null = 端侧未提供）。显式列名理由同上。 */
     @Column(name = "accuracy_m")
     private Integer accuracyM;
+
+    /**
+     * 用户纬度（gcj02，端侧随足迹上报；2026-10-08 V46 起新记录才有值，历史行 NULL）。
+     * <p>
+     * ⚠️ 用途限定：仅 admin 内部到访统计与轨迹分析（{@code GET /admin/users/{id}/track}），
+     * ⛔ 不向 C 端 / 第三方展示；同意文案四处已与事实同步（见 V46 迁移头注）。
+     */
+    @Column(name = "latitude")
+    private Double latitude;
+
+    /** 用户经度（gcj02，与 {@link #latitude} 成对入库；NULL = 旧端 / 历史记录） */
+    @Column(name = "longitude")
+    private Double longitude;
 }
