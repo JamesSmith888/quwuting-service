@@ -13,9 +13,12 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  * @param outcome      {@code TimerShareJoinOutcome} 的名字；JOINED / ALREADY_JOINED 才带 snapshot
  * @param serverNowMs  服务端当前时刻：接收方用它与自己测得的往返时间估算时钟偏移
  * @param snapshot     快照；非 JOINED / ALREADY_JOINED 时为 null
+ * @param host         主持方资料（昵称 / 头像；2026-10-08，V45）——「双方互看」的接收方一侧；
+ *                     非 JOINED / ALREADY_JOINED 时为 null；null 与「资料为空」用字段内层 null 区分
  */
 @JsonInclude(JsonInclude.Include.ALWAYS)
-public record TimerShareJoinResponse(String outcome, long serverNowMs, Snapshot snapshot) {
+public record TimerShareJoinResponse(String outcome, long serverNowMs, Snapshot snapshot,
+                                     TimerShareProfileView host) {
 
     /**
      * 时间快照（服务端时间轴）。接收方还原本机计时：
@@ -43,6 +46,6 @@ public record TimerShareJoinResponse(String outcome, long serverNowMs, Snapshot 
 
     /** 无快照的结果（EXPIRED / FULL / … 这些「预期的业务状态」） */
     public static TimerShareJoinResponse withoutSnapshot(String outcome, long serverNowMs) {
-        return new TimerShareJoinResponse(outcome, serverNowMs, null);
+        return new TimerShareJoinResponse(outcome, serverNowMs, null, null);
     }
 }

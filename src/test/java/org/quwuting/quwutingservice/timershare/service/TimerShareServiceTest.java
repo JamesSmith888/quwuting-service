@@ -11,13 +11,20 @@ import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.timershare.dto.request.CreateTimerShareRequest;
 import org.quwuting.quwutingservice.timershare.dto.request.CreateTimerShareRequest.RuleInput;
 import org.quwuting.quwutingservice.timershare.dto.request.CreateTimerShareRequest.TierInput;
+import org.quwuting.quwutingservice.timershare.dto.request.SettleTimerShareRequest;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareCloseResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareJoinResponse;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerShareJoinView;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerSharePeerResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareResponse;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerShareSettleResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareStatusResponse;
 import org.quwuting.quwutingservice.timershare.entity.TimerShare;
+import org.quwuting.quwutingservice.timershare.entity.TimerShareJoin;
 import org.quwuting.quwutingservice.timershare.enums.TimerShareJoinOutcome;
 import org.quwuting.quwutingservice.timershare.enums.TimerShareStatus;
+import org.quwuting.quwutingservice.user.entity.User;
+import org.quwuting.quwutingservice.user.repository.UserRepository;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.wxacode.service.WxacodeImage;
@@ -64,6 +71,8 @@ class TimerShareServiceTest {
     private WechatService wechatService;
     @Mock
     private VenueRepository venueRepository;
+    @Mock
+    private UserRepository userRepository;
 
     private final long[] now = {T0};
     /** 预热任务录制器（只记录不执行）：暖启动的执行语义（生成 / 失败静默 / 不重复外呼）在 TimerShareQrServiceTest */
@@ -74,7 +83,16 @@ class TimerShareServiceTest {
     @BeforeEach
     void setUp() {
         qrService = new TimerShareQrService(wechatService, "wx-test-appid", "release", prewarmTasks::add);
-        service = new TimerShareService(store, qrService, venueRepository, () -> now[0]);
+        service = new TimerShareService(store, qrService, venueRepository, userRepository, () -> now[0]);
+    }
+
+    /** 一位有昵称头像的用户（资料装配用；V45） */
+    private static User user(long id, String nickname, String avatarUrl) {
+        User u = new User();
+        u.setId(id);
+        u.setNickname(nickname);
+        u.setAvatarUrl(avatarUrl);
+        return u;
     }
 
     private static CreateTimerShareRequest request(String sessionKey) {
@@ -349,6 +367,8 @@ class TimerShareServiceTest {
         venue.setId(42L);
         venue.setName("某舞厅");
         when(venueRepository.findByIdAndDeletedFalse(42L)).thenReturn(Optional.of(venue));
+        when(userRepository.findByIdAndDeletedFalse(HOST))
+                .thenReturn(Optional.of(user(HOST, "王姐", "https://cdn.example/a.png")));
 
         TimerShareJoinResponse r = service.join(GUEST, TOKEN);
 
@@ -364,6 +384,10 @@ class TimerShareServiceTest {
         assertEquals(20.0, snap.rule().tiers().get(0).price());
         assertEquals(42L, snap.venue().id());
         assertEquals("某舞厅", snap.venue().name(), "名称由服务端据 id 现取，不信任客户端");
+        // 主持方资料（「双方互看」接收方一侧，V45）
+        assertNotNull(r.host());
+        assertEquals("王姐", r.host().nickname());
+        assertEquals("https://cdn.example/a.png", r.host().avatarUrl());
     }
 
     @Test
@@ -371,6 +395,8 @@ class TimerShareServiceTest {
         TimerShare share = storedShare(TOKEN);
         when(store.join(TOKEN, GUEST, T0))
                 .thenReturn(new TimerShareStore.JoinResult(TimerShareJoinOutcome.ALREADY_JOINED, share, false));
+        // 账号已不可查（极端情况）→ host 为 null，客户端兜底占位，不因资料缺失拒绝加入
+        when(userRepository.findByIdAndDeletedFalse(HOST)).thenReturn(Optional.empty());
 
         TimerShareJoinResponse r = service.join(GUEST, TOKEN);
 
@@ -378,6 +404,7 @@ class TimerShareServiceTest {
         assertNotNull(r.snapshot());
         assertNull(r.snapshot().venue());
         assertNull(r.snapshot().pausedAtServerMs());
+        assertNull(r.host());
         verifyNoInteractions(venueRepository);
     }
 
@@ -444,6 +471,103 @@ class TimerShareServiceTest {
     void closeOfMalformedTokenIsHarmlessFalse() {
         assertFalse(service.close(HOST, "bad").closed());
         verifyNoInteractions(store);
+    }
+
+    // ── 结算与对账（V45）────────────────────────────────────────────────────
+
+    @Test
+    void settleRecordsThroughStoreAndDegradesToFalseForMalformedToken() {
+        when(store.settle(TOKEN, GUEST, 2700, T0)).thenReturn(true);
+        assertTrue(service.settle(GUEST, TOKEN, new SettleTimerShareRequest(2700)).recorded());
+
+        // token 格式非法：不触库、不抛错，直接 recorded=false（尽力而为语义，见 TimerShareSettleResponse）
+        assertFalse(service.settle(GUEST, "bad token", new SettleTimerShareRequest(2700)).recorded());
+        verify(store, never()).settle(eq("bad token"), anyLong(), any(), anyLong());
+    }
+
+    @Test
+    void settleWithIllegalReadingIs1041AndNeverTouchesStore() {
+        assertCode(1041, () -> service.settle(GUEST, TOKEN, null));
+        assertCode(1041, () -> service.settle(GUEST, TOKEN, new SettleTimerShareRequest(null)));
+        assertCode(1041, () -> service.settle(GUEST, TOKEN, new SettleTimerShareRequest(-1)));
+        assertCode(1041, () -> service.settle(GUEST, TOKEN,
+                new SettleTimerShareRequest(12 * 3600 + 1)));
+        verifyNoInteractions(store);
+    }
+
+    @Test
+    void settleSharesTheHostWriteRateLimit() {
+        when(store.settle(TOKEN, HOST, 100, T0)).thenReturn(true);
+        for (int i = 0; i < TimerSharePolicy.WRITE_RATE_LIMIT; i++) {
+            service.settle(HOST, TOKEN, new SettleTimerShareRequest(100));
+        }
+        assertCode(1006, () -> service.settle(HOST, TOKEN, new SettleTimerShareRequest(100)));
+    }
+
+    @Test
+    void peerReturnsHostSettlementFactAndProfile() {
+        TimerShare share = storedShare(TOKEN);
+        share.setHostSettledAtMs(T0 - 30_000L);
+        share.setHostSettledNetSeconds(2400);
+        when(store.findForJoiner(TOKEN, GUEST)).thenReturn(Optional.of(share));
+        when(userRepository.findByIdAndDeletedFalse(HOST))
+                .thenReturn(Optional.of(user(HOST, "王姐", null)));
+
+        TimerSharePeerResponse r = service.peer(GUEST, TOKEN);
+
+        assertEquals("ACTIVE", r.status());
+        assertEquals(T0 - 30_000L, r.hostSettledAtMs());
+        assertEquals(2400, r.hostSettledNetSeconds());
+        assertEquals("王姐", r.host().nickname());
+        assertNull(r.host().avatarUrl());
+        assertEquals(T0, r.serverNowMs());
+    }
+
+    @Test
+    void peerDerivesClosedStatusAndRejectsNonJoinersOrMalformedToken() {
+        TimerShare share = storedShare(TOKEN);
+        share.setStatus(TimerShareStatus.CLOSED);
+        when(store.findForJoiner(TOKEN, GUEST)).thenReturn(Optional.of(share));
+        when(userRepository.findByIdAndDeletedFalse(HOST)).thenReturn(Optional.empty());
+
+        TimerSharePeerResponse closed = service.peer(GUEST, TOKEN);
+        assertEquals("CLOSED", closed.status(), "关闭后的结算事实仍可读（结算恰大量发生在关码之后）");
+        assertNull(closed.hostSettledAtMs(), "未结算 → null");
+        assertNull(closed.host(), "账号不可查 → null（客户端兜底）");
+
+        when(store.findForJoiner(TOKEN, 99L)).thenReturn(Optional.empty());
+        assertCode(1043, () -> service.peer(99L, TOKEN));
+        assertCode(1043, () -> service.peer(GUEST, "bad"));
+    }
+
+    @Test
+    void statusCarriesJoinerProfilesAndSettlementFacts() {
+        TimerShare share = storedShare(TOKEN);
+        when(store.findOwned(TOKEN, HOST)).thenReturn(Optional.of(share));
+        TimerShareJoin first = new TimerShareJoin();
+        first.setUserId(GUEST);
+        first.setSettledAtMs(T0 - 10_000L);
+        first.setSettledNetSeconds(1500);
+        TimerShareJoin second = new TimerShareJoin();
+        second.setUserId(21L);
+        when(store.listJoins(share.getId())).thenReturn(List.of(first, second));
+        when(userRepository.findByIdInAndDeletedFalse(any()))
+                .thenReturn(List.of(user(GUEST, "小李", "https://cdn.example/b.png"), user(21L, null, null)));
+
+        TimerShareStatusResponse r = service.status(HOST, TOKEN);
+
+        assertEquals(2, r.joins().size());
+        TimerShareJoinView v0 = r.joins().get(0);
+        assertEquals(1, v0.seq(), "序号 = 加入顺序（1 起），与界面「第 N 位」对应");
+        assertEquals("小李", v0.nickname());
+        assertEquals("https://cdn.example/b.png", v0.avatarUrl());
+        assertEquals(T0 - 10_000L, v0.settledAtMs());
+        assertEquals(1500, v0.settledNetSeconds());
+        TimerShareJoinView v1 = r.joins().get(1);
+        assertEquals(2, v1.seq());
+        assertNull(v1.nickname());
+        assertNull(v1.avatarUrl());
+        assertNull(v1.settledAtMs(), "未结算 → null");
     }
 
     // ── 码图 ──────────────────────────────────────────────────────────────

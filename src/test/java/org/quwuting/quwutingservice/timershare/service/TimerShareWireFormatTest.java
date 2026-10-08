@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import org.junit.jupiter.api.Test;
 import org.quwuting.quwutingservice.timershare.dto.request.CreateTimerShareRequest;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareJoinResponse;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerSharePeerResponse;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerShareProfileView;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareRuleView;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -68,7 +70,8 @@ class TimerShareWireFormatTest {
     void joinedResponseWritesExplicitNullsForSemanticallyNullFields() {
         TimerShareJoinResponse resp = new TimerShareJoinResponse("JOINED", 1780000000123L,
                 new TimerShareJoinResponse.Snapshot(1779999400000L, 60, null,
-                        new TimerShareRuleView(List.of(new TimerShareRuleView.Tier(4.0, 20.0, null))), null));
+                        new TimerShareRuleView(List.of(new TimerShareRuleView.Tier(4.0, 20.0, null))), null),
+                null);
 
         JsonNode json = APP_MAPPER.readTree(APP_MAPPER.writeValueAsString(resp));
 
@@ -81,6 +84,36 @@ class TimerShareWireFormatTest {
         JsonNode tier = snapshot.get("rule").get("tiers").get(0);
         assertFalse(tier.has("mode"), "档位式缺省不写出 mode");
         assertEquals(4.0, tier.get("durationMinutes").asDouble());
+        assertTrue(json.has("host") && json.get("host").isNull(), "非成功加入时主持方资料显式为 null（V45）");
+    }
+
+    @Test
+    void joinResponseWritesHostProfileIncludingInnerNulls() {
+        TimerShareJoinResponse resp = new TimerShareJoinResponse("ALREADY_JOINED", 1780000000123L,
+                new TimerShareJoinResponse.Snapshot(1779999400000L, 60, null,
+                        new TimerShareRuleView(List.of(new TimerShareRuleView.Tier(4.0, 20.0, null))), null),
+                new TimerShareProfileView("王姐", null));
+
+        JsonNode json = APP_MAPPER.readTree(APP_MAPPER.writeValueAsString(resp));
+
+        JsonNode host = json.get("host");
+        assertEquals("王姐", host.get("nickname").asString());
+        assertTrue(host.has("avatarUrl") && host.get("avatarUrl").isNull(),
+                "「没设头像」必须是显式 null——客户端以此决定首字占位（V45）");
+    }
+
+    @Test
+    void peerResponseAlwaysWritesHostAndSettlementFields() {
+        TimerSharePeerResponse resp = new TimerSharePeerResponse("CLOSED", null, null, null, 1780000000123L);
+
+        JsonNode json = APP_MAPPER.readTree(APP_MAPPER.writeValueAsString(resp));
+
+        assertEquals("CLOSED", json.get("status").asString());
+        assertTrue(json.has("host") && json.get("host").isNull());
+        assertTrue(json.has("hostSettledAtMs") && json.get("hostSettledAtMs").isNull(),
+                "未结算 → 显式 null（客户端以 null 判「还没结算」，不能是字段消失）");
+        assertTrue(json.has("hostSettledNetSeconds") && json.get("hostSettledNetSeconds").isNull());
+        assertEquals(1780000000123L, json.get("serverNowMs").asLong());
     }
 
     @Test

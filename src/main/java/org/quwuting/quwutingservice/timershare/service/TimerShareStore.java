@@ -17,6 +17,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -81,6 +82,10 @@ public class TimerShareStore {
             applySnapshot(share, anchors, ruleJson, venueId, nowMs);
             share.setStatus(TimerShareStatus.ACTIVE);
             share.setClosedAtMs(null);
+            // 重新激活即结清（2026-10-08，V45）：刷新发生在「单独结算后撤销、重新打开弹层」等路径——
+            // 主持方又回到计时中，「已结算」事实必须一并作废（与 closedAtMs 同口径，见 V45 迁移头注）
+            share.setHostSettledAtMs(null);
+            share.setHostSettledNetSeconds(null);
             share.setRefreshCount(share.getRefreshCount() + 1);
             return new Upserted(shareRepository.save(share), false);
         }
@@ -169,6 +174,57 @@ public class TimerShareStore {
         share.setClosedAtMs(nowMs);
         shareRepository.save(share);
         return true;
+    }
+
+    /**
+     * 结算事实上报（2026-10-08，V45）。调用者是主持方 → 写分享行；是该会话的加入者 → 写其流水行；
+     * 两者都不是（或 token 不存在）→ {@code recorded=false}（静默，调用方据此忽略）。
+     * <p>
+     * 三条刻意的设计（见 V45 迁移头注）：① <b>不检查会话状态</b>——结算大量发生在码过期 / 会话关闭之后，
+     * 这不是异常路径；② <b>覆盖语义</b>——重复上报覆盖为最新一次（客户端重试与「撤销后重结算」都靠它）；
+     * ③ 结算时刻由服务端盖章（{@code nowMs} 由编排层取），不信客户端时间。
+     * <p>
+     * 锁的是分享行（{@code FOR UPDATE}）：与 join / close 保持同一把锁、同一加锁顺序；结算与「加入」
+     * 并发时天然串行，不会出现「刚写完结算又被人刷进新状态」的读改写竞态。
+     */
+    @Transactional
+    public boolean settle(String token, Long userId, Integer netSeconds, long nowMs) {
+        Optional<TimerShare> found = shareRepository.findByTokenForUpdate(token);
+        if (found.isEmpty()) {
+            return false;
+        }
+        TimerShare share = found.get();
+        if (share.getHostUserId().equals(userId)) {
+            share.setHostSettledAtMs(nowMs);
+            share.setHostSettledNetSeconds(netSeconds);
+            shareRepository.save(share);
+            return true;
+        }
+        Optional<TimerShareJoin> join = joinRepository.findByShareIdAndUserIdAndDeletedFalse(share.getId(), userId);
+        if (join.isEmpty()) {
+            return false;
+        }
+        TimerShareJoin row = join.get();
+        row.setSettledAtMs(nowMs);
+        row.setSettledNetSeconds(netSeconds);
+        joinRepository.save(row);
+        return true;
+    }
+
+    /**
+     * 加入者视角读会话（peer 接口用，2026-10-08，V45）：token 找到会话<b>且</b>调用者确实加入过它才返回。
+     * 主持方不从此通道读（那是 status 的职责）；任何状态都算（CLOSED / EXPIRED 下结算事实仍要可读）。
+     */
+    @Transactional(readOnly = true)
+    public Optional<TimerShare> findForJoiner(String token, Long userId) {
+        return shareRepository.findByTokenAndDeletedFalse(token)
+                .filter(s -> joinRepository.findByShareIdAndUserIdAndDeletedFalse(s.getId(), userId).isPresent());
+    }
+
+    /** 会话的加入流水（按加入先后；status 装配用）。调用方保证 shareId 存在 */
+    @Transactional(readOnly = true)
+    public List<TimerShareJoin> listJoins(Long shareId) {
+        return joinRepository.findByShareIdAndDeletedFalseOrderByIdAsc(shareId);
     }
 
     /** 主持方轮询用：只读取自己的会话（不是自己的一律视作不存在） */

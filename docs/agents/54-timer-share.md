@@ -221,10 +221,71 @@ SELECT COUNT(*) FROM qwt_timer_shares WHERE parent_share_id IS NOT NULL;
 
 ## 十二、没做（有意）
 
-- **P1「对方已结算 → 一键按此结算」**：主持方结算时多上报一次终态、接收方前台轮询。表结构已留 `closed_at_ms`，
-  但先看有没有人真扫（漏斗埋好了）。
+- ~~P1「对方已结算 → 一键按此结算」~~ → **2026-10-08 V45 已做**（口径升级为「结算事实同步 +
+  建议式对齐」，见「十三、V45 结算事实同步与资料互看」）。
 - **P2 暂停/继续同步、结算单码、微信卡片转发**。
 - 管理端漏斗看板：上面三条 SQL 足够首发观察；需要常态化再进 admin-web。
+
+## 十三、V45 结算事实同步与资料互看（2026-10-08）
+
+> 需求：① 一方结算后，另一方能看到「对方几点结束」并可选择**按此时间结束自己这场**（建议式，
+> **不强制**）；② 扫码加入的双方互看头像昵称。迁移 = V45（四列，见迁移头注）。
+
+### 数据（V45）
+
+| 表 | 列 | 含义 |
+|---|---|---|
+| `qwt_timer_shares` | `host_settled_at_ms` / `host_settled_net_seconds` | 主持方结算时刻（服务端时间轴）/ 净秒数；NULL = 未结算 |
+| `qwt_timer_share_joins` | `settled_at_ms` / `settled_net_seconds` | 加入者结算时刻 / 净秒数；NULL = 未结算 |
+
+四条刻意的设计（细节在 V45 迁移头注）：
+1. **不复用 `closed_at_ms`**——close 有三种触发（整场结算 / 单独结算 / 丢弃清理），丢弃不产生结算
+   事实；「关码」是凭据生命周期、「结算」是账务事实，两件事各自独立。
+2. **重新激活即结清**——主持方「单独结算后撤销」会经 createOrRefresh 重新激活（V42 既有行为），
+   此时 host 又回到计时中，`host_settled_*` 一并清空（与 `closed_at_ms` 同口径）。
+3. **覆盖语义**——重复上报覆盖为最新一次（客户端重试与「撤销后重结算」都靠它）；无「已结算不可改」。
+4. **不检查会话状态**——结算大量发生在码过期 / 会话关闭之后（TTL 只有 10 分钟而一场舞几十分钟），
+   CLOSED / EXPIRED 下照常可写、可读，这不是异常路径。
+
+### 接口
+
+| 接口 | 鉴权 | 说明 |
+|---|---|---|
+| `POST /timer-shares/{token}/settle` | 登录 | 结算事实上报（主持方与加入者共用，服务端按 caller 角色分派写入）。body `{netElapsedSeconds}`（0 ~ 12h 秒；**金额刻意不带**——各端规则可能不同、金额是账务隐私）。尽力而为：token 无效 / 非本会话成员 → `{recorded:false}`（数据回传，同 join 的 outcome 模式）；读数非法 → 1041。限流复用写速率（30/10min） |
+| `GET /timer-shares/{token}/peer` | 登录 | **加入者**读主持方：`{status, host, hostSettledAtMs, hostSettledNetSeconds, serverNowMs}`。鉴权 = 调用者必须是该会话的加入者（主持方走 status）；CLOSED / EXPIRED 也正常响应。限流复用状态速率 |
+
+既有接口扩展：`join` 响应加 `host`（主持方资料，仅 JOINED / ALREADY_JOINED 带有）；
+`status` 响应加 `joins[]`（`{seq, nickname, avatarUrl, settledAtMs, settledNetSeconds}`，seq 1 起 = 界面
+「第 N 位」）。`host` / `joins[].nickname|avatarUrl` 的 null 都是**显式写出**（ALWAYS 契约，客户端
+用 null 与字段缺失区分语义）。
+
+### 资料互看的边界（合规收敛点）
+
+- **只下发昵称 + 头像**（`TimerShareProfileView`）——年龄 / 性别 / 城市等一概不经本通道。
+  展示形态 = **会话内的静态标识**（计时页同行 chip / 弹层已加入态），不提供"对方主页"与任何
+  浏览入口（用户公开主页 `GET /users/{id}` 2026-08-21 因「收集、存储用户身份信息」驳回下线，
+  见前端 services/user.ts——本功能刻意不复活它）。
+- **不下发加入者的 userId**（`TimerShareJoinView` 只有 seq）——不给跨会话串联同一个人留通道。
+- 资料是**服务端现查的当前值**（非快照落库）；客户端各存一份快照用于离线展示（加入方
+  `origin.peerProfile`），进页经 peer 顺带刷新。
+- ⚠️ **若未来审核要求收敛**：改两处即可全链收敛——① 本域 DTO 不再下发 `host`/`joins[].nickname|avatarUrl`；
+  ② 前端同行 chip / 弹层 joined 态退回无资料形态（`utils/timerPeer` 是前端唯一兜底单点）。
+  不需要动表、不需要动其它域。
+
+### 已知边界（如实登记）
+
+- **加入方撤销结算后未重新结算**：服务端保留上一次的 `settled_at_ms`（主持方视角可能看到
+  「对方已结算」的过期事实）。概率低、影响小；重结算自然覆盖。主持方一侧无此问题
+  （重新激活即结清）。
+- **结算时刻的客户端换算误差**：接收方用一次往返估偏移（同加入链路），误差上界 = 半个 RTT；
+  对齐的落点是本机计时事实，秒级误差与场景容差同量级。
+- **加入者视角的资料是快照**（join 时刻 + 进页 peer 刷新）；主持方视角是现查值——两侧不对称
+  是有意的（主持方在弹层轮询里天然持续刷新，加入方没有等价通道）。
+
+### 验证（2026-10-08）
+
+- 后端：`TimerShare*Test` 97 条全绿（新增 settle 语义 / peer 鉴权与 CLOSED 可读 / status 装配 /
+  WireFormat 的显式 null 契约 8 条）；静态验证止步于此，真机行为交用户（同 59 号 §十）。
 
 ## 相关文件
 

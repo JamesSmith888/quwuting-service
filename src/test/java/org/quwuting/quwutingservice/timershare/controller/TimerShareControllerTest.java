@@ -12,9 +12,12 @@ import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.exception.GlobalExceptionHandler;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.timershare.dto.request.CreateTimerShareRequest;
+import org.quwuting.quwutingservice.timershare.dto.request.SettleTimerShareRequest;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareCloseResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareJoinResponse;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerSharePeerResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareResponse;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerShareSettleResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareStatusResponse;
 import org.quwuting.quwutingservice.timershare.service.TimerShareService;
 import org.quwuting.quwutingservice.user.enums.UserRole;
@@ -109,6 +112,10 @@ class TimerShareControllerTest {
         mvc.perform(get("/timer-shares/" + TOKEN + "/status")).andExpect(status().isUnauthorized());
         mvc.perform(post("/timer-shares/" + TOKEN + "/join")).andExpect(status().isUnauthorized());
         mvc.perform(post("/timer-shares/" + TOKEN + "/close")).andExpect(status().isUnauthorized());
+        mvc.perform(post("/timer-shares/" + TOKEN + "/settle")
+                .contentType(MediaType.APPLICATION_JSON).content("{\"netElapsedSeconds\":100}"))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(get("/timer-shares/" + TOKEN + "/peer")).andExpect(status().isUnauthorized());
         verifyNoInteractions(service);
     }
 
@@ -123,7 +130,7 @@ class TimerShareControllerTest {
 
     @Test
     void statusCloseAndJoinRouteToTheServiceWithTheCallerIdentity() throws Exception {
-        when(service.status(10L, TOKEN)).thenReturn(new TimerShareStatusResponse("ACTIVE", 1, 5, 1780000600000L, 1780000000000L));
+        when(service.status(10L, TOKEN)).thenReturn(new TimerShareStatusResponse("ACTIVE", 1, 5, 1780000600000L, 1780000000000L, java.util.List.of()));
         when(service.close(10L, TOKEN)).thenReturn(new TimerShareCloseResponse(true));
         when(service.join(10L, TOKEN)).thenReturn(TimerShareJoinResponse.withoutSnapshot("EXPIRED", 1780000000000L));
 
@@ -138,6 +145,27 @@ class TimerShareControllerTest {
     }
 
     @Test
+    void settleBindsTheBodyAndPeerRoutesToTheService() throws Exception {
+        when(service.settle(eq(10L), eq(TOKEN), any())).thenReturn(new TimerShareSettleResponse(true));
+        when(service.peer(10L, TOKEN)).thenReturn(new TimerSharePeerResponse("CLOSED", null, 1780000300000L, 2400, 1780000000000L));
+
+        mvc.perform(post("/timer-shares/" + TOKEN + "/settle")
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"netElapsedSeconds\":2400}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.recorded").value(true));
+
+        ArgumentCaptor<SettleTimerShareRequest> body = ArgumentCaptor.forClass(SettleTimerShareRequest.class);
+        verify(service).settle(eq(10L), eq(TOKEN), body.capture());
+        assertEquals(2400, body.getValue().netElapsedSeconds());
+
+        mvc.perform(get("/timer-shares/" + TOKEN + "/peer"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("CLOSED"))
+                .andExpect(jsonPath("$.data.hostSettledAtMs").value(1780000300000L))
+                .andExpect(jsonPath("$.data.hostSettledNetSeconds").value(2400));
+    }
+
+    @Test
     void onlyTheDeclaredVerbsReachTheService() throws Exception {
         // 全仓只有 GET / POST。错误的动词不会命中任何处理器（具体状态码由全局异常处理器决定，
         // 本仓既有行为是兜底映射，不是 405——这里不断言它，只断言「绝不会执行到 Service、绝不会 2xx」）
@@ -146,7 +174,9 @@ class TimerShareControllerTest {
                 org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete("/timer-shares/" + TOKEN + "/close"),
                 org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch("/timer-shares/" + TOKEN + "/join"),
                 get("/timer-shares/" + TOKEN + "/join"),
-                post("/timer-shares/" + TOKEN + "/status"))) {
+                post("/timer-shares/" + TOKEN + "/status"),
+                get("/timer-shares/" + TOKEN + "/settle"),
+                post("/timer-shares/" + TOKEN + "/peer"))) {
             int code = mvc.perform(req).andReturn().getResponse().getStatus();
             org.junit.jupiter.api.Assertions.assertTrue(code >= 400, "错误的动词不应成功：" + code);
         }

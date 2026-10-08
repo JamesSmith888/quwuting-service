@@ -265,6 +265,69 @@ class TimerShareStoreTest {
         verify(shareRepository, never()).save(any());
     }
 
+    // ── settle（V45 结算事实同步）──────────────────────────────────────────
+
+    @Test
+    void hostSettleWritesShareColumnsAndJoinerSettleWritesJoinRow() {
+        TimerShare s = activeShare();
+        when(shareRepository.findByTokenForUpdate(TOKEN)).thenReturn(Optional.of(s));
+
+        assertTrue(store.settle(TOKEN, HOST, 1500, NOW));
+        assertEquals(NOW, s.getHostSettledAtMs());
+        assertEquals(1500, s.getHostSettledNetSeconds());
+        verify(shareRepository).save(s);
+
+        TimerShareJoin row = new TimerShareJoin();
+        row.setShareId(1L);
+        row.setUserId(GUEST);
+        when(joinRepository.findByShareIdAndUserIdAndDeletedFalse(1L, GUEST)).thenReturn(Optional.of(row));
+        assertTrue(store.settle(TOKEN, GUEST, 1200, NOW + 5_000L));
+        assertEquals(NOW + 5_000L, row.getSettledAtMs());
+        assertEquals(1200, row.getSettledNetSeconds());
+        verify(joinRepository).save(row);
+    }
+
+    @Test
+    void settleOverwritesInPlaceBecauseTheClientMayRetryOrResettle() {
+        TimerShare s = activeShare();
+        when(shareRepository.findByTokenForUpdate(TOKEN)).thenReturn(Optional.of(s));
+
+        store.settle(TOKEN, HOST, 100, NOW);
+        store.settle(TOKEN, HOST, 200, NOW + 1_000L);
+
+        assertEquals(NOW + 1_000L, s.getHostSettledAtMs(), "覆盖为最新一次（客户端重试 / 撤销后重结算都靠它）");
+        assertEquals(200, s.getHostSettledNetSeconds());
+    }
+
+    @Test
+    void settleWithoutMembershipOrUnknownTokenIsFalseAndWritesNothing() {
+        TimerShare s = activeShare();
+        when(shareRepository.findByTokenForUpdate(TOKEN)).thenReturn(Optional.of(s));
+        when(joinRepository.findByShareIdAndUserIdAndDeletedFalse(1L, 99L)).thenReturn(Optional.empty());
+
+        assertFalse(store.settle(TOKEN, 99L, 100, NOW), "既不是主持方也没加入过 ⇒ 静默 false");
+
+        when(shareRepository.findByTokenForUpdate("ZzZzZzZzZz")).thenReturn(Optional.empty());
+        assertFalse(store.settle("ZzZzZzZzZz", HOST, 100, NOW));
+
+        verify(shareRepository, never()).save(any());
+        verify(joinRepository, never()).save(any());
+    }
+
+    @Test
+    void findForJoinerRequiresMembershipAndWorksAfterClose() {
+        TimerShare s = activeShare();
+        s.setStatus(TimerShareStatus.CLOSED);
+        when(shareRepository.findByTokenAndDeletedFalse(TOKEN)).thenReturn(Optional.of(s));
+        when(joinRepository.findByShareIdAndUserIdAndDeletedFalse(1L, GUEST))
+                .thenReturn(Optional.of(new TimerShareJoin()));
+
+        assertTrue(store.findForJoiner(TOKEN, GUEST).isPresent(), "CLOSED 也要能读——结算事实恰恰发生在关码之后");
+
+        when(joinRepository.findByShareIdAndUserIdAndDeletedFalse(1L, 99L)).thenReturn(Optional.empty());
+        assertFalse(store.findForJoiner(TOKEN, 99L).isPresent(), "没加入过 ⇒ 不可读（主持方走 findOwned）");
+    }
+
     // ── createOrRefresh ───────────────────────────────────────────────────
 
     private static final TimerShareClock.Anchors ANCHORS = new TimerShareClock.Anchors(NOW - 600_000L, 60, null);
@@ -275,6 +338,8 @@ class TimerShareStoreTest {
         s.setStatus(TimerShareStatus.CLOSED);
         s.setClosedAtMs(NOW - 1);
         s.setJoinCount(2);
+        s.setHostSettledAtMs(NOW - 500L);
+        s.setHostSettledNetSeconds(1000);
         when(shareRepository.findByHostAndSessionKeyForUpdate(HOST, "1780000000000")).thenReturn(Optional.of(s));
         when(shareRepository.save(s)).thenReturn(s);
 
@@ -285,6 +350,8 @@ class TimerShareStoreTest {
         assertEquals(TOKEN, u.share().getToken(), "刷新不换 token ⇒ 码图不变");
         assertEquals(TimerShareStatus.ACTIVE, s.getStatus(), "单独结算后撤销 ⇒ 重新激活");
         assertNull(s.getClosedAtMs());
+        assertNull(s.getHostSettledAtMs(), "重新激活即结清：主持方回到计时中，「已结算」事实作废（V45）");
+        assertNull(s.getHostSettledNetSeconds());
         assertEquals(2, s.getRefreshCount());
         assertEquals(2, s.getJoinCount(), "已加入的人不受刷新影响");
         assertEquals(NOW + 5_000L, s.getSnapshotAtMs());

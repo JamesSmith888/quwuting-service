@@ -93,4 +93,17 @@ public class TimerShare extends BaseEntity {
     /** 主持方关闭的时刻（status=CLOSED 时非空） */
     @Column(name = "closed_at_ms")
     private Long closedAtMs;
+
+    /**
+     * 主持方结算时刻（服务端时间轴 epoch ms；2026-10-08，V45）。NULL = 未结算。
+     * <p>
+     * 与 {@link #closedAtMs} 语义分离：close 是凭据生命周期（码失效，三种触发含「丢弃」），
+     * 本列是账务事实（几点结束）。「单独结算后撤销」重新激活时会一并清空（回到计时中）。
+     */
+    @Column(name = "host_settled_at_ms")
+    private Long hostSettledAtMs;
+
+    /** 主持方结算时这一场的净时长（秒）；NULL = 未结算。只作对方端展示（金额绝不上云） */
+    @Column(name = "host_settled_net_seconds")
+    private Integer hostSettledNetSeconds;
 }

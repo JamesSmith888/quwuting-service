@@ -4,9 +4,12 @@ import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.common.ApiResponse;
 import org.quwuting.quwutingservice.security.UserContext;
 import org.quwuting.quwutingservice.timershare.dto.request.CreateTimerShareRequest;
+import org.quwuting.quwutingservice.timershare.dto.request.SettleTimerShareRequest;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareCloseResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareJoinResponse;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerSharePeerResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareResponse;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerShareSettleResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareStatusResponse;
 import org.quwuting.quwutingservice.timershare.service.TimerShareService;
 import org.quwuting.quwutingservice.wxacode.service.WxacodeImage;
@@ -26,16 +29,18 @@ import java.time.Duration;
 import java.util.Optional;
 
 /**
- * 计时「二维码同步给对方」接口（2026-10-07，V42；文档 = docs/agents/54-timer-share.md）。
+ * 计时「二维码同步给对方」接口（2026-10-07，V42；2026-10-08，V45；文档 = docs/agents/54-timer-share.md）。
  * <p>
  * 全仓只有 GET / POST。除码图外全部需登录——方法首行 {@code UserContext.requireAuth()}
  * （重放安全不变量：鉴权先于任何副作用；401 后客户端静默续期并重放，不能出现「鉴权失败前已写了库」）。
  *
  * <pre>
  *   POST /timer-shares                      主持方：创建 / 刷新（幂等）
- *   GET  /timer-shares/{token}/status       主持方：轮询「对方已同步 N 人」
+ *   GET  /timer-shares/{token}/status       主持方：轮询「谁加入了 / 谁已结算」+ 加入者资料
  *   POST /timer-shares/{token}/close        主持方：结束 / 结算 / 丢弃时清理（幂等）
+ *   POST /timer-shares/{token}/settle       主持方或加入者：结算事实同步（尽力而为，V45）
  *   POST /timer-shares/{token}/join         接收方：扫码加入（预期业务状态以 outcome 回传）
+ *   GET  /timer-shares/{token}/peer         接收方：读「对方」结算事实 + 主持方资料（V45）
  *   GET  /timer-shares/{token}/wxacode.jpg  码图（公开；token 即凭据）
  * </pre>
  */
@@ -62,6 +67,28 @@ public class TimerShareController {
     public ApiResponse<TimerShareCloseResponse> close(@PathVariable("token") String token) {
         Long userId = UserContext.requireAuth();
         return ApiResponse.ok(timerShareService.close(userId, token));
+    }
+
+    /**
+     * 结算事实上报（2026-10-08，V45）：谁先结算谁上报，对方经 status / peer 读它。
+     * 尽力而为——调用方（客户端结算完成后）不因失败重试打断主流程；token 无效 / 非成员
+     * 以 {@code recorded=false} 数据回传（同 join 的 outcome 模式），读数非法才抛 1041。
+     */
+    @PostMapping("/{token}/settle")
+    public ApiResponse<TimerShareSettleResponse> settle(@PathVariable("token") String token,
+                                                        @RequestBody SettleTimerShareRequest request) {
+        Long userId = UserContext.requireAuth();
+        return ApiResponse.ok(timerShareService.settle(userId, token, request));
+    }
+
+    /**
+     * 加入者读「对方」状态（2026-10-08，V45）：主持方结算事实（几点结束）+ 主持方资料。
+     * 鉴权 = 必须是这张会话的加入者（主持方走 status）；CLOSED / EXPIRED 同样可读。
+     */
+    @GetMapping("/{token}/peer")
+    public ApiResponse<TimerSharePeerResponse> peer(@PathVariable("token") String token) {
+        Long userId = UserContext.requireAuth();
+        return ApiResponse.ok(timerShareService.peer(userId, token));
     }
 
     @PostMapping("/{token}/join")

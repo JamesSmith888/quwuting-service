@@ -5,14 +5,22 @@ import org.quwuting.quwutingservice.common.db.DbConstraintViolations;
 import org.quwuting.quwutingservice.common.ratelimit.SlidingWindowLimiter;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.timershare.dto.request.CreateTimerShareRequest;
+import org.quwuting.quwutingservice.timershare.dto.request.SettleTimerShareRequest;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareCloseResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareJoinResponse;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerShareJoinView;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerSharePeerResponse;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerShareProfileView;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareRuleView;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerShareSettleResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareStatusResponse;
 import org.quwuting.quwutingservice.timershare.entity.TimerShare;
+import org.quwuting.quwutingservice.timershare.entity.TimerShareJoin;
 import org.quwuting.quwutingservice.timershare.enums.TimerShareJoinOutcome;
 import org.quwuting.quwutingservice.timershare.enums.TimerShareStatus;
+import org.quwuting.quwutingservice.user.entity.User;
+import org.quwuting.quwutingservice.user.repository.UserRepository;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.wxacode.service.WxacodeImage;
@@ -21,6 +29,10 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
@@ -56,6 +68,7 @@ public class TimerShareService {
     private final TimerShareStore store;
     private final TimerShareQrService qrService;
     private final VenueRepository venueRepository;
+    private final UserRepository userRepository;
     private final LongSupplier clock;
 
     private final SlidingWindowLimiter writeLimiter = new SlidingWindowLimiter(
@@ -70,16 +83,17 @@ public class TimerShareService {
 
     @Autowired
     public TimerShareService(TimerShareStore store, TimerShareQrService qrService,
-                             VenueRepository venueRepository) {
-        this(store, qrService, venueRepository, System::currentTimeMillis);
+                             VenueRepository venueRepository, UserRepository userRepository) {
+        this(store, qrService, venueRepository, userRepository, System::currentTimeMillis);
     }
 
     /** 可注入时钟的构造器（单测用：限流 / 过期判定都是时间的函数，不该依赖真实睡眠） */
     TimerShareService(TimerShareStore store, TimerShareQrService qrService,
-                      VenueRepository venueRepository, LongSupplier clock) {
+                      VenueRepository venueRepository, UserRepository userRepository, LongSupplier clock) {
         this.store = store;
         this.qrService = qrService;
         this.venueRepository = venueRepository;
+        this.userRepository = userRepository;
         this.clock = clock;
     }
 
@@ -129,7 +143,7 @@ public class TimerShareService {
                 clock.getAsLong(), share.getJoinCount(), share.getMaxJoins());
     }
 
-    /** 主持方轮询：对方加入了几人。不是自己的 / 不存在 → 1043（主持方永远只会查自己的会话，这是调用方的错） */
+    /** 主持方轮询：对方加入了几人、分别是谁、谁已结算（2026-10-08 V45 起含资料与结算事实） */
     public TimerShareStatusResponse status(Long hostUserId, String token) {
         long nowMs = clock.getAsLong();
         if (!statusLimiter.tryAcquire(limiterKey(hostUserId), nowMs)) {
@@ -141,10 +155,8 @@ public class TimerShareService {
         if (share == null) {
             throw new BusinessException(CODE_NOT_FOUND, "二维码不存在或已失效");
         }
-        String status = share.getStatus() == TimerShareStatus.CLOSED ? "CLOSED"
-                : (nowMs > share.getExpiresAtMs() ? "EXPIRED" : "ACTIVE");
-        return new TimerShareStatusResponse(status, share.getJoinCount(), share.getMaxJoins(),
-                share.getExpiresAtMs(), nowMs);
+        return new TimerShareStatusResponse(deriveStatus(share, nowMs), share.getJoinCount(),
+                share.getMaxJoins(), share.getExpiresAtMs(), nowMs, resolveJoinViews(share.getId()));
     }
 
     /** 主持方结束 / 单独结算 / 丢弃计时时的清理；幂等，永不报错（见 TimerShareCloseResponse） */
@@ -189,8 +201,61 @@ public class TimerShareService {
         TimerShareJoinResponse.Snapshot snapshot = new TimerShareJoinResponse.Snapshot(
                 share.getStartServerMs(), share.getExcludedSeconds(), share.getPausedAtServerMs(), rule,
                 resolveVenueView(share.getVenueId()));
+        // 主持方资料（「双方互看」接收方一侧，2026-10-08 V45）：只随 JOINED / ALREADY_JOINED 下发；
+        // 账号查不到（极端情况）→ null，客户端兜底占位，不因此拒绝整个加入
+        TimerShareProfileView host = resolveProfile(share.getHostUserId());
         // serverNowMs 在所有 DB 工作之后取：客户端按「往返中点」估算偏移，取得越靠近响应发出越准
-        return new TimerShareJoinResponse(result.outcome().name(), clock.getAsLong(), snapshot);
+        return new TimerShareJoinResponse(result.outcome().name(), clock.getAsLong(), snapshot, host);
+    }
+
+    // ── 结算与对账（2026-10-08，V45）──────────────────────────────────────────
+
+    /**
+     * 结算事实上报：调用方（主持方或加入者）在本地结算完成后上报「这一场结算于此刻、净时长多少」。
+     * <p>
+     * 尽力而为语义（见 {@link TimerShareSettleResponse}）：token 无效 / 非本会话成员 → {@code recorded=false}，
+     * 不抛错、不打扰。读数非法（null / 越界）才是调用方的错 → 1041（客户端本来就在静默路径上，用户无感）。
+     */
+    public TimerShareSettleResponse settle(Long userId, String token, SettleTimerShareRequest request) {
+        long nowMs = clock.getAsLong();
+        if (!writeLimiter.tryAcquire(limiterKey(userId), nowMs)) {
+            throw new BusinessException(CODE_TOO_FREQUENT, "操作过于频繁，请稍后再试");
+        }
+        Integer netSeconds = request == null ? null : request.netElapsedSeconds();
+        int maxNetSeconds = (int) (TimerSharePolicy.MAX_WALL_ELAPSED_MS / 1000);
+        if (netSeconds == null || netSeconds < 0 || netSeconds > maxNetSeconds) {
+            throw invalid("settle netSeconds 非法: " + netSeconds);
+        }
+        if (!TimerShareTokens.isWellFormed(token)) {
+            return new TimerShareSettleResponse(false);
+        }
+        boolean recorded = store.settle(token, userId, netSeconds, nowMs);
+        if (recorded) {
+            log.info("[timer-share] settle recorded: uid={}", userId);
+        }
+        return new TimerShareSettleResponse(recorded);
+    }
+
+    /**
+     * 加入者读「对方（主持方）」状态：主持方是否已结算、几点结束 + 主持方资料（顺带刷新本地快照）。
+     * <p>
+     * 鉴权 = 调用者必须是这张会话的加入者（{@link TimerShareStore#findForJoiner}）；
+     * 主持方不走本通道（status 才是它的读取口）。CLOSED / EXPIRED 也正常响应——结算事实
+     * 恰恰大量发生在会话关闭 / 码过期之后，这不是异常状态。
+     */
+    public TimerSharePeerResponse peer(Long userId, String token) {
+        long nowMs = clock.getAsLong();
+        if (!statusLimiter.tryAcquire(limiterKey(userId), nowMs)) {
+            throw new BusinessException(CODE_TOO_FREQUENT, "操作过于频繁，请稍后再试");
+        }
+        TimerShare share = TimerShareTokens.isWellFormed(token)
+                ? store.findForJoiner(token, userId).orElse(null)
+                : null;
+        if (share == null) {
+            throw new BusinessException(CODE_NOT_FOUND, "二维码不存在或已失效");
+        }
+        return new TimerSharePeerResponse(deriveStatus(share, nowMs), resolveProfile(share.getHostUserId()),
+                share.getHostSettledAtMs(), share.getHostSettledNetSeconds(), nowMs);
     }
 
     // ── 码图 ─────────────────────────────────────────────────────────────────
@@ -245,6 +310,54 @@ public class TimerShareService {
         return venueRepository.findByIdAndDeletedFalse(venueId)
                 .map(v -> new TimerShareJoinResponse.VenueView(v.getId(), v.getName()))
                 .orElse(null);
+    }
+
+    /** 会话状态名（status / peer 两处共用；EXPIRED 是派生态，不落库） */
+    private static String deriveStatus(TimerShare share, long nowMs) {
+        return share.getStatus() == TimerShareStatus.CLOSED ? "CLOSED"
+                : (nowMs > share.getExpiresAtMs() ? "EXPIRED" : "ACTIVE");
+    }
+
+    /**
+     * 一方的公开资料（昵称 / 头像，2026-10-08 V45）。删号 / 查不到 → null（客户端兜底占位）。
+     * 只走 UserRepository 直读、不引入新的资料服务——两列而已，不值得一个中间层。
+     */
+    private TimerShareProfileView resolveProfile(Long userId) {
+        if (userId == null) {
+            return null;
+        }
+        return userRepository.findByIdAndDeletedFalse(userId)
+                .map(u -> new TimerShareProfileView(u.getNickname(), u.getAvatarUrl()))
+                .orElse(null);
+    }
+
+    /**
+     * 装配加入者列表（status 响应用）：一次流水查询 + 一次用户批量查询（N+1 规避，
+     * 人数上限 5 本来就不大，但批量是既有的通用约定）。序号 seq 由列表顺序派生（1 起）。
+     */
+    private List<TimerShareJoinView> resolveJoinViews(Long shareId) {
+        List<TimerShareJoin> joins = store.listJoins(shareId);
+        if (joins.isEmpty()) {
+            return List.of();
+        }
+        List<Long> ids = new ArrayList<>(joins.size());
+        for (TimerShareJoin join : joins) {
+            ids.add(join.getUserId());
+        }
+        Map<Long, User> users = new HashMap<>();
+        for (User user : userRepository.findByIdInAndDeletedFalse(ids)) {
+            users.put(user.getId(), user);
+        }
+        List<TimerShareJoinView> views = new ArrayList<>(joins.size());
+        for (int i = 0; i < joins.size(); i++) {
+            TimerShareJoin join = joins.get(i);
+            User user = users.get(join.getUserId());
+            views.add(new TimerShareJoinView(i + 1,
+                    user == null ? null : user.getNickname(),
+                    user == null ? null : user.getAvatarUrl(),
+                    join.getSettledAtMs(), join.getSettledNetSeconds()));
+        }
+        return views;
     }
 
     /** 传播链：parentToken 格式合法且存在才记；否则忽略（它只是统计口径，不值得为它拒绝请求） */
