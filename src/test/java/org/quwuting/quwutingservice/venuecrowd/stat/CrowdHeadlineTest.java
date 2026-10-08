@@ -9,7 +9,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** 折叠头摘要文案：窗口内「今晚」、窗口外按相对日期如实说明「这不是此刻」。 */
+/** 折叠头摘要文案：措辞按营业日分流（2026-10-08 起与窗口长短解耦）——「今晚」只给当前营业日的票，其余如实带相对日期 + 时刻。 */
 class CrowdHeadlineTest {
 
     private static LocalDateTime t(int month, int day, int hour, int minute) {
@@ -36,7 +36,9 @@ class CrowdHeadlineTest {
     }
 
     @Test
-    void windowEmptyFallsBackToLastNightWithTheExactTime() {
+    void lastNightVotesAreNeverCalledTonightEvenWhenStillFresh() {
+        // 2026-10-08：有效期放宽到 1 天后，清晨 / 白天的窗口内可能只剩昨晚的票——
+        // 它仍新鲜（不置灰、进统计），但绝不许说成「今晚」（那是营业日措辞，不是「新不新鲜」）。
         LocalDateTime now = t(10, 7, 12, 0);
         List<CrowdVote> votes = List.of(vote(1, 3, t(10, 6, 23, 40)));
         assertEquals(Optional.of("昨晚 23:40 约50 · 1人"), CrowdHeadline.build(now, votes));
@@ -58,11 +60,24 @@ class CrowdHeadlineTest {
     }
 
     @Test
-    void sameBusinessDayButOutsideTheWindowSaysToday() {
-        // 14:00 的上报到 23:30 已过 6h 窗口，但仍是「今天」这个营业日——不能说「今晚」（那会被读成仍有效）
+    void sameBusinessDayVotesStayTonightWhileInsideTheValidWindow() {
+        // 14:00 的票到 23:30 相距 9.5h —— 有效期 1 天内仍算数（且同属当前营业日）⇒「今晚」。
+        // （6h 窗口时代此场景给「今天 14:00」；窗口放宽后它不再"过期"，措辞随有效性升级。）
         LocalDateTime now = t(10, 7, 23, 30);
         List<CrowdVote> votes = List.of(vote(1, 3, t(10, 7, 14, 0)));
-        assertEquals(Optional.of("今天 14:00 约50 · 1人"), CrowdHeadline.build(now, votes));
+        assertEquals(Optional.of("今晚 约50 · 1人"), CrowdHeadline.build(now, votes));
+    }
+
+    @Test
+    void tonightHeadlineCountsOnlyTheCurrentBusinessNight() {
+        // 白天查：窗口内既有昨晚的票（仍新鲜）又有今晚的票 —— 「今晚」只统计当前营业日的票，
+        // 昨晚那票的档位（8）不得混进今晚的中位数。
+        LocalDateTime now = t(10, 8, 14, 0);
+        List<CrowdVote> votes = List.of(
+                vote(1, 8, t(10, 7, 21, 0)),
+                vote(2, 3, t(10, 8, 11, 0)),
+                vote(3, 3, t(10, 8, 13, 0)));
+        assertEquals(Optional.of("今晚 约50 · 2人"), CrowdHeadline.build(now, votes));
     }
 
     @Test

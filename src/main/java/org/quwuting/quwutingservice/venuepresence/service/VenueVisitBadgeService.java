@@ -1,141 +1,86 @@
 package org.quwuting.quwutingservice.venuepresence.service;
 
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.quwuting.quwutingservice.config.VenueHeatWeights;
-import org.quwuting.quwutingservice.venuepresence.repository.VenueVisitMetricRepository;
+import org.quwuting.quwutingservice.venue.service.HeatAccountExclusionService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 
 /**
- * 列表页「到店足迹」胶囊文案供给（2026-10-06，V38；文档 = docs/agents/52-venue-presence.md「到访进排序」）。
+ * 列表卡片「到店足迹」行文案供给（2026-10-06 V38 建；<b>2026-10-08 展示口径重定义</b>；
+ * 文档 = docs/agents/52-venue-presence.md「C 侧展示：附近的足迹」节）。
  * <p>
- * <b>为什么独立成类</b>：{@link VenuePresenceService} 的职责是「从原始 ping 算出到访事实」
- * （归因 / 分摊 / 展示摘要），而本类读的是**已经物化的排序指标**再做一层展示派生
- * （门槛 + 文案）——两者输入不同（原始 ping vs V38 物化表）、生命周期不同
- * （写路径 vs 列表读路径）。同 {@code StatusReportLatestService} 为打破循环依赖而拆微服务的
- * 先例：能力边界决定类的边界。
+ * <b>为什么独立成类</b>：{@link VenuePresenceService} 的职责是「从原始 ping 算出事实」
+ * （附近并集 / 同址归因 / 分摊 / 展示摘要），而本类只做<b>展示派生</b>（门槛 + 文案）——
+ * 事实与表达分离，改文案不动事实口径，改口径不动文案。同 {@code StatusReportLatestService}
+ * 为打破循环依赖而拆微服务的先例：能力边界决定类的边界。
  *
- * <h3>展示与排序是<b>两条独立的线</b>（2026-10-06 六轮，用户裁决）</h3>
- * <b>展示：全部展示</b>——只要这家店有到访记录（≥1 人）就渲染该行，<b>不设人数门槛</b>。
- * <b>排序/热度：仍按 {@code VISIT_FREE_TIER + 1}（≥3 人）算</b>（{@code HEAT_BEHAVIOR} 未变）。
- *
- * <h3>为什么拆（此前耦合在一起的代价）</h3>
- * 本类原以"与计分同门槛"为首要论据，导致<b>展示被排序规则绑架</b>：一个用户真的去了某店、
- * 系统也收到了记录，却因"1 人没到计分门槛"而<b>连一句感谢都拿不到</b>。对贡献者而言这是
- * 最不该发生的事——他要的不是分数，是被看见。现网实证（2026-10-06 取证）：9 家有到访门店中
- * <b>8 家只有 1~2 人</b>（寻梦缘 2 / 抖舞 2 / 天宝 1 / 金莎 1 / 魅莎 1 / 舞美时光 1 /
- * 开心音乐 1 / 钜之淋 1），旧口径下它们全部静默 = 功能近乎不存在。
- *
- * <h3>两条线各自的口径与代价（分叉登记，勿"顺手统一"）</h3>
+ * <h3>⛔ 2026-10-08 重定义：展示语义 = 「附近的足迹」，不再做门店级归属</h3>
+ * <b>用户裁决原话</b>：「因为我们无法从经纬度距离上判断线下用户真实在哪家店，所以范围内的店
+ * 我们都显示为『附近的足迹』，不管它是否关门……我们没有承诺用户百分之百是这家店，
+ * 我们只是承诺是附近，交给用户自己去判断是哪家店。」
+ * <p>
+ * 落地形态（事实来源 = {@link VenuePresenceService#nearbyVisitSummaries}）：
  * <ul>
- *   <li><b>人数门槛</b>：展示 ≥1 / 排序 ≥3（免计基数+1）；</li>
- *   <li><b>停业门店</b>：<b>展示照常</b>（到访是已发生的事实，不该被状态字段抹掉——营业状态
- *       时常变换，今天关门、昨天有人去过，两件事同时为真）；<b>排序仍记 0</b>
- *       （{@code selfInOperation} 守卫：人不可能"到店"停业店，榜单不该让停业店上浮）。
- *       现网 608 家 CEASED 中已有 1 家带到访记录（钜之淋，1 人）。</li>
- * </ul>
- * ⇒ 1~2 人店与停业店都会出现"有显示但无分"。<b>这是预期行为，不是数据不一致。</b>
- *
- * <h3>⛔ "有显示 ⇔ 有分"这条契约<b>已有意放弃</b>（取舍，不是缺陷）</h3>
- * 放弃后必然出现"卡片写着有人来过、但这家店热度里到访项得 0 分"。用户明确选择
- * <b>展示优先</b>。<b>后人若看到这条不一致，不要当 bug 修。</b>
- *
- * <h3>旧论据作废留痕（2026-10-06 六轮，勿据此前言改回门槛）</h3>
- * 本类此前以「卡片上出现的数字必然对应公式里的正分」为首要论据，并写明
- * "1~2 人无判定价值（λ≈1 泊松，无法区分'真的有人去'与'恰好一个路过'）"。
- * <b>该论据已被用户裁决推翻</b>：泊松噪声是<b>排序</b>的问题（该不该给它加分），
- * 而<b>展示</b>要回答另一个问题（有没有人被记下来、值不值得被感谢）。
- * 用排序的统计口径去否决展示，是对两个问题的误用。
- *
- * <h3>1~2 人时省略「N 次」（2026-10-06 六轮用户裁决，方案 A）</h3>
- * 1 人来 1 天 ⇒ "1 位 · 1 次"两个数字<b>是同一个数</b>，第二个数字零信息量；
- * 且现网 8/9 家都是 1~2 人 ⇒ 满屏"1 次"会让功能显得"什么都没干"。
- * ⇒ <b>只有 ≥ {@link #MIN_VISIT_USERS} 人（= 有人可能常来）才亮出「次」</b>，1~2 人只说
- * 「N 位舞友」。⚠️ 这不是"短则省字"，是"第二个数字此时不承载信息"。
- *
- * <h3>展示门槛 = 1，但「无到访」仍不渲染（唯一硬约束）</h3>
- * 无到访记录的门店不在 map 里 ⇒ 前端 null 不渲染、卡片零布局变化。
- * ⛔ 显示"0 人到店"对门店是<b>负面的失实陈述</b>（真实到店人数系统性大于本数字），
- * 且会给每张卡片凭空加一行。
- * <b>「全部展示」= 有记录的门店全展示，不是所有门店都展示一行。</b>
- * </ol>
- *
- * <h3>文案为什么是「感谢 N 位舞友 · N 次真实到店足迹」（2026-10-06 三轮定稿，勿简写）</h3>
- * 四个词各担一个职责，缺一个都会说错话：
- * <ul>
- *   <li><b>「感谢」= 对贡献的正反馈</b>。愿意开启的人是在替全体用户补全"这家店真的有人去"
- *       这一事实，理应有回应；这也是本行"顺带引导更多用户开启"的正当性来源——
- *       感谢是回报，不是诱导。</li>
- *   <li><b>「N 位舞友」= 有多少人参与</b>。人数是最粗但最可感的量级感来源。</li>
- *   <li><b>「N 次」= 有人<b>多次</b>回来</b>。人数只说明"有人来过"，次数才说明
- *       "有人常来"——后者才是热度公式真正想吃的信息，也是让用户愿意继续开着的理由。
- *       口径 = {@code (人, 店, 自然日)} 去重（V39，见本类「人数与次数为什么同源却不可互推」节）：
- *       <b>一天内去多次只记 1 次</b>（用户 2026-10-06 定案），所以"次"读作"来了几个晚上"，
- *       不读作"打开了几次小程序"。</li>
- *   <li><b>「真实」= 口径 + 合规</b>。到访只覆盖「到店 × 打开小程序 × 定位命中 ×
- *       <b>用户显式开启到店足迹</b>」的联合事件（服务端同意门禁，见 {@link VenuePresenceService}）
- *       —— 数字**远小于**真实到店人数、且低估幅度不可测。把"真实"写在脸上，用户就不会
- *       把它读成"这家店只有 N 个人来过"（对门店是失真的负面陈述），同时强化了本功能的
- *       知情同意叙事（个保法第 28/29 条要求处理敏感个人信息须单独同意）。</li>
- *   <li><b>「到店足迹」= 用户可读的功能名</b>。与「我的-设置」里的开关名逐字对齐——
- *       本行可点，点进去就是那个开关，文案一致才能形成"看到 → 点开 → 找到开关"的闭环
- *       （文案与目标页用词不一致 = 用户到了设置页认不出）。</li>
- * </ul>
- * ⛔ 禁改写为无限定词形态（「N 人到店」/「N 位舞友到店」/「已记录 N 位舞友到店」——
- * 一轮稿，被"只陈述事实、不解释来源、也不感谢"否决）。<b>改文案前先读本段</b>。
- *
- * <h3>长度纪律（2026-10-06 三轮实测，硬约束不是偏好）</h3>
- * 该行是卡片内<b>单行</b> caption（22rpx + {@code text-overflow: ellipsis}），
- * 行内还要扣前置 signal 图标与行尾「点击了解更多」（V39 同轮新增，6 字 ≈ 132rpx）：
- * <ul>
- *   <li>可用宽 ≈ <b>518rpx</b> ⇒ 每行约 <b>23 个中文字</b>；</li>
- *   <li>主文案「感谢 N 位舞友 · N 次真实到店足迹」在 N 为一位数时约 <b>19 字</b>
- *       ⇒ 单行放得下（人数取整后 ≥100 的店现网尚无，门槛与量级决定它短期不会出现）；</li>
- *   <li>⛔ <b>禁再加从句</b>：用户曾提出追加「为社区建设出力」→ 已否决（推到 24+ 字必截断）。
- *       "为社区出力"的分量由「感谢」+「真实」+「舞友」三个词承担，不靠追加说明。</li>
+ *   <li><b>展示单元 = 门店 ± {@code NEARBY_TRACE_RADIUS_M}（150m）内的全部命中足迹的并集</b>
+ *       （含停业门店上的证据；一端为已发生的足迹事实，另一端只声明「附近」，见常量注释标定）；</li>
+ *   <li><b>范围内所有门店一律展示</b>——营业状态不参与过滤（不管是否关门）；
+ *       同一组门店显示同一句文案（「都显示」）；</li>
+ *   <li><b>文案恒为「附近」语义</b>，数字 = 范围并集（与 admin 的共享口径同层；不再使用
+ *       1/k 分摊后的排序份额——那曾导致「admin 显示 4 人、小程序显示 2 人」的口径割裂）；</li>
+ *   <li><b>「真实到店足迹」措辞全面退役</b>：150m 命中本身不能证明「进店」，且门店归属
+ *       不可判定——「真实」是替系统断言无法证实的事实（事故复盘见 52 号）。</li>
  * </ul>
  *
- * <h3>「人数」与「次数」的关系（V39）</h3>
- * 两者由<b>同一趟归因循环</b>产出（同 attribution / 同 1/k 分摊 / 同排除集），
- * 口径上的关系是<b>次数 ≥ 人数</b>：每位用户至少贡献 1 次（同址让渡下一个人算 1 人、
- * 却来了 3 天 ⇒ 3 次）。两个数字的去重粒度不同，<b>不可互推</b>：
+ * <h3>文案（三段）与长度纪律（硬约束不是偏好）</h3>
  * <ul>
- *   <li>人数 = {@code MAX(createdAt)} 时间窗去重 ⇒ <b>跨零点连场算 1 人</b>
- *       （舞厅 22:00 进 02:00 出不会被拆成两天）；</li>
- *   <li>次数 = {@code (人, 自然日)} 二元组去重 ⇒ 跨零点连场算 <b>2 次</b>
- *       （这正是"有人常来"与"有人来过"的差别）。</li>
+ *   <li>≥ {@link #MIN_VISIT_USERS}（3）人：「<b>感谢 N 位舞友 · N 次到过这附近的足迹</b>」——
+ *       「次」= 有人<b>多次</b>回来（人数只说"有人来过"，次数才说"有人常来"）；
+ *       口径 = {@code (人, 自然日)} 去重（一天内多次只记 1 次，读作"来了几个晚上"）；</li>
+ *   <li>1~2 人：「<b>感谢 N 位舞友来过这附近</b>」（省略「次」：1 人来 1 天时两个数字是同一个数、
+ *       零信息量；现网多数店是 1~2 人，满屏"1 次"让功能显得"什么都没干"）；</li>
+ *   <li>「感谢」= 对贡献的正反馈，也是本行引导开启的正当性来源（感谢是回报，不是诱导）；
+ *       「到店足迹」= 与设置页开关名逐字对齐（本行可点，点进去就是那个开关）。</li>
  * </ul>
- * ⛔ 禁止用其中之一推算另一个（推出来的数与真实口径不符，且错得静默）；
- * ⛔ 也**不需要**做"次数 ≥ 人数"的纠偏——那只会把取数 bug 掩盖成看起来合理的数字
- * （2026-10-06 实测教训，见 {@link #displayEvents}）。
+ * 该行是卡片内<b>单行</b> caption（22rpx + {@code text-overflow: ellipsis}），可用宽 ≈518rpx
+ * ⇒ 约 23 个中文字；主文案 N 为一位数时约 20 字，单行放得下。⛔ <b>禁再加从句</b>
+ * （用户曾提「为社区建设出力」→ 已否决：必截断）。
  *
- * <h3>文案由后端下发，前端只渲染</h3>
- * 与 {@code crowdBadgeText} / {@code heatFormulaText} 同模式：措辞承载口径（"真实"是口径），
- * 口径归后端；前端换文案要走发版，而这里改一行即可全端生效。
+ * <h3>展示门槛 = 1，但「无足迹」仍不渲染（唯一硬约束）</h3>
+ * 附近无命中足迹的门店不在 {@link VenuePresenceService#nearbyVisitSummaries} 结果里
+ * ⇒ 前端 null 不渲染、卡片零布局变化。⛔ 显示"0 位舞友"是负面失实陈述（真实到访系统性大于本数字）。
+ * <p>
+ * ⚠️ <b>展示与排序是两条独立的线</b>（2026-10-06 六轮用户裁决）：「有显示 ⇔ 有分」契约
+ * <b>已有意放弃</b>——1~2 人店与停业店都会出现"有显示但无分"。这是预期行为，⛔ 勿当 bug 修。
  *
- * <h3>与热度公式同门槛（不是巧合）</h3>
- * 卡片上出现的数字必然对应公式里的正分（见 {@link #MIN_VISIT_USERS}）——否则会出现
- * "展示了 N 人、但这家店没拿到任何到访分"的隐性矛盾（用户看不出，但口径上是撒谎）。
+ * <h3>历史留痕（勿回退，2026-10-08）</h3>
+ * V40 的 {@code share_in_operation} 文案分支（未分摊 ⇒「真实到店足迹」/ 被分摊 ⇒「附近」）
+ * 随本轮重构<b>整体删除</b>，原因有二：① 它的立论（"未分摊时事实无歧义，可断言到这家店"）
+ * 与新裁决矛盾（任何门店级归属断言都不可判定）；② 该分支自 10-06 上线起<b>映射被接反</b>
+ * （{@code allocated = !isUnallocated(...)} 叠加三元分支写反 ⇒ 未分摊显示"附近"、被分摊显示"真实"，
+ * 与文档、与同处注释、与其自身 fail-safe 注释三处全部相反），且从未被端到端验证——
+ * 本轮事故复盘的一部分。<b>{@code qwt_venue_visit_metrics.share_in_operation} 列保留
+ * （V40 迁移不回改）但自此无消费方</b>；刷新任务仍写入该列（保持行自洽），
+ * 删除与否留待该表整体重构时一并处理。
+ *
+ * <h3>与其它口径的分叉（都读同一份命中事实，⛔ 禁互相"对齐"）</h3>
+ * 展示（本类）= 附近并集、无归属、无状态过滤；admin 归因 = ABSORBED/YIELDED 明细；
+ * 排序 = 1/k 分摊 + 不在营记 0。三者的数字<b>有意不同</b>，取舍依据见 52 号。
  */
-@Slf4j
 @Service
 @RequiredArgsConstructor
 public class VenueVisitBadgeService {
 
     /**
-     * <b>计分门槛</b>（人）= 免计基数 + 1：派生自 {@link VenueHeatWeights#VISIT_FREE_TIER}。
+     * <b>「次」的显示门槛</b>（人）= 免计基数 + 1：派生自 {@link VenueHeatWeights#VISIT_FREE_TIER}。
      *
-     * <p>⚠️ <b>2026-10-06 六轮起，它只管排序，不管展示</b>（用户裁决「展示与排序是两条线」）：
+     * <p>⚠️ <b>2026-10-06 六轮起，它不再管"是否展示"</b>（用户裁决「展示与排序是两条线」）：
      * 展示侧门槛已降为 {@link #MIN_DISPLAY_USERS}(=1)，本常量<b>降级为"何时亮出「次」"的分界</b>
      * （人数 ≥3 ⇒ 有人可能常来 ⇒ "次"这个数字开始承载信息）。
-     * 它<b>不再是</b>"有分 ⇔ 有展示"契约的两端——那条契约已有意放弃（见类注释）。
      * <b>改它只影响文案形态与热度公式的免计基数，二者仍同源</b>，勿当成纯展示参数。
      */
     private static final long MIN_VISIT_USERS = VenueHeatWeights.VISIT_FREE_TIER + 1;
@@ -143,114 +88,51 @@ public class VenueVisitBadgeService {
     /**
      * <b>展示门槛</b>（人）= 1（2026-10-06 六轮用户裁决「展示：全部展示」）。
      *
-     * <p><b>为什么是 1 而不是 0</b>：0 意味着"没有任何到访记录"——那正是<b>无数据</b>，
-     * 而无数据门店压根不在物化表结果里（{@code findVisitUsersByVenueIds} 无行），自然不渲染。
-     * 写成显式的 {@code >= 1} 是为了表达"<b>有记录就展示</b>"这条口径本身，
-     * 而不是依赖"表里没有就是 0"的隐含前提（那个前提一旦被改 schema 打破就会静默出错）。
-     *
-     * <p>⛔ 它<b>不</b>控制"是否渲染"这件事的另一半——无到访门店不渲染由「不在 map 里」保证，
-     * 与本常量无关（见类注释「展示门槛 = 1，但无到访仍不渲染」）。
+     * <p><b>为什么是 1 而不是 0</b>：0 意味着"附近没有任何命中足迹"——那正是<b>无数据</b>，
+     * 而无数据门店压根不在 {@code nearbyVisitSummaries} 结果里，自然不渲染。
+     * 写成显式的 {@code >= 1} 是为了表达"<b>有足迹就展示</b>"这条口径本身，
+     * 而不是依赖"map 里没有就是 0"的隐含前提（那个前提一旦被改口径打破就会静默出错）。
      */
     private static final long MIN_DISPLAY_USERS = 1L;
 
-    private final VenueVisitMetricRepository metricRepository;
+    private final VenuePresenceService venuePresenceService;
+    private final HeatAccountExclusionService heatAccountExclusionService;
 
     /**
-     * 整页批量生成（列表卡片标签行，防 N+1）：一次 IN 覆盖整页，返回 venueId → 文案。
-     * <b>无到访记录的门店不在 map 里</b>（前端按缺席不渲染）；<b>有记录（≥1 人）的门店全部展示</b>
-     * （2026-10-06 六轮：展示与排序拆成两条线，见类注释）。
-     * <p>
-     * ⚠️ 两列取值口径<b>刻意不同</b>，改前先读本类「人数与次数为什么同源却不可互推」节：
-     * 人数 = 时间窗去重（跨零点连场算 1 人），次数 = 自然日去重（跨零点算 2 次）。
-     * 两个数字来自同一份命中集与同一趟归因，但去重粒度不同 ⇒ 不可互相推算。
+     * 整页批量生成（列表卡片到店足迹行，防 N+1）：一次覆盖整页，返回 venueId → 文案。
+     * <b>附近无足迹的门店不在 map 里</b>（前端按缺席不渲染）；
+     * <b>有足迹（≥1 人）的门店全部展示</b>（2026-10-08：含停业门店，状态不参与过滤）。
      */
     @Transactional(readOnly = true)
     public Map<Long, String> visitBadgeTextsByVenue(Collection<Long> venueIds) {
         if (venueIds == null || venueIds.isEmpty()) {
             return Map.of();
         }
+        Map<Long, NearbyVisitSummary> summaries = venuePresenceService.nearbyVisitSummaries(
+                venueIds, heatAccountExclusionService.excludedUserIds());
         Map<Long, String> badges = new HashMap<>();
-        for (Object[] row : metricRepository.findVisitUsersByVenueIds(venueIds)) {
-            BigDecimal visitUsers = (BigDecimal) row[1];
-            if (visitUsers == null) {
-                continue;
+        summaries.forEach((venueId, summary) -> {
+            if (summary.visitUsers() < MIN_DISPLAY_USERS) {
+                return;
             }
-            // 分摊会产生 1/k 小数（同址组都在营）——展示取整，与门槛比较也用取整值，
-            // 保证"显示几位"与"是否过门槛"是同一个数（不出现 2.6→显示3 却按2判门槛）
-            long displayed = visitUsers.setScale(0, RoundingMode.HALF_UP).longValue();
-            // 展示门槛 = 1（2026-10-06 六轮用户裁决「全部展示」）：有到访记录就渲染。
-            // ⛔ 这**不再**是"有分 ⇔ 有展示"契约的一端（该契约已有意放弃，见类注释）——
-            // 1~2 人的店照样展示，只是热度里到访项得 0 分，这是预期行为。
-            if (displayed < MIN_DISPLAY_USERS) {
-                continue;
-            }
-            // 「次」只在 ≥ MIN_VISIT_USERS 人时出现：1 人来 1 天时"1 位 · 1 次"两个数字
-            // 是同一个数，第二个数字零信息量；现网 8/9 家只有 1~2 人，满屏"1 次"会让
-            // 功能显得"什么都没干"（用户 2026-10-06 六轮裁决，方案 A）。
-            //
-            // ⛔ **「真实」二字与「到这家店」的断言，只在未被分摊时才能用**（V40）：
-            // 被同址在营店分摊（share_in_operation = false）时，20m 定位精度**分不清**
-            // 到访者去的是同址组里哪家店 —— 此时说"真实到店足迹"是替系统断言一个
-            // 无法证实的事实（用户 2026-10-06 裁决方案 B）。改说「这附近」是诚实的。
-            boolean allocated = !isUnallocated(row[3]);
-            String text;
-            if (displayed >= MIN_VISIT_USERS) {
-                // row[2] 来自 JPQL 原生返回的 Object[]，元素声明为 Object（不像 row[1] 有赋值
-                // 处的向下转型）⇒ 必须显式转型，漏了就是编译错误（不会静默出 null）
-                text = "感谢 " + displayed + " 位舞友 · " + displayEvents((BigDecimal) row[2])
-                        + " 次" + (allocated ? "真实到店足迹" : "到过这附近的足迹");
-            } else {
-                text = "感谢 " + displayed + " 位舞友" + (allocated ? "分享真实到店足迹" : "来过这附近");
-            }
-            badges.put((Long) row[0], text);
-        }
+            badges.put(venueId, renderBadgeText(summary.visitUsers(), summary.visitEvents()));
+        });
         return badges;
     }
 
     /**
-     * 读取「未被分摊」标记（V40）。
+     * 文案渲染（纯函数，单点；改文案只改这里）。
      *
-     * <p>⚠️ <b>取不到时按「已分摊」处理</b>（{@code false}）—— 宁可少断言"真实到店"，
-     * 也不在证据不足时替系统说话（fail-safe 方向 = 保守用词）。
-     * 这一点与 {@link #displayEvents} 的"下限钳 1"（宁可略高不略低）**方向相反**：
-     * 那是数值，这是<b>断言强度</b>，两者各自的fail-safe 方向由语义决定，不统一。
-     *
-     * <p>正常返回类型是 {@link Boolean}（Hibernate 对tinyint(1) 的映射）；
-     * 也接受 {@link Number}（某些驱动返回 0/1）⇒ 避免 JDBC 映射差异导致误判为"已分摊"。
+     * <p>⚠️ 数字是<b>范围并集的整数</b>（无 1/k 分摊 ⇒ 无小数），且由
+     * {@link VenuePresenceService#nearbyVisitSummaries} 保证 @{@code visitEvents >= visitUsers >= 1}。
+     * ⛔ <b>刻意不做"下限钳 1"</b>：旧实现的钳位是为分摊小数（0.33 → 显示"0 次"的自相矛盾）
+     * 而设；整数并集下次数恒 ≥ 人数，钳位<b>只会把取数错误掩盖成看起来合理的数字</b>
+     * （2026-10-06 教训：钳 1 曾把"并集键丢了 user 维"的 bug 掩盖成"1 次"）。
      */
-    private static boolean isUnallocated(Object raw) {
-        if (raw instanceof Boolean flag) {
-            return flag;
+    static String renderBadgeText(long visitUsers, long visitEvents) {
+        if (visitUsers >= MIN_VISIT_USERS) {
+            return "感谢 " + visitUsers + " 位舞友 · " + visitEvents + " 次到过这附近的足迹";
         }
-        if (raw instanceof Number number) {
-            return number.intValue() != 0;
-        }
-        return false;
-    }
-
-    /**
-     * 次数列的展示取整（2026-10-06，V39）。
-     * <p>
-     * **下限钳 1 的理由**：分摊后可能是 0.33（1 人 / 3 家同址在营店），HALF_UP 会显示
-     * "0 次"——那读起来是"有人来过却一次没记录"的自相矛盾文案，是对贡献者的否定。
-     * 钳 1 与"显示几位"的口径纪律同源（宁可略高不略低；分摊本身已把同址人流摊薄，
-     * 不是虚报）。
-     * <p>
-     * ⚠️ **钳 1 绝不用于掩盖取数 bug**（2026-10-06 实测教训）：本次首版实现把并集键错写成
-     * 纯日期（丢了 user 维度），现网样本 6 位用户散在 5 天 ⇒ 误算 5 次 ⇒ ×1/2 分摊 = 2.5
-     * ⇒ 存 0.00 ⇒ 钳 1 显示"1 次"，而真实是 6 位用户。
-     * <b>看到"1 次"先怀疑取数、别怀疑钳 1</b>：钳 1 只应把 0.33 抬到 1，不该把 0 抬到 1
-     * （真为 0 说明该店根本没有到访日，而人数已过≥3 ⇒ 矛盾，必是取数问题）。
-     * <p>
-     * ✅ <b>次数恒 ≥ 人数</b>（每个用户至少贡献 1 次，见
-     * {@code VenuePresenceService#countVisitEvents}）⇒ <b>不需要</b>也不允许再做
-     * "次数 ≥ 人数"的对齐/纠偏：那样会把取数错误掩盖成看起来合理的数字。
-     */
-    private static long displayEvents(BigDecimal raw) {
-        if (raw == null) {
-            return 0;
-        }
-        long rounded = raw.setScale(0, RoundingMode.HALF_UP).longValue();
-        return Math.max(1, rounded);
+        return "感谢 " + visitUsers + " 位舞友来过这附近";
     }
 }

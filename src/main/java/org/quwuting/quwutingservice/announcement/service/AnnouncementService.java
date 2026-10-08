@@ -9,6 +9,7 @@ import org.quwuting.quwutingservice.announcement.dto.response.AdminAnnouncementR
 import org.quwuting.quwutingservice.announcement.dto.response.AnnouncementDetailResponse;
 import org.quwuting.quwutingservice.announcement.dto.response.AnnouncementStatsResponse;
 import org.quwuting.quwutingservice.announcement.dto.response.AnnouncementSummaryResponse;
+import org.quwuting.quwutingservice.announcement.dto.response.HomeSlotResponse;
 import org.quwuting.quwutingservice.announcement.entity.Announcement;
 import org.quwuting.quwutingservice.announcement.entity.AnnouncementRead;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementCategory;
@@ -50,21 +51,42 @@ import java.util.stream.Collectors;
  *   <li>可见公告可在线编辑（2026-09-05 修订）：PUBLISHED 除 publishAt 外全字段可改并
  *       即时生效（旧「仅允许追加正文」契约已废弃——运营纠错刚需，代价是不再防静默
  *       篡改，由 operator_id 审计兜底）；publishAt 已生效不可改，OFFLINE 禁改；</li>
- *   <li>首页公告栏口径（2026-09-05）：仅 pinned=true 的可见公告进首页公告栏，
- *       非置顶公告只在公告中心出现（listVisible 的 pinned 过滤参数）；</li>
+ *   <li><b>首页公告位（2026-10-08 根因修复）</b>：首页公告位是<b>容量为 1 的稀缺资源</b>，
+ *       而 {@code pinned} 是布尔列——布尔表达不了"唯一占用"，这是原缺陷的根因。
+ *       修复不放在读端（{@code size=1} 那种"读端容量限制"）而是搬到写入端：
+ *       ① {@link HomeSlotService} = 占位记账唯一写入点（校验 + 显式拒绝冲突）；
+ *       ② V44 生成列 + UNIQUE INDEX = 数据层兜底；
+ *       ③ {@code processScheduledTransitions} 调 {@code reconcile()} 自愈脏数据。
+ *       消费端 {@code listAnnouncements(0, 1, true)} 契约不变（占位至多一条，取它即真值）；
+ *       下方「首页位可见面」说明"多条同日公告如何被触达"——靠未读债务，不靠多条占位。</li>
  *   <li>定时发布/下线由 @Scheduled 强转（状态权威在后端，publish 只写计划时间）；</li>
  *   <li>生命周期闭环（2026-09-02）：可见性 = PUBLISHED 且 publishAt ≤ now 且 offlineAt
  *       未到（offlineAt 到点强转 OFFLINE）；草稿保存校验调度窗口；重发布清空过期遗留
  *       offlineAt（OFFLINE 复活唯一通道，不清空会被 offlineDue 立即再度下线）；SYSTEM
  *       数据更新公告按 ops-config auto_offline_hours（默认 24h）自动过期；</li>
+ *   <li><b>下线/ 软删必须释放首页位</b>（2026-10-08）：否则过期公告永久霸占首页位
+ *       ——历史 36 条幽灵置顶正是"永不下线 + 置顶"共同造成的；</li>
  *   <li>SYSTEM 公告 operator_id 恒 null（系统/Agent 来源审计先例）；</li>
  *   <li>数据更新公告同日防重：查询防重 + V7 生成列唯一索引兜底并发；</li>
  *   <li><b>未读口径（2026-09-15 收敛）</b>：只有 {@code touchLevel = ALERT} 的公告
  *       才构成用户未读债务（见 {@link AnnouncementTouchLevel} 的根因说明）。SILENT
- *       （数据更新 / 每日舞讯等流水）照常可见可查、置顶仍进首页，但恒不计入未读徽标
- *       与未读红点。列表项的 {@code unread} 字段即本判据的派生结果（
- *       {@link #isUnread} 为唯一实现），前端零分支消费。</li>
+ *       （数据更新 / 每日舞讯等流水）照常可见可查、恒不计入未读徽标与未读红点。
+ *       列表项的 {@code unread} 字段即本判据的派生结果（{@link #isUnread} 为唯一
+ *       实现），前端零分支消费。</li>
  * </ul>
+ *
+ * <h3>首页位可见面：为什么不需要"多条同时置顶"</h3>
+ * 首页公告位是<b>一个</b>胶囊（几何上限 {@code max-width: 362rpx}，避让右侧系统胶囊按钮，
+ * 单行文字）——物理上只能承载一条，且多条并显会互相削弱（每条曝光时间被摊薄）。
+ * 因此"一天内多条公告都要触达用户"的正确模型不是"多条占位"，而是：
+ * <ul>
+ *   <li><b>位置（1 条）</b> = {@code pinned} 首页位，由运营显式决策占谁；</li>
+ *   <li><b>打扰（N 条）</b> = {@code touchLevel=ALERT} 的未读债务，走「我的 → 公告中心」
+ *       徽标 + 公告中心列表，未读数已按此口径统计（{@link #unreadCount}）。</li>
+ * </ul>
+ * 两条通道正交且各自唯一判据：置顶管"位置"、touchLevel 管"债务"。
+ * 同日多条公告各自勾置顶会被<b>显式拒绝</b>（报错带上当前占位者标题），
+ * 运营要么换一条占位，要么靠 ALERT 未读让其余条目在公告中心被看到——动作结果始终可见。
  */
 @Slf4j
 @Service
@@ -82,6 +104,8 @@ public class AnnouncementService {
     private final UserRepository userRepository;
     private final OpsConfigService opsConfigService;
     private final MediaAttachmentValidator mediaAttachmentValidator;
+    /** 首页公告位记账（占位语义唯一写入点，2026-10-08；不变量与根因见该类） */
+    private final HomeSlotService homeSlotService;
 
     // ── 用户端 ────────────────────────────────────────────────
 
@@ -233,6 +257,22 @@ public class AnnouncementService {
         return toAdminResponse(findAny(id));
     }
 
+    /**
+     * 首页公告位当前占用者（2026-10-08）：管理端编辑页的<b>占位可见性</b>数据源。
+     *
+     * <p><b>为什么必须有它</b>：占位是<b>独占</b>语义（容量 = 1），所以运营在勾"首页置顶"
+     * 之前必须知道位上是谁。否则只能提交后吃一个 400——"动作结果对运营不可见"正是本轮
+     * 根因的第四层（09-15 修 touchLevel 时已立同一条纪律：后果必须对运营可见）。
+     * <p>
+     * 判据单点 = {@link HomeSlotService#findHolder()}；禁在管理端各处重写"谁占着位"的查询。
+     */
+    @Transactional(readOnly = true)
+    public HomeSlotResponse adminHomeSlot() {
+        return homeSlotService.findHolder()
+                .map(a -> new HomeSlotResponse(a.getId(), a.getTitle(), a.getPublishAt()))
+                .orElseGet(() -> new HomeSlotResponse(null, null, null));
+    }
+
     /** 创建（默认草稿；publishAt 未来时刻 = 计划发布时间，不影响状态） */
     @Transactional
     public AdminAnnouncementResponse create(CreateAnnouncementRequest request, Long adminId) {
@@ -240,14 +280,17 @@ public class AnnouncementService {
         rejectFlashCategory(request.category());
         validateSchedule(request.publishAt(), request.offlineAt());
         Announcement a = new Announcement();
+        // 触达等级先解析（占位判据必须消费它，禁两处各判一次——见 resolvePinned）
+        AnnouncementTouchLevel touchLevel = resolveTouchLevel(request.touchLevel(), request.category());
+        boolean pinned = resolvePinned(request.pinned(), touchLevel);
         applyFields(a, request.title(), request.content(), request.category(),
-                resolveTouchLevel(request.touchLevel(), request.category()),
-                request.pinned() != null && request.pinned(), request.publishAt(), request.offlineAt());
+                touchLevel, pinned, request.publishAt(), request.offlineAt());
         applyMedia(a, request.media());
         a.setSource(AnnouncementSource.MANUAL); // 管理端创建恒 MANUAL（SYSTEM 走 createDataUpdateAnnouncement）
         a.setStatus(AnnouncementStatus.DRAFT);
         a.setOperatorId(adminId);
         a.setPublishAt(request.publishAt());
+        applyPinned(a, pinned);
         return toAdminResponse(announcementRepository.save(a));
     }
 
@@ -272,6 +315,9 @@ public class AnnouncementService {
         }
         validateContent(request.content());
         rejectFlashCategory(request.category());
+        // 触达等级与占位判据先解析（两者有顺序依赖：占位判据消费已解析的等级）
+        AnnouncementTouchLevel touchLevel = resolveTouchLevel(request.touchLevel(), request.category());
+        boolean pinned = resolvePinned(request.pinned(), touchLevel);
         if (a.getStatus() == AnnouncementStatus.PUBLISHED) {
             // 发布中：publishAt 既不校验也不落库（已生效时间，逻辑上不可改）
             validateSchedule(null, request.offlineAt());
@@ -279,19 +325,38 @@ public class AnnouncementService {
             a.setContent(request.content());
             a.setCategory(request.category());
             // 触达等级随分类一起可改：显式传入即采用，缺省按（可能已改的）分类重新派生
-            a.setTouchLevel(resolveTouchLevel(request.touchLevel(), request.category()));
-            a.setPinned(request.pinned() != null && request.pinned());
+            a.setTouchLevel(touchLevel);
             a.setOfflineAt(request.offlineAt());
         } else {
             validateSchedule(request.publishAt(), request.offlineAt());
             applyFields(a, request.title(), request.content(), request.category(),
-                    resolveTouchLevel(request.touchLevel(), request.category()),
-                    request.pinned() != null && request.pinned(), request.publishAt(), request.offlineAt());
+                    touchLevel, pinned, request.publishAt(), request.offlineAt());
         }
         // 媒体附件幂等替换（两个状态分支共用：DRAFT 与 PUBLISHED 均可改附件）
         applyMedia(a, request.media());
         a.setOperatorId(adminId);
+        // 占位收敛走 HomeSlotService（PUBLISHED 分支此时a.pinned 仍是旧值，故先清一次
+        // 再由 claim 置位；DRAFT 分支applyFields 已写入 pinned，claim 幂等）
+        applyPinned(a, pinned);
         return toAdminResponse(announcementRepository.save(a));
+    }
+
+    /**
+     * 占位收敛（<b>唯一写 pinned 的地方</b>，2026-10-08）：创建 / 更新两条路径都必须经过它，
+     * 禁在别处直接 {@code setPinned(true)}。
+     * <ul>
+     *   <li>要置顶 → {@link HomeSlotService#claim}（校验 + 清场 + 置位）；</li>
+     *   <li>不置顶且当前占位 → release（运营主动取消勾选必须真的释放位）。</li>
+     * </ul>
+     * <b>为什么取消勾选也要走这里</b>：取消置顶若只置本条为false 而不清场，
+     * 位就"空"了但没有任何公告占位——首页位无人展示，而运营以为位还留着。
+     */
+    private void applyPinned(Announcement a, boolean pinned) {
+        if (pinned) {
+            homeSlotService.claim(a);
+        } else if (a.isPinned()) {
+            a.setPinned(false);
+        }
     }
 
     /**
@@ -343,6 +408,9 @@ public class AnnouncementService {
         a.setStatus(AnnouncementStatus.OFFLINE);
         a.setOfflinedAt(LocalDateTime.now());
         a.setOperatorId(adminId);
+        // 下线必须释放首页位（2026-10-08）：否则过期公告永久霸占首页位——这正是历史
+        // 36 条幽灵置顶的形成机制之一（"永不下线 + 置顶"）。
+        homeSlotService.release(a.getId());
         return toAdminResponse(announcementRepository.save(a));
     }
 
@@ -352,6 +420,8 @@ public class AnnouncementService {
         Announcement a = findAny(id);
         a.setDeleted(true);
         a.setOperatorId(adminId);
+        // 软删同样释放位：V44 生成列条件含 deleted=0，但实体侧同步落false 才与 PC 一致
+        homeSlotService.release(a.getId());
         announcementRepository.save(a);
     }
 
@@ -412,7 +482,14 @@ public class AnnouncementService {
         a.setStatus(AnnouncementStatus.PUBLISHED);
         a.setPublishAt(LocalDateTime.now());
         a.setPublishedAt(a.getPublishAt());
-        a.setOperatorId(null); // 系统来源恒 null（Agent 来源审计先例）
+        a.setOperatorId(null); // 系统来源恒null（Agent 来源审计先例）
+        // 🚫 恒不占首页位（2026-10-08，位置口径与打扰口径同源）：每日舞讯是 SILENT 流水
+        //   （用户不知道也不吃亏，见 resolvePinned 的判据），不配占据首页这个唯一强触达位。
+        //   历史上这里曾长期被 Skill 传 pinned=true 而霸位—— 流水公告每天换一个，
+        //   但"霸位"这件事本身让真正的运营公告永远挤不进首页。
+        //   显式写 false 而非留默认：让"不占位"成为这条通道的声明式契约，
+        //   未来有人想改必须先推翻这句话，而不是靠"这里没写所以是false"的隐式默认。
+        a.setPinned(false);
         // 自动下线（2026-09-02 失效机制闭环）：舞讯公告时效 = 当日，按 ops-config
         // auto_offline_hours（默认 24h）到期后由 30s 调度强转 OFFLINE，不长期占据小程序顶部
         long autoOfflineHours = resolveDataUpdateAutoOfflineHours();
@@ -436,6 +513,10 @@ public class AnnouncementService {
     /**
      * 每 30s 扫一次：DRAFT + publish_at 已到 → PUBLISHED；PUBLISHED + offline_at 已到 → OFFLINE。
      * 批量 UPDATE 零业务副作用（状态权威 + publishedAt/offlinedAt 落库），转换数 >0 才记日志。
+     * <p>
+     * <b>为什么可以放心批量转态</b>：首页公告位的占位与可见性<b>刻意解耦</b>
+     * （草稿也能占位 = "预定"语义），因此本批量 UPDATE 不触碰 pinned ⇒
+     * <b>永不与 V44 唯一索引冲突</b>。这是刻意的取舍：换来的是定时路径零风险。
      */
     @Scheduled(fixedDelay = 30_000)
     @Transactional
@@ -448,6 +529,10 @@ public class AnnouncementService {
         if (published > 0 || offlined > 0) {
             log.info("[announcement] scheduled transitions: published={} offlined={}", published, offlined);
         }
+        // 自愈兜底：至多一条占位。写入侧有校验 + 数据侧有唯一索引，但历史脏数据已存在
+        // （本轮实测 36 条），且任何手工改库都可能绕过约束 ⇒ 30s 内自动收敛，
+        // 胜出者 = id 最大者（与首页读端排序同源，保住的就是用户实际看到的那条）。
+        homeSlotService.reconcile();
     }
 
     // ── 内部工具 ──────────────────────────────────────────────
@@ -473,6 +558,45 @@ public class AnnouncementService {
     private static AnnouncementTouchLevel resolveTouchLevel(AnnouncementTouchLevel requested,
                                                             AnnouncementCategory category) {
         return requested != null ? requested : category.defaultTouchLevel();
+    }
+
+    /**
+     * 首页占位解析（<b>位置口径的唯一判据</b>，2026-10-08 根因修复）。
+     *
+     * <p><b>为什么要有这个方法（这是根因，不是新规则）</b><br>
+     * 2026-09-15 立了判据「用户不知道会不会吃亏」（{@link AnnouncementTouchLevel}），
+     * 但它<b>只被套用到未读口径</b>（{@code touchLevel}），没被套用到<b>位置口径</b>
+     * （{@code pinned}）—— 同一个"要不要打扰用户"的决策被切成两个独立字段各自决策，
+     * 位置口径还写死在每日舞讯 Skill 的固定模板里。结果：一条"用户不知道也不吃亏"的
+     * 流水公告，每天都占着唯一强触达位。
+     * <p>
+     * 修法不是给某个分类打特例，而是让<b>两个口径由同一个判据派生</b>：
+     * {@link AnnouncementTouchLevel#eligibleForHomeSlot()}——值得打扰用户的（ALERT）
+     * 才配占据首页位。SILENT（每日舞讯 / 数据更新等流水，可查即可）不占位：它在公告中心
+     * 照常出现、照常可搜索阅读，只是不抢强触达。
+     *
+     * <p><b>为什么显式拒绝而不是静默降级</b><br>
+     * 静默把 {@code pinned=true} 悄悄改成 false，就是<b>原缺陷的另一种形态</b>
+     * ——运营勾了置顶却什么都没发生，且无任何提示（本轮痛点即如此）。
+     * 因此这里抛错而不是悄悄改值，由管理端把原因显示给运营。
+     *
+     * @param requested  请求的置顶意图（null / false = 不占位）
+     * @param touchLevel 已解析的触达等级（<b>必须先经 {@link #resolveTouchLevel}</b>，
+     *                   禁直接按分类判断——否则又回到两套口径）
+     * @return 是否应当占据首页位
+     * @throws BusinessException 请求置顶但内容为 SILENT 档（不值得打扰）
+     */
+    private static boolean resolvePinned(Boolean requested, AnnouncementTouchLevel touchLevel) {
+        boolean wantPinned = requested != null && requested;
+        if (!wantPinned) {
+            return false;
+        }
+        if (!touchLevel.eligibleForHomeSlot()) {
+            throw new BusinessException(1001,
+                    "「不打扰」档的内容不占用首页公告位——它是流水记录，可查即可。"
+                            + "若确实需要用户立刻知晓，请把「用户提醒」改为「提醒用户」后再置顶");
+        }
+        return true;
     }
 
     /**

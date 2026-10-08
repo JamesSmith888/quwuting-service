@@ -61,9 +61,9 @@ import java.util.concurrent.TimeUnit;
  * <b>不进热度公式</b>（到店数天然随曝光增长，线性进公式即马太闭环——热度四问判据
  * 第 3 问不过；待数据量起来后按 05 号文档流程另行评估）。
  * <p>
- * <b>写宽松读严格</b>：写入侧只做协议限幅（防脏数据），「到访 / 附近 / 同址 / 营业归因」口径
+ * <b>写宽松读严格</b>：写入侧只做协议限幅（防脏数据），「到访 / 附近 / 同址 / 附近展示 / 营业归因」口径
  * （{@link #HIT_RADIUS_M} / {@link #HIT_MAX_ACCURACY_M} / {@link #NEARBY_RADIUS_M} /
- * {@link #CO_LOCATED_RADIUS_M} / {@link #isInOperation}）全部在查询侧判定——门店坐标是地址级
+ * {@link #CO_LOCATED_RADIUS_M} / {@link #NEARBY_TRACE_RADIUS_M} / {@link #isInOperation}）全部在查询侧判定——门店坐标是地址级
  * 地理编码（同楼多店坐标重合，室内偏离 50~150m），阈值定错时历史数据可回溯（2026-10-03 即据此回溯修复）。
  * <p>
  * <b>同意门禁（2026-10-03 五轮）</b>：只收「最新一条状态确立是用户显式开启」的用户的 ping
@@ -171,6 +171,44 @@ public class VenuePresenceService {
      * 不变量：本值 &lt; {@link #HIT_RADIUS_M}（两个量回答的问题不同，见命中半径注释）。
      */
     public static final int CO_LOCATED_RADIUS_M = 50;
+
+    /**
+     * C 侧「附近的足迹」展示半径（米，<b>展示口径</b>参数 = 「门店 ↔ 门店」的<b>声明不可分辨</b>
+     * 距离；2026-10-08 新增，只服务 {@link #nearbyVisitSummaries}）。
+     * <p>
+     * 语义：两家店相距 ≤ 本值 ⇒ C 侧「到店足迹」行把它们的证据视作「同一片附近」——
+     * 范围内<b>所有</b>门店（含停业店）显示同一句「感谢 N 位舞友 · N 次到过这附近的足迹」。
+     * 它回答的问题是「我们敢不敢替系统说这些足迹属于哪家店」——<b>不敢</b>
+     * （经纬度距离对线下用户在哪家店没有判定力），所以不归属、只声明「附近」。
+     *
+     * <h3>⛔ 为什么不是 {@link #CO_LOCATED_RADIUS_M}（=50m）：两个问题两个值，禁合并</h3>
+     * <ul>
+     *   <li><b>50m（同址）管排序分摊公平</b>——「手机分不开」才共享/让渡，紧了才对
+     *       （同楼双吃是排序事故）；</li>
+     *   <li><b>150m（附近展示）管展示声明诚实</b>——「分不清哪家」就都说「附近」，松了才不冤枉：
+     *       漏显示一家 = 该看到的贡献者看不到（2026-10-08 事故正是这种），
+     *       多显示一家只多一句「附近」（声明强度极低，代价可忽略）。
+     *       用户裁决原话：「我们没有承诺用户百分之百是这家店，我们只是承诺是附近」。</li>
+     * </ul>
+     * 与 {@link #HIT_RADIUS_M} 数值相同但<b>语义独立</b>（那是 用户↔门店 的命中容差，本值是
+     * 门店↔门店 的展示半径）；数值趋同是标定巧合，⛔ 不得互相派生、各自重标定。
+     *
+     * <h3>标定（2026-10-08 生产只读，1,714 家在库门店；方法 = 52 号 §4.3 ④ 同款）</h3>
+     * <ul>
+     *   <li><b>触发事故</b>：南通五洲国际广场「一壶淡泊（F2）/ 丽莎（3 层）」地址级编码锚点相距
+     *       <b>95m</b>——坐标维护（单店更正）后脱离 50m 同址组，全部历史足迹的展示从丽莎
+     *       「移动」到一壶淡泊（用户报障「算到一壶淡泊头上了」）；</li>
+     *   <li><b>同综合体/同楼对的上界实测 146m</b>（嘉兴桐乡新世界广场 990↔1156；柳州声福国际
+     *       1253↔1254 = 141m）——同商场多店经不同地址写法编码后可散布百余米，50m/100m 均漏；</li>
+     *   <li>100~150m 段同时混有确实不同楼的邻居（如张家口 1324↔1329 = 117m）——单一距离无法
+     *       完全分开「同楼/不同楼」，但展示口径只声明「附近」，对此不敏感（宁多勿漏）；</li>
+     *   <li><b>不取 300m</b>（{@link #NEARBY_RADIUS_M}，采集准入的「片区」）：那会把整个商圈的
+     *       门店合成一个展示单元（150~300m 段全量上百对），功能退化成"商圈徽章"。</li>
+     * </ul>
+     * 改值影响面：只影响 C 侧「到店足迹」行；<b>不影响</b>排序（{@link #CO_LOCATED_RADIUS_M} /
+     * {@link #visitSharesForRanking}）、admin 归因（{@code attributionsFor}）与邻近提示等任何既有口径。
+     */
+    public static final int NEARBY_TRACE_RADIUS_M = 150;
 
     /**
      * 「附近」覆盖半径（米，口径参数）：对齐 GET /venues/nearby 的缺省 300m——
@@ -491,6 +529,90 @@ public class VenuePresenceService {
     /** 在营判定（可被到访归因的门店状态，{@link #IN_OPERATION_STATUSES}）；状态无法识别时按在营处理（不凭未知让渡证据） */
     public static boolean isInOperation(VenueStatus status) {
         return status == null || IN_OPERATION_STATUSES.contains(status);
+    }
+
+    // ── 读侧：C 侧「附近的足迹」展示（2026-10-08 重定义；唯一的消费方 = VenueVisitBadgeService） ──
+
+    /**
+     * C 侧「附近的足迹」展示事实（2026-10-08 重定义；文档 = 52 号「C 侧展示：附近的足迹」节）。
+     *
+     * <p><b>语义</b>：一家店的「附近」= 本店 + 与它相距 ≤ {@link #NEARBY_TRACE_RADIUS_M} 的
+     * 在库门店；返回其上的命中 ping 的<b>用户并集</b>与 <b>(人, 自然日) 并集</b>（30 天窗）。
+     * <b>不看营业状态</b>——足迹是已发生的事实，展示只声明「附近」，停业店的位置同样可能有足迹
+     * （营业状态时常变换，今天关门、昨天有人去过两件事同时为真）。
+     *
+     * <p><b>为什么不再做门店级归属</b>（2026-10-08 用户裁决；事故复盘见 52 号）：经纬度距离
+     * 无法判定线下用户真实在哪家店（门店坐标是地址级地理编码、同商场可散布百余米；端侧
+     * 「500m 内最近一家」只是几何顺序，不是事实）。旧展示实现把一组门店的证据「归属」给某一家
+     * （按营业状态 ABSORBED/YIELDED），一次单店坐标维护就让同一批足迹「算到另一家头上」
+     * ⇒ 新口径：范围内<b>所有</b>门店都显示同一句「附近的足迹」，由用户自行判断是哪家店。
+     *
+     * <p><b>与既有口径的关系（都读同一份命中事实，分叉刻意，⛔ 禁互相"对齐"）</b>：
+     * <ul>
+     *   <li>本方法（C 侧展示）= 附近并集、无归属、无状态过滤、无分摊；</li>
+     *   <li>admin 展示（{@link #visitSummaries} / {@link #visitedVenueSummaries}）= 同址归因明细
+     *       （NONE/SHARED/ABSORBED/YIELDED），供运营核查；</li>
+     *   <li>排序（{@link #visitSharesForRanking}）= 1/k 分摊 + 不在营记 0。</li>
+     * </ul>
+     *
+     * <p><b>取数</b>：一次同址查询（入参集合 × 全表）+ 一次命中并集查询 + 一次到访日查询，
+     * 页面级批量、无 N+1（与 admin 单页路径同量级）。排除集合与排序口径同一来源（调用方传入；
+     * admin 展示"不排除"的分叉保持原样）。无命中足迹的门店<b>不在返回 map 里</b>
+     * （调用方按缺席处理：前端不渲染，零布局变化）。
+     *
+     * <p>量级边界：每次调用 3 条小查询（命中表稀疏 + {@code (venue_id, created_at)} 索引前缀）；
+     * ping 表到 10^6 行 / 门店到万级时改为物化（触发条件与 admin 侧登记同款）。
+     *
+     * @param venueIds         当页门店（城市列表 / 收藏列表的一页）
+     * @param excludedUserIds  排除账号集合（恒非空由调用方保证——{@code HeatAccountExclusionService}
+     *                         契约；空集合退化为"谁都不排除"，不会产生 SQL 语法问题，本方法在 Java 侧过滤）
+     */
+    @Transactional(readOnly = true)
+    public Map<Long, NearbyVisitSummary> nearbyVisitSummaries(Collection<Long> venueIds,
+                                                              Collection<Long> excludedUserIds) {
+        if (venueIds == null || venueIds.isEmpty()) {
+            return Map.of();
+        }
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime windowStart = now.minusDays(RANKING_WINDOW_DAYS);
+        // ① 每店的「附近门店集合」= {本店} ∪ {与它相距 ≤ NEARBY_TRACE_RADIUS_M 的在库门店}。
+        //    只做一跳（不做传递闭包）：展示单元是「这家店的附近」而非「连成一片的商圈」。
+        Map<Long, Set<Long>> vicinityByVenue = new LinkedHashMap<>();
+        for (Long id : venueIds) {
+            vicinityByVenue.computeIfAbsent(id, k -> new LinkedHashSet<>()).add(id);
+        }
+        for (VenueRepository.CoLocatedVenueRow row
+                : venueRepository.findCoLocatedPairs(venueIds, NEARBY_TRACE_RADIUS_M)) {
+            // 查询过滤 a.id IN :venueIds ⇒ row.getVenueId() 恒在 map；防御性判空只为
+            // 未来若扩大查询范围的场景（不让新增行静默漏并）
+            Set<Long> vicinity = vicinityByVenue.get(row.getVenueId());
+            if (vicinity != null) {
+                vicinity.add(row.getCoLocatedId());
+            }
+        }
+        // ② 一次批量取事实：范围内全部门店上的命中 ping（两个查询与 admin / 排序路径同源同谓词）
+        Set<Long> evidenceStores = new LinkedHashSet<>();
+        vicinityByVenue.values().forEach(evidenceStores::addAll);
+        Map<Long, Map<Long, LocalDateTime>> lastSeen = toLastSeenByVenue(
+                pingRepository.findVisitorLastSeenByVenueIds(evidenceStores, HIT_RADIUS_M, HIT_MAX_ACCURACY_M));
+        Map<Long, Map<Long, Set<LocalDate>>> visitDays = toVisitDaysByVenue(
+                pingRepository.findVisitorDaysByVenueIdsSince(evidenceStores, windowStart,
+                        HIT_RADIUS_M, HIT_MAX_ACCURACY_M));
+        // ③ 排除集合单点剔除（两张映射的 user 维同时过滤——「同一集合、两种消费面」，见方法注释）
+        if (excludedUserIds != null && !excludedUserIds.isEmpty()) {
+            lastSeen.values().forEach(m -> m.keySet().removeAll(excludedUserIds));
+            visitDays.values().forEach(m -> m.keySet().removeAll(excludedUserIds));
+        }
+        // ④ 逐店求并集：组内同一用户 / 同一天只计一次（⛔ 不能各店相加——52 号 §4.2 第 1 条）
+        Map<Long, NearbyVisitSummary> result = new LinkedHashMap<>();
+        vicinityByVenue.forEach((venueId, stores) -> {
+            long users = countSince(unionLastSeen(stores, lastSeen), windowStart);
+            if (users <= 0) {
+                return; // 本店附近无命中足迹 ⇒ 缺席 = 不渲染（「无足迹不渲染」是唯一硬约束）
+            }
+            result.put(venueId, new NearbyVisitSummary(users, countVisitEvents(stores, visitDays)));
+        });
+        return result;
     }
 
     // ── 读侧：到访名单下钻（2026-10-06，admin 名单页 / 用户足迹页） ─────────────────
@@ -882,8 +1004,10 @@ public class VenuePresenceService {
                     scaleVisits(eventCount * share),
                     attribution.areaVenueIds().size(),
                     // 被分摊 ⇔ 分摊系数 < 1（组内 ≥2 家在营，每位用户只算 1/k）。
-                    // 供文案层决定用词：未分摊可断言"到这家店"，被分摊只能说"这附近"
-                    // （20m 定位精度分不清同址组里哪家店，V40）。
+                    // ⚠️ 2026-10-08 起本标记**无消费方**：它原供文案层决定用词（V40：
+                    // 未分摊可断言"到这家店"），而 C 侧展示已改为无条件「附近」语义
+                    // （门店级归属断言整体退役，见 nearbyVisitSummaries）——保留随行仅为
+                    // 查询/调试可读；⛔ 不得据此重建"未分摊 ⇒ 真实到店"类用词分支。
                     share >= 1.0));
         });
         return result;

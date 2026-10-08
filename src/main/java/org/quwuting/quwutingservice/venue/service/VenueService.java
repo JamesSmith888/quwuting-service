@@ -1183,10 +1183,11 @@ public class VenueService {
         // docs/agents/38-venue-aliases.md §4.1）。无 keyword → 空 Map，全页恒 null，零额外
         // 查询（同 photos 等批量装配模式，一次 IN 覆盖整页规避 N+1；两张别名表规模极小）。
         Map<Long, VenueMatchHint> matchHints = loadMatchHints(result.getContent(), rawTerms);
-        // 批量「到店足迹」胶囊（2026-10-06，V38）：读 V38 物化表（归因 + 1/k 分摊 + 排除内部账号）
-        // 的分摊人数，≥ VISIT_FREE_TIER+1 才出文案——同门槛，保证"卡片上有数字 ⇔ 热度公式里有分"
-        // （口径与展示门槛依据见 VenueVisitBadgeService / VenueResponse#visitBadgeText）。
-        // 一次 IN 覆盖整页防 N+1，走 UNIQUE(venue_id) 主键点查，表只含有过到访的门店（稀疏量级）。
+        // 批量「到店足迹」行文案（2026-10-06 V38 建；2026-10-08 改「附近的足迹」口径）：
+        // 事实 = VenuePresenceService#nearbyVisitSummaries（门店 ±150m 内全部命中足迹的并集，
+        // 停业店同样展示、无门店级归属——「我们只是承诺是附近」，见 52 号「C 侧展示」节）；
+        // 文案门槛/措辞单点 = VenueVisitBadgeService / VenueResponse#visitBadgeText。
+        // 页面级批量（同址 1 次 + 命中 1 次 + 到访日 1 次），一次覆盖整页防 N+1。
         Map<Long, String> visitBadges = venueVisitBadgeService.visitBadgeTextsByVenue(venueIds);
         return result.map(v -> venueResponseMapper.toResponse(
                 v, reactionsByVenue.getOrDefault(v.getId(), Collections.emptyList()),

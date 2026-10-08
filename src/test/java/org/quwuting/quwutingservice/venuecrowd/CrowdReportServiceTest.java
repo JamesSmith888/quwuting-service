@@ -43,6 +43,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -146,7 +147,7 @@ class CrowdReportServiceTest {
      * 读路径共用桩：权重默认 1.0；用户资料；点赞聚合为空。
      *
      * <p><b>两条取数都要桩</b>（2026-10-07）：{@code summary()} 现在刻意分成两路——
-     * 统计走 6h 窗口（{@code findByVenueIdAndCreatedAtAfterAndDeletedFalse}），
+     * 统计走有效期窗口（{@code findByVenueIdAndCreatedAtAfterAndDeletedFalse}，2026-10-08 起 1 天），
      * 展示走最近 N 条（{@code findByVenueIdAndDeletedFalseOrderByCreatedAtDesc}，
      * 含过期）。只桩一条会让明细取数拿到 Mockito 默认的 null → NPE，
      * 且这类失败会被误读成"环境问题"，故在此一次性说明白。
@@ -213,12 +214,15 @@ class CrowdReportServiceTest {
         assertEquals(1, summary.female().count(), "count = 独立投票人数");
         assertTrue(summary.mainText().startsWith("舞伴 约100 · 1 位舞友 · "));
         assertEquals("男客 约50 · 1 人", summary.maleText());
-        assertEquals("今晚 约100 · 1人", summary.headlineText());
+        // 结论值由本测试验证；「今晚 / 昨晚」措辞按营业日分流（时段敏感），
+        // 措辞分支由 CrowdHeadlineTest 用可控时钟 100% 覆盖。
+        assertNotNull(summary.headlineText());
+        assertTrue(summary.headlineText().contains("约100 · 1人"), "实际：" + summary.headlineText());
         assertEquals(1, summary.rows().size());
         CrowdSummary.CrowdReportRow row = summary.rows().get(0);
         assertEquals("约100", row.femaleLevelName());
         assertEquals("约50", row.maleLevelName());
-        assertFalse(row.expired(), "10 分钟前的上报仍在 6h 窗口内");
+        assertFalse(row.expired(), "10 分钟前的上报仍在有效期窗口（1 天）内");
     }
 
     @Test
@@ -234,7 +238,8 @@ class CrowdReportServiceTest {
 
         assertEquals(5, summary.female().level());
         assertEquals("CONFIRMED", summary.tier(), "4/5/6 中位 5，三人均在 ±1 内 ⇒ 确认（旧众数口径会判说法不一）");
-        assertEquals("今晚 约100 · 3人", summary.headlineText());
+        assertNotNull(summary.headlineText());
+        assertTrue(summary.headlineText().contains("约100 · 3人"), "实际：" + summary.headlineText());
     }
 
     @Test
@@ -265,8 +270,9 @@ class CrowdReportServiceTest {
 
         assertEquals(3, summary.female().level(), "认领人的 8 档不参与中位数");
         assertEquals(1, summary.reporterCount());
-        assertEquals("今晚 约50 · 1人", summary.headlineText());
-        assertEquals(2, summary.rows().size(), "明细表照常展示两行");
+        assertNotNull(summary.headlineText());
+        assertTrue(summary.headlineText().contains("约50 · 1人"), "实际：" + summary.headlineText());
+        assertEquals(2, summary.rows().size(), "明细照常展示两行");
         CrowdSummary.CrowdReportRow ownerRow = summary.rows().stream()
                 .filter(r -> r.userId().equals(10L)).findFirst().orElseThrow();
         assertEquals(CrowdTrustService.BADGE_OWNER, ownerRow.badgeText(), "店家行如实标注");
@@ -296,9 +302,10 @@ class CrowdReportServiceTest {
         VenueCrowdReport lastNightReport = report(9L, 10L, 3, null, lastNight);
         when(venueRepository.findById(VENUE_ID)).thenReturn(Optional.of(venue(null)));
         when(crowdReportRepository.findByVenueIdAndCreatedAtAfterAndDeletedFalse(eq(VENUE_ID), any()))
-                .thenReturn(List.of())                                             // 今晚窗口
+                .thenReturn(List.of())                                             // 统计窗口（mock 为空 ⇒ 走回看路径）
                 .thenReturn(List.of(lastNightReport));                             // 回看范围
-        // 明细展示（2026-10-07）：窗口空但历史有行 ⇒ 表格照常展示这 1 条（已过期）
+        // 明细展示（2026-10-07）：统计窗口无有效票但历史有行 ⇒ 明细照常展示这 1 条
+        // （本测试直接 mock 掉统计窗口、只验回看摘要链路，不依赖真实窗口边界）
         when(crowdReportRepository.findByVenueIdAndDeletedFalseOrderByCreatedAtDesc(eq(VENUE_ID), any()))
                 .thenReturn(new PageImpl<>(List.of(lastNightReport),
                         PageRequest.of(0, CrowdPolicy.DETAIL_ROWS_LIMIT), 1L));
@@ -331,17 +338,17 @@ class CrowdReportServiceTest {
 
     /**
      * 本轮的核心契约：<b>展示放宽、统计不放宽</b>。
-     * 场景 = 用户最在意的那种：清晨进门店页，昨晚有 3 条上报但全出 6h 窗口。
-     * 期望 = 明细表照常展示那 3 条（每行标 expired），而统计字段一律按窗口外处理
+     * 场景 = 用户最在意的那种：清晨进门店页，昨晚有 3 条上报但已全出有效期窗口（1 天）。
+     * 期望 = 明细照常展示那 3 条（每行标 expired），而统计字段一律按窗口外处理
      * （hasData=false / mainText=null / headline 走回看）——两条取数互不串味。
      */
     @Test
-    void expiredRowsAreStillShownButNeverCountedIntoTheTonightStatistics() {
+    void expiredRowsAreStillShownButNeverCountedIntoTheStatistics() {
         LocalDateTime now = LocalDateTime.now();
-        // 三条都是昨晚（窗口外）的上报
-        VenueCrowdReport r1 = report(1L, 10L, 5, null, now.minusHours(9));
-        VenueCrowdReport r2 = report(2L, 11L, 6, null, now.minusHours(10));
-        VenueCrowdReport r3 = report(3L, 12L, 5, null, now.minusHours(11));
+        // 三条都是前一夜（窗口外，1 天前）的上报
+        VenueCrowdReport r1 = report(1L, 10L, 5, null, now.minusHours(28));
+        VenueCrowdReport r2 = report(2L, 11L, 6, null, now.minusHours(29));
+        VenueCrowdReport r3 = report(3L, 12L, 5, null, now.minusHours(30));
         stubReadPath(null, List.of(), List.of(r1, r2, r3), 10L, 11L, 12L);
 
         CrowdSummary summary = crowdReportService.summary(VENUE_ID);
@@ -349,7 +356,7 @@ class CrowdReportServiceTest {
         // 展示侧：三条都在，且逐行标过期
         assertEquals(3, summary.rows().size(), "窗口外也要展示最近 3 条（本轮根因：这里原本是空表）");
         assertTrue(summary.rows().stream().allMatch(CrowdSummary.CrowdReportRow::expired),
-                "全部出 6h 窗口 ⇒ 每行都要标 expired，前端据此置灰 +「已过期」");
+                "全部出有效期窗口（1 天）⇒ 每行都要标 expired，前端据此置灰 +「已过期」");
         // 统计侧：一步不退
         assertFalse(summary.hasData(), "过期票绝不能让「今晚有数据」为真");
         assertNull(summary.female(), "过期票绝不能进中位数");
@@ -362,8 +369,8 @@ class CrowdReportServiceTest {
     void detailRowsTopUpToThreeWhileStatisticsStayWindowOnly() {
         LocalDateTime now = LocalDateTime.now();
         VenueCrowdReport live = report(1L, 10L, 5, null, now.minusMinutes(20));   // 窗口内
-        VenueCrowdReport old1 = report(2L, 11L, 8, null, now.minusHours(8));      // 窗口外
-        VenueCrowdReport old2 = report(3L, 12L, 8, null, now.minusHours(9));      // 窗口外
+        VenueCrowdReport old1 = report(2L, 11L, 8, null, now.minusHours(30));     // 窗口外（1 天前）
+        VenueCrowdReport old2 = report(3L, 12L, 8, null, now.minusHours(31));     // 窗口外
         stubReadPath(null, List.of(live), List.of(live, old1, old2), 10L, 11L, 12L);
 
         CrowdSummary summary = crowdReportService.summary(VENUE_ID);

@@ -148,7 +148,8 @@ public class FavoriteService {
         // 2026-09-04 用户拍板推翻同日「中性角标」方案；同 isHot 历史缺陷模式——收藏列表
         // 漏注入会出现"城市列表有文案、收藏不显示"，见 StatusReportLatestService#latestTextsByVenue）
         Map<Long, String> statusLatestTexts = statusReportLatestService.latestTextsByVenue(venueIds);
-        // 批量「到店足迹」胶囊（2026-10-06，V38）：与城市列表同源同门槛（≥3 才下发）——
+        // 批量「到店足迹」行文案（2026-10-06 V38 建；2026-10-08 改「附近的足迹」口径）：
+        // 与城市列表同一供给方（nearbyVisitSummaries 的附近并集事实 + VenueVisitBadgeService 文案）——
         // 收藏列表与城市列表同为 venue-card 展示场景，须同口径（同上方角标的「漏注入」历史缺陷模式）
         Map<Long, String> visitBadges = venueVisitBadgeService.visitBadgeTextsByVenue(venueIds);
         // 批量未读状态变更门店 ID（2026-09-01「收藏即关注」）：一次 IN 覆盖整页收藏，

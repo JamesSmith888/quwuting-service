@@ -8,15 +8,18 @@ import org.springframework.data.repository.query.Param;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.Collection;
-import java.util.List;
 
 /**
  * 门店到访指标物化汇总仓储（2026-10-06，V38；文档 = docs/agents/52-venue-presence.md「到访进排序」）。
  * <p>
  * 写侧 = 定时刷新任务专用（先整表清零、再逐店 upsert ⇒ 窗口外自然淘汰，不留陈旧值）；
- * 读侧 = 公式标量子查询（在 {@code VenueRepository} 的 JPQL/native 片段内直接引用表名/实体名）
- * 与列表徽标批量取数（本接口）。
+ * 读侧 = 热度公式标量子查询（在 {@code VenueRepository} 的 JPQL/native 片段内直接引用表名/实体名）。
+ * <p>
+ * ⚠️ <b>2026-10-08 起本表消费方只剩热度公式</b>：C 侧「到店足迹」文案改由
+ * {@code VenuePresenceService#nearbyVisitSummaries} 供给（「附近的足迹」= 附近并集口径，
+ * 与本表存的 1/k 分摊排序份额<b>刻意不同</b>，见 52 号）——原「列表徽标批量取数」方法
+ * （{@code findVisitUsersByVenueIds}）随迁删除。{@code share_in_operation} 列自此亦无消费方
+ * （列保留，V40 迁移不回改；刷新仍写入以保持行自洽）。
  */
 public interface VenueVisitMetricRepository extends JpaRepository<VenueVisitMetric, Long> {
 
@@ -32,6 +35,10 @@ public interface VenueVisitMetricRepository extends JpaRepository<VenueVisitMetr
      * <p>
      * ⚠️ {@code updated_at} 必须一并显式写：native 语句绕过 Hibernate 的
      * {@code @UpdateTimestamp}，漏写会留下过期时间戳。
+     * <p>
+     * ⚠️ 只清零三个业务值，<b>不动</b> {@code group_size}/{@code share_in_operation}：
+     * 这两列是"最近一轮被计算到时"的口径说明字段，行若本轮未被 upsert 会保持旧值
+     * （消费方解读时须以 {@code refreshed_at} 与三数是否全 0 结合判断，见 52 号）。
      */
     @Modifying
     @Query(value = "UPDATE qwt_venue_visit_metrics "
@@ -66,19 +73,4 @@ public interface VenueVisitMetricRepository extends JpaRepository<VenueVisitMetr
                 @Param("groupSize") int groupSize,
                 @Param("shareInOperation") boolean shareInOperation,
                 @Param("now") LocalDateTime now);
-
-    /**
-     * 整页批量取数（列表卡片徽标，防 N+1）：<b>排序口径</b>的分摊后到访人数 + 到访次数。
-     * 返回 Object[]{venueId, visitUsers30d, visitEvents30d}；无到访的门店不在结果里
-     * （调用方按缺席处理）。
-     * <p>
-     * <p>次数与分摊标记随行返回而非二次查询：三者同源同窗，列表页只渲染这一行，
-     * 拆成多次取数会让"人数/ 次数 / 用词依据"之间多出可能不一致的时间窗
-     * （分摊标记必须与那批数字来自同一轮归因，否则会出现"按未分摊用词、却给着分摊后的数"）。
-     *
-     * <p>返回 Object[]{venueId, visitUsers30d, visitEvents30d, shareInOperation}。
-     */
-    @Query("SELECT m.venueId, m.visitUsers30d, m.visitEvents30d, m.shareInOperation FROM VenueVisitMetric m "
-            + "WHERE m.deleted = false AND m.venueId IN :venueIds")
-    List<Object[]> findVisitUsersByVenueIds(@Param("venueIds") Collection<Long> venueIds);
 }

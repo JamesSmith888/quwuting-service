@@ -13,9 +13,9 @@ import java.util.List;
  * <p>
  * 字段语义：
  * <ul>
- *   <li>{@code hasData}：6h 窗口内是否有上报（false → 前端渲染空态 emptyText；
- *       历史数据不在此——2026-08-29 定版：过期/历史记录走独立历史页
- *       {@code GET /venues/{id}/crowd-reports/history}，详情页右下角链接进入）；</li>
+ *   <li>{@code hasData}：有效期窗口（2026-10-08 起 = 1 天）内是否有上报（false → 前端渲染空态 emptyText；
+ *       历史数据不在此——过期/历史记录走独立历史页 {@code GET /venues/{id}/crowd-reports/history}，
+ *       详情页右下角链接进入）；</li>
  *   <li>{@code female}/{@code male}：主/次信号中位数视图（无对应数据时 null）；
  *       {@code share} = 中位数 ±1 档内的权重占比（见 {@code CrowdConsensus}）；</li>
  *   <li>{@code tier}/{@code tierText}：置信度分层（CrowdTier code + 完整胶囊文案，
@@ -33,15 +33,16 @@ import java.util.List;
  *       <b>2026-10-07 起为「最近 {@code CrowdPolicy#DETAIL_ROWS_LIMIT} 条，不管过没过期」</b>
  *       （每行带 {@code expired} 标记，前端置灰 +「已过期」）——过期记录不再只走历史页；
  *       但 {@code expired = true} 的行<b>绝不进统计</b>，本记录的 hasData/female/male/tier/
- *       mainText/headlineText 全部仍只由 6h 窗口内的票决定。</li>
+ *       mainText/headlineText 全部仍只由有效期窗口内的票决定。</li>
  *   <li>{@code rewardText}/{@code upgradedBadgeText}：<b>仅 POST 提交响应填充</b>的
  *       即时反馈（GET 恒 null）——rewardText = 本次提交新触发「确认后积分」的服务端
  *       权威文案（如「你的上报被 3 位舞友确认 · +3 积分已到账」）；upgradedBadgeText =
  *       本次提交后身份升级文案（普通→常客→资深，如「身份升级：常客舞友」）；
  *       两者为反馈闭环的即时确认（对齐「label 服务端权威」契约，前端零拼接）。</li>
- *   <li>{@code headlineText}：折叠头常驻摘要（2026-10-07，服务端权威）——窗口内有票「今晚 约100 · 3人」，
- *       窗口外回看最近一个营业日「昨晚 23:40 约50 · 1人」，回看范围内一张票都没有则为 null
- *       （详见 {@code CrowdHeadline}）；<b>折叠态才渲染</b>，展开后明细表已呈现同一信息。</li>
+ *   <li>{@code headlineText}：折叠头常驻摘要（2026-10-07，服务端权威；2026-10-08 起措辞
+ *       按<b>营业日</b>分流、与窗口长短解耦）——最近有票的营业日 = 当前营业日「今晚 约100 · 3人」，
+ *       否则「昨晚 23:40 约50 · 1人」（详见 {@code CrowdHeadline}）；回看范围内一张票都没有则为
+ *       null（不渲染）。</li>
  *   <li>{@code female}/{@code male} 的 {@code level} 自 2026-10-07 起是<b>（加权）下中位档</b>（原为加权众数），
  *       {@code count} = 该维度独立投票人数，{@code share} = 落在中位数 ±1 档内的权重占比
  *       （统计口径见 {@code CrowdConsensus}）。</li>
@@ -84,12 +85,12 @@ public record CrowdSummary(
     }
 
     /**
-     * 单个用户的上报明细（详情页「今晚热度」表格式列表行，2026-08-29；2026-09-03
-     * 用户要求表格直接展示<b>头像 + 名称（超长省略）</b>；同日追加行级点赞
-     * 「有用」——reportId 行主键 + likeCount 赞数 + likedByMe 我是否已赞
-     * （登录态回填，前端渲染点亮态；未登录恒 false）。
+     * 单个用户的上报明细（详情页「今晚热度」明细行，2026-08-29；2026-09-03 用户要求
+     * 直接展示<b>头像 + 名称（超长省略）</b>；同日追加行级点赞「有用」——reportId 行主键 +
+     * likeCount 赞数 + likedByMe 我是否已赞（登录态回填，前端渲染点亮态；未登录恒 false）；
+     * <b>2026-10-08 起详情页由表格改行卡片</b>，与历史页共用 crowd-report-card 组件）。
      * <p>
-     * <b>2026-10-07 用户拍板：不再只含 6h 窗口内有效行</b>，改为「最近
+     * <b>2026-10-07 用户拍板：不再只含窗口内有效行</b>，改为「最近
      * {@code CrowdPolicy#DETAIL_ROWS_LIMIT} 条，<b>不管过没过期</b>」——窗口一过整卡退化成
      * 空态，恰好是用户最想看的时候。每行带 {@code expired} 标记，前端据此派生「已过期」
      * 标签 + 置灰；<b>过期行不参与任何统计</b>（{@code hasData}/mainText/tier/headline 仍只看窗口内）。
@@ -98,7 +99,7 @@ public record CrowdSummary(
             Long userId,
             /** 用户标识（服务端权威三档：资深 / 常客 / 普通） */
             String badgeText,
-            /** 完整昵称（2026-09-03 详情页表格直接展示；空兜底「匿名」） */
+            /** 完整昵称（2026-09-03 直接展示；空兜底「匿名」） */
             String nickname,
             /** 上报者头像 URL（2026-09-03；空 = 用户未设头像，前端渲染首字占位） */
             String avatarUrl,
@@ -108,6 +109,8 @@ public record CrowdSummary(
             String femaleLevelHint,
             String maleLevelName,
             String maleLevelHint,
+            /** 上报绝对时间（2026-10-08；与历史行同款，卡片时间行展示「今天/昨天 HH:mm」） */
+            @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime reportAt,
             String ageText,
             /** 上报行 ID（2026-09-03 行级点赞主键——like/unlike 请求体） */
             Long reportId,
@@ -116,7 +119,8 @@ public record CrowdSummary(
             /** 我是否已赞该行（2026-09-03；登录态回填，前端点亮态） */
             boolean likedByMe,
             /**
-             * 是否已出 6h 有效窗口（2026-10-07；true = 历史参考，前端置灰 +「已过期」）。
+             * 是否已出有效期窗口（2026-10-07 建立；2026-10-08 起窗口 = 1 天；true = 历史参考，
+             * 前端置灰 +「已过期」）。
              * 明细行不再只含窗口内记录，此标记是「过期数据不当成此刻」的如实告知。
              * <p>
              * ⚠️ <b>它与「能不能赞」无关</b>：2026-10-07 起点赞<b>永不加窗口锁</b>
@@ -135,8 +139,8 @@ public record CrowdSummary(
      * 字段全部服务端权威派生（badgeText 三档 / 档位名+锚点 / ageText 相对时间 /
      * reportAt 绝对时间 yyyy-MM-dd HH:mm:ss / expired 窗口外标记——前端仅据此
      * 派生「已过期」标签 + 置灰样式，零拼接）。2026-09-03 追加 likeCount：
-     * 历史页行赞数<b>只读展示</b>（整页锁定，无点赞交互——过期行不可赞，封死
-     * 「赞远古行」刷法；未过期行回详情页热度卡点赞）。
+     * 历史页行赞数<b>只读展示</b>（本页整页无点赞交互；该拇指是「谁觉得有用」名单入口——
+     * 2026-10-07 起点赞永不加窗口锁，过期行回详情页热度卡照常可赞）。
      */
     public record CrowdHistoryRow(
             Long id,
@@ -157,7 +161,7 @@ public record CrowdSummary(
             @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime reportAt,
             /** 相对时间（「刚刚 / N 分钟前 / N 小时前」） */
             String ageText,
-            /** 是否已出 6h 有效窗口（true = 历史参考，前端置灰 +「已过期」） */
+            /** 是否已出有效期窗口（2026-10-08 起窗口 = 1 天；true = 历史参考，前端置灰 +「已过期」） */
             boolean expired,
             /** 该行当前赞数（2026-09-03 行级点赞；只读展示，纯展示永不进算法） */
             int likeCount

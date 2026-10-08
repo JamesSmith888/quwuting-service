@@ -34,7 +34,7 @@
 ## 3. 统计判定（`CrowdConsensus`，纯函数）
 
 1. **一人一票**（`evaluate` 的前置条件，重复投票人直接抛 `IllegalArgumentException`——静默去重会藏住「忘了折票」的 bug）：
-   `latestPerVoter`（今晚窗口：同一人取最新一张）/ `typicalPerVoter`（常态：折成其全部上报的下中位档）。
+   `latestPerVoter`（有效期窗口：同一人取最新一张）/ `typicalPerVoter`（常态：折成其全部上报的下中位档）。
 2. **统计量 = （加权）下中位数 + 四分位**：有序量表、顶档「约300+」无上限、档间不等距 ⇒ 不求均值；中位数本身就是「排除最高最低」且结果永远是真实档位。
    累计权重首次 ≥ p×总权重的那一档（等权时 = nearest-rank，偶数样本取较低档）。
 3. **权重**：独立人数 < 5 等权；≥ 5 才启用可信度权重，并截断到 `[1.0, 2.0]` ⇒ 单人权重占比 ≤ 1/3（`CrowdPolicyInvariantTest` 证明）。
@@ -47,16 +47,30 @@
 
 | 接口 | 说明 |
 |---|---|
-| `GET /venues/{id}/crowd-reports` | 摘要新增 `headlineText`；`female/male.level` 改为中位档，`count` = 该维度独立投票人数，`share` = ±1 档一致占比；明细行新增 `likeExpiresInSec`（剩余可赞秒数，≤0 = 已过窗口）与 **`expired`（是否已出 6h 窗口，2026-10-07）**；认领人行 `badgeText = 店家`。**明细行不再只含窗口内记录** = 最近 `CrowdPolicy.DETAIL_ROWS_LIMIT`（3）条、含过期（见 §4.1） |
+| `GET /venues/{id}/crowd-reports` | 摘要新增 `headlineText`；`female/male.level` 改为中位档，`count` = 该维度独立投票人数，`share` = ±1 档一致占比；明细行带 **`reportAt`（绝对时间，2026-10-08 详情卡与历史页共用卡片样式后必需）**与 **`expired`（是否已出有效期窗口，2026-10-07）**；认领人行 `badgeText = 店家`。**明细行不再只含窗口内记录** = 最近 `CrowdPolicy.DETAIL_ROWS_LIMIT`（3）条、含过期（见 §4.1） |
 | `GET /venues/{id}/crowd-reports/baseline` | 常态人气：前 7 / 30 个**营业日**（不含今晚所在营业日）；每窗口按 `SampleTier` 分档出文案（NONE 邀请 / SPARSE 原值 / LIMITED 中位+最低~最高 / SOLID 中位+四分位）；`deviationText` 仅在今晚 ≥2 人、常态 ≥3 人、偏差 ≥2 档（或「差不多」）时下发；`noteText` 口径小字 |
-| `GET /venues/{id}/crowd-reports/{reportId}/likers` | 谁觉得有用：上报者本人 / ADMIN ⇒ `FULL`（完整名单，最近点赞在前）；其他人（含未登录）⇒ `SUMMARY`（人数 + 分层汇总，名单恒空）。不受 6h 窗口限制；行不存在 / 已删 / 串店 ⇒ 1019 |
+| `GET /venues/{id}/crowd-reports/{reportId}/likers` | 谁觉得有用：上报者本人 / ADMIN ⇒ `FULL`（完整名单，最近点赞在前）；其他人（含未登录）⇒ `SUMMARY`（人数 + 分层汇总，名单恒空）。不受有效期窗口限制；行不存在 / 已删 / 串店 ⇒ 1019 |
 | `POST …/like` / `…/unlike` | 行为不变；**自赞放开**（2026-10-07 用户再次确认），赞数永不进算法；被赞通知改为未读合并；**2026-10-07 取消点赞窗口锁** —— 过期上报永远可赞可取消（业务码 1020 退役，见 §4.1） |
 
-## 4.1 明细展示 vs 统计口径的分离（2026-10-07 用户拍板）
+## 4.1 明细展示 vs 统计口径的分离（2026-10-07 用户拍板，2026-10-08 窗口拉长）
 
-用户诉求两条：①「门店详情页今晚热度必须展示最近的三条上报记录，不管它是否过期」；
-②「超过有效期（过期）的数据也依旧永远可以点赞」。根因同上：6h 窗口一过整张卡退化成
-「暂无舞友上报」，而窗口锁让那些仍显示在屏幕上的数据**不可赞**——「看得见却点不动」。
+用户诉求三条：①「门店详情页今晚热度必须展示最近的三条上报记录，不管它是否过期」；
+②「超过有效期（过期）的数据也依旧永远可以点赞」；③（2026-10-08）「**过期时间从两小时改为 1 天**」。
+根因同源：6h 窗口一过整张卡退化成「暂无舞友上报」，而窗口锁让那些仍显示在屏幕上的数据**不可赞**
+——「看得见却点不动」。③ 则是承认：舞讯集中在 23:00 后、营业日跨午夜，6h 窗口让「昨晚怎么样」
+在次日白天大面积失效，1 天（≈一个完整营业日）才是「还算今晚的事」的自然边界。
+
+### 窗口口径（2026-10-08）
+
+- 常量更名 `TONIGHT_WINDOW_HOURS`(6) → **`VALID_WINDOW_HOURS`(24)**：旧名把「窗口」与「今晚」
+  绑死，窗口拉长后名字直接撒谎（窗口里躺着昨晚的票）。新名只描述语义「数据还算数的有效期」。
+- **措辞与窗口解耦**：`CrowdHeadline` 摘要（「今晚 约100 · 3人」/「昨晚 23:40 约50 · 1人」）
+  改按**营业日**（`BusinessDay`，05:00 分界）分流，不再由窗口决定——窗口说「数据还算数」，
+  文案说「这是哪一晚的事」，两者是两个问题。若不拆开，24h 窗口内的昨晚票会被摘要称成
+  「今晚」（用户读成此刻仍有效）。
+- Service 侧 record / 方法随之更名 `Tonight` / `tonight()` → **`ValidWindow` / `validWindow()`**。
+- 下游口径自动跟随：详情统计、列表角标「N人报过」、列表「最新上报」行、确认积分门槛
+  全部引用 `VALID_WINDOW_HOURS`，**不逐个改字面量**（数值口径只在 CrowdPolicy 的门禁兜底）。
 
 ### 展示侧
 
@@ -64,8 +78,8 @@
 
 | | 数据源 | 消费者 |
 |---|---|---|
-| **统计** | `tonight()` — 6h 窗口 | `hasData` / `female` / `male` / `tier` / `mainText` / `ageText` / `headlineText` |
-| **展示** | `recentDetailRows()` — 最近 `DETAIL_ROWS_LIMIT`(3) 条，不过滤窗口 | `rows`（明细表，每行带 `expired`） |
+| **统计** | `validWindow()` — 有效期窗口（24h） | `hasData` / `female` / `male` / `tier` / `mainText` / `ageText` / `headlineText` |
+| **展示** | `recentDetailRows()` — 最近 `DETAIL_ROWS_LIMIT`(3) 条，不过滤窗口 | `rows`（明细卡片，每行带 `expired` + `reportAt`） |
 
 ⛔ **让过期票进统计 = 用昨晚的数据冒充「今晚人气」**。`hasData=false` 时 `female` 恒 null、
 `tier=EMPTY`、`headline` 走回看口径——由

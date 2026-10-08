@@ -239,4 +239,18 @@ public interface AnnouncementRepository extends JpaRepository<Announcement, Long
             """)
     Set<Long> findReadAnnouncementIds(@Param("userId") Long userId,
                                       @Param("ids") Collection<Long> ids);
+
+    // ── 首页公告位（home slot）记账 ──────────────────────────────────
+    // 不变量：未软删的公告中至多一条 pinned=true（首页位容量 = 1）。
+    // 应用层单点 = HomeSlotService；数据层兜底 = V44 生成列 + UNIQUE INDEX。
+    // ⚠️ 刻意<b>不用</b> @Modifying bulk UPDATE：它绕过持久化上下文，会让「已被 bulk
+    //    清成false 的行在 PC 里仍是 true」⇒ 后续 save 因字段无变化而不发 UPDATE，DB 与
+    //    实体永久分叉。占位条目数正常 ≤1、历史脏数据 ≤36，逐条改的成本可忽略。
+
+    /** 当前全部置顶条目（占位清场 + 自愈收敛的输入；正常至多 1 条，>1 即脏数据） */
+    @Query("SELECT a FROM Announcement a WHERE a.pinned = true AND a.deleted = false ORDER BY a.id DESC")
+    List<Announcement> findAllPinned();
+
+    /** 当前占位者（未软删置顶中 id 最大者 = 首页实际展示的那条） */
+    Optional<Announcement> findTopByPinnedTrueAndDeletedFalseOrderByIdDesc();
 }

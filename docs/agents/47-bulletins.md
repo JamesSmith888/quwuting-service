@@ -434,8 +434,8 @@ DRAFT --publish(立即/定时)--> PUBLISHED --offline / offlineAt 到点--> OFFL
 | 类型 | 载体 | 小程序侧实现 |
 |---|---|---|
 | 文本 / 列表 / 表格 / 代码 | markdown | towxml（与公告详情同一管线） |
-| 图片 | 结构化附件 `media[{type:"IMAGE"}]` | `media-attachments` 组件预览网格（点击 `wx.previewImage` 大图） |
-| 视频 | 结构化附件 `media[{type:"VIDEO", poster?}]` | 组件内原生 `<video>` 内联播放（无封面走原生控件兜底） |
+| 图片 | 结构化附件 `media[{type:"IMAGE"}]` | `media-attachments` 组件网格（**按实测宽高等比显示** `aspectFit`；点击 → 宿主页 `photo-viewer` 全屏展示） |
+| 视频 | 结构化附件 `media[{type:"VIDEO", poster?}]` | 组件内原生 `<video>` **内联静音自动播**（盒比例 = 素材比例故不留黑边；点击 → 同节点 `requestFullScreen` 全屏续播，进全屏出声、退全屏回静音，2026-10-08 三改） |
 | 历史外链媒体（不迁移） | 正文 markdown `![](url)` / `<video src>` | towxml `img` / 白名单直通原生 `<video>`（hasMedia 正则兜底） |
 | 门店锚点 | `[店名](venue://门店ID)` | `normalizeAnnouncementLinks` → 门店详情页（外链降级纯文本） |
 
@@ -445,8 +445,34 @@ DRAFT --publish(立即/定时)--> PUBLISHED --offline / offlineAt 到点--> OFFL
   否则保存即静默清空附件（幂等替换语义的反面教训，同 touchLevel 回显先例）。
 - **hasMedia 事实源 = 结构化附件**（`item.media`）；`MEDIA_IN_CONTENT_RE` 正则仅
   兜底历史条目正文里手写的媒体语法，两者取或。
-- 附件组件的可交互节点统一带 `data-media="1"`，宿主 `onBandTap` 据此放行
-  （点击预览/播放，不弹消息菜单）——新增可交互节点必须同步该标记。
+- 附件组件的可交互节点统一带 `data-media="1"` **且** `catch:tap`（自己吞冒泡），
+  宿主 `onBandTap` 据前者放行、后者保证不同时触发——**成对出现，缺一即漂移**（漏标记
+  ⇒ 误弹消息菜单；漏 catch ⇒ 同样误弹但修法不同）。
+- **点媒体一律进全屏查看器，绝不弹二级菜单**（2026-10-08 用户报障④的根因修复）：
+  图片 → 宿主页 `components/photo-viewer`（组件 `triggerEvent('previewimage')`，
+  由宿主页拉起——`page-container` 全页面唯一且锚点在宿主页作用域解析，组件拿不到）；
+  视频 → **内联节点 `requestFullScreen` 全屏续播**（2026-10-08 三改：`wx.previewMedia`
+  退役——其全屏查看器进入后**默认暂停**且无 autoplay 参数、静音不可控，正是
+  "全屏后暂停"报障的根因；静音契约同步升级为「默认态 + 全屏内出声」，见小程序仓
+  47 号 §7.21.2）。
+  ⛔ 组件不再自行调 `wx.previewImage`：无缩放 / 无共享元素 / 不在返回栈，
+  与 57 号判据 2「同一份内容只许一个查看器」分叉。
+- **尺寸唯一来源 = 素材实测宽高 × 宿主可用宽**（2026-10-08 用户报障③的根因修复）：
+  `utils/mediaGeometry` 的 `resolveMediaBox`（纯函数），数据来自 `<image bindload>` /
+  `<video bindloadedmetadata>` 的 `detail.width/height`，实测到达前走具名兜底比例。
+  ⛔ 组件 WXSS 内不得出现任何媒体尺寸声明（写死的盒子会让气泡宽度与素材永久脱钩——
+  气泡是 shrink-to-fit，量到的只会是那个常量）。
+  机器门禁 `npm run check:bulletin-media`（S1–S6 + 8 条变异自测）；
+  完整推导见小程序仓 `docs/agents/47-bulletins.md` §7.21。
+- **气泡宽度 = 媒体块实测宽度（2026-10-08 二次报障）**：`width: auto` 在普通块级容器里
+  等于"填满"、不是 shrink-to-fit（`.bul-item` 不是 flex 容器）⇒ 旧写法气泡恒等于
+  max-width，媒体比它窄多少就留多少白边。现由组件 `boxchange` 上报块宽、宿主按行下发
+  `bandStyle`；⛔ `.bul-band--media` 不得再写非零 `min-width`（下限会让贴合失效）。
+- **组件宿主必须 `:host { display: block }`**：自定义组件宿主默认 inline，会把块级媒体盒
+  包进匿名行盒 ⇒ 媒体上下各多一条 line-height 的空隙（"margin 全删了还剩一条缝"）。
+- **网格间距是跨语言镜像对**：JS `GRID_GAP_RPX` 必须与 WXSS `--space-1` 同值，
+  否则多图恒被 `flex-wrap` 挤成 1 列（格宽漏算间距）。
+  以上四条均有门禁（S7–S10 + 变异自测）。
 - 读取链路复用公告详情踩过的两个 towxml 覆盖（本页 wxss 内已覆盖）：主题自带
   `text-align: justify`（中文两端对齐事故）→ 页面级改 `left`；`.h2w__main` 自带
   `margin/padding` → 归零（边距所有权归气泡容器）。

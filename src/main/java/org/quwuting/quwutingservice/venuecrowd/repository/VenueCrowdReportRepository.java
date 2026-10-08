@@ -23,7 +23,7 @@ import java.util.List;
  */
 public interface VenueCrowdReportRepository extends JpaRepository<VenueCrowdReport, Long> {
 
-    /** 聚合窗口扫描：最近 6h（CrowdPolicy.TONIGHT_WINDOW_HOURS）该店全部未删上报（详情聚合数据源） */
+    /** 聚合窗口扫描：最近 CrowdPolicy.VALID_WINDOW_HOURS 小时（2026-10-08 起 = 1 天）该店全部未删上报（详情聚合数据源） */
     List<VenueCrowdReport> findByVenueIdAndCreatedAtAfterAndDeletedFalse(
             @Param("venueId") Long venueId, @Param("since") LocalDateTime since);
 
@@ -51,7 +51,7 @@ public interface VenueCrowdReportRepository extends JpaRepository<VenueCrowdRepo
      * 批量每店独立上报人数（2026-08-29 列表角标数据源）：一次 IN + 窗口过滤 +
      * GROUP BY venue_id 覆盖整页，避免逐店 COUNT 的 N+1（同
      * VenueViewRepository#countByVenueIds 批量模式）。窗口 = 最近
-     * TONIGHT_WINDOW_HOURS 小时（6h，与详情聚合同口径）。返回 Object[]{venueId, count}。
+     * CrowdPolicy.VALID_WINDOW_HOURS 小时（与详情聚合同口径）。返回 Object[]{venueId, count}。
      * <p>
      * 2026-10-07：<b>认领人（门店主）的上报不计入</b>——商家自报有营销动机，与详情页统计同口径
      * （文档 27 早有此承诺，此前 venuecrowd 包里从未实现）。原生 SQL：JOIN qwt_venues 过滤
@@ -67,7 +67,7 @@ public interface VenueCrowdReportRepository extends JpaRepository<VenueCrowdRepo
 
     /**
      * 批量每店最新一条上报（2026-08-29 列表「最新上报」行数据源）：窗口内
-     * （TONIGHT_WINDOW_HOURS=6h）每店 created_at 最大的记录，一次查询覆盖整页，
+     * （CrowdPolicy.VALID_WINDOW_HOURS）每店 created_at 最大的记录，一次查询覆盖整页，
      * 防 N+1（同 countDistinctUsersByVenueIdsSince 批量模式）。子查询 = 窗口内
      * 每店最大 created_at，外查询等值匹配；同一店同一时刻多条（理论罕见，
      * upsert 幂等 + timestamp 精度）由 Service 按 venueId 取首条兜底。
@@ -97,10 +97,10 @@ public interface VenueCrowdReportRepository extends JpaRepository<VenueCrowdRepo
      * ⚠️ 时间口径（2026-08-29 修复）：created_at/updated_at **必须由 Java 传入
      * LocalDateTime.now()（JVM 时区=北京时间）**，禁止用 DB 端 now()——Supabase
      * 会话时区是 UTC，DB now() 写入 UTC 墙钟值，而聚合窗口（since = JVM
-     * LocalDateTime.now() - 2h）是北京时间，比较永远错位 → 上报恒落在窗口外、
+     * LocalDateTime.now() − 有效窗口）是北京时间，比较永远错位 → 上报恒落在窗口外、
      * 详情页恒显「暂无舞友上报」。全库其余表（@CreationTimestamp）均为 JVM 时间，
      * 本表须同口径。同夜「改一下」命中 ON DUPLICATE KEY 时同时刷新 created_at（重新
-     * 上报 = 数据此刻新鲜，6h TTL 重新计时——顺带自愈修复前的 UTC 脏行）。
+     * 上报 = 数据此刻新鲜，有效期重新计时——顺带自愈修复前的 UTC 脏行）。
      */
     @Modifying
     @Query(value = "INSERT INTO qwt_venue_crowd_reports " +

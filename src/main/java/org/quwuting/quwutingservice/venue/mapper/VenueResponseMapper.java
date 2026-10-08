@@ -174,9 +174,10 @@ public class VenueResponseMapper {
     }
 
     /**
-     * 十一参重载（2026-10-06 V38 新增）：visitBadgeText = 「已记录 N 位舞友到店」
-     * （近 30 天到访人数 ≥ {@code VenueHeatWeights.VISIT_FREE_TIER + 1} 才生成，
-     * 见 {@code VenueService#listVenues} 批量装配），驱动列表卡片标签行的到访胶囊。
+     * 十一参重载（2026-10-06 V38 新增；2026-10-08 改「附近的足迹」口径）：
+     * visitBadgeText = 「感谢 N 位舞友 · N 次到过这附近的足迹」（附近有足迹即生成，
+     * 见 {@code VenueService#listVenues} 批量装配与 {@code VenueVisitBadgeService}），
+     * 驱动列表卡片的到店足迹行。
      * 语义边界与门槛依据见 {@link VenueResponse#visitBadgeText()}。
      * <p>
      * 注入边界同 isHot / crowdBadgeText 先例：仅列表场景（城市列表/收藏列表）传真实值；

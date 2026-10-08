@@ -7,6 +7,7 @@ import org.quwuting.quwutingservice.announcement.dto.request.PublishAnnouncement
 import org.quwuting.quwutingservice.announcement.dto.request.UpdateAnnouncementRequest;
 import org.quwuting.quwutingservice.announcement.dto.response.AdminAnnouncementResponse;
 import org.quwuting.quwutingservice.announcement.dto.response.AnnouncementStatsResponse;
+import org.quwuting.quwutingservice.announcement.dto.response.HomeSlotResponse;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementCategory;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementSource;
 import org.quwuting.quwutingservice.announcement.enums.AnnouncementStatus;
@@ -53,6 +54,20 @@ public class AdminAnnouncementController {
     public ApiResponse<AdminAnnouncementResponse> detail(@PathVariable Long id) {
         UserContext.requireAdmin();
         return ApiResponse.ok(announcementService.adminDetail(id));
+    }
+
+    /**
+     * 首页公告位当前占用者（2026-10-08）：编辑页勾"首页置顶"前的可见性数据源。
+     * <p>
+     * <b>为什么要这个接口</b>：首页公告位容量 = 1（不变量见 {@code HomeSlotService} +
+     * V44 唯一索引），置顶是<b>独占</b>动作。运营看不到位上是谁就只能提交后吃 400——
+     * "动作结果对运营不可见"就是本轮根因的一层。与 2026-09-15「触达等级后果对运营可见」
+     * 同一条纪律：稀缺资源的占用状态必须可读，且可读处只有一个。
+     */
+    @GetMapping("/home-slot")
+    public ApiResponse<HomeSlotResponse> homeSlot() {
+        UserContext.requireAdmin();
+        return ApiResponse.ok(announcementService.adminHomeSlot());
     }
 
     /** 创建公告（存草稿；source 固定 MANUAL） */

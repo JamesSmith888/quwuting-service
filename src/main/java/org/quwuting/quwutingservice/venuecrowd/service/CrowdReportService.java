@@ -68,8 +68,10 @@ import java.util.stream.Collectors;
  *   <li><b>统计口径只有一处</b>：一人一票 → （加权）下中位数 → 中位数 ±1 档内算一致 → 置信度分层，
  *       全在 {@link CrowdConsensus}（纯函数），本类<b>只负责取数、组装、落库</b>，不含任何统计判定
  *       （门禁 {@code CrowdDomainSingleSourceTest}）。常量唯一出处 {@link CrowdPolicy}；</li>
- *   <li><b>6 小时窗口</b>：聚合只取最近 {@link CrowdPolicy#TONIGHT_WINDOW_HOURS} 小时记录；窗口外的数据
- *       走独立历史页（{@link #history}）、折叠头摘要（{@link CrowdHeadline}）与常态人气（{@link #baseline}）；</li>
+ *   <li><b>有效期窗口（1 天，2026-10-08 由 6h 放宽）</b>：聚合只取最近
+ *       {@link CrowdPolicy#VALID_WINDOW_HOURS} 小时记录；窗口外的数据走独立历史页（{@link #history}）、
+ *       折叠头摘要（{@link CrowdHeadline}）与常态人气（{@link #baseline}）。窗口只定义「数据还算不算数」——
+ *       「今晚」是营业日概念，措辞由 {@link CrowdHeadline} 按营业日独立分流（勿用窗口长度近似），见该类注释；</li>
  *   <li><b>认领人不进统计</b>：商家自报有营销动机；其上报照常落库与展示（标「店家」），
  *       但不参与中位数 / 确认积分 / 列表角标 / 最新上报行；</li>
  *   <li><b>确认后积分 + 反馈闭环</b>（2026-09-03）：submit() 重算命中确认态时，给「与中位数一致」的
@@ -117,7 +119,7 @@ public class CrowdReportService {
     // ===== 列表公共读缓存（2026-08-30 性能优化，根因见 AGENTS.md「首页性能优化」） =====
     //
     // 背景：列表接口每次请求 8~9 次 DB 往返，其中门店热度角标（badgeTextsByVenue /
-    // latestTextsByVenue）是「6h 窗口 + 每夜一记」的低频变化数据，却每次列表都重查。
+    // latestTextsByVenue）是「有效期窗口（1 天）+ 每夜一记」的低频变化数据，却每次列表都重查。
     // 两者均为「与请求用户无关 / 低频变化」的公共数据，短 TTL 缓存 + 写路径显式失效
     // （不串用户、相对时间文案实时渲染）。
     //
@@ -125,7 +127,7 @@ public class CrowdReportService {
     // 不能缓存渲染后的文案——缓存「最新上报原始行」（userId + createdAt），
     // 渲染时实时重算 ageTextFor。
 
-    /** 列表角标「N人报过」人数缓存（venueId → 6h 窗口独立人数，已剔除认领人），TTL 30s。 */
+    /** 列表角标「N人报过」人数缓存（venueId → 有效期窗口内独立人数，已剔除认领人），TTL 30s。 */
     private final Cache<Long, Long> badgeCountsCache = Caffeine.newBuilder()
             .maximumSize(500)
             .expireAfterWrite(30, TimeUnit.SECONDS)
@@ -141,13 +143,20 @@ public class CrowdReportService {
     private record LatestReport(Long userId, LocalDateTime createdAt) {}
 
     /**
-     * 今晚窗口快照：窗口内全部行 + 女 / 男两个维度的统计结论（认领人已剔除出统计，但仍在 rows 里）。
+     * 有效期窗口快照：窗口内全部行 + 女 / 男两个维度的统计结论（认领人已剔除出统计，但仍在 rows 里）。
      * <p>
      * 2026-10-07：原带一个 weights 字段，明细行改由 {@link #recentDetailRows} 独立取数后
      * 已无人读取，一并移除（留着一个恒不被读的空壳字段，下一个人会以为明细行权重从这里来）。
+     * <p>
+     * 2026-10-08：新增 {@code femaleVotes}——折叠头摘要改按<b>营业日</b>分流（措辞「今晚」只给
+     * 当前营业日的票）后，headline 需要票级数据（不只是 verdict），由本字段透传。
+     * <p>
+     * 命名（2026-10-08）：窗口由 6h 放宽为 1 天后，本快照不再等价于「今晚」（白天查询会含昨晚的票）
+     * ——原名 {@code Tonight} 与「今晚」营业日语义混淆，随常量一并改为 ValidWindow，勿改回。
      */
-    private record Tonight(List<VenueCrowdReport> rows,
-                           CrowdVerdict female, CrowdVerdict male) {}
+    private record ValidWindow(List<VenueCrowdReport> rows,
+                               CrowdVerdict female, CrowdVerdict male,
+                               List<CrowdVote> femaleVotes) {}
 
     /**
      * 提交 / 更新今晚热度（需登录；每营业夜一记，同夜幂等 UPDATE）。
@@ -184,7 +193,7 @@ public class CrowdReportService {
         // 「该店首次达确认」时通知（防骚扰），需提交前确认态做差。
         crowdTrustService.invalidate(userId);
         String oldBadge = CrowdTrustService.badgeFor(userId, crowdTrustService.weights(Set.of(userId)), claimantId);
-        boolean wasConfirmed = tonight(venueId, claimantId, now).female().confirmed();
+        boolean wasConfirmed = validWindow(venueId, claimantId, now).female().confirmed();
         crowdReportRepository.upsert(venueId, userId, female.getLevel(),
                 male != null ? male.getLevel() : null, now.toLocalDate(), BusinessDay.of(now), now, now);
         // 上报写路径：该店角标人数/最新上报行缓存立即失效（新数据此刻生效，不依赖 TTL）；
@@ -237,11 +246,11 @@ public class CrowdReportService {
     public CrowdSummary summary(Long venueId) {
         LocalDateTime now = LocalDateTime.now();
         Long claimantId = claimantOf(venueId);
-        Tonight t = tonight(venueId, claimantId, now);
+        ValidWindow t = validWindow(venueId, claimantId, now);
         CrowdSummary.CrowdMineView mine = mine(venueId, now);
         // 明细行取数与统计取数**刻意分开**（2026-10-07 用户拍板「必须展示最近的三条，
-        // 不管它是否过期」）：统计仍只认 6h 窗口（tonight），展示另取最近 N 条
-        // （含过期）。两者混用会让「今晚人气」显示昨晚的数据。
+        // 不管它是否过期」）：统计仍只认有效期窗口（tonight，2026-10-08 起 1 天），
+        // 展示另取最近 N 条（含过期）。两者混用会让「今晚人气」显示昨晚的数据。
         List<CrowdSummary.CrowdReportRow> detailRows = recentDetailRows(venueId, claimantId, now);
         if (t.rows().isEmpty()) {
             return new CrowdSummary(false, null, null, 0, CrowdTier.EMPTY.name(),
@@ -262,22 +271,26 @@ public class CrowdReportService {
         String ageText = ageTextFor(latestVoterAt(t.rows(), claimantId));
         String mainText = buildMainText(female, ageText, tier);
         String maleText = maleView != null ? buildMaleText(t.male()) : null;
+        // 折叠头摘要（2026-10-08）：措辞按营业日分流——当前营业日有票 ⇒「今晚 …」（只统计当天票）；
+        // 否则（有效期放宽到 1 天后，窗口内可能只有昨晚的票）⇒「昨晚 23:40 …」。
+        // 不能直接用整个窗口的 verdict——窗口（1 天）≠ 营业夜，混用会把昨晚的票说成「今晚」。
+        String headline = CrowdHeadline.fromWindow(now, t.femaleVotes()).orElse(null);
         return new CrowdSummary(true, femaleView, maleView, female.voterCount(), tier.name(),
                 tier.getText(), mainText, maleText, ageText, EMPTY_TEXT, mine, detailRows,
-                null, null, CrowdHeadline.tonight(female));
+                null, null, headline);
     }
 
     /**
      * 详情页明细行数据源（2026-10-07 用户拍板）：该店<b>最近 {@link CrowdPolicy#DETAIL_ROWS_LIMIT} 条</b>
-     * 上报，<b>不过滤 6h 窗口</b>——过期记录照样上屏，每行带 {@code expired} 标记由前端置灰
+     * 上报，<b>不过滤有效期窗口</b>——过期记录照样上屏，每行带 {@code expired} 标记由前端置灰
      * +「已过期」如实告知。
      * <p>
-     * 根因：6h 窗口一过（清晨 / 次日白天查「昨晚怎么样」），详情页整张卡退化成「暂无舞友上报」，
-     * 恰恰是用户最想看的时刻什么也看不到——折叠头摘要能带出一句结论，但明细表是空的，
+     * 根因：有效期一过（清晨 / 次日白天查「昨晚怎么样」），详情页整张卡退化成「暂无舞友上报」，
+     * 恰恰是用户最想看的时刻什么也看不到——折叠头摘要能带出一句结论，但明细行是空的，
      * 「谁报的、报了多少」全部丢失。
      * <p>
      * ⚠️ <b>与统计的边界</b>：本方法只产出<b>展示</b>行，绝不参与 hasData / mainText / tier /
-     * headline 的判定（那些仍只由 {@link #tonight} 的 6h 窗口决定，见 {@link CrowdPolicy#DETAIL_ROWS_LIMIT}）。
+     * headline 的判定（那些仍只由 {@link #tonight} 的有效期窗口决定，见 {@link CrowdPolicy#DETAIL_ROWS_LIMIT}）。
      * 认领人行照常保留在明细里（如实标「店家」），只是不计入任何统计，与原口径一致。
      * <p>
      * 复用 {@link #history} 的同一仓储查询（全量 createdAt 倒序分页）取第一页，
@@ -312,7 +325,7 @@ public class CrowdReportService {
                 .orElseThrow(() -> new BusinessException(1017, "门店不存在"));
         LocalDateTime now = LocalDateTime.now();
         Long claimantId = venue.getClaimedBy();
-        Tonight t = tonight(venueId, claimantId, now);
+        ValidWindow t = validWindow(venueId, claimantId, now);
         LocalDate today = BusinessDay.of(now);
         int longestWindowDays = Collections.max(CrowdPolicy.BASELINE_WINDOW_DAYS);
         List<VenueCrowdReport> past = crowdReportRepository
@@ -330,7 +343,7 @@ public class CrowdReportService {
      * <p>
      * 全量分页（createdAt 倒序，不过滤窗口）；行字段全部服务端权威派生——
      * badgeText（资深/常客/普通/店家）、档位名/锚点、ageText（相对时间）、
-     * reportAt（绝对时间 yyyy-MM-dd HH:mm:ss）、expired（是否已出 6h 窗口，
+     * reportAt（绝对时间 yyyy-MM-dd HH:mm:ss）、expired（是否已出有效期窗口，
      * 前端仅据此派生「已过期」标签 + 置灰，不参与任何聚合）。
      * <p>
      * ⚠️ 与 summary 的边界：summary = 窗口内有效信号（决策用）；history =
@@ -342,7 +355,7 @@ public class CrowdReportService {
                 .orElseThrow(() -> new BusinessException(1017, "门店不存在"));
         Long claimantId = venue.getClaimedBy();
         LocalDateTime now = LocalDateTime.now();
-        LocalDateTime since = now.minusHours(CrowdPolicy.TONIGHT_WINDOW_HOURS);
+        LocalDateTime since = now.minusHours(CrowdPolicy.VALID_WINDOW_HOURS);
         Page<VenueCrowdReport> result = crowdReportRepository
                 .findByVenueIdAndDeletedFalseOrderByCreatedAtDesc(venueId,
                         PageRequest.of(page, Math.min(size, HISTORY_PAGE_SIZE_LIMIT)));
@@ -406,22 +419,23 @@ public class CrowdReportService {
     }
 
     /**
-     * 取今晚窗口并统计（认领人剔除出票，仍保留在 rows 里）。
+     * 取有效期窗口并统计（认领人剔除出票，仍保留在 rows 里）。
      * <p>
-     * ⚠️ rows 的消费者只有统计侧（{@code latestVoterAt} / 空态判定）与「只有认领人上报」分支；
-     * 详情页<b>展示</b>的明细行走 {@link #recentDetailRows}（最近 N 条、含过期），两者刻意分开——
-     * 统计认窗口、展示认「最近」，混用会让「今晚人气」显示昨晚的数据。
+     * ⚠️ rows 的消费者只有统计侧（{@code latestVoterAt} / 空态判定）、折叠头摘要与
+     * 「只有认领人上报」分支；详情页<b>展示</b>的明细行走 {@link #recentDetailRows}
+     * （最近 N 条、含过期），两者刻意分开——统计认窗口、展示认「最近」，混用会让
+     * 「今晚人气」显示昨晚的数据。
      */
-    private Tonight tonight(Long venueId, Long claimantId, LocalDateTime now) {
+    private ValidWindow validWindow(Long venueId, Long claimantId, LocalDateTime now) {
         List<VenueCrowdReport> rows = crowdReportRepository.findByVenueIdAndCreatedAtAfterAndDeletedFalse(
-                venueId, now.minusHours(CrowdPolicy.TONIGHT_WINDOW_HOURS));
+                venueId, now.minusHours(CrowdPolicy.VALID_WINDOW_HOURS));
         Set<Long> userIds = rows.stream().map(VenueCrowdReport::getUserId).collect(Collectors.toSet());
         Map<Long, Double> weights = crowdTrustService.weights(userIds);
-        CrowdVerdict female = CrowdConsensus.evaluate(CrowdConsensus.latestPerVoter(
-                votesOf(rows, claimantId, weights, VenueCrowdReport::getFemaleLevel)));
+        List<CrowdVote> femaleVotes = votesOf(rows, claimantId, weights, VenueCrowdReport::getFemaleLevel);
+        CrowdVerdict female = CrowdConsensus.evaluate(CrowdConsensus.latestPerVoter(femaleVotes));
         CrowdVerdict male = CrowdConsensus.evaluate(CrowdConsensus.latestPerVoter(
                 votesOf(rows, claimantId, weights, VenueCrowdReport::getMaleLevel)));
-        return new Tonight(rows, female, male);
+        return new ValidWindow(rows, female, male, femaleVotes);
     }
 
     /**
@@ -522,7 +536,7 @@ public class CrowdReportService {
      * nickname = 完整昵称（空兜底「匿名」）；avatarUrl = 头像（空 = 未设头像，
      * 前端首字占位）；isMine = 当前登录用户本人（高亮 +「我」标记，登录后回填）。
      * <p>
-     * <b>2026-10-07 用户拍板：输入不再限 6h 窗口</b>（数据源 = {@link #recentDetailRows}
+     * <b>2026-10-07 用户拍板：输入不再限有效期窗口</b>（数据源 = {@link #recentDetailRows}
      * 的最近 {@link CrowdPolicy#DETAIL_ROWS_LIMIT} 条）。每行 {@code expired} 如实标注是否
      * 已出窗口，前端据此置灰 +「已过期」——展示放宽，统计不退（统计仍只认窗口内，见
      * {@link #summary}）。
@@ -534,7 +548,7 @@ public class CrowdReportService {
                                                               Long claimantId,
                                                               CrowdLikeAggregates likes,
                                                               LocalDateTime now) {
-        LocalDateTime windowStart = now.minusHours(CrowdPolicy.TONIGHT_WINDOW_HOURS);
+        LocalDateTime windowStart = now.minusHours(CrowdPolicy.VALID_WINDOW_HOURS);
         return rows.stream()
                 .sorted(Comparator.comparing(VenueCrowdReport::getCreatedAt).reversed())
                 .map(r -> {
@@ -550,6 +564,7 @@ public class CrowdReportService {
                             female.getDisplayName(), female.getAnchor(),
                             male != null ? male.getDisplayName() : null,
                             male != null ? male.getAnchor() : null,
+                            r.getCreatedAt(),
                             ageTextFor(r.getCreatedAt()),
                             r.getId(),
                             likes.counts().getOrDefault(r.getId(), 0L).intValue(),
@@ -608,7 +623,7 @@ public class CrowdReportService {
     private ConfirmOutcome confirmAndReward(Venue venue, Long actorId, boolean wasConfirmedBefore,
                                             LocalDateTime now) {
         Long venueId = venue.getId();
-        CrowdVerdict verdict = tonight(venueId, venue.getClaimedBy(), now).female();
+        CrowdVerdict verdict = validWindow(venueId, venue.getClaimedBy(), now).female();
         if (!verdict.confirmed()) {
             return ConfirmOutcome.none();
         }
@@ -666,7 +681,7 @@ public class CrowdReportService {
     /**
      * 列表角标批量生成（2026-08-29，VenueService.listVenues 调用）：
      * 一次 IN + GROUP BY 覆盖整页（防 N+1），返回 venueId → 中性文案「N人报过」。
-     * 门槛 = 最近 6h 窗口独立上报人数 ≥ {@link CrowdPolicy#BADGE_MIN_VOTERS}（3）——
+     * 门槛 = 最近 {@link CrowdPolicy#VALID_WINDOW_HOURS}h 窗口独立上报人数 ≥ {@link CrowdPolicy#BADGE_MIN_VOTERS}（3）——
      * 列表是公共面，&lt;3 人不上（防误伤/防商家找两三个朋友刷「火爆」）；
      * 文案中性不带档位词（「热闹/冷清」不上列表——给门店贴正负定性有商家争议
      * 与数据误伤风险，具体档位留给详情页，同一事实只呈现一次）。
@@ -693,7 +708,7 @@ public class CrowdReportService {
             }
         }
         if (!misses.isEmpty()) {
-            LocalDateTime since = LocalDateTime.now().minusHours(CrowdPolicy.TONIGHT_WINDOW_HOURS);
+            LocalDateTime since = LocalDateTime.now().minusHours(CrowdPolicy.VALID_WINDOW_HOURS);
             for (Object[] row : crowdReportRepository.countDistinctUsersByVenueIdsSince(misses, since)) {
                 // 原生 SQL 返回的数值列类型由驱动决定（BIGINT → Long，但不同驱动 / 版本可能是 BigInteger）：
                 // 一律经 Number 转，禁直接强转（2026-10-06 到访调度 ClassCastException 事故同款）
@@ -744,7 +759,7 @@ public class CrowdReportService {
             }
         }
         if (!misses.isEmpty()) {
-            LocalDateTime since = LocalDateTime.now().minusHours(CrowdPolicy.TONIGHT_WINDOW_HOURS);
+            LocalDateTime since = LocalDateTime.now().minusHours(CrowdPolicy.VALID_WINDOW_HOURS);
             for (VenueCrowdReport r : crowdReportRepository.findLatestByVenueIdsSince(misses, since)) {
                 // 同一店同一时刻多条（理论罕见，子查询等值匹配）→ 每店只取首条
                 if (latestByVenue.containsKey(r.getVenueId())) {

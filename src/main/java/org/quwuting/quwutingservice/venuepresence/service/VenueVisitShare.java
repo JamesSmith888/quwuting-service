@@ -25,9 +25,12 @@ import java.math.BigDecimal;
  *                       不同源会出现"5 位舞友分享 0 次"这类自相矛盾的行。
  *                       仅展示，不进公式（与人数是同一份命中集的两个粒度，同时进公式 = 同一信号算两票）。
  * @param groupSize     同址组规模（含本店，≥1）——口径说明用，不参与计算
- * @param shareInOperation {@code true} = 未被同址分摊（文案可断言"到这家店"）；
- *                       {@code false} = 被同址在营店按 1/k 分摊（**文案必须改「附近」语义**——
- *                       20m 定位精度分不清是哪家店，断言"这家店"是未证实的陈述，V40）。
+ * @param shareInOperation {@code true} = 未被同址分摊（本店分摊系数 = 1）；
+ *                       {@code false} = 被同址在营店按 1/k 分摊。
+ *                       ⚠️ 2026-10-08 起<b>无消费方</b>：它原为 C 侧文案用词依据（V40），
+ *                       而文案已改为无条件「附近」语义（门店级归属断言整体退役，见
+ *                       52 号「C 侧展示：附近的足迹」节）——保留随行仅为查询/调试可读，
+ *                       ⛔ 不得据此重建"未分摊 ⇒ 可断言到这家店"的用词分支。
  */
 public record VenueVisitShare(
         BigDecimal visitUsers30d,
