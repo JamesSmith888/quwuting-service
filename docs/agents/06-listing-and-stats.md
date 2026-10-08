@@ -187,6 +187,13 @@ AND (:hasActivity = false OR EXISTS (SELECT 1 FROM VenueActivity a
 
 ### 热门场所标记（VenueResponse.isHot）
 
+> **2026-10-08 状态更新（C 端角标下线，机制保留）**：前端 venue-card 已移除热门角标
+> （生产审计：热门集合仅 5 家/3 城、与列表默认排序 100% 重合、5 家中 2 家为已知游戏面
+> 样本——见前端 `quwuting/docs/agents/38-list-cardless.md` §2026-10-08）。
+> `VenueResponse.isHot` 字段、`findHotVenueIds`、hotOnly 筛选、排序 heat、热度页
+> **全部保留**——本章节以下内容（判定、查询实现、消费方）仍为现行机制描述，
+> 唯"驱动卡片视觉高亮"一项退役（前端渲染消费方为零，字段照常下发）。
+
 `VenueResponse` 新增 `isHot` 字段（boolean），标记该场所在同城市中属于热门场所。
 
 - **双条件判定（2026-08-08 确立，修复"热度指数 2 也有热门标签"的伪热门缺陷）**：

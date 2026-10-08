@@ -62,8 +62,16 @@ bash scripts/sync-skills.sh          # 在 quwuting-service 仓内执行（脚�
   通道，API 不可伪造）。
 - **状态机**：`DRAFT →（publish，立即或定时）→ PUBLISHED →（offline 手动 / offlineAt
   到点 30s 强转）→ OFFLINE →（重新 publish，唯一复活通道）→ PUBLISHED`。
-- **置顶 `pinned`**：**只有 pinned=true 的公告进首页导航栏公告行**（强触达位）；不置顶
-  只在公告中心（我的页入口）。发布新公告默认问用户要不要置顶；数据更新公告惯例 pinned=true。
+- **置顶 `pinned`**：**只有 pinned=true 的公告进首页导航栏公告行**（强触达位，**全站至多一条**）；
+  不置顶只在公告中心（我的页入口）。发布新公告默认问用户要不要置顶；**每日舞讯 / 数据更新公告
+  惯例 pinned=true**（2026-10-08 16:57 用户拍板「舞讯依旧要顶置，以我为准」）。
+  ⚠️ **首页位容量=1 的发布流程（2026-10-08 起）**：新公告占位前先看
+  `GET /admin/announcements/home-slot`（返回 holderId / holderTitle，null=位空）——
+  ① 位空 → 直接 `"pinned": true`；② 位被**旧流水公告**（上一条舞讯 / data-update）占用 →
+  先 `offline` 旧条（自动释放位）再发；③ 位被**非流水公告**（运营 / 通知）占用 → **不自动抢占**，
+  改 `"pinned": false` 照常发布并汇报「位被《X》占用，本条未置顶」交用户定。
+  ❗ 位被占时直接带 `pinned: true` 会让 create **整体失败**（后端显式拒绝并把占位者标题写进报错），
+  别省「先探位」这步。
 - **触达等级 `touchLevel`（2026-09-15 新增）**：`ALERT` = 计入用户未读徽标（"我的 → 公告中心"
   的数字 + 列表未读点），需用户打开详情或点「全部已读」才消除；`SILENT` = **不打扰**，
   不计入未读，但照常可见可查、置顶时仍进首页公告行。

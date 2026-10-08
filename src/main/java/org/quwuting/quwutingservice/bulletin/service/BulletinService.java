@@ -155,8 +155,8 @@ public class BulletinService {
         LocalDateTime now = LocalDateTime.now();
         List<Announcement> items;
         if (beforeId != null && beforeId > 0) {
-            LocalDateTime cursorAt = announcementRepository.findById(beforeId)
-                    .map(Announcement::getPublishAt).orElse(null);
+            // 只取锚点排序键（不实体化整行，见 findPublishAtById 注释）
+            LocalDateTime cursorAt = announcementRepository.findPublishAtById(beforeId).orElse(null);
             if (cursorAt != null) {
                 // 倒序取「早于上界的最近 size 条」→ 反转回正序（keyset 上界窗口的标准取法）
                 items = new ArrayList<>(announcementRepository.findBulletinFeedBefore(
@@ -167,8 +167,7 @@ public class BulletinService {
                 items = findLatestWindow(pageSize, now); // 锚点已删/下线 → 回退最新一屏
             }
         } else if (fromId != null && fromId > 0) {
-            LocalDateTime anchorAt = announcementRepository.findById(fromId)
-                    .map(Announcement::getPublishAt).orElse(null);
+            LocalDateTime anchorAt = announcementRepository.findPublishAtById(fromId).orElse(null);
             if (anchorAt != null) {
                 items = announcementRepository.findBulletinFeedFrom(
                         CATEGORY, AnnouncementStatus.PUBLISHED, now, anchorAt, fromId,

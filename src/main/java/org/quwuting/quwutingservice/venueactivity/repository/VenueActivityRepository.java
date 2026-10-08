@@ -19,16 +19,27 @@ public interface VenueActivityRepository extends JpaRepository<VenueActivity, Lo
     Optional<VenueActivity> findByIdAndDeletedFalse(Long id);
 
     /**
-     * 门店详情页数据源：某门店的全部 PUBLISHED 活动（权重升序、id 倒序兜底）。
+     * 门店详情页数据源：某门店的全部**用户端可见** PUBLISHED 活动（权重降序、id 倒序兜底）。
      * <p>
      * 刻意**不在 SQL 里过滤时效**：到期由 30s 调度强转 OFFLINE（单点状态机），
      * 查询只认状态；而"今天还有没有效 / 此刻是否命中"是 {@code ActivityState} 派生，
      * 由 {@code ActivityStateResolver} 单点负责。两边都过滤会出现同一条活动在
      * 不同路径上表现不一致（公告域明令禁止的写法）。
+     * <p>
+     * <b>2026-10-08 追加「门店可服务」条件</b>（用户拍板：非 OPEN 全静默）：
+     * 活动是<b>到店才能兑现</b>的承诺，门店休息 / 装修 / 暂停 / 停业期间（{@code v.status != OPEN}，
+     * 判据单点 {@code VenueStatus#isServable()}）承诺前提不成立 ⇒ 不下发。
+     * 与 {@code VenueRepository#ACTIVITY_PREDICATE}（列表「有活动」筛选）、
+     * {@link #findPublishedByVenueIds} 及 {@code VenueActivityService#checkin} 同源——
+     * <b>四处同改</b>，漏一处即「筛出来但卡片没有行」这类静默漂移。门店恢复 OPEN 后
+     * 仍在有效期的活动自动恢复可见（活动自身状态不被本条件改写）。
      */
     @Query("""
             SELECT a FROM VenueActivity a
             WHERE a.deleted = false AND a.status = :status AND a.venueId = :venueId
+              AND EXISTS (SELECT 1 FROM Venue v
+                          WHERE v.id = a.venueId AND v.deleted = false
+                            AND v.status = org.quwuting.quwutingservice.venue.enums.VenueStatus.OPEN)
             ORDER BY a.sortWeight DESC, a.id DESC
             """)
     List<VenueActivity> findPublishedByVenue(@Param("venueId") Long venueId,
@@ -37,12 +48,20 @@ public interface VenueActivityRepository extends JpaRepository<VenueActivity, Lo
     /**
      * 门店**列表页**数据源：一次 IN 查询批量取多店活动，避免列表页 N+1。
      * <p>
-     * 列表页只需要"此刻命中的那一批"（方案 A：只在命中当前时段时打标），
-     * 所以彻底不过滤时间段、只按状态与门店集合取回，命中判定全部交给派生器。
+     * 列表页口径 = "活动在**当前日期范围内**即下发"（2026-09-16 修订，见 49 号 §5.2；
+     * 旧「只在命中时段时打标」已废）——彻底不过滤时间段、只按状态与门店集合取回，
+     * 命中与否 / 下一次何时到全部交给 {@code ActivityStateResolver} 派生。
+     * <p>
+     * <b>2026-10-08 追加「门店可服务」条件</b>：与 {@link #findPublishedByVenue} 同款同源
+     * （四处同改清单见该方法 javadoc）——门店不可服务时该店活动整批不进结果，
+     * 列表活动行随门店状态一起收敛。
      */
     @Query("""
             SELECT a FROM VenueActivity a
             WHERE a.deleted = false AND a.status = :status AND a.venueId IN :venueIds
+              AND EXISTS (SELECT 1 FROM Venue v
+                          WHERE v.id = a.venueId AND v.deleted = false
+                            AND v.status = org.quwuting.quwutingservice.venue.enums.VenueStatus.OPEN)
             ORDER BY a.sortWeight DESC, a.id DESC
             """)
     List<VenueActivity> findPublishedByVenueIds(@Param("venueIds") Collection<Long> venueIds,

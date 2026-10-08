@@ -17,17 +17,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p><b>为什么需要它</b>：本轮修复的是「置顶动作系统性不兑现」——根因是首页公告位
  * 容量为 1 的稀缺资源，却用布尔列 {@code pinned} 表达，且没有任何一层声明过这个容量。
  * 修复分三层设防（领域层 HomeSlotService / 数据层 V44 唯一索引 / 自愈 reconcile），
- * 三层都<b>依赖同一份判据</b>：位置口径由 {@link AnnouncementTouchLevel#eligibleForHomeSlot()}
- * 派生。
+ * 三层都<b>依赖同一份判据</b>：位置口径的判据单点在
+ * {@link AnnouncementTouchLevel#eligibleForHomeSlot()}（2026-10-08 16:57 用户拍板后
+ * = 全档放行；容量=1 由 HomeSlotService + V44 保证）。
  * <p>
  * 纯文本层面的镜像引用必须有断言锁住，否则只能等用户肉眼发现（本仓教训：
  * 门店别名域「注释改了谓词没改」）。
  * <p>
  * <b>锁定的不变量</b>：
  * <ul>
- *   <li><b>位置与打扰同源</b>：SILENT（每日舞讯/数据更新等流水）恒不占首页位，
- *       且该约定在 {@code AnnouncementService} 里必须<b>显式落成赋值</b>
- *       （不是"没写所以是false" 的隐式默认——否则未来有人删掉这行就静默复发）；</li>
+ *   <li><b>位置判据单点</b>：占位资格唯一在 {@code eligibleForHomeSlot()} 声明
+ *       （当前恒放行）；{@code AnnouncementService#resolvePinned} 必须消费它而非另写 if/else；</li>
  *   <li><b>下线 / 软删必须释放位</b>：这是历史 36 条幽灵置顶的形成机制
  *       （"永不下线 + 置顶"），两条路径都必须调release；</li>
  *   <li><b>数据层兜底存在</b>：V44 迁移必须含生成列 + UNIQUE INDEX，
@@ -60,21 +60,23 @@ class HomeSlotContractTest {
     // ── 判据本身（纯枚举，零IO） ─────────────────────────────────
 
     @Test
-    void alertEligibleForHomeSlotButSilentNot() {
-        assertTrue(AnnouncementTouchLevel.ALERT.eligibleForHomeSlot(),
-                "ALERT=需要用户知晓的内容必须有资格占首页位（位置口径与打扰口径同源）");
-        assertFalse(AnnouncementTouchLevel.SILENT.eligibleForHomeSlot(),
-                "SILENT=流水记录不该占唯一强触达位——这正是每日舞讯长期霸占首页位的根因");
+    void bothLevelsEligibleForHomeSlotAfterDecoupling() {
+        // 2026-10-08 16:57 用户拍板「舞讯依旧要顶置，以我为准」：位置与打扰解耦，全档放行。
+        // （上午版曾断言 SILENT 不可占位——该判据当日被用户推翻；沿革见 eligibleForHomeSlot。）
+        assertTrue(AnnouncementTouchLevel.ALERT.eligibleForHomeSlot(), "ALERT 档可占首页位");
+        assertTrue(AnnouncementTouchLevel.SILENT.eligibleForHomeSlot(),
+                "SILENT 档（含每日舞讯）也可显式占位——位置是显式决策，容量=1 由 HomeSlotService/V44 保证");
     }
 
     @Test
-    void dataUpdateDefaultsToSilentThusNotEligible() {
-        // 默认档派生 ⇒ 不显式上调的 DATA_UPDATE 天然不占位（Skill 不传参也落对口径）
+    void dataUpdateDefaultsToSilentAndMayStillPin() {
+        // 默认档派生（未读口径不变）：DATA_UPDATE 缺省 SILENT——档位只决定「是否计入未读」。
         assertEquals(AnnouncementTouchLevel.SILENT,
                 AnnouncementCategory.DATA_UPDATE.defaultTouchLevel(),
-                "数据更新/每日舞讯的缺省档必须是 SILENT，否则发布链路漏传参就会重新霸占首页位");
-        assertFalse(AnnouncementCategory.DATA_UPDATE.defaultTouchLevel().eligibleForHomeSlot(),
-                "缺省档下DATA_UPDATE 不得具备占位资格");
+                "数据更新/每日舞讯的缺省档仍为 SILENT（不产生未读打扰）");
+        // 位置口径已解耦（16:57 用户拍板）：缺省档同样可被显式置顶。
+        assertTrue(AnnouncementCategory.DATA_UPDATE.defaultTouchLevel().eligibleForHomeSlot(),
+                "DATA_UPDATE（含每日舞讯）凭显式 pinned=true 可占首页位（2026-10-08 用户拍板）");
     }
 
     // ── SYSTEM 通道显式不占位 ────────────────────────────────────
@@ -89,8 +91,9 @@ class HomeSlotContractTest {
         assertTrue(end > start, "createDataUpdateAnnouncement 方法边界丢失（注释结构变了？）");
         String body = svc.substring(start, end);
         assertTrue(body.contains("a.setPinned(false)"),
-                "每日舞讯通道必须显式 setPinned(false)——不能靠\"没写所以是 false\"的隐式默认，"
-                        + "否则未来有人清理这行代码就会静默复发\"舞讯霸占首页位\"");
+                "自动数据更新通道保持显式 setPinned(false)——批处理自动生成、不自动抢占运营位；"
+                        + "每日舞讯的置顶由显式发布链路 claim（2026-10-08 用户拍板「舞讯依旧要顶置」）。"
+                        + "显式声明而非隐式默认的理由不变");
     }
 
     // ── 下线 / 软删释放位 ────────────────────────────────────────

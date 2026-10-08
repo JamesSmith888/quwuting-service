@@ -3,9 +3,11 @@ package org.quwuting.quwutingservice.bulletin;
 import org.junit.jupiter.api.Test;
 import org.quwuting.quwutingservice.emoji.EmojiCatalog;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -13,29 +15,33 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 快讯表态字典一致性静态校验（2026-09-10，零依赖：不连库、不起 Spring）。
+ * 快讯表态字典一致性静态校验（2026-09-10 建立，2026-10-08 随「频道表态扩展层」改写；
+ * 零依赖：不连库、不起 Spring）。
  * <p>
- * <b>为什么需要它</b>：{@link BulletinReactionCode} 是共享目录 {@link EmojiCatalog}
- * 的<b>域适配器</b>（只挑选、不复制条目）——这带来一个跨文件耦合：目录项被删除或改名时，
- * 快讯域仍持有那个 code 字面量，{@code emojiOf/labelOf} 会静默返回 {@code null}，
- * 接口下发 {@code emoji: null} 前端渲染成空白格，且<b>编译与 HQL 语法检查都发现不了</b>。
- * 同门店别名域「注释改了谓词没改」的教训（见 {@code VenueAliasMatchMirrorTest}）：
- * 纯文本层面的镜像引用必须有一条断言锁住，否则只能等用户肉眼发现。
+ * <b>为什么需要它</b>：{@link BulletinReactionCode} = 共享目录 {@link EmojiCatalog}
+ * + 本域扩展层 {@link BulletinChannelEmoji}。两层之间、两端之间都有<b>纯文本层面的耦合</b>，
+ * 编译与 HQL 语法检查都发现不了：目录项被删/改名 ⇒ {@code emojiOf/labelOf} 静默返回 null；
+ * 目录日后收回某个表情 ⇒ 与扩展层重复、Picker 出「双胞胎」；新条目 code 手误 ⇒ 前后端
+ * 对不上、表态写入被 1007 拒。每一条都只能等用户肉眼发现，故逐条锁成断言。
  * <p>
- * <b>判据</b>：增删本域表态项时，本测试与前端字典
- * {@code miniprogram/constants/bulletin-reactions.ts} 的 code 列表必须同改；
- * 本测试守"后端侧不漂移"（目录存在性 + 完整性），前端侧守"picker 渲染不空白"
- * （字典缺失项被过滤降级）。
+ * 跨仓（前端镜像 {@code BULLETIN_CHANNEL_EMOJIS} 逐项一致）由前端门禁
+ * {@code npm run check:bulletin-reactions} 承担——本测试守后端侧，两边规则同一份
+ * （47 号文档 §6.2）。
  */
 class BulletinReactionCodeTest {
 
+    /** 用户口径「至少再加一倍」的机器化表达（2026-10-08 时目录 100 项） */
+    private static final int MIN_DICTIONARY_SIZE = 200;
+
+    /** {@code qwt_bulletin_reactions.reaction_code varchar(30)}（V19）——ZWJ 序列的 code 最长，逼近这个宽度 */
+    private static final int REACTION_CODE_COLUMN_WIDTH = 30;
+
     @Test
-    void everyCodeExistsInEmojiCatalog() {
+    void everyCodeResolvesToEmojiAndLabel() {
         for (String code : BulletinReactionCode.allCodes()) {
-            assertTrue(EmojiCatalog.isValid(code),
-                    "快讯表态 code 不在共享 emoji 目录中（目录项被删/改名？）：" + code
-                            + "——不是补一个孤儿 code 进目录，就是把它从 BulletinReactionCode 的集合里去掉，"
-                            + "否则接口会下发 emoji=null / label=null");
+            assertTrue(EmojiCatalog.isValid(code) || BulletinChannelEmoji.find(code) != null,
+                    "快讯表态 code 既不在共享目录也不在频道扩展层：" + code
+                            + "——接口会下发 emoji=null / label=null");
             assertNotNull(BulletinReactionCode.emojiOf(code), "emoji 缺失: " + code);
             assertNotNull(BulletinReactionCode.labelOf(code), "label 缺失: " + code);
             assertFalse(BulletinReactionCode.emojiOf(code).isEmpty(), "emoji 为空串: " + code);
@@ -52,21 +58,68 @@ class BulletinReactionCodeTest {
                         + "且并列排序的字典序兜底失效");
     }
 
+    @Test
+    void dictionaryIsCatalogThenChannelLayer() {
+        List<String> expected = new ArrayList<>(EmojiCatalog.allCodes());
+        expected.addAll(BulletinChannelEmoji.allCodes());
+        assertEquals(expected, BulletinReactionCode.allCodes(),
+                "快讯表态字典 = 共享目录全量（声明序）+ 频道扩展层（声明序）；"
+                        + "前端 constants/bulletin-reactions.ts 同口径派生");
+    }
+
+    @Test
+    void channelLayerIsDisjointFromCatalog() {
+        Set<String> catalogEmojis = new HashSet<>();
+        for (EmojiCatalog entry : EmojiCatalog.values()) {
+            catalogEmojis.add(normalize(entry.getEmoji()));
+        }
+        for (BulletinChannelEmoji entry : BulletinChannelEmoji.values()) {
+            assertFalse(EmojiCatalog.isValid(entry.name()),
+                    "频道扩展层 code 已存在于共享目录：" + entry.name()
+                            + "——目录收回了这个表情，请把它从 BulletinChannelEmoji（及前端镜像）删掉");
+            assertFalse(catalogEmojis.contains(normalize(entry.getEmoji())),
+                    "频道扩展层 emoji 与共享目录重复：" + entry.getEmoji() + "（" + entry.name() + "）");
+        }
+        Set<String> channelEmojis = new HashSet<>();
+        for (BulletinChannelEmoji entry : BulletinChannelEmoji.values()) {
+            assertTrue(channelEmojis.add(normalize(entry.getEmoji())),
+                    "频道扩展层内 emoji 重复：" + entry.getEmoji());
+        }
+    }
+
+    @Test
+    void channelCodeIsDerivedFromCodePoints() {
+        for (BulletinChannelEmoji entry : BulletinChannelEmoji.values()) {
+            assertEquals(deriveCode(entry.getEmoji()), entry.name(),
+                    "code 必须由 emoji 码位确定性派生（EMOJI_<HEX>[_<HEX>…]，去掉 FE0F）：" + entry.getEmoji());
+            assertFalse(entry.getLabel().isBlank(), "label 为空：" + entry.name());
+            assertFalse(entry.getDescription().isBlank(), "description 为空：" + entry.name());
+        }
+    }
+
     /**
-     * 集合 = 共享目录全量（2026-09-19 起）：既锁"快讯域不再手工挑选子集"（历史教训：
-     * 手工子集 10 → 16 → 32 两次被用户反馈"太少"，门店列表 Picker 同期是 109 格），
-     * 也锁"同集同序"——顺序即 Picker 展示序，两端排序漂移会让同一条快讯在两个端
-     * 展示不同顺序的表情。
+     * 2026-10-08 二改：原 {@code channelLayerHonoursComplianceAndRenderFloor}（合规排除 + Emoji 12.0 下限）已删——
+     * 用户裁定快讯放开；排除判据借自门店域、渲染下限把设备能力缺口做成了字典准入（根因见
+     * {@link BulletinChannelEmoji} 类注释），渲染能力改由前端逐台设备探测。「快讯字典 ⊇ TG 频道默认
+     * reaction」由前端门禁 {@code check:bulletin-reactions} 持参照表断言（它同时校验两端逐项一致）。
+     * 这里守的是本仓独有的物理约束：code 要放得进库列。
      */
     @Test
-    void dictionaryEqualsEmojiCatalog() {
-        List<String> catalogCodes = EmojiCatalog.allCodes();
-        assertEquals(catalogCodes, BulletinReactionCode.allCodes(),
-                "快讯表态字典应等于共享 emoji 目录全量且同序（前端 constants/bulletin-reactions.ts "
-                        + "同样派生自目录全量）；若业务上需要收窄子集，须同时改本类、前端字典、"
-                        + "本断言与 docs/agents/47-bulletins.md");
-        assertEquals(catalogCodes.size(), BulletinReactionCode.allCodes().size(),
-                "快讯表态字典规模 = 目录规模（当前 " + catalogCodes.size() + " 项）");
+    void everyCodeFitsReactionColumn() {
+        for (String code : BulletinReactionCode.allCodes()) {
+            assertTrue(code.length() <= REACTION_CODE_COLUMN_WIDTH,
+                    "code 超出 reaction_code 列宽 " + REACTION_CODE_COLUMN_WIDTH + "：" + code
+                            + "（" + code.length() + " 字符）——写入会被截断或报错，先加迁移再收这个表情");
+        }
+    }
+
+    @Test
+    void dictionaryMeetsMinimumSize() {
+        int size = BulletinReactionCode.allCodes().size();
+        assertTrue(size >= MIN_DICTIONARY_SIZE,
+                "快讯表态字典规模 " + size + " < " + MIN_DICTIONARY_SIZE
+                        + "——别的域收缩共享目录会静默拉低快讯集合（2026-10-08 用户第四次反馈「太少」的成因），"
+                        + "请在频道扩展层补齐，而不是改小这个下限");
     }
 
     @Test
@@ -76,8 +129,22 @@ class BulletinReactionCodeTest {
         // 门店域业务 code 不得被快讯域接受（两域字典刻意不同，防「机车/收费偏高」类
         // 门店属性黑话从快讯接口写进来）
         assertFalse(BulletinReactionCode.isValid("HOT"), "门店业务 code 不属于快讯字典");
-        // 2026-09-19 起快讯集合 = 目录全量：目录内任意 code 均合法（旧断言曾要求
-        // EMOJI_1F600 被拒，那是"手工子集"时代的产物）
-        assertTrue(BulletinReactionCode.isValid("EMOJI_1F600"), "目录内的 code 应被快讯字典接受");
+        assertTrue(BulletinReactionCode.isValid("EMOJI_1F600"), "共享目录内的 code 应被快讯字典接受");
+        assertTrue(BulletinReactionCode.isValid("EMOJI_1F433"), "频道扩展层的 code 应被快讯字典接受");
+        assertEquals("🐳", BulletinReactionCode.emojiOf("EMOJI_1F433"), "扩展层 emoji 走扩展层取值");
+    }
+
+    /** 比较用的规范形：去掉 FE0F 变体选择符（❤️ 与 ❤ 视为同一个表情）；按码位过滤，不写转义序列 */
+    private static String normalize(String emoji) {
+        StringBuilder sb = new StringBuilder();
+        emoji.codePoints().filter(cp -> cp != 0xFE0F).forEach(sb::appendCodePoint);
+        return sb.toString();
+    }
+
+    private static String deriveCode(String emoji) {
+        return "EMOJI_" + emoji.codePoints()
+                .filter(cp -> cp != 0xFE0F)
+                .mapToObj(cp -> Integer.toHexString(cp).toUpperCase())
+                .collect(Collectors.joining("_"));
     }
 }

@@ -118,6 +118,7 @@ public record ApiResponse<T>(int code, String message, T data) {
 | 1034 | 营业活动参数非法 |
 | 1035 | 快讯越过内容红线（只写服务可得性，命中原因/事件/负面词；`BulletinContentPolicy`，2026-10-01） |
 | 1036 | 批量置暂停影响面熔断（单城本批暂停占比超上限，需 dryRun 核对 + confirmedCities 确认；`SuspendBlastRadiusGuard`，2026-10-01） |
+| 1037 | 门店不可服务时活动打卡被拒（`VenueStatus#isServable()` 为假；活动域，2026-10-08） |
 | 1040 | 计价规则快照载荷非法（空 / 超过 32KB，结构校验归客户端） |
 | 1041 | 计时同步读数 / 规则 / 场次标识非法（`TimerShareService`，文案固定，细节只进日志；2026-10-07） |
 | 1043 | 计时同步二维码不存在或不是自己的（主持方轮询；2026-10-07） |
@@ -128,8 +129,12 @@ public record ApiResponse<T>(int code, String message, T data) {
 | 5004 | 门店营业管线正在运行中（单槽位并发，重复触发「拉取数据」） |
 | 5005 | 外部依赖暂不可用（配额 / 限流 / 凭证 / 上游超时），HTTP 503 + Retry-After（2026-10-01） |
 
-> 2026-10-01 补登 1011–1022、1032–1034（此前在用却未登记）。**新增错误码前先
-> `grep -rhoE "BusinessException\(1[0-9]{3}" src/main/java | sort -u` 核对占用**，登记表不是唯一事实源。
+> 2026-10-01 补登 1011–1022、1032–1034（此前在用却未登记）。**新增错误码前先核对占用**
+> ——登记表不是唯一事实源，且号段有两种占用形态（直接调用 / 常量定义），**两条都要扫**：
+> `grep -rhoE "BusinessException\(1[0-9]{3}" src/main/java | sort -u` 与
+> `grep -rhoE "= 10[0-9]{2};" src/main/java --include="*.java" | sort -u`
+> （2026-10-08 活动域踩坑实录：只扫直调形态会漏掉 `BulletinContentPolicy` 以常量定义
+> 占用的 1035；另 ⛔ 核对单个号码勿用词边界模式——部分 grep 实现会静默不匹配）。
 
 ---
 

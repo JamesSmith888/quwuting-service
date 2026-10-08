@@ -212,8 +212,13 @@ def match_one(m, cities: set[str], by_city: dict, indexes: dict, header_map: dic
         n0 = norm(name)
         f1 = [v for v in cands if n0[:2] and n0[:2] in norm(v["name"])
               and abs(len(norm(v["name"])) - len(n0)) <= PREFIX_LEN_TOL]
+        # 🔎 形近字规则（等长 + 末字同 + **首字同** + 候选唯一）。
+        #    「首字同」为 2026-10-08 收紧：拦「真爱音乐酒吧 ↔ 红梦娱乐酒吧」这类**纯噪声**
+        #    （等长+末字同「吧」即命中，名字毫无关联；误挂会同时造成「漏进表③」+「潜在误反转」
+        #    两个方向的错）。历史合法案例（帅喵/帅猫、秘稞/秘粿、金莎/金沙）**首字均相同**，
+        #    收紧不误伤；OCR 错字/谐音场景首字极少变化。
         f2 = [v for v in cands if len(norm(v["name"])) == len(n0) and norm(v["name"])[-1:] == n0[-1:]
-              and norm(v["name"]) != n0]
+              and norm(v["name"]) != n0 and norm(v["name"])[:1] == n0[:1]]
         if len(f1) == 1:
             hit = (f1[0]["venueId"], "fuzzy-prefix", "CONTAINED")
         elif len(f2) == 1:
@@ -226,12 +231,20 @@ def match_one(m, cities: set[str], by_city: dict, indexes: dict, header_map: dic
     return rec
 
 
-def _try_cross_check(base_url: str, r: dict, qname: str) -> bool:
+def _try_cross_check(base_url: str, r: dict, qname: str, must_contain: str | None = None) -> bool:
     """单条 UNMATCHED 的 keyword 交叉验证（可换 query 重试）。
 
     命中「同城且唯一」⇒ 就地升级 CONTAINED（via=keyword-cross-check）+ 记 cross_check_query，
     返回 True（不再试其它 query）。命中多个 ⇒ 累积 cross_check_candidates 后返回 False。
     接口报错 ⇒ 落 cross_check_error 并返回 False（静默跳过 = 假阴性无人知，见 2026-09-16 实证）。
+
+    🔎 `must_contain`（2026-10-08 立规）：**升级前校验命中店名必须包含给定字串**——
+    专用于「末字补搜」路径（`must_contain=末字`）。为什么：末字是单字 query，语义空间大，
+    搜索结果可能命中**地址含该字**的无关店（实证：内江·玉如玉 → 末字「玉」→ 命中
+    #1604 新上城歌舞厅，其地址「玉溪路437号」含「玉」；店名完全无关）。若不拦，
+    该点名既漏进表③（假阴性）又可能把无关店误反转（假阳性）。正经案例均通过：
+    鲸鲨→京鲨（含「鲨」）、温酱吟→温馨吟（含「吟」）。被拒时落 `cross_check_rejected`
+    审计字段（不静默）。
     """
     q = urllib.parse.urlencode({"keyword": qname, "page": 0, "size": 20, "sort": "newest"})
     try:
@@ -251,10 +264,18 @@ def _try_cross_check(base_url: str, r: dict, qname: str) -> bool:
     items = d if isinstance(d, list) else d.get("content", [])
     hits = [x for x in items if x.get("city") == r["platform_city"]]
     if len(hits) == 1:
-        vid = hits[0].get("id") or hits[0].get("venueId")
+        hit0 = hits[0]
+        if must_contain:
+            nm = norm(hit0.get("name") or "")
+            if norm(must_contain) not in nm:
+                # 同城唯一但店名毫不相关（多为命中地址/简介字段）⇒ 拒绝升级、落审计
+                r["cross_check_rejected"] = (f"query「{qname}」同城唯一命中「{hit0['name']}」"
+                                             f"但店名不含「{must_contain}」⇒ 拒绝升级")
+                return False
+        vid = hit0.get("id") or hit0.get("venueId")
         r.update(venueId=vid, confidence="CONTAINED", via="keyword-cross-check",
-                 mapped_platform_name=hits[0]["name"], status=hits[0].get("status"),
-                 district=hits[0].get("district"), platform_city_of_hit=hits[0].get("city"),
+                 mapped_platform_name=hit0["name"], status=hit0.get("status"),
+                 district=hit0.get("district"), platform_city_of_hit=hit0.get("city"),
                  cross_check_query=qname)
         r.pop("fuzzy_hints", None)
         r.pop("cross_check_error", None)
@@ -346,8 +367,12 @@ def main() -> int:
             has_cjk = any("一" <= ch <= "鿿" for ch in nq)
             if has_cjk and 2 <= len(nq) <= 4 and nq[-1] != r["name"]:
                 queries.append(nq[-1])
-            for qname in queries:
-                if _try_cross_check(args.base_url, r, qname):
+            for i, qname in enumerate(queries):
+                # 末字补搜（queries 的第 2 项，单字 query）升级前必须校验「命中店名含该字」
+                # （2026-10-08 立规，见 _try_cross_check docstring：
+                #  拦「玉如玉→末字玉→地址含玉的无关店」类假阳性；整串 query 不设此约束）
+                must = nq[-1] if i == 1 else None
+                if _try_cross_check(args.base_url, r, qname, must_contain=must):
                     break
 
     out = {"reportDate": M.get("reportDate"), "sources": M.get("sources", []),

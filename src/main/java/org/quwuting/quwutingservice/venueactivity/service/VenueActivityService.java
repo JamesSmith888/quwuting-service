@@ -73,6 +73,9 @@ public class VenueActivityService {
     /** 错误码：活动参数非法（有效期缺失、日期区间颠倒等） */
     private static final int CODE_ACTIVITY_INVALID = 1034;
 
+    /** 错误码：门店不可服务（休息/装修/暂停/停业）时打卡——与「活动不存在」区分，让直调方看见真实原因 */
+    private static final int CODE_ACTIVITY_NOT_SERVABLE = 1037;
+
     private final VenueActivityRepository activityRepository;
     private final VenueActivityCheckinRepository checkinRepository;
     private final VenueRepository venueRepository;
@@ -110,6 +113,11 @@ public class VenueActivityService {
      * 只认 {@code PUBLISHED} 状态，**不过滤时效**——结束态由调度强转，预热态
      * （NOT_STARTED）与今日已过场态（ENDED_TODAY）都要下发给前端，
      * 前者用于"双节活动预告"，后者用于告诉用户"还有明天"。
+     * <p>
+     * <b>2026-10-08 起「用户可见」的完整定义 = 活动在期 × 门店可服务</b>：门店非 OPEN
+     * （休息/装修/暂停/停业）时返回空列表。过滤在查询层
+     * （{@code VenueActivityRepository}），本方法零分支；判据与镜像清单见
+     * {@code VenueStatus#isServable()} javadoc。
      */
     @Transactional(readOnly = true)
     public List<VenueActivityResponse> listForVenue(Long venueId) {
@@ -144,6 +152,11 @@ public class VenueActivityService {
      * <p>
      * 唯一不下发的情形 = **已彻底过期**（有效期结束且无下一次）——那不是降级，
      * 是这条活动已经不存在（正常路径由 30s 调度强转 OFFLINE，此处仅防御）。
+     * <p>
+     * <b>2026-10-08 追加门店条件</b>（用户拍板「非 OPEN 全静默」）：门店非 OPEN
+     * （休息/装修/暂停/停业）时该店不出现在返回值里——过滤在查询层
+     * （{@code findPublishedByVenueIds}），本方法零分支。列表活动行与营业状态徽标
+     * 由此在同一次刷新里收敛；判据与镜像清单见 {@code VenueStatus#isServable()}。
      * <p>
      * <b>为什么是"列表"而不是"一条"（2026-09-20 改）</b>：列表页那一行已能轮播多条
      * （同「最新上报」信号行的节奏）。只挑一条等于让第 2 条以后的活动在列表上**根本没有
@@ -221,11 +234,22 @@ public class VenueActivityService {
      * <p>
      * {@code activityDate} 由<b>服务端</b>取今天，禁客户端传入——设备时钟可改，
      * 归因数据不能建立在客户端时间上。
+     * <p>
+     * <b>2026-10-08 增「门店可服务」准入</b>：门店非 OPEN（休息/装修/暂停/停业）时拒绝
+     * ——打卡是「我到店了」的声明，门店不可服务时到店前提不成立。判据单点
+     * {@code VenueStatus#isServable()}，与活动可见性（两个查询的门店条件）、
+     * 热度上报「非营业禁报」同一口径；前端入口已随活动卡静默不可达，
+     * 此处是后端权威兜底（禁绕过前端直调 API 写入）。
      */
     @Transactional
     public VenueActivityResponse checkin(Long venueId, Long activityId) {
         Long userId = UserContext.requireAuth();
         VenueActivity activity = requirePublished(venueId, activityId);
+        Venue venue = venueRepository.findByIdAndDeletedFalse(venueId)
+                .orElseThrow(() -> new BusinessException(CODE_ACTIVITY_NOT_FOUND, "活动不存在"));
+        if (!venue.getStatus().isServable()) {
+            throw new BusinessException(CODE_ACTIVITY_NOT_SERVABLE, "门店当前未营业，活动暂不可参与");
+        }
 
         LocalDate today = LocalDate.now();
         boolean already = checkinRepository

@@ -78,6 +78,18 @@ public interface AnnouncementRepository extends JpaRepository<Announcement, Long
                                             Pageable pageable);
 
     /**
+     * 游标锚点的排序键（2026-10-08，47 号 §7.22 性能体检）：只取 {@code publishAt} 一列。
+     * <p>
+     * 旧实现用 {@code findById(anchorId).map(getPublishAt)} 定位游标——为一个时间戳把整行
+     * （{@code content} mediumtext + {@code media_json}）读出来并实体化进持久化上下文，
+     * 且向上加载（beforeId）时锚点行本就不在结果窗口里，这一读纯属白付。口径不变：
+     * 不按状态 / 软删过滤（锚点只提供坐标，已下线的锚点照样能定位相邻窗口），
+     * 行不存在 / publishAt 为 NULL ⇒ empty ⇒ 调用方回退最新一屏（与旧口径逐分支一致）。
+     */
+    @Query("SELECT a.publishAt FROM Announcement a WHERE a.id = :id")
+    Optional<LocalDateTime> findPublishAtById(@Param("id") Long id);
+
+    /**
      * 快讯信息流·游标窗口（2026-09-14「尾部优先」改造，docs/agents/47 §4.1）：
      * 取<b>严格早于</b>游标 {@code (cursorAt, cursorId)} 的<b>最后</b> {@code size} 条
      * ——按时间<b>倒序</b>取前 size 条，由调用方反转为正序返回。

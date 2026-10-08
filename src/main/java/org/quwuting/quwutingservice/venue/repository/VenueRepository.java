@@ -488,18 +488,28 @@ public interface VenueRepository extends JpaRepository<Venue, Long>, JpaSpecific
      * 过期下线由 30s 调度负责（判据 {@code endDate < today}，结束当天仍有效），
      * 调度停摆时本谓词仍 fail-closed：宁可少返一家，也不给一个已经过期的活动。
      * <p>
+     * <b>2026-10-08 追加「门店可服务」条件</b>（用户拍板：非 OPEN 全静默）：活动是
+     * <b>到店才能兑现</b>的承诺，门店休息 / 装修 / 暂停 / 停业期间（{@code v.status != OPEN}，
+     * 判据单点 {@code VenueStatus#isServable()}）承诺前提不成立 ⇒ 「有活动」筛选
+     * 同样只保留<b>可服务门店</b>——这是与卡片侧同源条件的<b>第三条</b>
+     * （镜像四处：本谓词 / {@code findPublishedByVenue} / {@code findPublishedByVenueIds} /
+     * {@code VenueActivityService#checkin}，清单见 {@code VenueStatus#isServable()} javadoc）。
+     * ⚠️ 本条件只包在 {@code :hasActivity = true} 分支内：门店可服务性只约束「有活动」筛选，
+     * 不改变列表对停业门店的既有展示口径（列表本身状态不过滤，停业店照常出现）。
+     * <p>
      * {@code hasActivity = false} 时短路恒真（不筛选——默认口径不做隐式过滤，同 hotOnly / tag）。
      * <p>
      * <b>声明位置约束</b>：必须位于 {@link #LIST_FILTERS} 之前——接口字段按声明顺序初始化，
      * Java 禁止初始化器中的向前引用（同 {@link #CITY_ONLY_VISIBILITY_PREDICATE}）。
      */
     String ACTIVITY_PREDICATE = """
-            AND (:hasActivity = false OR EXISTS (SELECT 1 FROM VenueActivity a
+            AND (:hasActivity = false OR (v.status = org.quwuting.quwutingservice.venue.enums.VenueStatus.OPEN
+                       AND EXISTS (SELECT 1 FROM VenueActivity a
                        WHERE a.venueId = v.id
                          AND a.deleted = false
                          AND a.status = org.quwuting.quwutingservice.venueactivity.enums.ActivityStatus.PUBLISHED
                          AND (a.startDate IS NULL OR a.startDate <= CURRENT_DATE)
-                         AND (a.endDate IS NULL OR a.endDate >= CURRENT_DATE)))
+                         AND (a.endDate IS NULL OR a.endDate >= CURRENT_DATE))))
             """;
 
     /**

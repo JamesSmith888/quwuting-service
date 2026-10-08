@@ -190,6 +190,9 @@ def main() -> int:
         for it in items:
             it.setdefault("reportDate", args.report_date)
             it.setdefault("sourceId", args.source_id)
+            # status 必填（后端校验 1001「status 不能为空」，2026-10-08 踩坑固化）：
+            # 反转通道语义即「置 OPEN」，未显式提供时自动补，避免每条命令手抄该字段。
+            it.setdefault("status", "OPEN")
             it.setdefault("source", args.change_source)  # 批量更新标识（审计/管理后台展示）
         data = _request(args.base_url, "POST", "/admin/venue-daily-openings/batch",
                         token, {"items": items})

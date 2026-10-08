@@ -199,6 +199,7 @@ def main() -> int:
 
     t1, t2, t3, t4, t5, t5_single, t5_manual_hold, t5_suspect_hold, guard_drop = (
         [], [], [], [], [], [], [], [], [])
+    scope_drop = []          # 范围细化排除明细（2026-10-08 增：审计「为什么没有更多暂停」）
     for r in RES:
         v = vm.get(r.get("venueId")) if r.get("venueId") else None
         if not v:
@@ -237,7 +238,16 @@ def main() -> int:
             t4.append({**row, "why": "平台已 " + v["status"]})
 
     for v in VEN:
-        if v["status"] != "OPEN" or v["city"] not in covered or not in_scope(v):
+        if v["status"] != "OPEN" or v["city"] not in covered:
+            continue
+        if v["venueId"] in mentioned_ids:
+            continue
+        if not in_scope(v):
+            # 范围细化排除（县级市/县/镇未报到 ⇒ 不随母城参与推断，close-direction-playbook §2）：
+            # 只记录「本该进入候选、仅因 scope 被挡」的明细用于审计输出 —— 收集顺序放在
+            # mentioned 检查之后（否则被点名的店会虚高进列表；判定行为与旧版一致，见 2026-10-08）。
+            scope_drop.append({"venueId": v["venueId"], "name": v["name"], "city": v["city"],
+                               "district": v.get("district"), "S": sorted(S[v["city"]])})
             continue
         if v["venueId"] in mentioned_ids:
             continue
@@ -321,6 +331,7 @@ def main() -> int:
            "t5_suspend": t5, "t5_single_source": t5_single,
            "t5_manual_hold": t5_manual_hold, "t5_suspect_hold": t5_suspect_hold,
            "t3_suspect_pairs": t3_suspect_pairs,
+           "scope_dropped": scope_drop,
            "guard_dropped": guard_drop,
            "confirm_open_ids": confirm}
     if args.out:
@@ -375,6 +386,12 @@ def main() -> int:
             print(f"  #{x['venueId']} {x['name']}（{x['city']}） ← {ev}")
     if guard_drop:
         print(f"守卫豁免剔除 {len(guard_drop)} 家: {[x['name'] + '#' + str(x['venueId']) for x in guard_drop]}")
+    if scope_drop:
+        from collections import Counter as _C
+        print(f"\n🧭 范围细化排除 {len(scope_drop)} 家（县级市/县/镇未报到 ⇒ 不参与推断；"
+              f"审计用，含县级分布 {dict(_C((x.get('district') or '?') for x in scope_drop))}）：")
+        for x in scope_drop:
+            print(f"  #{x['venueId']} {x['name']}（{x['city']}·{x.get('district')}）")
     if t5_manual_hold:
         print(f"\n🖐 人工状态待确认（statusSource=MANUAL，**已剔除、不进自动提交集**）"
               f"{len(t5_manual_hold)} 家：")

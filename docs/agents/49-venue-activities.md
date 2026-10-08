@@ -129,7 +129,31 @@ DRAFT ──publish──▶ PUBLISHED ──(end_date < today 强转 / 手动 o
 - 只针对 `DATE_RANGE`（用 `outerType` 枚举排除，**不判 `endDate IS NULL`**——枚举是显式
   契约，判空是隐式的，后者会在业务演进时被悄悄改掉语义）。
 - **查询只认 `status`，不做时效过滤**：否则过期活动会在不同查询路径上表现不一致
-  （"单点状态机"原则，同公告域）。
+  （"单点状态机"原则，同公告域）。⚠️ 防的是**时效**被实现两遍——宿主条件见下节。
+
+### 5.1 用户端可见性 = 活动在期 × 门店可服务（2026-10-08）
+
+**判据**：门店不可服务（`VenueStatus#isServable()` 为假：休息中 / 装修中 / 暂停营业 /
+已停业）时，该门店的活动在**所有 C 端出口静默**——列表活动行、详情活动卡、
+「有活动」筛选、到店打卡。**活动自身的 `status` 与数据一律不动**：暂停营业多为临时
+（生产案例帝豪 #122：23 天内 8 次 SUSPENDED↔OPEN 横跳），门店恢复 OPEN 后仍在
+有效期的活动**自动恢复可见**；停业期间自然过期的活动照常由 30s 调度落幕。
+
+- **不做联动下线**（门店置停业时把活动强转 OFFLINE）的三条理由：① 联动要挂到门店状态的
+  六个写入点（48 号），漏一处就是「停业但活动还挂着」——正是本次要修的缺陷形态；
+  ② OFFLINE 恢复不可逆（`publish` 是唯一复活通道），临时停业恢复后运营要手动重发全部活动；
+  ③ 活动状态机保持单点（只由活动自身生命周期驱动）。
+- **不是"第二份时效真值"**：门店可服务性是**宿主条件**（这条内容此刻是否该出现），
+  与活动时效（这条内容还存不存在）正交互补；单点状态机防的是时效判定被实现两遍。
+- **四处镜像（同改清单）**：`VenueActivityRepository#findPublishedByVenue` /
+  `#findPublishedByVenueIds`（EXISTS 子查询）、`VenueRepository#ACTIVITY_PREDICATE`
+  （**仅包在 hasActivity 分支内**——做成无条件过滤会把停业门店从列表整体抹掉，
+  违反「列表状态不过滤」的既有口径）、`VenueActivityService#checkin`（Java 侧判
+  `isServable()`，错误码 1037）。SQL 调不了方法 ⇒ 以 `VenueStatus.OPEN` 字面量镜像；
+  漏改一处即「筛出来但卡片没有行」这类静默漂移。不变量锁在
+  `VenueActivityVisibilityTest`（全枚举 isServable + 三处查询文本 + checkin 行为）。
+- **边界**：门店 OPEN 但未到营业时间（展示层派生 `NOT_OPEN_YET`）**照常显示**
+  （「买一送一 · 13:00 起」）——今天会开门的店，活动提示仍成立；只有存储态非 OPEN 才静默。
 
 ## 6. 接口契约
 
@@ -137,9 +161,9 @@ DRAFT ──publish──▶ PUBLISHED ──(end_date < today 强转 / 手动 o
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/venues/{venueId}/activities` | 门店可见活动（只认 PUBLISHED）。返回 `state` / `stateDisplay` / `nextChangeAt` / `windowsText` / `validityText` / `badgeLabel`（已按类别兜底）等**派生好的结果** |
-| GET | `/venues/activity-badges?venueIds=1,2,3` | 列表页批量标记，返回 `{venueId: [{state, stateDisplay, nextChangeAt, badgeLabel}, ...]}`：**活动在日期范围内即下发**（与营业状态徽标同源——状态要在、语气降级），**已彻底过期的不下发键**；同店多条**按 `命中优先 → nextChangeAt 最近 → activityId 兜底` 排序后全量下发**（规则实现 `VenueActivityService.compareBadgePriority`，与前端 `compareSharePriority` / `pickShareActivity` 必须一致；2026-09-20 由"取一条"扩为"排多条"，判据逐条等价——列表页那一行已支持轮播） |
-| POST | `/venues/{venueId}/activities/{activityId}/checkin` | 打卡（幂等） |
+| GET | `/venues/{venueId}/activities` | 门店可见活动（只认 PUBLISHED）。返回 `state` / `stateDisplay` / `nextChangeAt` / `windowsText` / `validityText` / `badgeLabel`（已按类别兜底）等**派生好的结果**。**门店非 OPEN ⇒ 返回空列表**（2026-10-08，§5.1） |
+| GET | `/venues/activity-badges?venueIds=1,2,3` | 列表页批量标记，返回 `{venueId: [{state, stateDisplay, nextChangeAt, badgeLabel}, ...]}`：**活动在日期范围内即下发**（与营业状态徽标同源——状态要在、语气降级），**已彻底过期的不下发键**；同店多条**按 `命中优先 → nextChangeAt 最近 → activityId 兜底` 排序后全量下发**（规则实现 `VenueActivityService.compareBadgePriority`，与前端 `compareSharePriority` / `pickShareActivity` 必须一致；2026-09-20 由"取一条"扩为"排多条"，判据逐条等价——列表页那一行已支持轮播）。**门店非 OPEN 的门店不出现在返回值里**（2026-10-08，§5.1 四处镜像） |
+| POST | `/venues/{venueId}/activities/{activityId}/checkin` | 打卡（幂等）。**门店非 OPEN ⇒ 拒绝（1037）**，2026-10-08 |
 
 分享复用 `venueshare` 域既有端点（本域**不新增接口**，只加可空 `activityId` 字段）：
 `POST /venues/{id}/shares`（SHARE）与 `POST /venues/{id}/share-opens`（OPEN）。
@@ -161,6 +185,7 @@ DRAFT ──publish──▶ PUBLISHED ──(end_date < today 强转 / 手动 o
 |---|---|
 | 1033 | 活动不存在 / 已下线 |
 | 1034 | 活动参数非法（指定日期却无日期、结束早于开始、时段缺时间） |
+| 1037 | 门店不可服务（休息/装修/暂停/停业）时打卡被拒（2026-10-08，前端入口已随活动卡静默，此处兜直调 API；1035 已被快讯红线占用故取 1037） |
 | 1001 | 场所不存在（复用既有码） |
 
 ## 7. 打卡与归因

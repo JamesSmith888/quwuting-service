@@ -1,7 +1,7 @@
 {
   "source": "xianbao360",
   "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-10-07",
+  "updated": "2026-10-08",
   "entries": [
     {
       "city": "西安市",
@@ -6053,6 +6053,310 @@
       "venue_id": 1642,
       "kind": "alias",
       "note": "2026-10-07 低置信长尾别名固化（去「吧」后缀；自 10-02 连续多轮）。已双写平台别名 + 本条目；重跑回读 via=alias-domain:金汇清 / EXACT；同日 SUSPENDED→OPEN。⚠️ 同段「夜色音乐」因佛山有双候选（#1672 夜色音乐吧·禅城 / #1683 夜色音乐酒馆·高明）未固化，见 run-history 2026-10-07"
+    },
+    {
+      "city": "滁州市",
+      "news_name": "幻新2",
+      "platform_name": "幻新酒吧",
+      "venue_id": 1179,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:幻新2 / EXACT。"
+    },
+    {
+      "city": "衡阳市",
+      "news_name": "醉晚风歌舞",
+      "platform_name": "醉晚风酒吧",
+      "venue_id": 1468,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:醉晚风歌舞 / EXACT。"
+    },
+    {
+      "city": "东莞市",
+      "news_name": "鑫莎(鑫盛)",
+      "platform_name": "鑫莎酒吧",
+      "venue_id": 720,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:鑫莎(鑫盛) / EXACT。"
+    },
+    {
+      "city": "成都市",
+      "news_name": "枫亚",
+      "platform_name": "枫亚之夜歌舞厅",
+      "venue_id": 401,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:枫亚 / EXACT。"
+    },
+    {
+      "city": "邵阳市",
+      "news_name": "百合",
+      "platform_name": "邵阳百合舞厅",
+      "venue_id": 1474,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:百合 / EXACT。"
+    },
+    {
+      "city": "邵阳市",
+      "news_name": "金莎",
+      "platform_name": "邵东金莎舞厅",
+      "venue_id": 1470,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:金莎 / EXACT。"
+    },
+    {
+      "city": "天津市",
+      "news_name": "A07音乐",
+      "platform_name": "旭华道A07音乐酒吧",
+      "venue_id": 1372,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:A07音乐 / EXACT。"
+    },
+    {
+      "city": "内江市",
+      "news_name": "蓝梦缘",
+      "platform_name": "蓝梦缘音乐酒吧",
+      "venue_id": 1603,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:蓝梦缘 / EXACT。"
+    },
+    {
+      "city": "保定市",
+      "news_name": "335音乐",
+      "platform_name": "335音乐酒馆",
+      "venue_id": 1313,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:335音乐 / EXACT。"
+    },
+    {
+      "city": "蚌埠市",
+      "news_name": "京晟小",
+      "platform_name": "京晟小酒馆莎莎舞",
+      "venue_id": 1519,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:京晟小 / EXACT。"
+    },
+    {
+      "city": "安庆市",
+      "news_name": "曼谷",
+      "platform_name": "曼谷娱乐舞厅",
+      "venue_id": 1513,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:曼谷 / EXACT。"
+    },
+    {
+      "city": "铜陵市",
+      "news_name": "东方音乐",
+      "platform_name": "东方音乐酒馆",
+      "venue_id": 1499,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:东方音乐 / EXACT。"
+    },
+    {
+      "city": "厦门市",
+      "news_name": "杏林音乐餐",
+      "platform_name": "杏林音乐餐吧",
+      "venue_id": 1568,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:杏林音乐餐 / EXACT。"
+    },
+    {
+      "city": "厦门市",
+      "news_name": "蓝潮",
+      "platform_name": "蓝潮舞吧",
+      "venue_id": 1574,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:蓝潮 / EXACT。"
+    },
+    {
+      "city": "泉州市",
+      "news_name": "艾莎舞",
+      "platform_name": "艾莎舞吧莎莎舞",
+      "venue_id": 1555,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:艾莎舞 / EXACT。"
+    },
+    {
+      "city": "南昌市",
+      "news_name": "乐瘾音乐餐",
+      "platform_name": "乐瘾音乐餐吧",
+      "venue_id": 1154,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:乐瘾音乐餐 / EXACT。"
+    },
+    {
+      "city": "南昌市",
+      "news_name": "星河音乐",
+      "platform_name": "星河音乐酒馆",
+      "venue_id": 858,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:星河音乐 / EXACT。"
+    },
+    {
+      "city": "景德镇市",
+      "news_name": "梦幻",
+      "platform_name": "梦幻舞汇",
+      "venue_id": 1426,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:梦幻 / EXACT。"
+    },
+    {
+      "city": "东莞市",
+      "news_name": "海派",
+      "platform_name": "海派音乐清吧",
+      "venue_id": 739,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:海派 / EXACT。"
+    },
+    {
+      "city": "东莞市",
+      "news_name": "零点",
+      "platform_name": "零点莎莎舞酒吧",
+      "venue_id": 705,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:零点 / EXACT。"
+    },
+    {
+      "city": "惠州市",
+      "news_name": "魅舞音乐清",
+      "platform_name": "魅舞音乐清吧",
+      "venue_id": 1626,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:魅舞音乐清 / EXACT。"
+    },
+    {
+      "city": "惠州市",
+      "news_name": "杯莫停主题",
+      "platform_name": "杯莫停主题吧",
+      "venue_id": 1624,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:杯莫停主题 / EXACT。"
+    },
+    {
+      "city": "梧州市",
+      "news_name": "夜上海",
+      "platform_name": "夜上海莎莎舞酒馆",
+      "venue_id": 1275,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:夜上海 / EXACT。"
+    },
+    {
+      "city": "阿克苏市",
+      "news_name": "扶青沙歌舞",
+      "platform_name": "扶青沙歌舞厅",
+      "venue_id": 1340,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:扶青沙歌舞 / EXACT。"
+    },
+    {
+      "city": "衡阳市",
+      "news_name": "黑马",
+      "platform_name": "黑马舞汇酒吧俱乐部",
+      "venue_id": 1465,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:黑马 / EXACT。"
+    },
+    {
+      "city": "怀化市",
+      "news_name": "怀情莎舞",
+      "platform_name": "怀情莎舞吧",
+      "venue_id": 1479,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:怀情莎舞 / EXACT。"
+    },
+    {
+      "city": "长沙市",
+      "news_name": "有酒说故事",
+      "platform_name": "有酒说故事舞吧",
+      "venue_id": 913,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:有酒说故事 / EXACT。"
+    },
+    {
+      "city": "广州市",
+      "news_name": "壹号",
+      "platform_name": "壹号舞厅清吧",
+      "venue_id": 1639,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:壹号 / EXACT。"
+    },
+    {
+      "city": "太原市",
+      "news_name": "暮色餐厅",
+      "platform_name": "暮色茶餐厅",
+      "venue_id": 1719,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:暮色餐厅 / EXACT。"
+    },
+    {
+      "city": "邯郸市",
+      "news_name": "月食音乐",
+      "platform_name": "月食酒馆",
+      "venue_id": 1338,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:月食音乐 / EXACT。"
+    },
+    {
+      "city": "安庆市",
+      "news_name": "铭爵舞蹈",
+      "platform_name": "铭爵舞厅",
+      "venue_id": 1515,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:铭爵舞蹈 / EXACT。"
+    },
+    {
+      "city": "淮南市",
+      "news_name": "艳派莎莎舞",
+      "platform_name": "艳派莎莎酒吧",
+      "venue_id": 1523,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:艳派莎莎舞 / EXACT。"
+    },
+    {
+      "city": "河源市",
+      "news_name": "九九民谣",
+      "platform_name": "九九娱乐民谣",
+      "venue_id": 1618,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:九九民谣 / EXACT。"
+    },
+    {
+      "city": "东莞市",
+      "news_name": "神话小",
+      "platform_name": "神话酒吧",
+      "venue_id": 724,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:神话小 / EXACT。"
+    },
+    {
+      "city": "广州市",
+      "news_name": "凤凰阁(聚贤阁)清",
+      "platform_name": "聚贤阁清吧",
+      "venue_id": 1630,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:凤凰阁(聚贤阁)清 / EXACT。"
+    },
+    {
+      "city": "怀化市",
+      "news_name": "十二生肖狐狸莎舞现场",
+      "platform_name": "十二生肖狐狸莎舞音乐现场",
+      "venue_id": 1480,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:十二生肖狐狸莎舞现场 / EXACT。"
+    },
+    {
+      "city": "怀化市",
+      "news_name": "湘约莎舞",
+      "platform_name": "湘约音乐酒吧",
+      "venue_id": 1478,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:湘约莎舞 / EXACT。"
+    },
+    {
+      "city": "西安市",
+      "news_name": "金柏丽",
+      "platform_name": "金柏音乐酒吧",
+      "venue_id": 177,
+      "kind": "alias",
+      "note": "2026-10-08 低置信长尾别名固化（舞讯写法 vs 平台名后缀/前缀差异 ⇒ 原落 CONTAINED/fuzzy；连续多轮出现）。已双写平台别名 + 本条目，重跑回读 via=alias-domain:金柏丽 / EXACT。"
     }
   ],
   "removed_duplicates": [

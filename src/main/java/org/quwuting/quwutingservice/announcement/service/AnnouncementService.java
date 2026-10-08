@@ -561,42 +561,34 @@ public class AnnouncementService {
     }
 
     /**
-     * 首页占位解析（<b>位置口径的唯一判据</b>，2026-10-08 根因修复）。
+     * 首页占位解析（<b>位置口径的判据消费点</b>，2026-10-08）。
      *
-     * <p><b>为什么要有这个方法（这是根因，不是新规则）</b><br>
-     * 2026-09-15 立了判据「用户不知道会不会吃亏」（{@link AnnouncementTouchLevel}），
-     * 但它<b>只被套用到未读口径</b>（{@code touchLevel}），没被套用到<b>位置口径</b>
-     * （{@code pinned}）—— 同一个"要不要打扰用户"的决策被切成两个独立字段各自决策，
-     * 位置口径还写死在每日舞讯 Skill 的固定模板里。结果：一条"用户不知道也不吃亏"的
-     * 流水公告，每天都占着唯一强触达位。
-     * <p>
-     * 修法不是给某个分类打特例，而是让<b>两个口径由同一个判据派生</b>：
-     * {@link AnnouncementTouchLevel#eligibleForHomeSlot()}——值得打扰用户的（ALERT）
-     * 才配占据首页位。SILENT（每日舞讯 / 数据更新等流水，可查即可）不占位：它在公告中心
-     * 照常出现、照常可搜索阅读，只是不抢强触达。
+     * <p><b>当前语义 = 显式意图直通 + 判据单点放行</b>：请求置顶（{@code pinned=true}）即占位，
+     * 触达档不再设限——2026-10-08 16:57 用户拍板「<b>舞讯依旧要顶置，以我为准</b>」，
+     * 位置口径与打扰口径解耦（沿革见 {@link AnnouncementTouchLevel#eligibleForHomeSlot()}）。
+     * 位置从此是运营 / 发布链路的显式决策；SILENT 档（每日舞讯等）凭显式置顶同样可占位。
      *
-     * <p><b>为什么显式拒绝而不是静默降级</b><br>
-     * 静默把 {@code pinned=true} 悄悄改成 false，就是<b>原缺陷的另一种形态</b>
-     * ——运营勾了置顶却什么都没发生，且无任何提示（本轮痛点即如此）。
-     * 因此这里抛错而不是悄悄改值，由管理端把原因显示给运营。
+     * <p><b>容量=1 的不变量不在此处</b>：占位收敛走 {@code applyPinned → HomeSlotService.claim}
+     * （占位前校验、冲突<b>显式拒绝</b>不自动抢占）+ V44 唯一索引兜底 —— 这半边修复继续有效，
+     * 保证"置顶动作一定兑现"（要么占上位、要么在提交时明确报出位被谁占用）。
+     *
+     * <p><b>沿革（当日两版）</b>：上午版曾在此对 SILENT 档<b>抛错拒绝</b>（"值得打扰的才配占位"），
+     * 16:57 用户拍板后删除该限制 ⇒ 判据单点 {@code eligibleForHomeSlot()} 翻转为全档放行。
      *
      * @param requested  请求的置顶意图（null / false = 不占位）
      * @param touchLevel 已解析的触达等级（<b>必须先经 {@link #resolveTouchLevel}</b>，
      *                   禁直接按分类判断——否则又回到两套口径）
      * @return 是否应当占据首页位
-     * @throws BusinessException 请求置顶但内容为 SILENT 档（不值得打扰）
      */
     private static boolean resolvePinned(Boolean requested, AnnouncementTouchLevel touchLevel) {
         boolean wantPinned = requested != null && requested;
         if (!wantPinned) {
             return false;
         }
-        if (!touchLevel.eligibleForHomeSlot()) {
-            throw new BusinessException(1001,
-                    "「不打扰」档的内容不占用首页公告位——它是流水记录，可查即可。"
-                            + "若确实需要用户立刻知晓，请把「用户提醒」改为「提醒用户」后再置顶");
-        }
-        return true;
+        // 2026-10-08 16:57 用户拍板「舞讯依旧要顶置，以我为准」：位置与打扰解耦——任一触达档
+        // （含 SILENT 的每日舞讯）均可显式置顶。此处曾对 SILENT 档抛错拒绝（上午版），已作废。
+        // 判据单点保留在 eligibleForHomeSlot()（当前恒放行；未来如再收紧改那一处）。
+        return touchLevel.eligibleForHomeSlot();
     }
 
     /**
