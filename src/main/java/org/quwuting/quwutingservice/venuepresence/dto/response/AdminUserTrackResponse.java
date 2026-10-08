@@ -32,14 +32,16 @@ public record AdminUserTrackResponse(
         int hitRadiusM,
         /** 附近带半径（米，服务端权威） */
         int nearbyRadiusM,
-        /** 轨迹点，按时间<b>升序</b>（绘制序）；已剔除无坐标行（其数量见 pointsWithoutCoordinates） */
+        /** 轨迹点，按时间<b>升序</b>（绘制序）；<b>含无坐标行</b>（latitude/longitude 为 null = V46 前旧记录，
+         * 地图跳过绘制、列表照常展示——数量见 pointsWithoutCoordinates） */
         List<TrackPoint> points,
         /** 轨迹点涉及到的门店（去重；含坐标供地图画 150/300m 半径圈） */
         List<TrackVenue> venues,
         /**
-         * 窗口内<b>无坐标</b>的记录数（旧端 / 历史行，不可绘制）。
-         * <b>必须显式下发</b>：这些记录不在 points 里，不说就会被读成「他没来过」——
-         * 同 truncated 的「禁静默」纪律。
+         * {@code points} 中<b>无坐标</b>的记录数（V46 前旧记录，不可绘制）。
+         * <b>必须显式下发</b>：这些行能进列表却上不了地图，不标注就会被读成「图这么少 = 他没来过」——
+         * 同 truncated 的「禁静默」纪律（2026-10-08 user 210 判例：曾因「剔除出 points」在 admin
+         * 彻底不可见，现将列表保留 + 计数标注）。
          */
         int pointsWithoutCoordinates,
         /** 是否被上限截断（保留最近点）；截断时前端须显示「仅显示最近 N 个点」 */
@@ -49,8 +51,8 @@ public record AdminUserTrackResponse(
      * 一个轨迹采样点（一次 ping）。
      *
      * @param at        采样（桶内首见）时刻，北京时间
-     * @param latitude  用户纬度（gcj02）
-     * @param longitude 用户经度（gcj02）
+     * @param latitude  用户纬度（gcj02）；<b>null = 无坐标旧行</b>（地图跳过、列表标注「无坐标」）
+     * @param longitude 用户经度（gcj02）；与 latitude 成对，同 null 语义
      * @param accuracyM 端侧定位精度（米；null = 端侧未提供）
      * @param venueId   该时刻的最近门店 id（端侧「500m 内最近一家」选择结果）
      * @param distanceM 距该门店距离（米，端侧自报）
@@ -61,8 +63,8 @@ public record AdminUserTrackResponse(
     public record TrackPoint(
             @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
             LocalDateTime at,
-            double latitude,
-            double longitude,
+            Double latitude,
+            Double longitude,
             Integer accuracyM,
             Long venueId,
             int distanceM,

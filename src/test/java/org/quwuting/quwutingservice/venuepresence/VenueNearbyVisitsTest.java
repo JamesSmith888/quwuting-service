@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -35,6 +36,10 @@ import static org.mockito.Mockito.when;
  * 地址级编码锚点相距 95m——> 同址半径 50m、≤ 展示半径 150m。单店坐标维护后旧实现把全部历史
  * 足迹「算到一壶淡泊头上」（丽莎不再显示）；新口径：范围内所有门店（含停业店）显示同一份
  * 附近并集，不做门店级归属、不看营业状态。
+ * <p>
+ * <b>2026-10-09 口径修订</b>：展示取数半径由命中带（150m）扩至「附近带」
+ * （{@code NEARBY_RADIUS_M}=300m）——150~300m 段的足迹同样计入（用户裁决；判例 = user 210
+ * 在丽莎 295m 上报、旧口径下被截掉的那条）。精度门槛不随半径放宽。
  */
 @ExtendWith(MockitoExtension.class)
 class VenueNearbyVisitsTest {
@@ -65,6 +70,9 @@ class VenueNearbyVisitsTest {
         assertTrue(VenuePresenceService.NEARBY_TRACE_RADIUS_M > VenuePresenceService.CO_LOCATED_RADIUS_M);
         // 不越过「片区」半径（否则整个商圈合成一个展示单元）
         assertTrue(VenuePresenceService.NEARBY_TRACE_RADIUS_M < VenuePresenceService.NEARBY_RADIUS_M);
+        // 取数半径（2026-10-09）= 附近带：必须覆盖判例 295m（user 210 在丽莎）
+        assertTrue(VenuePresenceService.NEARBY_RADIUS_M >= 295,
+                "150~300m「附近」段必须计入展示（user 210 在丽莎 295m 的判例）");
     }
 
     @Test
@@ -164,6 +172,22 @@ class VenueNearbyVisitsTest {
                 "证据范围 = 范围并集（两店互为邻居时含两家）");
     }
 
+    @Test
+    void displayFetchRadiusCoversNearbyBandWithHitAccuracyGate() {
+        // 2026-10-09：展示取数 = 附近带半径（300m，含 150~300m「附近」段）；
+        // 精度门槛保持 HIT_MAX_ACCURACY_M（数据质量门槛不随半径放宽）
+        stubPairs();
+        stubFacts(row(YIHU, 1L, now.minusDays(1)));
+        stubDays(day(YIHU, 1L, now.toLocalDate().minusDays(1)));
+
+        service.nearbyVisitSummaries(List.of(YIHU), List.of(-1L));
+
+        verify(pingRepository).findVisitorLastSeenByVenueIds(anyCollection(),
+                eq(VenuePresenceService.NEARBY_RADIUS_M), eq(VenuePresenceService.HIT_MAX_ACCURACY_M));
+        verify(pingRepository).findVisitorDaysByVenueIdsSince(anyCollection(), any(LocalDateTime.class),
+                eq(VenuePresenceService.NEARBY_RADIUS_M), eq(VenuePresenceService.HIT_MAX_ACCURACY_M));
+    }
+
     // ── fixtures ────────────────────────────────────────────────────────────
 
     private void stubPairs(VenueRepository.CoLocatedVenueRow... pairs) {
@@ -171,15 +195,16 @@ class VenueNearbyVisitsTest {
                 .thenReturn(List.of(pairs));
     }
 
+    /** 取数谓词（2026-10-09）：半径 = 附近带 {@code NEARBY_RADIUS_M}=300m（⛔ 不再是 HIT_RADIUS_M） */
     private void stubFacts(Object[]... rows) {
         when(pingRepository.findVisitorLastSeenByVenueIds(anyCollection(),
-                eq(VenuePresenceService.HIT_RADIUS_M), anyInt()))
+                eq(VenuePresenceService.NEARBY_RADIUS_M), anyInt()))
                 .thenReturn(rows(rows));
     }
 
     private void stubDays(Object[]... rows) {
         when(pingRepository.findVisitorDaysByVenueIdsSince(anyCollection(), any(LocalDateTime.class),
-                eq(VenuePresenceService.HIT_RADIUS_M), anyInt()))
+                eq(VenuePresenceService.NEARBY_RADIUS_M), anyInt()))
                 .thenReturn(rows(rows));
     }
 

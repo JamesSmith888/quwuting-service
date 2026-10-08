@@ -1184,8 +1184,9 @@ public class VenueService {
         // 查询（同 photos 等批量装配模式，一次 IN 覆盖整页规避 N+1；两张别名表规模极小）。
         Map<Long, VenueMatchHint> matchHints = loadMatchHints(result.getContent(), rawTerms);
         // 批量「到店足迹」行文案（2026-10-06 V38 建；2026-10-08 改「附近的足迹」口径）：
-        // 事实 = VenuePresenceService#nearbyVisitSummaries（门店 ±150m 内全部命中足迹的并集，
-        // 停业店同样展示、无门店级归属——「我们只是承诺是附近」，见 52 号「C 侧展示」节）；
+        // 事实 = VenuePresenceService#nearbyVisitSummaries（门店 ±150m 邻域内全部「附近带」足迹
+        // （距店 ≤300m，2026-10-09 扩）的并集，停业店同样展示、无门店级归属——「我们只是承诺是
+        // 附近」，见 52 号「C 侧展示」节）；
         // 文案门槛/措辞单点 = VenueVisitBadgeService / VenueResponse#visitBadgeText。
         // 页面级批量（同址 1 次 + 命中 1 次 + 到访日 1 次），一次覆盖整页防 N+1。
         Map<Long, String> visitBadges = venueVisitBadgeService.visitBadgeTextsByVenue(venueIds);

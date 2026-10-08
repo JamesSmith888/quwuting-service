@@ -135,6 +135,8 @@ public class VenuePresenceService {
      * <p>
      * <b>镜像</b>（改值三处同改，52 号 §4 参数表）：admin-web {@code PRESENCE_HIT_RADIUS_M}（列表口径
      * 提示）、小程序 {@code ARRIVAL_PROMPT_RADIUS_M}（「真正到店」才首问的触发半径）。
+     * <p>⚠️ C 侧「附近的足迹」展示取数自 2026-10-09 起已改用 {@link #NEARBY_RADIUS_M}（300m）——
+     * 本值仍是「命中 / 到访」判定与上述两处镜像的唯一来源，⛔ 勿据展示口径回改本值。
      */
     public static final int HIT_RADIUS_M = 150;
 
@@ -218,6 +220,13 @@ public class VenuePresenceService {
     /**
      * 「附近」覆盖半径（米，口径参数）：对齐 GET /venues/nearby 的缺省 300m——
      * 同一「附近」语义在采集与统计两侧共用一个值，避免第二份真值。
+     * <p>
+     * <b>2026-10-09 起兼任 C 侧「附近的足迹」展示取数半径</b>（用户裁决）：展示数字 =
+     * {@link #NEARBY_TRACE_RADIUS_M} 邻域（门店↔门店 ±150m）内各店 <b>≤ 本值</b> 的足迹并集——
+     * 原取数只到命中带（150m），150~300m「附近」段被截掉（判例 = user 210 在丽莎 295m 上报，
+     * 「唯一想看的样本」既不进到访也不进徽章）。⛔ 与「共享圈不取 300m」不矛盾：被禁的是把
+     * 门店邻域扩到 300m（会把商圈合成一个展示单元）；这里扩的是「人↔店」是否算「这附近」的
+     * 距离带，两层正交（标定论证见 52 号 §4.5）。
      */
     public static final int NEARBY_RADIUS_M = 300;
 
@@ -562,13 +571,15 @@ public class VenuePresenceService {
         return status == null || IN_OPERATION_STATUSES.contains(status);
     }
 
-    // ── 读侧：C 侧「附近的足迹」展示（2026-10-08 重定义；唯一的消费方 = VenueVisitBadgeService） ──
+    // ── 读侧：C 侧「附近的足迹」展示（2026-10-08 重定义；2026-10-09 取数扩至附近带 300m；
+    //    唯一的消费方 = VenueVisitBadgeService） ──
 
     /**
      * C 侧「附近的足迹」展示事实（2026-10-08 重定义；文档 = 52 号「C 侧展示：附近的足迹」节）。
      *
      * <p><b>语义</b>：一家店的「附近」= 本店 + 与它相距 ≤ {@link #NEARBY_TRACE_RADIUS_M} 的
-     * 在库门店；返回其上的命中 ping 的<b>用户并集</b>与 <b>(人, 自然日) 并集</b>（30 天窗）。
+     * 在库门店；返回其上的<b>「附近带」ping</b>（距店 ≤ {@link #NEARBY_RADIUS_M}，2026-10-09
+     * 由命中的 150m 扩至 300m）的<b>用户并集</b>与 <b>(人, 自然日) 并集</b>（30 天窗）。
      * <b>不看营业状态</b>——足迹是已发生的事实，展示只声明「附近」，停业店的位置同样可能有足迹
      * （营业状态时常变换，今天关门、昨天有人去过两件事同时为真）。
      *
@@ -578,7 +589,7 @@ public class VenuePresenceService {
      * （按营业状态 ABSORBED/YIELDED），一次单店坐标维护就让同一批足迹「算到另一家头上」
      * ⇒ 新口径：范围内<b>所有</b>门店都显示同一句「附近的足迹」，由用户自行判断是哪家店。
      *
-     * <p><b>与既有口径的关系（都读同一份命中事实，分叉刻意，⛔ 禁互相"对齐"）</b>：
+     * <p><b>与既有口径的关系（都读同一份 ping 事实，分叉刻意，⛔ 禁互相"对齐"）</b>：
      * <ul>
      *   <li>本方法（C 侧展示）= 附近并集、无归属、无状态过滤、无分摊；</li>
      *   <li>admin 展示（{@link #visitSummaries} / {@link #visitedVenueSummaries}）= 同址归因明细
@@ -621,14 +632,16 @@ public class VenuePresenceService {
                 vicinity.add(row.getCoLocatedId());
             }
         }
-        // ② 一次批量取事实：范围内全部门店上的命中 ping（两个查询与 admin / 排序路径同源同谓词）
+        // ② 一次批量取事实：范围内全部门店上的「附近带」ping（距店 ≤ NEARBY_RADIUS_M=300m，
+        //    2026-10-09 由命中带 150m 扩至 300m；⛔ 与 admin / 排序路径同表**不同谓词**——
+        //    那两处仍取命中带 150m，分叉刻意、禁对齐）。精度门槛不随半径放宽（数据质量门槛恒定）。
         Set<Long> evidenceStores = new LinkedHashSet<>();
         vicinityByVenue.values().forEach(evidenceStores::addAll);
         Map<Long, Map<Long, LocalDateTime>> lastSeen = toLastSeenByVenue(
-                pingRepository.findVisitorLastSeenByVenueIds(evidenceStores, HIT_RADIUS_M, HIT_MAX_ACCURACY_M));
+                pingRepository.findVisitorLastSeenByVenueIds(evidenceStores, NEARBY_RADIUS_M, HIT_MAX_ACCURACY_M));
         Map<Long, Map<Long, Set<LocalDate>>> visitDays = toVisitDaysByVenue(
                 pingRepository.findVisitorDaysByVenueIdsSince(evidenceStores, windowStart,
-                        HIT_RADIUS_M, HIT_MAX_ACCURACY_M));
+                        NEARBY_RADIUS_M, HIT_MAX_ACCURACY_M));
         // ③ 排除集合单点剔除（两张映射的 user 维同时过滤——「同一集合、两种消费面」，见方法注释）
         if (excludedUserIds != null && !excludedUserIds.isEmpty()) {
             lastSeen.values().forEach(m -> m.keySet().removeAll(excludedUserIds));
@@ -639,7 +652,7 @@ public class VenuePresenceService {
         vicinityByVenue.forEach((venueId, stores) -> {
             long users = countSince(unionLastSeen(stores, lastSeen), windowStart);
             if (users <= 0) {
-                return; // 本店附近无命中足迹 ⇒ 缺席 = 不渲染（「无足迹不渲染」是唯一硬约束）
+                return; // 本店附近无足迹 ⇒ 缺席 = 不渲染（「无足迹不渲染」是唯一硬约束）
             }
             result.put(venueId, new NearbyVisitSummary(users, countVisitEvents(stores, visitDays)));
         });
@@ -845,8 +858,10 @@ public class VenuePresenceService {
      * 2026-10-08 判例（user 210 在丽莎 295m 上报、超命中线不入到访）正是它要回答的问题。
      * <p>
      * <b>取数形态</b>：原始行**倒序**取最近 {@link #USER_TRACK_MAX_POINTS} 条（超限保留最近的，
-     * 同截断方向纪律），内存反转为时间升序（绘制序）。坐标缺失的历史行不进 points，
-     * 以 {@code pointsWithoutCoordinates} 显式计数（⛔ 禁静默丢）。
+     * 同截断方向纪律），内存反转为时间升序（绘制序）。坐标缺失的历史行**保留在 points**
+     * （坐标 null：地图跳过绘制、列表照常展示，店名解析所需门店一并收集），并以
+     * {@code pointsWithoutCoordinates} 显式计数（⛔ 禁静默丢——2026-10-08 user 210 判例：
+     * 唯一想看的 295m 样本恰是无坐标行，「只计数不展示」等于想看的记录仍不可见）。
      * <p>
      * <b>分级恒为距离带</b>（{@link PresenceTrackGrade}：≤150 命中 / ≤300 附近 / 其余留痕）——
      * 只表达「距最近门店多远」，不是到访判定的替代（到访另需精度达标 + 同址归因）。
@@ -876,8 +891,9 @@ public class VenuePresenceService {
             Double longitude = (Double) row[5];
             if (latitude == null || longitude == null) {
                 noCoordinate++;
-                continue;
             }
+            // 无坐标行照常进入 points 与门店集合：「不能画」≠「不存在」——列表要展示它、
+            // 店名解析也依赖门店集合；只有地图侧跳过（⛔ 禁静默丢，见方法注释）
             venueIds.add(venueId);
             int distanceM = (Integer) row[2];
             PresenceTrackGrade grade = PresenceTrackGrade.ofDistance(distanceM);

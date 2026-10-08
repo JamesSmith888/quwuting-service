@@ -11,8 +11,8 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * 列表卡片「到店足迹」行文案供给（2026-10-06 V38 建；<b>2026-10-08 展示口径重定义</b>；
- * 文档 = docs/agents/52-venue-presence.md「C 侧展示：附近的足迹」节）。
+ * 列表卡片「到店足迹」行文案供给（2026-10-06 V38 建；<b>2026-10-08 展示口径重定义；
+ * 2026-10-09 取数扩至「附近带」300m</b>；文档 = docs/agents/52-venue-presence.md「C 侧展示」节）。
  * <p>
  * <b>为什么独立成类</b>：{@link VenuePresenceService} 的职责是「从原始 ping 算出事实」
  * （附近并集 / 同址归因 / 分摊 / 展示摘要），而本类只做<b>展示派生</b>（门槛 + 文案）——
@@ -26,8 +26,9 @@ import java.util.Map;
  * <p>
  * 落地形态（事实来源 = {@link VenuePresenceService#nearbyVisitSummaries}）：
  * <ul>
- *   <li><b>展示单元 = 门店 ± {@code NEARBY_TRACE_RADIUS_M}（150m）内的全部命中足迹的并集</b>
- *       （含停业门店上的证据；一端为已发生的足迹事实，另一端只声明「附近」，见常量注释标定）；</li>
+ *   <li><b>展示单元 = 门店 ± {@code NEARBY_TRACE_RADIUS_M}（150m）邻域内的全部「附近带」足迹
+ *       （距店 ≤ {@code NEARBY_RADIUS_M}）的并集</b>（含停业门店上的证据；一端为已发生的足迹
+ *       事实，另一端只声明「附近」，见常量注释标定）；</li>
  *   <li><b>范围内所有门店一律展示</b>——营业状态不参与过滤（不管是否关门）；
  *       同一组门店显示同一句文案（「都显示」）；</li>
  *   <li><b>文案恒为「附近」语义</b>，数字 = 范围并集（与 admin 的共享口径同层；不再使用
@@ -51,7 +52,7 @@ import java.util.Map;
  * （用户曾提「为社区建设出力」→ 已否决：必截断）。
  *
  * <h3>展示门槛 = 1，但「无足迹」仍不渲染（唯一硬约束）</h3>
- * 附近无命中足迹的门店不在 {@link VenuePresenceService#nearbyVisitSummaries} 结果里
+ * 附近无足迹的门店不在 {@link VenuePresenceService#nearbyVisitSummaries} 结果里
  * ⇒ 前端 null 不渲染、卡片零布局变化。⛔ 显示"0 位舞友"是负面失实陈述（真实到访系统性大于本数字）。
  * <p>
  * ⚠️ <b>展示与排序是两条独立的线</b>（2026-10-06 六轮用户裁决）：「有显示 ⇔ 有分」契约

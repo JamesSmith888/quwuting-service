@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -40,8 +41,8 @@ import static org.mockito.Mockito.when;
  * admin 用户「位置轨迹」接口（2026-10-08 V46，52 号 / GET /admin/users/{id}/track）。
  * <p>
  * 守四条不变量：① 分级 = 距离带（边界 150/300 精确）；② 点按时间升序（绘制序）、
- * 取数方向倒序（截断保留最近）；③ 无坐标行显式计数、不进点集也不静默消失；
- * ④ 窗口钳制（1~90）与未知用户短路（1004，不触达 ping / venue 仓储）。
+ * 取数方向倒序（截断保留最近）；③ 无坐标行**保留在点集**（坐标 null，地图跳过、列表照常）
+ * 且显式计数，⛔ 不静默消失；④ 窗口钳制（1~90）与未知用户短路（1004，不触达 ping / venue 仓储）。
  */
 @ExtendWith(MockitoExtension.class)
 class AdminUserTrackTest {
@@ -100,7 +101,7 @@ class AdminUserTrackTest {
     }
 
     @Test
-    void rowsWithoutCoordinatesAreCountedButNotPlotted() {
+    void rowsWithoutCoordinatesStayInListAndAreCounted() {
         givenUserExists();
         when(pingRepository.findTrackByUserIdSince(eq(USER_ID), any(), any())).thenReturn(List.of(
                 row(YIHU, 92, LocalDateTime.now().minusDays(1), null, null),
@@ -110,9 +111,17 @@ class AdminUserTrackTest {
         AdminUserTrackResponse res = service.trackFor(USER_ID, 7);
 
         assertEquals(1, res.pointsWithoutCoordinates(), "无坐标旧记录必须显式计数（⛔ 禁静默丢）");
-        assertEquals(1, res.points().size());
+        // 2026-10-08 user 210 判例：无坐标行不能被剔除——列表要展示它（「不能画」≠「不存在」）
+        assertEquals(2, res.points().size(), "无坐标行保留在点集（地图侧跳过）");
+        // 升序（绘制序）：更早的 LISA（有坐标）在前，最近的无坐标旧行在后
+        assertNotNull(res.points().get(0).latitude(), "有坐标行坐标原样返回");
         assertEquals(Long.valueOf(LISA), res.points().get(0).venueId());
-        assertEquals(1, res.venues().size(), "无坐标行不能被计入门店集合");
+        AdminUserTrackResponse.TrackPoint legacy = res.points().get(1);
+        assertEquals(Long.valueOf(YIHU), legacy.venueId(), "升序末行 = 最近的无坐标旧行");
+        assertNull(legacy.latitude(), "无坐标行纬度恒为 null");
+        assertNull(legacy.longitude(), "无坐标行经度恒为 null");
+        assertEquals("HIT", legacy.grade(), "无坐标行照常按距离分级");
+        assertEquals(2, res.venues().size(), "无坐标行涉及的门店也在集合里（列表需解析店名）");
     }
 
     @Test
