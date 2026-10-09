@@ -1,7 +1,7 @@
 {
   "source": "xianbao360",
   "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-10-08",
+  "updated": "2026-10-09",
   "entries": [
     {
       "city": "西安市",
@@ -6813,6 +6813,30 @@
       "venue_id": 1780,
       "kind": "exact",
       "note": "2026-10-08 用户贴完整表格建档（第 6 波；济南/东营已有门店 ⇒ 已逐条同城核查、零冲突）。venueId 1774-1780。"
+    },
+    {
+      "city": "西安市",
+      "news_name": "开阔",
+      "platform_name": "开运舞厅",
+      "venue_id": 188,
+      "kind": "alias",
+      "note": "2026-10-09 市井慢时光图片源：西安(南)「开阔」＝平台 #188 开运舞厅；与 10-08 源站「开运」互证，判为同店更名/简写。平台别名已灌。"
+    },
+    {
+      "city": "重庆市",
+      "news_name": "金刚",
+      "platform_name": "金岗舞厅",
+      "venue_id": 517,
+      "kind": "alias",
+      "note": "2026-10-09 市井慢时光图片源：重庆「金刚」＝平台 #517 金岗舞厅；与 10-08 源站「金岗」互证，判为同店错字。平台别名已灌。"
+    },
+    {
+      "city": "咸阳市",
+      "news_name": "金沙",
+      "platform_name": "金莎舞吧",
+      "venue_id": 785,
+      "kind": "alias",
+      "note": "2026-10-09 市井慢时光图片源：咸阳「金沙」＝平台 #785 金莎舞吧；与 10-08 源站「金莎」互证，判为同店错字。平台别名已灌。"
     }
   ],
   "removed_duplicates": [

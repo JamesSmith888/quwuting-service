@@ -128,7 +128,7 @@ public class AdminUserController {
 
     /**
      * 用户详情（GET /admin/users/{id}；仅 ADMIN）：管理端列表行点击 → 用户详情——
-     * 公开资料 + 积分账户收支 + 贡献档案完整明细 + 需求/上报/认领分布 + 打卡
+     * 公开资料 + 积分账户收支 + 贡献档案完整明细 + 上报/认领分布 + 打卡
      * 连续性（完整画像）。openId 等敏感字段绝不下发；用户不存在/已软删 → 1004。
      */
     @GetMapping("/{id}")
@@ -140,9 +140,8 @@ public class AdminUserController {
     /**
      * 用户统计明细（GET /admin/users/{id}/stats-detail；仅 ADMIN，2026-08-28）：
      * 用户详情页<b>每条统计数据可点击下钻</b>——查看该统计的每条详细列表。
-     * type = {@link AdminUserStatsType}（POINTS/REPORT_REWARD/CHECKIN/RECOGNITION/
-     * CLAIM/SHARE/FAVORITE/DEMAND/REPORT）；status = 可选状态过滤（CLAIM/DEMAND/
-     * REPORT 用，如 APPROVED/PENDING）；mode = POINTS 收支方向（ALL 默认/EARN/GIFT）。
+     * type = {@link AdminUserStatsType}（POINTS/REPORT_REWARD/CHECKIN/CLAIM/SHARE/
+     * REPORT）；status = 可选状态过滤（CLAIM/REPORT 用，如 APPROVED/PENDING）；mode = POINTS 收支方向（ALL 默认/EARN/GIFT）。
      * 返回统一行结构（title/subtitle/time/badgeText/badgeCls），前端零分支渲染；
      * openId 绝不下发；用户不存在/已软删 → 1004。
      */
@@ -176,7 +175,7 @@ public class AdminUserController {
 
     /**
      * 用户行为统计分析（GET /admin/users/behavior-analysis?days=30，仅 ADMIN；2026-09-15）：
-     * 挂在资料协作（用户）域下的平台级行为盘子——类型分布（全目录，含 0 次）+
+     * 挂在资料协作（用户）域下的平台级行为盘子——类型分布（全现役目录含 0 次；下线功能仅在有历史记录时下发）+
      * 活跃分层（六层互斥完备，按「占可用天数比例」分档，避免把新注册判成沉默）+
      * 行为宽度分布 + 活跃时段直方图（24 格）+ 口径自证（账号盘子漏斗）。
      * <p>

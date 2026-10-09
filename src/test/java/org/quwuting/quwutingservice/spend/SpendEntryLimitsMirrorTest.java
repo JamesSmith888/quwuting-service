@@ -40,6 +40,16 @@ class SpendEntryLimitsMirrorTest {
     }
 
     @Test
+    void companionsJsonLimitMatchesV47Ddl() throws IOException {
+        // V47（2026-10-09）新增 companions_json varchar(n)：常量与 DDL 逐项对齐，沿用本类的防漂移纪律
+        String ddl = Files.readString(Path.of("src/main/resources/db/migration-mysql/V47__spend_entry_companions.sql"));
+        Matcher m = Pattern.compile("\\bcompanions_json\\s+varchar\\(\\s*(\\d+)\\s*\\)", Pattern.CASE_INSENSITIVE)
+                .matcher(ddl);
+        assertTrue(m.find(), "V47 中找不到 companions_json varchar(n) 列定义");
+        assertEquals(SpendEntryLimits.COMPANIONS_JSON_MAX_LENGTH, Integer.parseInt(m.group(1)));
+    }
+
+    @Test
     void amountMaxIsLargestValueOfColumn() {
         int integerDigits = SpendEntryLimits.AMOUNT_PRECISION - SpendEntryLimits.AMOUNT_SCALE;
         BigDecimal expected = BigDecimal.TEN.pow(integerDigits)

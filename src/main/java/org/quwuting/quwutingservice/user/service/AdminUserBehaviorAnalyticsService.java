@@ -12,6 +12,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -44,11 +46,15 @@ import java.util.Set;
  * 分层用「活跃天数 <b>占可用天数的比例</b>」而不是绝对天数：{@code 可用天数 =
  * min(窗口天数, 注册至今 + 1)}。理由与留存报表「未到期 ≠ 0%」（2026-09-15）完全同族：
  * 按绝对值切档会把窗口内刚注册的用户系统性判成「沉默/低频」——注册两天的人不可能有八个
- * 活跃日，那不是用户不活跃，是观测期不够。故 {@code 可用天数 ≤ NEW_USER_AVAILABLE_DAYS}
+ * 活跃日，那不是用户不活跃，是观测期不够。故 {@code 可用天数 ≤ BehaviorSegment#NEW_USER_AVAILABLE_DAYS}
  * 的用户单列「新近注册」层，不参与比例分档。
  * <p>
- * 六层互斥且完备（所有真实用户恰好落入一层，人数之和 = 总用户数）——这个等式让页面上的
+ * 七层互斥且完备（所有真实用户恰好落入一层，人数之和 = 总用户数）——这个等式让页面上的
  * 分层图可以被当场验算，也防止将来有人新增一层时漏掉一支。
+ * <p>
+ * <b>2026-10-09</b>：分类器抽成 {@link BehaviorSegment}（与用户详情页共用，阈值只有一处）；
+ * 新增「仅用扩展功能」层——把「只看快讯 / 只用计时记账」的真实用户从「仅打开无行为」（审核/巡检形态）
+ * 里分离出来，其人数同时就是「若把扩展功能纳入活跃口径，会新增多少活跃用户」的评审依据。
  */
 @Service
 @RequiredArgsConstructor
@@ -61,13 +67,6 @@ public class AdminUserBehaviorAnalyticsService {
     private static final int DEFAULT_DAYS = 30;
     /** 时段直方图格数（0~23 时） */
     private static final int HOURS_PER_DAY = 24;
-
-    /** 可用天数 ≤ 此值 → 「新近注册」层（观测期不足，不参与比例分档） */
-    private static final long NEW_USER_AVAILABLE_DAYS = 3;
-    /** 活跃天数占可用天数 ≥ 此比例 → 高频活跃 */
-    private static final double HIGH_ACTIVE_RATIO = 0.5;
-    /** ≥ 此比例（且低于高频阈值）→ 常规活跃；低于则低频活跃 */
-    private static final double REGULAR_ACTIVE_RATIO = 0.25;
 
     /** 行为宽度桶界（含上界）：1 类 / 2 类 / 3-4 类 / 5 类及以上（最后一桶无上限） */
     private static final int WIDTH_MID_MAX = 2;
@@ -105,6 +104,7 @@ public class AdminUserBehaviorAnalyticsService {
         // ── 类型维度（全目录，0 也保留一行：类型清单要稳定可发现） ──────────────
         Map<String, long[]> typeAgg = new HashMap<>();          // 事件码 → [人数, 条数]
         Map<Long, Set<String>> activeTypesByUser = new HashMap<>(); // 用户 → 主动行为类型集合
+        Set<Long> extendedUsers = new HashSet<>();                  // 窗口内有扩展行为的用户
         for (UserBehaviorRepository.UserTypeRow row : userTypes) {
             UserBehaviorEvent event = UserBehaviorEvent.byCode(row.getEventType());
             if (event == null) {
@@ -118,15 +118,21 @@ public class AdminUserBehaviorAnalyticsService {
                 activeTypesByUser.computeIfAbsent(row.getUserId(), k -> new HashSet<>())
                         .add(event.code());
             }
+            if (event.nature() == UserBehaviorEvent.Nature.EXTENDED) {
+                extendedUsers.add(row.getUserId());
+            }
         }
 
+        // 下线功能（舞伴 / 招工）只在窗口内仍有历史记录时下发：恒为 0 的下线类型留在清单里只是噪音，
+        // 但有记录时必须保留——事实不因功能下线而消失（UserBehaviorEvent#isRetired）
         List<AdminUserBehaviorAnalysisResponse.TypeStat> byType = UserBehaviorEvent.all().stream()
+                .filter(event -> !event.isRetired() || typeAgg.containsKey(event.code()))
                 .map(event -> {
                     long[] agg = typeAgg.getOrDefault(event.code(), new long[2]);
                     return new AdminUserBehaviorAnalysisResponse.TypeStat(
                             event.code(), event.label(), event.category().label(),
                             event.nature().name(), event.nature().label(), event.nature().hint(),
-                            agg[0], agg[1]);
+                            event.isRetired(), agg[0], agg[1]);
                 })
                 .toList();
 
@@ -154,7 +160,7 @@ public class AdminUserBehaviorAnalyticsService {
                 new AdminUserBehaviorAnalysisResponse.Summary(
                         users.size(), activeDaysByUser.size(), activeEvents, activeDaysSum),
                 byType,
-                segments(users, window, today, activeDaysByUser, openDaysByUser),
+                segments(users, window, today, activeDaysByUser, openDaysByUser, extendedUsers),
                 widthBuckets(activeTypesByUser),
                 boxed(hourly),
                 boxed(hourlyUsers),
@@ -162,58 +168,32 @@ public class AdminUserBehaviorAnalyticsService {
                 scopeAudit());
     }
 
-    // ── 活跃分层（六层互斥完备，判据即口径） ────────────────────────────────────
+    // ── 活跃分层（七层互斥完备，判据即口径；分类器见 BehaviorSegment） ──────────────
 
     private static List<AdminUserBehaviorAnalysisResponse.Segment> segments(
             List<UserBehaviorRepository.UserJoinedRow> users, int window, LocalDate today,
-            Map<Long, Long> activeDaysByUser, Map<Long, Long> openDaysByUser) {
-        long high = 0;
-        long regular = 0;
-        long low = 0;
-        long openOnly = 0;
-        long dormant = 0;
-        long fresh = 0;
+            Map<Long, Long> activeDaysByUser, Map<Long, Long> openDaysByUser,
+            Set<Long> extendedUsers) {
+        Map<BehaviorSegment, Long> counts = new EnumMap<>(BehaviorSegment.class);
         for (UserBehaviorRepository.UserJoinedRow user : users) {
             long availableDays = window;
             if (user.getJoinedDay() != null) {
                 availableDays = Math.min(window,
                         ChronoUnit.DAYS.between(user.getJoinedDay(), today) + 1L);
             }
-            if (availableDays <= NEW_USER_AVAILABLE_DAYS) {
-                fresh++;
-                continue;
-            }
-            long activeDays = activeDaysByUser.getOrDefault(user.getUserId(), 0L);
-            if (activeDays == 0) {
-                if (openDaysByUser.getOrDefault(user.getUserId(), 0L) > 0) {
-                    openOnly++;
-                } else {
-                    dormant++;
-                }
-                continue;
-            }
-            double ratio = (double) activeDays / availableDays;
-            if (ratio >= HIGH_ACTIVE_RATIO) {
-                high++;
-            } else if (ratio >= REGULAR_ACTIVE_RATIO) {
-                regular++;
-            } else {
-                low++;
-            }
+            // 扩展行为天数此处只需「有/无」（分层判据只看 >0），故以集合成员折算为 1/0
+            long extendedDays = extendedUsers.contains(user.getUserId()) ? 1L : 0L;
+            BehaviorSegment segment = BehaviorSegment.classify(availableDays,
+                    activeDaysByUser.getOrDefault(user.getUserId(), 0L),
+                    openDaysByUser.getOrDefault(user.getUserId(), 0L),
+                    extendedDays);
+            counts.merge(segment, 1L, Long::sum);
         }
-        return List.of(
-                new AdminUserBehaviorAnalysisResponse.Segment("HIGH", "高频活跃",
-                        "活跃天数 ≥ 可用天数的 50%", high),
-                new AdminUserBehaviorAnalysisResponse.Segment("REGULAR", "常规活跃",
-                        "活跃天数占可用天数 25% ~ 50%", regular),
-                new AdminUserBehaviorAnalysisResponse.Segment("LOW", "低频活跃",
-                        "窗口内有主动行为，但活跃天数不足可用天数的 25%", low),
-                new AdminUserBehaviorAnalysisResponse.Segment("OPEN_ONLY", "仅打开无行为",
-                        "窗口内没有主动行为，但有登录自动打卡（审核/巡检号的典型形态）", openOnly),
-                new AdminUserBehaviorAnalysisResponse.Segment("DORMANT", "完全沉默",
-                        "窗口内既无主动行为也无打开记录", dormant),
-                new AdminUserBehaviorAnalysisResponse.Segment("NEW", "新近注册",
-                        "可用天数 ≤ " + NEW_USER_AVAILABLE_DAYS + " 天，观测期不足，不参与比例分档", fresh));
+        // 枚举声明序 = 展示序（高频 → … → 新近注册）；每层都下发（0 也保留），保证清单稳定
+        return Arrays.stream(BehaviorSegment.values())
+                .map(seg -> new AdminUserBehaviorAnalysisResponse.Segment(
+                        seg.name(), seg.label(), seg.hint(), counts.getOrDefault(seg, 0L)))
+                .toList();
     }
 
     /** 行为宽度桶（只统计窗口内有主动行为的用户；无行为者已在分层里单列） */

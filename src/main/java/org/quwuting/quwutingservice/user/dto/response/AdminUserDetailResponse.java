@@ -12,7 +12,7 @@ import java.time.LocalDateTime;
  * <p>
  * 定位：管理端用户列表行点击 → 用户详情——运营查看任意用户的<b>完整画像</b>：
  * 公开资料（昵称/头像/角色/加入时间 + V53 age/gender/city）+ 积分账户收支 +
- * 贡献档案（等级 + 六维度计数）+ 行为概览（需求单分布/履约/上报/认领/打卡）。
+ * 贡献档案（等级 + 维度计数）+ 行为概览（上报/认领/打卡）。
  * 识别异常/刷分/流失的决策页。
  * <p>
  * 展示边界 = 管理端（requireAdmin）；openId 等敏感字段绝不下发；
@@ -42,8 +42,6 @@ public record AdminUserDetailResponse(
         PointsSummary points,
         /** 贡献档案完整明细（等级 + 各维度计数，见 ContributionBrief） */
         ContributionBrief contribution,
-        /** 需求单概览（总数 + 履约数 + 按状态分布；存量 NULL 状态等价 APPROVED） */
-        DemandSummary demand,
         /** 上报概览（门店信息上报 + 暂停营业报告合并；总数 + 待处理） */
         ReportSummary reports,
         /** 认领概览（总数 + 按状态分布） */

@@ -57,11 +57,26 @@ public record AdminUserBehaviorProfileResponse(
         LocalDateTime firstActiveAt,
         /** 窗口内最近主动行为时刻（null = 窗口内无主动行为） */
         LocalDateTime lastActiveAt,
+        /**
+         * 扩展行为条数（快讯 / 计时账本 / 热度点赞…；<b>不计入</b>活跃，见 {@code Nature.EXTENDED}）。
+         * 与 {@link #activeEventTotal} 并排展示——「活跃为 0 但有扩展行为」是真实使用而非审核/巡检。
+         */
+        long extendedEventTotal,
+        /** 扩展行为覆盖的去重自然日数 */
+        long extendedDays,
+        /** 本窗口内该用户可用天数 = min(窗口, 注册至今天数 + 1)（分层的分母，回显供前端解释分层依据） */
+        long availableDays,
+        /** 该用户在窗口内的活跃分层（与平台「行为分析」页同一分类器，见 {@code BehaviorSegment}） */
+        Segment segment,
         /** 行为类型分布（只含窗口内有事件的类型，按条数降序；平台全目录见 timeline 的 typeOptions） */
         List<TypeCount> breakdown,
         /** 活跃时段直方图：固定 24 格（下标 = 小时 0~23），值为主动行为条数（无观测恒为 0，非「未知」） */
         List<Long> hourly
 ) {
+
+    /** 活跃分层（码 / 中文名 / 判据释义，均服务端权威；前端零字典） */
+    public record Segment(String code, String label, String hint) {
+    }
 
     /**
      * 单类型计数（窗口内）。
@@ -77,12 +92,16 @@ public record AdminUserBehaviorProfileResponse(
             String code,
             /** 事件中文名 */
             String label,
+            /** 分类码（BROWSE/NEWS/TIMER/…；前端按它把类型分布分组） */
+            String category,
             /** 分类中文名 */
             String categoryLabel,
             /** 口径档码 */
             String nature,
             /** 口径档中文名（前端据此打标签、分色） */
             String natureLabel,
+            /** 对应功能已下线（历史记录；前端打「已下线」弱标记） */
+            boolean retired,
             /** 该类型事件条数 */
             long count,
             /** 该类型覆盖的去重天数（回答「零星一次」还是「持续在做」） */

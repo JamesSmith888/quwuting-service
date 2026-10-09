@@ -14,6 +14,9 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  * @param avatarUrl         头像（null = 未设置，客户端以昵称首字占位）
  * @param settledAtMs       该加入者的结算时刻（服务端时间轴 epoch ms）；null = 尚未结算
  * @param settledNetSeconds 该加入者结算时的净时长（秒）；null = 尚未结算。只作展示，不含金额
+ * @param joinedAtMs        该加入者扫码加入的时刻（服务端时间轴 epoch ms；2026-10-09，计时页「同行详情」展示
+ *                          「几点加入」用）。取自加入流水的创建时间，与 settledAtMs 同一条时间轴，客户端用同一次
+ *                          往返校准换算回本机
  */
 @JsonInclude(JsonInclude.Include.ALWAYS)
 public record TimerShareJoinView(
@@ -21,5 +24,6 @@ public record TimerShareJoinView(
         String nickname,
         String avatarUrl,
         Long settledAtMs,
-        Integer settledNetSeconds) {
+        Integer settledNetSeconds,
+        Long joinedAtMs) {
 }

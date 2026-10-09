@@ -229,11 +229,19 @@ public class TimerShareService {
         if (!TimerShareTokens.isWellFormed(token)) {
             return new TimerShareSettleResponse(false);
         }
-        boolean recorded = store.settle(token, userId, netSeconds, nowMs);
+        boolean recorded = store.settle(token, userId, netSeconds, nowMs - clampSettleAgeMs(request.settledAgoMs()));
         if (recorded) {
             log.info("[timer-share] settle recorded: uid={}", userId);
         }
         return new TimerShareSettleResponse(recorded);
+    }
+
+    /** 结算已发生多久：null / 负数 → 0；超过 {@link TimerSharePolicy#SETTLE_MAX_AGE_MS} → 截断（见 DTO 注释） */
+    static long clampSettleAgeMs(Long settledAgoMs) {
+        if (settledAgoMs == null || settledAgoMs < 0) {
+            return 0L;
+        }
+        return Math.min(settledAgoMs, TimerSharePolicy.SETTLE_MAX_AGE_MS);
     }
 
     /**
@@ -355,9 +363,19 @@ public class TimerShareService {
             views.add(new TimerShareJoinView(i + 1,
                     user == null ? null : user.getNickname(),
                     user == null ? null : user.getAvatarUrl(),
-                    join.getSettledAtMs(), join.getSettledNetSeconds()));
+                    join.getSettledAtMs(), join.getSettledNetSeconds(), toEpochMs(join)));
         }
         return views;
+    }
+
+    /**
+     * 加入流水 → 加入时刻（服务端时间轴 epoch ms）。取自 {@code created_at}（本库约定：业务时刻由 Java 写入，
+     * 不用 DB now()），与 settled_at_ms 同一条时间轴；创建时间缺失（理论上不会）→ null，客户端不展示该行。
+     */
+    private static Long toEpochMs(TimerShareJoin join) {
+        return join.getCreatedAt() == null
+                ? null
+                : join.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
     }
 
     /** 传播链：parentToken 格式合法且存在才记；否则忽略（它只是统计口径，不值得为它拒绝请求） */

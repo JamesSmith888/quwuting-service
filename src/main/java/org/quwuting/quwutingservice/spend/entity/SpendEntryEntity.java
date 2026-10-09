@@ -84,4 +84,13 @@ public class SpendEntryEntity extends BaseEntity {
     /** 结算时长秒数（仅 DANCE 来源；手动无此字段） */
     @Column(name = "duration_seconds")
     private Integer durationSeconds;
+
+    /**
+     * 一同计时的人快照 JSON（2026-10-09，V47；NULL = 无）。形状与长度护栏的唯一声明处 =
+     * {@link org.quwuting.quwutingservice.spend.SpendCompanions} / {@link SpendEntryLimits}。
+     * 与 {@code venue_name} 同构的「落账时快照」：对方事后改名换头像不改写历史账目。
+     * 不含对方 userId；仅账目所有者可读。
+     */
+    @Column(name = "companions_json", length = SpendEntryLimits.COMPANIONS_JSON_MAX_LENGTH)
+    private String companionsJson;
 }

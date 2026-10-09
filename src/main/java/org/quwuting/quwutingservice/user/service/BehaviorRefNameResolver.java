@@ -2,12 +2,18 @@ package org.quwuting.quwutingservice.user.service;
 
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.announcement.entity.Announcement;
+import org.quwuting.quwutingservice.announcement.enums.AnnouncementCategory;
 import org.quwuting.quwutingservice.announcement.repository.AnnouncementRepository;
+import org.quwuting.quwutingservice.appfeedback.AppFeedbackCategory;
+import org.quwuting.quwutingservice.bulletin.BulletinExcerpt;
+import org.quwuting.quwutingservice.bulletin.BulletinReactionCode;
 import org.quwuting.quwutingservice.dancer.entity.Dancer;
 import org.quwuting.quwutingservice.dancer.repository.DancerRepository;
 import org.quwuting.quwutingservice.recruitment.entity.Recruitment;
 import org.quwuting.quwutingservice.recruitment.repository.RecruitmentRepository;
 import org.quwuting.quwutingservice.user.repository.UserBehaviorEvent;
+import org.quwuting.quwutingservice.venuecrowd.entity.VenueCrowdReport;
+import org.quwuting.quwutingservice.venuecrowd.repository.VenueCrowdReportRepository;
 import org.quwuting.quwutingservice.venue.entity.Venue;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuefeedback.enums.FeedbackType;
@@ -60,11 +66,16 @@ public class BehaviorRefNameResolver {
     public static final String RECRUITMENT_FALLBACK = "招工信息";
     /** 公告标题兜底 */
     public static final String ANNOUNCEMENT_FALLBACK = "公告";
+    /** 快讯摘要兜底（已删除 / 正文为空） */
+    public static final String BULLETIN_FALLBACK = "快讯";
+    /** 热度上报所属门店名兜底（上报已删 / 门店已软删） */
+    public static final String CROWD_REPORT_FALLBACK = "门店热度上报";
 
     private final VenueRepository venueRepository;
     private final DancerRepository dancerRepository;
     private final RecruitmentRepository recruitmentRepository;
     private final AnnouncementRepository announcementRepository;
+    private final VenueCrowdReportRepository crowdReportRepository;
 
     /**
      * 批量解析关联对象名：{@code id → 展示名}。
@@ -87,6 +98,8 @@ public class BehaviorRefNameResolver {
             case DANCER -> dancerNames(clean);
             case ANNOUNCEMENT -> announcementTitles(clean);
             case RECRUITMENT -> recruitmentVenueNames(clean);
+            case BULLETIN -> bulletinExcerpts(clean);
+            case CROWD_REPORT -> crowdReportVenueNames(clean);
             case NONE -> Map.of();
         };
     }
@@ -103,6 +116,9 @@ public class BehaviorRefNameResolver {
             case SHARE_CHANNEL -> shareChannel(raw);
             case VENUE_FEEDBACK_TYPE -> enumDisplay(FeedbackType.class, raw, "其他问题");
             case STATUS_REPORT_REASON -> enumDisplay(ReportType.class, raw, "暂停营业");
+            case BULLETIN_REACTION -> bulletinReaction(raw);
+            case SPEND_SOURCE -> spendSource(raw);
+            case APP_FEEDBACK_CATEGORY -> enumDisplay(AppFeedbackCategory.class, raw, "其他");
         };
     }
 
@@ -125,6 +141,44 @@ public class BehaviorRefNameResolver {
         announcementRepository.findAllById(ids).stream()
                 .filter(a -> !a.isDeleted() && a.getTitle() != null)
                 .forEach(a -> out.put(a.getId(), a.getTitle()));
+        return out;
+    }
+
+    /**
+     * 快讯：展示名 = 正文摘要（快讯域<b>无标题字段</b>，47 号文档 §五稿字段删除；摘要规则唯一出处
+     * {@link BulletinExcerpt}，与列表 / 分享卡片同源）。只取 FLASH 档——公告共用同一张表，
+     * 但公告有自己的 {@link UserBehaviorEvent.RefKind#ANNOUNCEMENT} 解析，两类互不串档。
+     */
+    private Map<Long, String> bulletinExcerpts(List<Long> ids) {
+        Map<Long, String> out = new LinkedHashMap<>();
+        announcementRepository.findAllById(ids).stream()
+                .filter(a -> !a.isDeleted() && a.getCategory() == AnnouncementCategory.FLASH)
+                .forEach(a -> {
+                    String excerpt = BulletinExcerpt.of(a.getContent());
+                    out.put(a.getId(), excerpt.isBlank() ? BULLETIN_FALLBACK : excerpt);
+                });
+        return out;
+    }
+
+    /**
+     * 热度上报（点赞对象）：{@code 上报 → 所属门店名}，两跳在本方法内批量完成（无 N+1）。
+     * 点赞行只落 {@code report_id}，而「给哪家店的热度点赞」才是运营能读懂的对象。
+     */
+    private Map<Long, String> crowdReportVenueNames(List<Long> reportIds) {
+        List<VenueCrowdReport> reports = crowdReportRepository.findAllById(reportIds);
+        if (reports.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, String> venues = venueNames(reports.stream()
+                .map(VenueCrowdReport::getVenueId)
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .toList());
+        Map<Long, String> out = new LinkedHashMap<>();
+        reports.forEach(r -> {
+            String venue = r.getVenueId() == null ? null : venues.get(r.getVenueId());
+            out.put(r.getId(), venue == null ? CROWD_REPORT_FALLBACK : venue);
+        });
         return out;
     }
 
@@ -157,6 +211,25 @@ public class BehaviorRefNameResolver {
 
     // ── 字典 ──────────────────────────────────────────────────────────────────
 
+    /** 快讯表态码 → 「😁 笑嘻嘻」（emoji + 中文短名，BulletinReactionCode 权威；未知码回退「表态」） */
+    private static String bulletinReaction(String code) {
+        String emoji = BulletinReactionCode.emojiOf(code);
+        if (emoji == null) {
+            return "表态";
+        }
+        String label = BulletinReactionCode.labelOf(code);
+        return label == null || label.isBlank() ? emoji : emoji + " " + label;
+    }
+
+    /** 记账来源（SpendSource：DANCE 计时结算入账 / MANUAL 手动记账；与管理端 SPEND_SOURCE_LABELS 同文案） */
+    private static String spendSource(String source) {
+        return switch (source) {
+            case "DANCE" -> "计时结算";
+            case "MANUAL" -> "手动记账";
+            default -> "记账";
+        };
+    }
+
     /** 分享渠道（channel：BUTTON/MENU/TIMELINE；空 = 未知渠道不渲染，与既有实现逐字一致） */
     private static String shareChannel(String channel) {
         return switch (channel) {
@@ -176,6 +249,9 @@ public class BehaviorRefNameResolver {
             }
             if (value instanceof ReportType r) {
                 return r.getDisplayName();
+            }
+            if (value instanceof AppFeedbackCategory c) {
+                return c.getDisplayName();
             }
             return fallback;
         } catch (IllegalArgumentException e) {

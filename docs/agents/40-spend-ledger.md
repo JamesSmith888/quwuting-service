@@ -153,6 +153,34 @@ ORDER BY e.ts DESC
 "账上现在有什么"，是**明细读取**而非"用过没有"的聚合；与双口径汇总并存时，
 `entryCount > entries.size()` 应读作"记过又删了"。
 
+## 一同计时的人快照（2026-10-09，V47）
+
+> 需求（前端 quwuting 仓 44 号 §41 / 59 号 §十四）：经二维码同步的计时结算后，账本流水要能回答「这一笔是和谁一起跳的」。
+
+**列**：`qwt_spend_entries.companions_json varchar(4096) NULL`（V47，纯增量；NULL = 没有同行者：手动账目 / 单人计时 / V47 之前的存量行）。
+JSON 数组 `[{"nickname":..,"avatarUrl":..,"relation":"HOST|JOINER"}]`；`HOST` = 对方是出示二维码的人，`JOINER` = 对方是扫码加入的人
+（枚举 `SpendCompanionRelation`，协议值 = 常量名，小程序 `check:protocol` 逐值比对）。
+
+**为什么是快照列、不是联查分享会话**：账本是「本地为源、云端为镜」，联查意味着每行一次往返（弱网退化成空白）；token 是 bearer 凭据，
+永久存进账目行 = 把凭据长期留在另一张表；展示昵称头像本来就该是"当时的样子"——与 `venue_name` 同构（对方事后改名不改写历史）。
+
+**不存什么（合规收敛点）**：对方 userId（不给跨账目串联同一个人留通道）、年龄 / 性别 / 城市（从不经计时分享通道下发）、对方金额（账务隐私）。
+读：与整张表一致，接口全部 user-scoped，仅账目所有者本人读得到；管理端用量统计（`AdminSpendStatsService`）**不投影本列**。
+
+**总原则：同行者是元数据，永远不能拒掉一笔账**（`SpendEntryLimits` 毒丸教训的同族应用）。`SpendCompanions`（纯静态、可单测）：
+- `normalize`：关系认不出的项整项丢弃、昵称去控制字符 / 首尾空白 / 超长按字符截断（不拆代理对）、头像只收 `https` 且 ≤ 512，否则置 null、人数封顶 6（= 单会话加入上限 5 + 主持方 1）；
+- `serialize`：序列化后超过 4096（引号转义膨胀的极端载荷）时**从尾部丢人直到放得下**，任何输入都产出可落库结果，从不抛；
+- `parse`（读侧）：坏 JSON / 形状不对 → 空列表 + WARN（不放大成 500，也不拖垮整页账目拉取），读出的每项再过一遍 `normalize`。
+
+**写语义**：请求 `companions` **缺省（null）= 保留库里已有值**；非 null（含空数组）= 整体替换（空 → 列 NULL）。账目是 last-write-wins，
+但"老版本客户端重传同一条账"不应抹掉新版本写下的同行者。下行 `GET /spend/entries` 的 `companions` 恒非 null（无则 `[]`）。
+
+**三个护栏常量**在 `SpendEntryLimits`（`COMPANIONS_JSON_MAX_LENGTH` / `COMPANION_MAX_COUNT` / `COMPANION_NICKNAME_MAX_LENGTH` / `COMPANION_AVATAR_URL_MAX_LENGTH`）：
+`SpendEntryLimitsMirrorTest` 把前者与 V47 DDL 逐项对齐；小程序 `check:protocol` 把后三者与客户端 `constants/spendWire.ts` 逐值比对。
+
+**验证**：`SpendCompanionsTest` 8 项（null 与空数组可区分 / 关系宽容与丢弃 / 人数封顶 / 昵称清洗与不拆 emoji / 头像 https 与超长置空 / 往返 / 极端载荷仍可落库 / 读侧宽容）；
+`SpendServiceTest` +4（落库为快照 JSON / 非法同行者不拒账 / 缺省保留与空数组置空 / 增量拉取恒非 null）。
+
 ## 门禁
 
 `SpendStatsScopeMirrorTest`（零依赖，7 项，与 `UserStatsSqlMirrorTest` /
@@ -179,6 +207,9 @@ spend/
   enums/WireEnums.java              协议字面量解析唯一入口
   enums/SpendSource.java            DANCE / MANUAL
   enums/SpendCategory.java          固定 6 类
+  enums/SpendCompanionRelation.java HOST / JOINER（同行者关系，V47）
+  SpendCompanions.java              ★ 同行者快照 规整 / 序列化 / 读侧解析（元数据永不拒账）
+  SpendEntryLimits.java             存储约束唯一声明处（含同行者护栏）
   entity/SpendEntryEntity.java
   repository/SpendEntryRepository.java  原生 SQL 聚合（user_id 恒在 WHERE 首位）
   dto/*                             请求/响应 record

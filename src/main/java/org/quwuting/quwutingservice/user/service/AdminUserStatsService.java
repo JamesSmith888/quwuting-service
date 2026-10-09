@@ -7,7 +7,6 @@ import org.quwuting.quwutingservice.points.repository.PointsAccountRepository;
 import org.quwuting.quwutingservice.points.repository.PointsTransactionRepository;
 import org.quwuting.quwutingservice.user.dto.response.CheckinSummary;
 import org.quwuting.quwutingservice.user.dto.response.ClaimSummary;
-import org.quwuting.quwutingservice.user.dto.response.DemandSummary;
 import org.quwuting.quwutingservice.user.dto.response.PointsSummary;
 import org.quwuting.quwutingservice.user.dto.response.ReportSummary;
 import org.quwuting.quwutingservice.user.dto.response.TopVenue;
@@ -40,7 +39,7 @@ import java.util.stream.Collectors;
  * 用户全维度聚合服务（2026-08-27 用户管理增强，docs/agents/23；仅 ADMIN 消费）。
  * <p>
  * <b>定位（系统性的长期方案）</b>：管理端用户管理需要的<b>所有行为维度聚合</b>
- * （积分账户收支 / 需求单 / 履约 / 上报 / 认领 / 打卡 / 最近活跃）集中在本服务，
+ * （积分账户收支 / 上报 / 认领 / 打卡 / 最近露面 / 常去门店）集中在本服务，
  * 列表（GET /admin/users）与详情（GET /admin/users/{id}）复用同一批批量聚合方法——
  * 后续新增维度 = 加一个 repository GROUP BY 方法 + 一个聚合方法，列表/详情自动
  * 获得，杜绝「每次增强从零写聚合」的散落模式。
@@ -118,38 +117,6 @@ public class AdminUserStatsService {
                 userId -> {
                     long[] s = snapshots.getOrDefault(userId, new long[]{0L, 0L, 0L});
                     return new PointsSummary(s[0], s[1], s[2], txCounts.getOrDefault(userId, 0L));
-                }));
-    }
-
-    // ── 需求单（总数 + 履约 + 按状态分布；存量 NULL 状态 = APPROVED） ──────────
-
-    /**
-     * 批量需求单概览：总数 + 履约数（fulfilled_at 非空）+ 按状态分布
-     * （TreeMap 字典序 key，前端按序渲染零逻辑）。无需求记录用户 → 全 0。
-     */
-    @Transactional(readOnly = true)
-    public Map<Long, DemandSummary> demandSummaries(Collection<Long> userIds) {
-        if (userIds.isEmpty()) {
-            return Map.of();
-        }
-        Map<Long, Long> totals = toMap(demandRecordRepository.countGroupByUserIds(userIds));
-        Map<Long, Long> fulfilled = toMap(demandRecordRepository.countFulfilledGroupByUserIds(userIds));
-        Map<String, Map<Long, Long>> byStatus = demandRecordRepository.countByUserAndStatusGroup(userIds).stream()
-                .collect(Collectors.groupingBy(
-                        r -> (String) r[1],
-                        Collectors.toMap(r -> (Long) r[0], r -> (Long) r[2], Long::sum)));
-        return userIds.stream().collect(Collectors.toMap(
-                Function.identity(),
-                userId -> {
-                    Map<String, Long> dist = new TreeMap<>();
-                    byStatus.forEach((status, counts) -> {
-                        long c = counts.getOrDefault(userId, 0L);
-                        if (c > 0) {
-                            dist.put(status, c);
-                        }
-                    });
-                    return new DemandSummary(totals.getOrDefault(userId, 0L),
-                            fulfilled.getOrDefault(userId, 0L), dist);
                 }));
     }
 

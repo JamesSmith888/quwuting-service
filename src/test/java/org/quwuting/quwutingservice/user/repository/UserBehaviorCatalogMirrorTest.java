@@ -43,7 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li><b>逐字等价</b>：{@code UserStatsSql} / {@code UserBehaviorSql} 的 5 条事实集常量
  *       必须 {@code equals} 目录生成器输出（口径的实际承载物，禁任何手工润色）；</li>
  *   <li><b>成员完整且互斥</b>：每个事件码唯一、表唯一、中文名非空；ACTIVE/PASSIVE/SIGNAL/COLLAB
- *       四档规模锁定（12/4/1/1）——无声增删会改变「活跃」与「噪音」口径；</li>
+ *       五档规模锁定（12/4/1/1/8）——无声增删会改变「活跃」与「噪音」口径；</li>
  *   <li><b>轨迹覆盖全目录</b>：轨迹事实集的事件码集合 = 事件级事实集的事件码集合 =
  *       目录全量（少一个 ⇒ 某类行为从轨迹里消失，且不会有人发现）；</li>
  *   <li><b>敏感列禁入</b>：联系手机号 / 真实姓名 / 微信号 / openId 不得成为轨迹的关联对象或
@@ -72,6 +72,8 @@ class UserBehaviorCatalogMirrorTest {
     private static final int PASSIVE_SIZE = 4;
     private static final int SIGNAL_SIZE = 1;
     private static final int COLLAB_SIZE = 1;
+    /** 扩展行为档（快讯 / 计时账本 / 热度点赞 / 意见反馈 / 活动打卡…；不计入活跃，见 Nature#EXTENDED） */
+    private static final int EXTENDED_SIZE = 8;
 
     /** 轨迹/明细列禁止出现的用户敏感列（含 openId 的库列名 open_id 与联系人字段） */
     private static final List<String> FORBIDDEN_COLUMNS = List.of(
@@ -113,6 +115,10 @@ class UserBehaviorCatalogMirrorTest {
                         + "它撑起管理端「打开」序列，多一个成员会让「打开」与「活跃」再次混淆");
         assertEquals(COLLAB_SIZE, UserBehaviorEvent.of(UserBehaviorEvent.Nature.COLLAB).size(),
                 "协作行为档成员数变化——该类事件当前不计入活跃，增删需显式登记");
+        assertEquals(EXTENDED_SIZE, UserBehaviorEvent.of(UserBehaviorEvent.Nature.EXTENDED).size(),
+                "扩展行为档成员数变化——该档不计入活跃，增删仍需在 docs/agents/35 登记；"
+                        + "若是把某项「纳入活跃」（改 Nature 为 ACTIVE），ACTIVE_SIZE 同步 +1、"
+                        + "大盘 DAU / 留存数字会上调，必须先登记「数字变化是预期而非故障」");
 
         Set<String> codes = all.stream().map(UserBehaviorEvent::code).collect(Collectors.toSet());
         Set<String> tables = all.stream().map(UserBehaviorEvent::table).collect(Collectors.toSet());
@@ -163,12 +169,13 @@ class UserBehaviorCatalogMirrorTest {
     @Test
     void everyBranchCarriesCanonicalDayAndTime() {
         UserBehaviorEvent.all().forEach(e -> {
-            String day = e.dayColumn() != null ? e.dayColumn() : "DATE(created_at)";
-            // 窗口下界的比较列 = 业务日列或原始时间戳列（禁 DATE(created_at) >= ——函数包列会让索引失效）
-            String lowerBound = e.dayColumn() != null ? e.dayColumn() : "created_at";
+            String time = e.timeColumn();
+            String day = e.dayColumn() != null ? e.dayColumn() : "DATE(" + time + ")";
+            // 窗口下界的比较列 = 业务日列或原始时间戳列（禁 DATE(col) >= ——函数包列会让索引失效）
+            String lowerBound = e.dayColumn() != null ? e.dayColumn() : time;
             String kind = e.dayColumn() != null ? "DATE" : "DATETIME";
-            String fragment = day + " AS event_day, created_at AS event_time FROM " + e.table()
-                    + " WHERE user_id IS NOT NULL AND " + lowerBound
+            String fragment = day + " AS event_day, " + time + " AS event_time FROM " + e.table()
+                    + " WHERE " + e.userColumn() + " IS NOT NULL AND " + lowerBound
                     + " >= CAST(:sinceDay AS " + kind + ")";
             assertTrue(UserBehaviorSql.EVENT_FACT_UNION.contains(fragment),
                     e.code() + " 的分支缺少「权威日 + 时刻」或窗口下界——"
@@ -276,9 +283,9 @@ class UserBehaviorCatalogMirrorTest {
         });
     }
 
-    /** 目录声明会落进 SQL 的全部列（时间列恒为 created_at） */
+    /** 目录声明会落进 SQL 的全部列（用户列 / 时间列可由事件声明覆盖，缺省 user_id / created_at） */
     private static List<String> declaredColumns(UserBehaviorEvent e) {
-        return Stream.of(e.dayColumn(), e.refColumn(), e.detailColumn(), e.timeColumn())
+        return Stream.of(e.userColumn(), e.dayColumn(), e.refColumn(), e.detailColumn(), e.timeColumn())
                 .filter(java.util.Objects::nonNull)
                 .distinct()
                 .toList();
@@ -309,6 +316,107 @@ class UserBehaviorCatalogMirrorTest {
             "\\b(ADD|DROP|RENAME|CHANGE)\\s+(?:COLUMN\\s+)?"
                     + "(?!CONSTRAINT\\b|INDEX\\b|UNIQUE\\b|FOREIGN\\b|KEY\\b|CHECK\\b|PRIMARY\\b)"
                     + "`?(\\w+)`?(?:\\s+TO\\s+`?(\\w+)`?)?", Pattern.CASE_INSENSITIVE);
+
+    // ── 6b. 归类门禁：新表必须表态（2026-10-09） ───────────────────────────────
+
+    /** 表里出现这些列即视为「按用户归因的数据」（点赞人 / 计时主持人也是用户行为的归因列） */
+    private static final Set<String> USER_ATTRIBUTION_COLUMNS =
+            Set.of("user_id", "host_user_id", "liker_id");
+
+    /**
+     * 含用户归因列、但<b>刻意不进行为目录</b>的表及理由。
+     * <p>
+     * 新增一张带 {@code user_id} 的表而既不登记目录、也不在这里写理由，门禁就红——
+     * 这是「目录 2026-09-15 后无人维护、快讯 / 计时账本 / 计时同步整整缺席三周」的结构性解法：
+     * 把「忘记登记」变成「编译期可见的未表态」。理由必须说清<b>为什么它不是『用户做过什么』</b>。
+     */
+    private static final Map<String, String> NOT_BEHAVIOR_TABLES = Map.ofEntries(
+            // ── 系统派生 / 账户快照（行为的结果，不是行为本身）
+            Map.entry("qwt_points_accounts", "积分账户余额快照（系统派生；行为本身是产生积分的那些事件）"),
+            Map.entry("qwt_points_transactions", "积分流水（行为的结果；详情页『积分账户』卡直接下钻展示）"),
+            Map.entry("qwt_wx_subscribe_quota", "订阅消息授权额度账本（系统记账）"),
+            Map.entry("qwt_wx_subscribe_logs", "订阅消息推送日志（系统发出，非用户动作）"),
+            Map.entry("qwt_dance_rule_snapshots", "计价规则云端快照（客户端后台静默同步，非用户当下动作）"),
+            Map.entry("qwt_web_login_sessions", "管理端扫码登录会话（运营登录凭据，非产品使用）"),
+            // ── 有专卡的事实（详情页已有独立卡片，放进轨迹会重复且口径不同）
+            Map.entry("qwt_venue_presence_pings", "到店足迹采样（系统按打开采样；专卡『到访足迹』『位置轨迹』，口径见 52 号文档）"),
+            Map.entry("qwt_venue_presence_consents", "到访授权状态流水（专卡『到访足迹』的开关记录）"),
+            // ── 运营授予 / 管理动作（用户是被授予方，不是行为人）
+            Map.entry("qwt_resource_grants", "协作授权（运营授予，用户是被授予方；专卡『协作授权』）"),
+            // ── 舞伴域（已下线）：历史上从未进入口径，现在补进会改写已发布的历史数字
+            Map.entry("qwt_dancer_recognitions", "舞伴认可（舞伴系统已下线；历史上从未入口径，补录会改写历史 DAU）"),
+            Map.entry("qwt_dancer_recognition_tags", "舞伴认可标签（同上）"),
+            Map.entry("qwt_dancer_ad_views", "舞伴广告浏览（同上；0 行）"),
+            Map.entry("qwt_points_unlocks", "舞伴内容积分解锁（同上；最后一条 2026-09-01）"),
+            Map.entry("qwt_dancers", "舞伴资料（资料主体，不是用户行为）")
+    );
+
+    /**
+     * 每张含用户归因列的表，必须二选一：登记进行为目录，或在 {@link #NOT_BEHAVIOR_TABLES} 写明理由。
+     * 反向同样断言：豁免表必须真实存在、且不能同时登记在目录里（陈旧豁免会掩盖新问题）。
+     */
+    @Test
+    void everyUserAttributedTableIsClassified() {
+        Map<String, Set<String>> schema = migrationSchema();
+        Set<String> catalogTables = UserBehaviorEvent.all().stream()
+                .map(UserBehaviorEvent::table).collect(Collectors.toSet());
+
+        List<String> unclassified = schema.entrySet().stream()
+                .filter(e -> e.getValue().stream().anyMatch(USER_ATTRIBUTION_COLUMNS::contains))
+                .map(Map.Entry::getKey)
+                .filter(t -> !catalogTables.contains(t) && !NOT_BEHAVIOR_TABLES.containsKey(t))
+                .toList();
+        assertTrue(unclassified.isEmpty(),
+                "以下表带有用户归因列，却既未登记行为目录也未豁免：" + unclassified
+                        + "\n——新功能的用户行为在管理端『行为轨迹』里将完全不可见（快讯 / 计时账本曾因此缺席三周）。"
+                        + "请判断它是不是『用户做过什么』：是 → 在 UserBehaviorEvent 登记"
+                        + "（用户主动但未评审纳入活跃 → Nature.EXTENDED）；不是 → 写进 NOT_BEHAVIOR_TABLES 并说明理由");
+
+        NOT_BEHAVIOR_TABLES.forEach((table, reason) -> {
+            assertNotNull(schema.get(table), "豁免表 " + table + " 在迁移脚本里不存在——请清理陈旧豁免");
+            assertTrue(!catalogTables.contains(table),
+                    "豁免表 " + table + " 同时登记在行为目录里——请删掉其中一边（" + reason + "）");
+            assertTrue(!reason.isBlank(), table + " 的豁免理由不能为空");
+        });
+    }
+
+    /**
+     * 下线事件仍是历史事实：保留在既有口径里（改写历史 DAU / 留存 = 事后篡改已发布的数字），
+     * 只在展示层退场。门禁锁住『下线事件仍留在原档位』与『必须写明下线说明』。
+     */
+    @Test
+    void retiredEventsStayInHistoricalFactsAndCarryNotes() {
+        List<UserBehaviorEvent> retired = UserBehaviorEvent.all().stream()
+                .filter(UserBehaviorEvent::isRetired).toList();
+        assertEquals(Set.of("DANCER_VIEW", "DANCER_SHARE", "DANCER_FAVORITE", "DANCER_DEMAND",
+                        "RECRUITMENT_CONTACT"),
+                retired.stream().map(UserBehaviorEvent::code).collect(Collectors.toSet()),
+                "下线事件集合变化——新增下线请同步 docs/agents/35『下线事件』并确认其历史数据仍留在口径内");
+        retired.forEach(e -> {
+            assertTrue(!e.retiredNote().isBlank(), e.code() + " 的下线说明为空");
+            String factUnion = e.nature() == UserBehaviorEvent.Nature.ACTIVE
+                    ? UserStatsSql.ACTIVE_FACT_UNION : UserStatsSql.PASSIVE_TRACE_FACT_UNION;
+            assertTrue(factUnion.contains(e.table()),
+                    e.code() + " 已下线但被移出了历史口径事实集——会让已发布的历史活跃 / 留存被事后改写。"
+                            + "下线只改展示（retiredNote），不改 Nature 与事实集成员");
+        });
+    }
+
+    /** 扩展行为不进任何『活跃 / 噪音』事实集，但必须进全档事实集（轨迹可见） */
+    @Test
+    void extendedEventsAreVisibleButNeverCountedAsActive() {
+        UserBehaviorEvent.of(UserBehaviorEvent.Nature.EXTENDED).forEach(e -> {
+            assertTrue(!UserStatsSql.ACTIVE_FACT_UNION.contains(e.table()),
+                    e.code() + "（扩展行为）混入了活跃事实集——这会让大盘 DAU 静默上调（评审通过再改 Nature）");
+            assertTrue(!UserStatsSql.PASSIVE_TRACE_FACT_UNION.contains(e.table()),
+                    e.code() + "（扩展行为）混入了被动痕迹事实集——会改变『打卡型噪音』判定");
+            assertTrue(!UserBehaviorSql.ACTIVE_EVENT_FACT_UNION.contains(e.table()),
+                    e.code() + "（扩展行为）混入了活跃事件级事实集");
+            assertTrue(UserBehaviorSql.EVENT_FACT_UNION.contains(e.table())
+                            && UserBehaviorSql.EVENT_DETAIL_UNION.contains(e.table()),
+                    e.code() + " 没有进入全档事实集——它将在轨迹里不可见");
+        });
+    }
 
     // ── 7. 派生表列引用（别名解析） ─────────────────────────────────────────────
 

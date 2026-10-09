@@ -50,6 +50,15 @@ public final class TimerSharePolicy {
     /** 净时长相对墙钟秒数允许的上浮（两个读数来自同一时刻的 floor，理论上 ≤；留 1 秒抖动余量） */
     public static final int NET_SECONDS_SLACK = 1;
 
+    /**
+     * 结算事实「已发生多久」的上限 = 12 小时（2026-10-09）。结算上报带 {@code settledAgoMs}（客户端
+     * 本机单调差：上报那一刻 − 结算那一刻），服务端据此回推 {@code settled_at = 收到时刻 − ago}，
+     * 使<b>延迟重放</b>（弱网下客户端把结算事实暂存、联网后补发）仍落在正确的时间点上。上限与墙钟
+     * 时长上限同值：比一场舞还久的结算事实没有意义，超限按上限截断（不拒——它只是展示用时间事实）。
+     * 前端出站队列的保留期必须与它一致（门禁 X 组比对）。
+     */
+    public static final long SETTLE_MAX_AGE_MS = MAX_WALL_ELAPSED_MS;
+
     /** session_key 最大长度 / 字符集（起点毫秒[:成员id]，只含数字字母冒号下划线连字符） */
     public static final int SESSION_KEY_MAX_LENGTH = 48;
 

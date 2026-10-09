@@ -38,7 +38,10 @@ public record AdminUserBehaviorAnalysisResponse(
         int days,
         /** 汇总盘子 */
         Summary summary,
-        /** 行为类型统计（<b>全目录</b>，含窗口内 0 次的类型——保证类型清单稳定可发现，前端过滤） */
+        /**
+         * 行为类型统计（<b>全现役目录</b>，含窗口内 0 次的类型——保证类型清单稳定可发现，前端过滤；
+         * <b>下线功能的类型只在窗口内有记录时才下发</b>：恒为 0 的下线类型留着只是噪音）
+         */
         List<TypeStat> byType,
         /** 活跃分层（互斥且完备：所有真实用户恰好落入一层） */
         List<Segment> segments,
@@ -70,7 +73,7 @@ public record AdminUserBehaviorAnalysisResponse(
     }
 
     /**
-     * 单类型平台统计（<b>全目录下发</b>，0 也保留一行）。
+     * 单类型平台统计（<b>全现役目录下发</b>，0 也保留一行；下线类型见 {@link #byType}）。
      */
     public record TypeStat(
             /** 事件码 */
@@ -85,6 +88,8 @@ public record AdminUserBehaviorAnalysisResponse(
             String natureLabel,
             /** 口径档释义（解释为何计入/不计入活跃） */
             String natureHint,
+            /** 对应功能已下线（出现即说明窗口内仍有历史记录；前端打「已下线」弱标记） */
+            boolean retired,
             /** 窗口内做过该事件的去重用户数 */
             long users,
             /** 窗口内该事件条数 */
@@ -99,7 +104,7 @@ public record AdminUserBehaviorAnalysisResponse(
      * 前端若自己按比例分档，改一次阈值就会与后端统计图互相矛盾。
      */
     public record Segment(
-            /** 分层码（HIGH / REGULAR / LOW / OPEN_ONLY / DORMANT / NEW） */
+            /** 分层码（HIGH / REGULAR / LOW / EXTENDED_ONLY / OPEN_ONLY / DORMANT / NEW，见 BehaviorSegment） */
             String code,
             /** 分层名（如「高频活跃」） */
             String label,

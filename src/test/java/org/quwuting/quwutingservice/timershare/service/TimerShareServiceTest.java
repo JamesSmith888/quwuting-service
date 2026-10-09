@@ -478,20 +478,20 @@ class TimerShareServiceTest {
     @Test
     void settleRecordsThroughStoreAndDegradesToFalseForMalformedToken() {
         when(store.settle(TOKEN, GUEST, 2700, T0)).thenReturn(true);
-        assertTrue(service.settle(GUEST, TOKEN, new SettleTimerShareRequest(2700)).recorded());
+        assertTrue(service.settle(GUEST, TOKEN, new SettleTimerShareRequest(2700, null)).recorded());
 
         // token 格式非法：不触库、不抛错，直接 recorded=false（尽力而为语义，见 TimerShareSettleResponse）
-        assertFalse(service.settle(GUEST, "bad token", new SettleTimerShareRequest(2700)).recorded());
+        assertFalse(service.settle(GUEST, "bad token", new SettleTimerShareRequest(2700, null)).recorded());
         verify(store, never()).settle(eq("bad token"), anyLong(), any(), anyLong());
     }
 
     @Test
     void settleWithIllegalReadingIs1041AndNeverTouchesStore() {
         assertCode(1041, () -> service.settle(GUEST, TOKEN, null));
-        assertCode(1041, () -> service.settle(GUEST, TOKEN, new SettleTimerShareRequest(null)));
-        assertCode(1041, () -> service.settle(GUEST, TOKEN, new SettleTimerShareRequest(-1)));
+        assertCode(1041, () -> service.settle(GUEST, TOKEN, new SettleTimerShareRequest(null, null)));
+        assertCode(1041, () -> service.settle(GUEST, TOKEN, new SettleTimerShareRequest(-1, null)));
         assertCode(1041, () -> service.settle(GUEST, TOKEN,
-                new SettleTimerShareRequest(12 * 3600 + 1)));
+                new SettleTimerShareRequest(12 * 3600 + 1, null)));
         verifyNoInteractions(store);
     }
 
@@ -499,9 +499,30 @@ class TimerShareServiceTest {
     void settleSharesTheHostWriteRateLimit() {
         when(store.settle(TOKEN, HOST, 100, T0)).thenReturn(true);
         for (int i = 0; i < TimerSharePolicy.WRITE_RATE_LIMIT; i++) {
-            service.settle(HOST, TOKEN, new SettleTimerShareRequest(100));
+            service.settle(HOST, TOKEN, new SettleTimerShareRequest(100, null));
         }
-        assertCode(1006, () -> service.settle(HOST, TOKEN, new SettleTimerShareRequest(100)));
+        assertCode(1006, () -> service.settle(HOST, TOKEN, new SettleTimerShareRequest(100, null)));
+    }
+
+    @Test
+    void settleWithAgeStampsTheFactBackInTimeSoDelayedReplaysStayAccurate() {
+        // 弱网重放：客户端 3 分钟前结算、现在才发出去 ⇒ 服务端回推 settled_at = 收到时刻 − 3 分钟
+        long threeMinutes = 3 * 60_000L;
+        when(store.settle(TOKEN, GUEST, 2700, T0 - threeMinutes)).thenReturn(true);
+        assertTrue(service.settle(GUEST, TOKEN, new SettleTimerShareRequest(2700, threeMinutes)).recorded());
+        verify(store).settle(TOKEN, GUEST, 2700, T0 - threeMinutes);
+    }
+
+    @Test
+    void settleAgeIsClampedNeverNegativeAndNeverBeyondTheSessionCeiling() {
+        // null / 负数 → 0（老客户端 = V45 行为逐字不变）；超过 12 小时 → 按上限截断，不拒（展示用时间事实）
+        assertEquals(0L, TimerShareService.clampSettleAgeMs(null));
+        assertEquals(0L, TimerShareService.clampSettleAgeMs(-5L));
+        assertEquals(1234L, TimerShareService.clampSettleAgeMs(1234L));
+        assertEquals(TimerSharePolicy.SETTLE_MAX_AGE_MS,
+                TimerShareService.clampSettleAgeMs(TimerSharePolicy.SETTLE_MAX_AGE_MS + 1));
+        assertEquals(TimerSharePolicy.SETTLE_MAX_AGE_MS, TimerSharePolicy.MAX_WALL_ELAPSED_MS,
+                "结算事实保留期与墙钟时长上限同值：比一场舞还久的结算没有意义，前端出站队列 TTL 也取它");
     }
 
     @Test
@@ -548,6 +569,7 @@ class TimerShareServiceTest {
         first.setUserId(GUEST);
         first.setSettledAtMs(T0 - 10_000L);
         first.setSettledNetSeconds(1500);
+        first.setCreatedAt(java.time.LocalDateTime.of(2026, 10, 9, 21, 5, 0));
         TimerShareJoin second = new TimerShareJoin();
         second.setUserId(21L);
         when(store.listJoins(share.getId())).thenReturn(List.of(first, second));
@@ -563,11 +585,14 @@ class TimerShareServiceTest {
         assertEquals("https://cdn.example/b.png", v0.avatarUrl());
         assertEquals(T0 - 10_000L, v0.settledAtMs());
         assertEquals(1500, v0.settledNetSeconds());
+        assertEquals(first.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli(),
+                v0.joinedAtMs(), "加入时刻取自加入流水的创建时间（服务端时间轴，同 settledAtMs）");
         TimerShareJoinView v1 = r.joins().get(1);
         assertEquals(2, v1.seq());
         assertNull(v1.nickname());
         assertNull(v1.avatarUrl());
         assertNull(v1.settledAtMs(), "未结算 → null");
+        assertNull(v1.joinedAtMs(), "创建时间缺失（桩数据）→ null，客户端不展示该行");
     }
 
     // ── 码图 ──────────────────────────────────────────────────────────────

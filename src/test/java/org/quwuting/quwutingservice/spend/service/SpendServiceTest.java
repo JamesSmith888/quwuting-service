@@ -5,7 +5,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.quwuting.quwutingservice.spend.SpendCompanions;
 import org.quwuting.quwutingservice.spend.SpendEntryLimits;
+import org.quwuting.quwutingservice.spend.dto.SpendCompanionItem;
 import org.quwuting.quwutingservice.spend.dto.SpendEntryItem;
 import org.quwuting.quwutingservice.spend.dto.SpendSyncRequest;
 import org.quwuting.quwutingservice.spend.dto.SpendSyncResponse;
@@ -22,6 +24,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -61,7 +64,7 @@ class SpendServiceTest {
     /** 合法条目（大写协议值；特殊字段由各用例覆盖；direction 缺省 = 老客户端不带该字段） */
     private SpendEntryItem entry(String clientEntryId, String source, String category) {
         return new SpendEntryItem(clientEntryId, TS, new BigDecimal("88.00"),
-                category, source, "", null, null, null, Boolean.FALSE, null);
+                category, source, "", null, null, null, Boolean.FALSE, null, null);
     }
 
     private SpendSyncRequest request(SpendEntryItem... items) {
@@ -127,11 +130,11 @@ class SpendServiceTest {
     @Test
     void testNonPositiveAmountAndInvalidTsRejected() {
         SpendEntryItem zeroAmount = new SpendEntryItem("led-g", TS, BigDecimal.ZERO,
-                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, null);
+                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, null, null);
         SpendEntryItem negativeAmount = new SpendEntryItem("led-h", TS, new BigDecimal("-1.00"),
-                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, null);
+                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, null, null);
         SpendEntryItem zeroTs = new SpendEntryItem("led-i", 0L, new BigDecimal("10.00"),
-                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, null);
+                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, null, null);
 
         SpendSyncResponse res = service().sync(1L, request(zeroAmount, negativeAmount, zeroTs));
 
@@ -160,13 +163,13 @@ class SpendServiceTest {
     void testValuesBeyondColumnLimitsRejectedPerEntryNotPerBatch() {
         stubFreshInsert();
         SpendEntryItem tooLarge = new SpendEntryItem("led-big", TS, new BigDecimal("100000000.00"),
-                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, null);
+                "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, null, null);
         SpendEntryItem longVenueName = new SpendEntryItem("led-venue", TS, new BigDecimal("10.00"),
                 "PARTNER", "DANCE", "", 1L, "店".repeat(SpendEntryLimits.VENUE_NAME_MAX_LENGTH + 1),
-                null, Boolean.FALSE, null);
+                null, Boolean.FALSE, null, null);
         SpendEntryItem longRef = new SpendEntryItem("led-ref", TS, new BigDecimal("10.00"),
                 "PARTNER", "DANCE", "r".repeat(SpendEntryLimits.SOURCE_REF_ID_MAX_LENGTH + 1),
-                null, null, null, Boolean.FALSE, null);
+                null, null, null, Boolean.FALSE, null, null);
 
         SpendSyncResponse res = service().sync(1L, request(
                 tooLarge, longVenueName, longRef, entry("led-ok", "DANCE", "PARTNER")));
@@ -181,7 +184,7 @@ class SpendServiceTest {
         stubFreshInsert();
         // 客户端表达式求和的浮点尾差（0.1 + 0.2）——是正常账目，不能因小数位多而拒收
         SpendEntryItem floatTail = new SpendEntryItem("led-float", TS, new BigDecimal("0.30000000000000004"),
-                "SNACK", "MANUAL", "", null, null, null, Boolean.FALSE, null);
+                "SNACK", "MANUAL", "", null, null, null, Boolean.FALSE, null, null);
 
         SpendSyncResponse res = service().sync(1L, request(floatTail));
 
@@ -194,7 +197,7 @@ class SpendServiceTest {
     @Test
     void testAmountThatRoundsToZeroRejected() {
         SpendEntryItem dust = new SpendEntryItem("led-dust", TS, new BigDecimal("0.004"),
-                "SNACK", "MANUAL", "", null, null, null, Boolean.FALSE, null);
+                "SNACK", "MANUAL", "", null, null, null, Boolean.FALSE, null, null);
         SpendSyncResponse res = service().sync(1L, request(dust));
         assertEquals(List.of("led-dust"), res.rejectedIds(), "四舍五入后为 0 的金额不是有效账目");
         verify(spendEntryRepository, never()).save(any(SpendEntryEntity.class));
@@ -254,7 +257,7 @@ class SpendServiceTest {
 
         // 软删载荷（deleted=true 携带原始 ts/amount）与恢复（deleted=false）走同一路径
         service().sync(1L, request(new SpendEntryItem("led-x", TS, new BigDecimal("66.00"),
-                "PARTNER", "DANCE", "rec-1", 9L, "测试门店", 1800, Boolean.TRUE, null)));
+                "PARTNER", "DANCE", "rec-1", 9L, "测试门店", 1800, Boolean.TRUE, null, null)));
 
         ArgumentCaptor<SpendEntryEntity> captor = ArgumentCaptor.forClass(SpendEntryEntity.class);
         verify(spendEntryRepository).save(captor.capture());
@@ -290,7 +293,7 @@ class SpendServiceTest {
 
         // 舞伴身份结算：小写 income（宽容读，与 source 同判据）→ 落库 INCOME
         SpendEntryItem income = new SpendEntryItem("led-dir-b", TS, new BigDecimal("60.00"),
-                "PARTNER", "DANCE", "rec-2", 9L, "测试门店", 2400, Boolean.FALSE, "income");
+                "PARTNER", "DANCE", "rec-2", 9L, "测试门店", 2400, Boolean.FALSE, "income", null);
 
         SpendSyncResponse res = service().sync(1L, request(income));
 
@@ -305,11 +308,106 @@ class SpendServiceTest {
     void testUnknownDirectionRejectedWithoutFallback() {
         SpendSyncResponse res = service().sync(1L, request(
                 new SpendEntryItem("led-dir-c", TS, new BigDecimal("60.00"),
-                        "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, "REWARD")));
+                        "PARTNER", "DANCE", "", null, null, null, Boolean.FALSE, "REWARD", null)));
 
         assertEquals(0, res.accepted());
         assertEquals(1, res.rejected());
         assertEquals(List.of("led-dir-c"), res.rejectedIds());
         verify(spendEntryRepository, never()).save(any(SpendEntryEntity.class));
+    }
+
+    // ── 一同计时的人（2026-10-09，V47：账目携带同行者快照）──────────────────────
+
+    private SpendEntryItem withCompanions(String id, List<SpendCompanionItem> companions) {
+        return new SpendEntryItem(id, TS, new BigDecimal("45.00"), "PARTNER", "DANCE", "rec-9", 9L, "测试门店",
+                2700, Boolean.FALSE, "EXPENSE", companions);
+    }
+
+    private SpendEntryEntity savedAfterSync(SpendEntryItem item) {
+        service().sync(1L, request(item));
+        ArgumentCaptor<SpendEntryEntity> captor = ArgumentCaptor.forClass(SpendEntryEntity.class);
+        verify(spendEntryRepository).save(captor.capture());
+        return captor.getValue();
+    }
+
+    @Test
+    void testCompanionsArePersistedAsSnapshotJson() {
+        stubFreshInsert();
+
+        SpendEntryEntity saved = savedAfterSync(withCompanions("led-c1", List.of(
+                new SpendCompanionItem("王姐", "https://cdn.example/w.png", "HOST"))));
+
+        List<SpendCompanionItem> stored = SpendCompanions.parse(saved.getCompanionsJson());
+        assertEquals(1, stored.size());
+        assertEquals("王姐", stored.get(0).nickname());
+        assertEquals("HOST", stored.get(0).relation());
+    }
+
+    @Test
+    void testInvalidCompanionNeverRejectsTheMoneyRecord() {
+        stubFreshInsert();
+
+        // 同行者里夹一个关系非法的项 + 一个超长头像：账目照常 accepted，坏项丢弃 / 置空
+        SpendSyncResponse res = service().sync(1L, request(withCompanions("led-c2", List.of(
+                new SpendCompanionItem("坏项", null, "STRANGER"),
+                new SpendCompanionItem("好项", "https://cdn.example/" + "a".repeat(600), "JOINER")))));
+
+        assertEquals(1, res.accepted(), "元数据非法绝不拒绝一笔账（毒丸教训：被拒的账客户端会留队重发，永远上不了云）");
+        assertEquals(0, res.rejected());
+        ArgumentCaptor<SpendEntryEntity> captor = ArgumentCaptor.forClass(SpendEntryEntity.class);
+        verify(spendEntryRepository).save(captor.capture());
+        List<SpendCompanionItem> stored = SpendCompanions.parse(captor.getValue().getCompanionsJson());
+        assertEquals(1, stored.size());
+        assertEquals("好项", stored.get(0).nickname());
+        assertNull(stored.get(0).avatarUrl());
+    }
+
+    @Test
+    void testAbsentCompanionsKeepExistingAndEmptyListClears() {
+        SpendEntryEntity existing = new SpendEntryEntity();
+        existing.setUserId(1L);
+        existing.setClientEntryId("led-c3");
+        existing.setCompanionsJson(SpendCompanions.serialize(List.of(
+                new SpendCompanionItem("王姐", null, "HOST"))));
+        when(spendEntryRepository.findByUserIdAndClientEntryId(eq(1L), eq("led-c3")))
+                .thenReturn(Optional.of(existing));
+        when(spendEntryRepository.save(any(SpendEntryEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        // 老客户端重传同一条账（不带 companions）：不得抹掉新版本写下的同行者
+        service().sync(1L, request(withCompanions("led-c3", null)));
+        assertEquals(1, SpendCompanions.parse(existing.getCompanionsJson()).size(), "null = 没带 → 保留");
+
+        // 明确置空（空数组）才清
+        service().sync(1L, request(withCompanions("led-c3", List.of())));
+        assertNull(existing.getCompanionsJson(), "空数组 = 明确置空 → 列 NULL");
+    }
+
+    @Test
+    void testIncrementalPullReturnsCompanionsAndNeverNull() {
+        SpendEntryEntity withPeers = new SpendEntryEntity();
+        withPeers.setUserId(1L);
+        withPeers.setClientEntryId("led-c4");
+        withPeers.setTs(LocalDateTime.of(2026, 10, 9, 21, 0));
+        withPeers.setAmount(new BigDecimal("45.00"));
+        withPeers.setCategory(SpendCategory.PARTNER);
+        withPeers.setSource(SpendSource.DANCE);
+        withPeers.setDirection(SpendDirection.EXPENSE);
+        withPeers.setCompanionsJson(SpendCompanions.serialize(List.of(new SpendCompanionItem("王姐", null, "HOST"))));
+        SpendEntryEntity plain = new SpendEntryEntity();
+        plain.setUserId(1L);
+        plain.setClientEntryId("led-c5");
+        plain.setTs(LocalDateTime.of(2026, 10, 9, 22, 0));
+        plain.setAmount(new BigDecimal("10.00"));
+        plain.setCategory(SpendCategory.OTHER);
+        plain.setSource(SpendSource.MANUAL);
+        plain.setDirection(SpendDirection.EXPENSE);
+        when(spendEntryRepository.findIncremental(eq(1L), any(), any())).thenReturn(List.of(withPeers, plain));
+
+        var page = service().entries(1L, 0L);
+
+        assertEquals(2, page.entries().size());
+        assertEquals("王姐", page.entries().get(0).companions().get(0).nickname());
+        assertEquals(List.of(), page.entries().get(1).companions(), "没有同行者 = 空数组而非 null：客户端不必区分「没有」与「缺字段」");
     }
 }

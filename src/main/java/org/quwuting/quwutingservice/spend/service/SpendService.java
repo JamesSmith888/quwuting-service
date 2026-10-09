@@ -2,8 +2,10 @@ package org.quwuting.quwutingservice.spend.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.quwuting.quwutingservice.spend.SpendCompanions;
 import org.quwuting.quwutingservice.spend.SpendEntryLimits;
 import org.quwuting.quwutingservice.exception.BusinessException;
+import org.quwuting.quwutingservice.spend.dto.SpendCompanionItem;
 import org.quwuting.quwutingservice.spend.dto.SpendEntriesResponse;
 import org.quwuting.quwutingservice.spend.dto.SpendEntryItem;
 import org.quwuting.quwutingservice.spend.dto.SpendEntryResponse;
@@ -111,7 +113,7 @@ public class SpendService {
 
     /** 校验通过后的枚举取值（避免"校验一遍、落库再解析一遍"的两处口径） */
     private record NormalizedEntry(BigDecimal amount, SpendCategory category, SpendSource source,
-                                   SpendDirection direction) {
+                                   SpendDirection direction, List<SpendCompanionItem> companions) {
     }
 
     /**
@@ -146,7 +148,10 @@ public class SpendService {
         if (direction == null) {
             return null;
         }
-        return new NormalizedEntry(amount, category, source, direction);
+        // 同行者是元数据（V47）：规整 = 丢非法项 / 截长 / 限人数，**从不因它拒绝整条账目**；
+        // null = 客户端没带 → 保留库里已有值（见 upsert）
+        return new NormalizedEntry(amount, category, source, direction,
+                SpendCompanions.normalize(item.companions()));
     }
 
     /**
@@ -181,6 +186,11 @@ public class SpendService {
         entity.setVenueId(item.venueId());
         entity.setVenueName(item.venueName());
         entity.setDurationSeconds(item.durationSeconds());
+        // 请求不带 companions（老客户端重传 / 手动账目）= 保留已有值，避免旧版本抹掉新版本写下的同行者；
+        // 带（含空数组）= 整体替换（空 → 列置 NULL）
+        if (normalized.companions() != null) {
+            entity.setCompanionsJson(SpendCompanions.serialize(normalized.companions()));
+        }
         entity.setDeleted(Boolean.TRUE.equals(item.deleted()));
         spendEntryRepository.save(entity);
     }
@@ -309,7 +319,8 @@ public class SpendService {
                     e.getDurationSeconds(),
                     e.isDeleted(),
                     updatedAtMillis,
-                    e.getDirection() == null ? null : e.getDirection().name()));
+                    e.getDirection() == null ? null : e.getDirection().name(),
+                    SpendCompanions.parse(e.getCompanionsJson())));
         }
         return new SpendEntriesResponse(items, maxUpdated);
     }

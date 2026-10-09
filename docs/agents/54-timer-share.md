@@ -122,7 +122,7 @@
   `TimerShareRules` 把请求解析成强类型、只取三个数值字段重新序列化，多余字段在解析那一刻就丢掉——库里和线上只可能有数字
   （`TimerShareWireFormatTest#ruleNameSentByAClientNeverSurvivesNormalization`）。接收方由档位本地派生展示名。
 - **门店名不信任客户端**：只收 `venueId`，校验存在才保留；加入响应里的名称由服务端据 id 现取。
-- **不展示任何一方的昵称/头像**；主持方只看到「已同步 N 人」。文案禁出现「陌生人/交友/匹配」（前端门禁 `check:timer-share`）。
+- **同行者资料只有昵称 + 头像**（V45 起双向下发，见 §十三「资料互看的边界」；2026-10-09 起前端可点开详情卡，仍不含任何账号标识 / 年龄 / 性别 / 城市）。**此前本条写的是"不展示任何一方的昵称/头像"——V45 起已过期。**文案禁出现「陌生人/交友/匹配」（前端门禁 `check:timer-share`）。
 - **不给分享者任何奖励**（可能触及「诱导分享」规范，也会招来小号刷）。
 - 码图端点公开但**不可被滥用**：会话不存在/已关闭/已过期一律 404，且不触发微信外呼。
 
@@ -286,6 +286,46 @@ SELECT COUNT(*) FROM qwt_timer_shares WHERE parent_share_id IS NOT NULL;
 
 - 后端：`TimerShare*Test` 97 条全绿（新增 settle 语义 / peer 鉴权与 CLOSED 可读 / status 装配 /
   WireFormat 的显式 null 契约 8 条）；静态验证止步于此，真机行为交用户（同 59 号 §十）。
+
+## 十四、结算事实可重放 · 加入时刻 · 同行者账目快照（2026-10-09）
+
+> 需求与根因见前端 quwuting 仓 `59-timer-share.md` §十四（用户四条：头像簇 / 结算提醒 / 结算卡 / 账本流水）。服务端只做三件小事，**都是加字段、对旧客户端零破坏**。
+
+### settle 带 `settledAgoMs`（结算事实可安全重放）
+
+V45 的结算时刻 = 服务端**收到**时刻，隐含假设"客户端在结算的同一刻就把它发出去"。但舞厅地下室弱网是常态：上报失败后客户端必须暂存重放，
+重放时的收到时刻已是几分钟之后，"对方几点结束"就被推迟了。所以客户端上报的不是时间戳（两端时钟互不可信），而是「**这件事已经过去多久**」
+（同一台手机上的单调差，不受时钟偏移影响）：
+
+`settled_at = 收到时刻 − clamp(settledAgoMs, 0, 12h)`
+
+- `SettleTimerShareRequest(netElapsedSeconds, settledAgoMs)`；`settledAgoMs` 缺省 / 负数 = 0（老客户端：行为与 V45 逐字相同）；超 `TimerSharePolicy.SETTLE_MAX_AGE_MS`
+  （= 墙钟时长上限 12h）按上限**截断而不拒绝**（它只是展示用时间事实）。前端出站队列保留期与它同值（跨仓门禁 X1 钉）。
+- 与主持方创建时上报 `wallElapsedMs` 而非本机时间戳是同一条判据（§一）。覆盖语义不变（重复上报 = 最新一次），所以重放天然幂等。
+
+### status 的 `joins[]` 增 `joinedAtMs`
+
+加入流水的创建时间（服务端时间轴，与 `settledAtMs` 同一条轴，客户端用同一次往返校准换算）。计时页详情卡展示"几点加入"。ALWAYS 契约：缺失显式 null。
+**可选字段**——前端先于后端上线时缺省，展示层按"不知道加入时间"处理（不画该行）。
+
+### 同行者账目快照（V47）
+
+账目（`qwt_spend_entries`）新增 `companions_json`：落账那一刻的同行者展示快照（昵称 / 头像 / 关系，不含 userId）。**不是**本域（timershare）的表，
+细节与护栏见 `40-spend-ledger.md`「一同计时的人快照」。timershare 域唯一的关联是：快照的原料来自本域已下发的资料（`TimerShareProfileView` /
+`TimerShareJoinView` 的昵称头像），由客户端在落账时快照——服务端**不**在账目上联查分享会话（理由见 40 号）。
+
+### 兼容矩阵（后端先发、前端后发 / 反之）
+
+| 组合 | 行为 |
+|---|---|
+| 新后端 + 旧前端 | `settle` 不带 `settledAgoMs` → 按 0；`status` 多出 `joinedAtMs` 被忽略；`sync` 不带 `companions` → 保留已有值 |
+| 旧后端 + 新前端 | `settle` 多余字段被忽略（退化为即时盖章，与 V45 相同）；`status` 无 `joinedAtMs` → 前端不画该行；`entries` 无 `companions` → 前端读为空 |
+
+### 验证（2026-10-09）
+
+`TimerShareServiceTest` +2（settle 带 ago 的回推 / ago 的夹取）、`statusCarriesJoinerProfilesAndSettlementFacts` 增 `joinedAtMs` 断言、
+`TimerShareWireFormatTest` +2（join view 的显式 null 契约含 `joinedAtMs`、老客户端 settle 请求仍可反序列化）；`./mvnw -q -o -Dtest='TimerShare*Test,SpendCompanionsTest,SpendServiceTest,SpendEntryLimitsMirrorTest'` 全绿。
+未验证：真实 MySQL 上跑 V47（纯 `ALTER TABLE … ADD COLUMN … NULL`，MySQL 8 即时 DDL；本机可用 Homebrew `mysql@8.0` 起一次性实例，方法见 §十一）。
 
 ## 相关文件
 

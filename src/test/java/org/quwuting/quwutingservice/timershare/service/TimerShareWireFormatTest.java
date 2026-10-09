@@ -3,7 +3,9 @@ package org.quwuting.quwutingservice.timershare.service;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import org.junit.jupiter.api.Test;
 import org.quwuting.quwutingservice.timershare.dto.request.CreateTimerShareRequest;
+import org.quwuting.quwutingservice.timershare.dto.request.SettleTimerShareRequest;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareJoinResponse;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerShareJoinView;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerSharePeerResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareProfileView;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareRuleView;
@@ -114,6 +116,34 @@ class TimerShareWireFormatTest {
                 "未结算 → 显式 null（客户端以 null 判「还没结算」，不能是字段消失）");
         assertTrue(json.has("hostSettledNetSeconds") && json.get("hostSettledNetSeconds").isNull());
         assertEquals(1780000000123L, json.get("serverNowMs").asLong());
+    }
+
+    @Test
+    void joinViewAlwaysWritesSettlementAndJoinTimeFields() {
+        // 加入者尚未结算 + 加入时刻缺失：两个「无值」都必须是显式 null（客户端以 null 判「没结算 / 不展示该行」）
+        TimerShareJoinView view = new TimerShareJoinView(1, "小李", null, null, null, null);
+
+        JsonNode json = APP_MAPPER.readTree(APP_MAPPER.writeValueAsString(view));
+
+        assertEquals(1, json.get("seq").asInt());
+        assertTrue(json.has("avatarUrl") && json.get("avatarUrl").isNull());
+        assertTrue(json.has("settledAtMs") && json.get("settledAtMs").isNull());
+        assertTrue(json.has("settledNetSeconds") && json.get("settledNetSeconds").isNull());
+        assertTrue(json.has("joinedAtMs") && json.get("joinedAtMs").isNull(),
+                "joinedAtMs（2026-10-09）同属 ALWAYS 契约：缺失必须是显式 null，不能是字段消失");
+        assertFalse(json.has("userId"), "不向主持方下发加入者 userId（V45 口径）");
+    }
+
+    @Test
+    void settleRequestWithoutAgeStillDeserializesForOldClients() {
+        // 老客户端（V45 形态）不带 settledAgoMs：必须仍能读入，ago 为 null（服务端按 0 处理 = 即时上报）
+        SettleTimerShareRequest old = APP_MAPPER.readValue("{\"netElapsedSeconds\":2700}", SettleTimerShareRequest.class);
+        assertEquals(2700, old.netElapsedSeconds());
+        assertNull(old.settledAgoMs());
+
+        SettleTimerShareRequest fresh = APP_MAPPER.readValue(
+                "{\"netElapsedSeconds\":2700,\"settledAgoMs\":180000}", SettleTimerShareRequest.class);
+        assertEquals(180000L, fresh.settledAgoMs());
     }
 
     @Test

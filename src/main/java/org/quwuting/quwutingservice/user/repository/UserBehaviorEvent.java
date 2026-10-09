@@ -61,9 +61,26 @@ import java.util.stream.Collectors;
  *       <b>永不进活跃/留存</b>（2026-09-15 修复的那个错误决策就是对它用了「活跃」之名）；</li>
  *   <li>{@link Nature#PASSIVE}：被动痕迹（站内信 / 暂停上报 / 招工联系 / 公告已读）——
  *       进 {@link #passiveTraceFactUnion()}，只在「注册后是否留下过任何痕迹」的噪音判定里使用。</li>
+ *   <li>{@link Nature#EXTENDED}（2026-10-09 新增）：用户主动使用的<b>扩展功能</b>（快讯 / 计时账本 /
+ *       热度点赞 / 意见反馈…），尚未评审纳入「活跃」。轨迹与画像可见，<b>不进</b>活跃 / 留存 / 噪音
+ *       任何一条口径事实集——「未纳入」是显式档位而不是沉默缺失，纳入 = 评审后把 Nature 改成
+ *       {@code ACTIVE} 一行（同时按门禁给出的 expected 替换字面量，并在 docs/agents/35 登记数字变化）。</li>
  * </ul>
  * <b>契约</b>：{@code ACTIVE + PASSIVE} 的成员集合必须与 {@link UserStatsSql} 的两条事实集
  * 逐字一致（由本类生成，故天然一致；门禁再从反向断言一次）。
+ *
+ * <h2>下线事件（{@link #isRetired()}）——功能下线 ≠ 抹除事实</h2>
+ * 舞伴系统（浏览 / 分享 / 收藏 / 邀约）与招工联系已下线，但<b>其历史行为仍是事实</b>：8 月有人只靠浏览舞伴
+ * 活跃，他那几天就是活跃的；把这些事件从目录里删掉，会让已发布的历史 DAU / 留存曲线被事后改写
+ * （与「事实口径 = 动作发生过」同一原则）。故下线事件<b>保留在目录与既有口径里</b>，只在<b>展示层</b>退场：
+ * 窗口内 0 条时不再占用筛选 chips / 类型分布（下线功能恒为 0，留着只是噪音），有历史数据时照常展示并带
+ * 「已下线」标记；各窗口滑过下线日后自然淡出。<b>新增的下线判定只改 {@code retiredNote} 一处</b>。
+ *
+ * <h2>归类门禁（防止目录再次沉默过期）</h2>
+ * 目录在 2026-09-15 后无人维护，而产品随后新增了快讯 / 计时账本 / 计时同步等一批用户主动功能——
+ * 它们在轨迹里整整缺席了三周，根因是「新建一张带用户列的表」与「登记进行为目录」之间<b>没有任何强制关联</b>。
+ * 现由 {@code UserBehaviorCatalogMirrorTest#everyUserAttributedTableIsClassified} 回放全部 Flyway 迁移，
+ * 要求每张含用户列的表<b>二选一</b>：在本目录登记，或在该测试的豁免表里写明理由——新表不表态就过不了门禁。
  *
  * <h2>新增行为的判据（先判断，再写代码）</h2>
  * <ol>
@@ -102,6 +119,7 @@ import java.util.stream.Collectors;
  */
 public enum UserBehaviorEvent {
 
+
     // ── 主动行为（ACTIVE）：管理端「活跃」的唯一事实集 ────────────────────────────
 
     /** 浏览门店（列表/搜索/详情页进入均计，来源加权见 05/06 号文档） */
@@ -110,7 +128,8 @@ public enum UserBehaviorEvent {
 
     /** 浏览舞伴主页 */
     DANCER_VIEW("DANCER_VIEW", "浏览舞伴", Category.BROWSE, Nature.ACTIVE,
-            "qwt_dancer_views", "view_date", RefKind.DANCER, "dancer_id", null, null),
+            "qwt_dancer_views", "view_date", RefKind.DANCER, "dancer_id", null, null,
+            "user_id", "created_at", Retired.DANCER),
 
     /** 分享门店（仅 SHARE 动作；OPEN 归因不计，与贡献档案口径一致） */
     VENUE_SHARE("VENUE_SHARE", "分享门店", Category.SHARE, Nature.ACTIVE,
@@ -118,7 +137,8 @@ public enum UserBehaviorEvent {
 
     /** 分享舞伴 */
     DANCER_SHARE("DANCER_SHARE", "分享舞伴", Category.SHARE, Nature.ACTIVE,
-            "qwt_dancer_shares", null, RefKind.DANCER, "dancer_id", "channel", DetailDict.SHARE_CHANNEL),
+            "qwt_dancer_shares", null, RefKind.DANCER, "dancer_id", "channel", DetailDict.SHARE_CHANNEL,
+            "user_id", "created_at", Retired.DANCER),
 
     /** 门店表情/评分（每日一记；明细码不渲染，避免把语义码泄漏成界面文案） */
     VENUE_REACTION("VENUE_REACTION", "门店表情评价", Category.INTERACT, Nature.ACTIVE,
@@ -130,11 +150,13 @@ public enum UserBehaviorEvent {
 
     /** 收藏舞伴 */
     DANCER_FAVORITE("DANCER_FAVORITE", "收藏舞伴", Category.COLLECT, Nature.ACTIVE,
-            "qwt_dancer_favorites", null, RefKind.DANCER, "dancer_id", null, null),
+            "qwt_dancer_favorites", null, RefKind.DANCER, "dancer_id", null, null,
+            "user_id", "created_at", Retired.DANCER),
 
     /** 邀约舞伴（需求单创建） */
     DANCER_DEMAND("DANCER_DEMAND", "邀约舞伴", Category.DEMAND, Nature.ACTIVE,
-            "qwt_demand_records", null, RefKind.DANCER, "dancer_id", null, null),
+            "qwt_demand_records", null, RefKind.DANCER, "dancer_id", null, null,
+            "user_id", "created_at", Retired.DANCER),
 
     /** 关注门店营业状态（2026-09-01 起与「收藏门店」耦合，但仍各自是独立事实） */
     VENUE_WATCH("VENUE_WATCH", "关注门店状态", Category.WATCH, Nature.ACTIVE,
@@ -198,11 +220,73 @@ public enum UserBehaviorEvent {
 
     /** 联系招工（弱意图信号，不构成「使用产品」） */
     RECRUITMENT_CONTACT("RECRUITMENT_CONTACT", "联系招工", Category.DEMAND, Nature.PASSIVE,
-            "qwt_recruitment_contacts", null, RefKind.RECRUITMENT, "recruitment_id", null, null),
+            "qwt_recruitment_contacts", null, RefKind.RECRUITMENT, "recruitment_id", null, null,
+            "user_id", "created_at", Retired.RECRUITMENT),
 
     /** 已读公告（回执性质，被动） */
     ANNOUNCEMENT_READ("ANNOUNCEMENT_READ", "已读公告", Category.INBOX, Nature.PASSIVE,
-            "qwt_announcement_reads", null, RefKind.ANNOUNCEMENT, "announcement_id", null, null);
+            "qwt_announcement_reads", null, RefKind.ANNOUNCEMENT, "announcement_id", null, null),
+
+    // ── 扩展行为（EXTENDED）：用户主动发起，但所属子域尚未评审纳入「活跃」口径 ──────
+    //
+    // 2026-10-09 补录：目录自 2026-09-15 起没人再维护，而产品在此后新增了快讯 / 计时账本 /
+    // 计时同步 / 热度点赞 / 意见反馈 / 门店活动打卡等一批用户主动功能——它们在管理端「行为轨迹」
+    // 里完全不可见（一个只看快讯、只记账的用户，轨迹是空的）。补录进目录（让「做过什么」可见），
+    // 但**刻意不入 ACTIVE**：UserStatsSql 早已把「消费账本与快讯表态/浏览」登记为需单独立项评审的
+    // 扩展位——实测并入会让「近 7 日活跃」113 → 168（+49%）、「近 30 日活跃」379 → 512（+35%），
+    // 其中快讯浏览一项（展示即计、同分钟批量写入，更接近曝光而非主动操作）占绝大部分增量。
+    // 是否纳入、纳入哪几项是产品口径决策：评审通过后**只需把对应事件的 Nature 改为 ACTIVE**，
+    // 再按门禁失败信息替换 UserStatsSql / UserBehaviorSql 字面量即可（本档位存在的意义 =
+    // 把「未纳入」从沉默变成显式，且让决策成本降到一行）。
+
+    /** 浏览快讯（信息流展示即计：列表/详情每成功加载即批量上报，同分钟常 4~10 条 ⇒ 轨迹层合并展示） */
+    BULLETIN_VIEW("BULLETIN_VIEW", "浏览快讯", Category.NEWS, Nature.EXTENDED,
+            "qwt_bulletin_views", "view_date", RefKind.BULLETIN, "bulletin_id", null, null),
+
+    /** 快讯表态（一人一条恒一个表情；换票原地 UPDATE，故一行 = 该用户对该快讯的当前表态） */
+    BULLETIN_REACTION("BULLETIN_REACTION", "快讯表态", Category.NEWS, Nature.EXTENDED,
+            "qwt_bulletin_reactions", null, RefKind.BULLETIN, "bulletin_id",
+            "reaction_code", DetailDict.BULLETIN_REACTION),
+
+    /**
+     * 点赞热度上报（行级点赞）。
+     * <p>
+     * <b>用户列是 {@code liker_id}</b>（点赞人，不是上报人 {@code user_id}）——目录因此支持
+     * 事件级 {@code userColumn} 声明，生成物统一以 {@code AS user_id} 对齐 UNION 列名。
+     */
+    CROWD_LIKE("CROWD_LIKE", "点赞热度上报", Category.CROWD, Nature.EXTENDED,
+            "qwt_venue_crowd_report_likes", null, RefKind.CROWD_REPORT, "report_id", null, null,
+            "liker_id", "created_at", null),
+
+    /**
+     * 记账（计时结算自动入账 / 手动记账）。
+     * <p>
+     * <b>时间列是 {@code ts}（账目发生时刻）而非 {@code created_at}（同步上云时刻）</b>：
+     * 账本是离线优先、批量同步的，created_at 会把「前几天发生、今天才同步」的账目全挤到同一刻，
+     * 轨迹与活跃时段都会失真（实测 195 条中 15 条两者相差 &gt; 1 小时）。
+     * 金额不进轨迹（财务数据已在详情页「计时 · 账本」卡单独展示）。
+     */
+    SPEND_ENTRY("SPEND_ENTRY", "记账", Category.TIMER, Nature.EXTENDED,
+            "qwt_spend_entries", null, RefKind.VENUE, "venue_id", "source", DetailDict.SPEND_SOURCE,
+            "user_id", "ts", null),
+
+    /** 发起计时同步（主持人生成二维码；用户列是 {@code host_user_id}） */
+    TIMER_SHARE_HOST("TIMER_SHARE_HOST", "发起计时同步", Category.TIMER, Nature.EXTENDED,
+            "qwt_timer_shares", null, RefKind.VENUE, "venue_id", null, null,
+            "host_user_id", "created_at", null),
+
+    /** 扫码加入计时同步（被邀请方；传播 → 新用户转化的落点） */
+    TIMER_SHARE_JOIN("TIMER_SHARE_JOIN", "扫码加入计时", Category.TIMER, Nature.EXTENDED,
+            "qwt_timer_share_joins", null, RefKind.NONE, null, null, null),
+
+    /** 提交意见反馈（应用级反馈，区别于 VENUE_FEEDBACK 的门店信息纠错） */
+    APP_FEEDBACK("APP_FEEDBACK", "提交意见反馈", Category.SUGGEST, Nature.EXTENDED,
+            "qwt_app_feedbacks", null, RefKind.NONE, null,
+            "category", DetailDict.APP_FEEDBACK_CATEGORY),
+
+    /** 门店活动打卡（V27；截至 2026-10-09 尚无一行数据，先登记落点——下一个功能上线不再沉默） */
+    VENUE_ACTIVITY_CHECKIN("VENUE_ACTIVITY_CHECKIN", "门店活动打卡", Category.ACTIVITY, Nature.EXTENDED,
+            "qwt_venue_activity_checkins", "activity_date", RefKind.VENUE, "venue_id", null, null);
 
     // ── 目录结构 ──────────────────────────────────────────────────────────────
 
@@ -214,12 +298,20 @@ public enum UserBehaviorEvent {
         COLLECT("收藏"),
         DEMAND("邀约招工"),
         WATCH("关注"),
-        CROWD("热度上报"),
+        CROWD("门店热度"),
         REPORT("信息上报"),
         TAG("标签标注"),
         INBOX("消息已读"),
         OPEN("打开"),
-        COLLAB("协作");
+        COLLAB("协作"),
+        /** 快讯（2026-10-09 补录） */
+        NEWS("快讯"),
+        /** 计时与账本（计时器结算入账 / 手动记账 / 计时同步） */
+        TIMER("计时账本"),
+        /** 应用级意见反馈 */
+        SUGGEST("意见反馈"),
+        /** 门店营业活动 */
+        ACTIVITY("门店活动");
 
         private final String label;
 
@@ -239,7 +331,10 @@ public enum UserBehaviorEvent {
         ACTIVE("主动行为", "用户主动发起的使用行为，计入「活跃」"),
         COLLAB("协作行为", "管理协作动作（认领门店），当前不计入活跃"),
         SIGNAL("系统信号", "登录自动打卡，只代表打开过，不计入活跃"),
-        PASSIVE("被动痕迹", "接收/告知类，只在「是否有过痕迹」判定里使用");
+        PASSIVE("被动痕迹", "接收/告知类，只在「是否有过痕迹」判定里使用"),
+        EXTENDED("扩展行为",
+                "用户主动使用的扩展功能（快讯 / 计时账本 / 热度点赞等），尚未评审纳入「活跃」口径："
+                        + "轨迹与画像可见，不计入活跃与留存");
 
         private final String label;
         private final String hint;
@@ -260,7 +355,11 @@ public enum UserBehaviorEvent {
 
     /** 事件关联对象类型（轨迹里「对谁做的」；名称批量解析见 BehaviorRefNameResolver） */
     public enum RefKind {
-        NONE, VENUE, DANCER, RECRUITMENT, ANNOUNCEMENT
+        NONE, VENUE, DANCER, RECRUITMENT, ANNOUNCEMENT,
+        /** 快讯（{@code qwt_announcements} 中 category=FLASH 的行；展示名 = 正文摘要） */
+        BULLETIN,
+        /** 热度上报（点赞的对象；展示名取其所属门店名） */
+        CROWD_REPORT
     }
 
     /**
@@ -278,7 +377,13 @@ public enum UserBehaviorEvent {
         /** 门店信息上报类型（FeedbackType） */
         VENUE_FEEDBACK_TYPE,
         /** 暂停营业上报原因（ReportType） */
-        STATUS_REPORT_REASON
+        STATUS_REPORT_REASON,
+        /** 快讯表态码（emoji + 中文短名，BulletinReactionCode 权威） */
+        BULLETIN_REACTION,
+        /** 记账来源（DANCE 计时结算 / MANUAL 手动记账） */
+        SPEND_SOURCE,
+        /** 意见反馈类型（AppFeedbackCategory） */
+        APP_FEEDBACK_CATEGORY
     }
 
     // ── 事件声明字段 ─────────────────────────────────────────────────────────
@@ -294,11 +399,44 @@ public enum UserBehaviorEvent {
     private final String refColumn;
     private final String detailColumn;
     private final DetailDict detailDict;
+    /** 归因用户的列名（绝大多数表是 {@code user_id}；点赞是 {@code liker_id}、计时同步主持人是 {@code host_user_id}） */
+    private final String userColumn;
+    /** 事件时刻列（缺省 {@code created_at}；账本是 {@code ts}——发生时刻 ≠ 同步上云时刻） */
+    private final String timeColumn;
+    /** 下线说明；null = 现役。<b>下线 ≠ 抹除事实</b>，见类注释「下线事件」 */
+    private final String retiredNote;
+
+    /**
+     * 下线说明文案（admin 展示用；改日期请同步 docs/agents/35）。
+     * 放在嵌套类里而不是枚举体内的静态字段：枚举常量的参数里按简单名引用文本上位于其后的
+     * 静态字段是非法前向引用，而经限定名引用嵌套类的编译期常量则合法。
+     */
+    private static final class Retired {
+        /** 舞伴域（最后一条记录 2026-09-02） */
+        static final String DANCER = "舞伴系统已下线（最后一条记录 2026-09-02）";
+        /** 招工（最后一条记录 2026-08-30） */
+        static final String RECRUITMENT = "招工功能已下线（最后一条记录 2026-08-30）";
+
+        private Retired() {
+        }
+    }
 
     UserBehaviorEvent(String code, String label, Category category, Nature nature,
                       String table, String dayColumn,
                       RefKind refKind, String refColumn,
                       String detailColumn, DetailDict detailDict) {
+        this(code, label, category, nature, table, dayColumn, refKind, refColumn,
+                detailColumn, detailDict, "user_id", "created_at", null);
+    }
+
+    UserBehaviorEvent(String code, String label, Category category, Nature nature,
+                      String table, String dayColumn,
+                      RefKind refKind, String refColumn,
+                      String detailColumn, DetailDict detailDict,
+                      String userColumn, String timeColumn, String retiredNote) {
+        this.userColumn = userColumn;
+        this.timeColumn = timeColumn;
+        this.retiredNote = retiredNote;
         this.code = code;
         this.label = label;
         this.category = category;
@@ -353,7 +491,39 @@ public enum UserBehaviorEvent {
 
     /** 事件级时间戳列（轨迹排序 / 时段分布；可为 null 的老行按「日」降级） */
     public String timeColumn() {
-        return "created_at";
+        return timeColumn;
+    }
+
+    /** 归因用户的列名（见字段注释） */
+    public String userColumn() {
+        return userColumn;
+    }
+
+    /** 下线说明；null = 现役 */
+    public String retiredNote() {
+        return retiredNote;
+    }
+
+    /**
+     * 是否为下线功能的事件。
+     * <p>
+     * 下线事件<b>仍留在目录里、仍参与既有口径</b>（事实不可改写：8 月有人只靠浏览舞伴活跃，
+     * 他那几天就是活跃的——从目录里删掉它会让历史 DAU / 留存曲线被事后改写）；
+     * 它只影响<b>展示</b>：窗口内 0 条时不再出现在筛选 chips / 类型分布里（下线功能恒为 0，
+     * 留着只是噪音），有历史数据时照常展示并带「已下线」标记。窗口滑过下线日后自然淡出。
+     */
+    public boolean isRetired() {
+        return retiredNote != null;
+    }
+
+    /** 事实集 SELECT 里的用户列表达式：非 {@code user_id} 的列统一 {@code AS user_id} 对齐 UNION 列名 */
+    private String userSelect() {
+        return "user_id".equals(userColumn) ? userColumn : userColumn + " AS user_id";
+    }
+
+    /** 该事件的游客/空归因行排除谓词 */
+    private String userFilter() {
+        return userColumn + " IS NOT NULL";
     }
 
     /** 该事件的「日」表达式（业务日列优先，保证与既有事实集逐字等价） */
@@ -379,8 +549,6 @@ public enum UserBehaviorEvent {
         return dayColumn != null ? "DATE" : "DATETIME";
     }
 
-    private static final String USER_FILTER = "user_id IS NOT NULL";
-
     // ── 生成物：日级事实（既有两条事实集，文本与 2026-09-15 前逐字等价） ──────────
 
     /**
@@ -401,8 +569,8 @@ public enum UserBehaviorEvent {
      */
     public static String passiveTraceFactUnion() {
         return of(Nature.PASSIVE).stream()
-                .map(e -> "SELECT " + e.userColumn() + " FROM " + e.table()
-                        + " WHERE " + e.userColumn() + " IS NOT NULL"
+                .map(e -> "SELECT " + e.userSelect() + " FROM " + e.table()
+                        + " WHERE " + e.userFilter()
                         + " AND " + e.timeColumn() + " >= CAST(:sinceDay AS DATETIME)")
                 .collect(Collectors.joining("\nUNION "));
     }
@@ -420,10 +588,10 @@ public enum UserBehaviorEvent {
      */
     public static String eventFactUnion(Nature... natures) {
         return of(natures).stream()
-                .map(e -> "SELECT " + e.userColumn() + ", '" + e.code() + "' AS event_type, "
+                .map(e -> "SELECT " + e.userSelect() + ", '" + e.code() + "' AS event_type, "
                         + e.dayExpression() + " AS event_day, " + e.timeColumn() + " AS event_time"
                         + " FROM " + e.table()
-                        + " WHERE " + USER_FILTER
+                        + " WHERE " + e.userFilter()
                         + " AND " + e.lowerBoundExpression() + " >= CAST(:sinceDay AS " + e.dayCastKind() + ")")
                 .collect(Collectors.joining("\nUNION ALL "));
     }
@@ -438,11 +606,11 @@ public enum UserBehaviorEvent {
      */
     public static String eventDetailUnion() {
         return Arrays.stream(values())
-                .map(e -> "SELECT " + e.userColumn() + ", '" + e.code() + "' AS event_type, "
+                .map(e -> "SELECT " + e.userSelect() + ", '" + e.code() + "' AS event_type, "
                         + e.dayExpression() + " AS event_day, " + e.timeColumn() + " AS event_time, "
                         + refSelect(e) + ", " + detailSelect(e)
                         + " FROM " + e.table()
-                        + " WHERE " + USER_FILTER
+                        + " WHERE " + e.userFilter()
                         + " AND " + e.lowerBoundExpression() + " >= CAST(:sinceDay AS " + e.dayCastKind() + ")")
                 .collect(Collectors.joining("\nUNION ALL "));
     }
@@ -459,13 +627,9 @@ public enum UserBehaviorEvent {
                 : "CAST(" + e.detailColumn + " AS CHAR) AS detail_text";
     }
 
-    private String userColumn() {
-        return "user_id";
-    }
-
     private static String dayFactBranch(UserBehaviorEvent e) {
-        return "SELECT " + e.userColumn() + ", " + e.dayExpression() + " AS day FROM " + e.table()
-                + " WHERE " + USER_FILTER
+        return "SELECT " + e.userSelect() + ", " + e.dayExpression() + " AS day FROM " + e.table()
+                + " WHERE " + e.userFilter()
                 + " AND " + e.lowerBoundExpression() + " >= CAST(:sinceDay AS " + e.dayCastKind() + ")";
     }
 

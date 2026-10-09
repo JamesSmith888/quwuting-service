@@ -9,7 +9,6 @@ import org.quwuting.quwutingservice.user.dto.response.AdminUserItem;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserStatsResponse;
 import org.quwuting.quwutingservice.user.dto.response.CheckinSummary;
 import org.quwuting.quwutingservice.user.dto.response.ClaimSummary;
-import org.quwuting.quwutingservice.user.dto.response.DemandSummary;
 import org.quwuting.quwutingservice.user.dto.response.PointsSummary;
 import org.quwuting.quwutingservice.user.dto.response.ReportSummary;
 import org.quwuting.quwutingservice.user.dto.response.TopVenue;
@@ -134,20 +133,19 @@ public class AdminUserService {
       }
 
       /**
-       * 一页用户 → 列表行（批量聚合一次覆盖，避免 N+1）：余额 / 贡献 / 需求单 /
-       * 最近露面 / 常去门店 五个维度各一次 GROUP BY（集合 = 1 时即详情页复用）。
+       * 一页用户 → 列表行（批量聚合一次覆盖，避免 N+1）：余额 / 贡献 /
+       * 最近露面 / 常去门店 四个维度各一次 GROUP BY（集合 = 1 时即详情页复用）。
        */
       private List<AdminUserItem> toItems(List<User> users, Set<Long> active7dIds) {
           List<Long> userIds = users.stream().map(User::getId).toList();
           Map<Long, Long> balances = toMap(pointsAccountRepository.findBalancesByUserIds(userIds));
           Map<Long, ContributionService.ContributionAggregate> contributions =
                   contributionService.aggregatesFor(userIds);
-          Map<Long, DemandSummary> demands = statsService.demandSummaries(userIds);
           Map<Long, LocalDateTime> lastSeen = statsService.lastSeenFor(userIds, profileUpdatedAt(users));
           Map<Long, TopVenue> topVenues = statsService.topVenuesFor(userIds);
           return users.stream()
                   .map(u -> toItem(u, balances.getOrDefault(u.getId(), 0L),
-                          contributions.get(u.getId()), demands.get(u.getId()),
+                          contributions.get(u.getId()),
                           lastSeen.get(u.getId()), topVenues.get(u.getId()),
                           active7dIds.contains(u.getId())))
                   .toList();
@@ -205,7 +203,7 @@ public class AdminUserService {
 
     /**
      * 用户详情（GET /admin/users/{id}，仅 ADMIN）：公开资料 + 积分账户收支 +
-     * 贡献档案完整明细 + 需求/上报/认领分布 + 打卡连续性——管理端列表行点击进入，
+     * 贡献档案完整明细 + 上报/认领分布 + 打卡连续性——管理端列表行点击进入，
      * 运营查看任意用户的<b>完整画像</b>（识别异常/刷分/流失）。用户不存在/已软删
      * → 1004。
      */
@@ -215,7 +213,6 @@ public class AdminUserService {
                 .orElseThrow(() -> new BusinessException(1004, "用户不存在"));
         List<Long> ids = List.of(id);
         PointsSummary points = statsService.pointsSummaries(ids).getOrDefault(id, emptyPoints());
-        DemandSummary demand = statsService.demandSummaries(ids).getOrDefault(id, emptyDemand());
         ReportSummary reports = statsService.reportSummaries(ids).getOrDefault(id, emptyReports());
         ClaimSummary claims = statsService.claimSummaries(ids).getOrDefault(id, emptyClaims());
         CheckinSummary checkin = statsService.checkinSummary(id);
@@ -237,7 +234,6 @@ public class AdminUserService {
                   lastSeen,
                   points,
                   contributionService.briefFor(id),
-                  demand,
                   reports,
                   claims,
                   checkin,
@@ -274,7 +270,7 @@ public class AdminUserService {
 
     private AdminUserItem toItem(User user, long pointsBalance,
                                  ContributionService.ContributionAggregate agg,
-                                 DemandSummary demand, LocalDateTime lastSeenAt,
+                                 LocalDateTime lastSeenAt,
                                  TopVenue topVenue, boolean activeWithin7d) {
         return new AdminUserItem(
                 user.getId(),
@@ -289,8 +285,6 @@ public class AdminUserService {
                 pointsBalance,
                 agg != null ? agg.score() : 0,
                 agg != null ? agg.levelName() : "新晋舞友",
-                demand != null ? demand.total() : 0,
-                demand != null ? demand.fulfilled() : 0,
                 lastSeenAt,
                 activeWithin7d,
                 Boolean.TRUE.equals(user.getWechatReview()),
@@ -338,10 +332,6 @@ public class AdminUserService {
 
     private static PointsSummary emptyPoints() {
         return new PointsSummary(0, 0, 0, 0);
-    }
-
-    private static DemandSummary emptyDemand() {
-        return new DemandSummary(0, 0, Map.of());
     }
 
     private static ReportSummary emptyReports() {

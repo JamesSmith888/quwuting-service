@@ -1,13 +1,6 @@
 package org.quwuting.quwutingservice.user.service;
 
 import lombok.RequiredArgsConstructor;
-import org.quwuting.quwutingservice.dancer.entity.DancerFavorite;
-import org.quwuting.quwutingservice.dancer.entity.DancerRecognition;
-import org.quwuting.quwutingservice.dancer.entity.DemandRecord;
-import org.quwuting.quwutingservice.dancer.enums.DemandStatus;
-import org.quwuting.quwutingservice.dancer.repository.DancerFavoriteRepository;
-import org.quwuting.quwutingservice.dancer.repository.DancerRecognitionRepository;
-import org.quwuting.quwutingservice.dancer.repository.DemandRecordRepository;
 import org.quwuting.quwutingservice.dancershare.entity.DancerShare;
 import org.quwuting.quwutingservice.dancershare.repository.DancerShareRepository;
 import org.quwuting.quwutingservice.exception.BusinessException;
@@ -45,11 +38,12 @@ import java.util.function.Function;
  * 管理端用户统计明细服务（2026-08-28，GET /admin/users/{id}/stats-detail，docs/agents/23；
  * 仅 ADMIN）——用户详情页<b>每条统计数据可点击下钻</b>：查看该统计的每条详细列表。
  * <p>
- * 维度 = {@link AdminUserStatsType} 八类：积分流水（POINTS，可选 mode=EARN/GIFT 过滤；
+ * 维度 = {@link AdminUserStatsType} 五类：积分流水（POINTS，可选 mode=EARN/GIFT 过滤；
  * 上报采纳 = REPORT_REWARD = 积分流水中 source_type ∈ 采纳来源）/ 打卡（CHECKIN）/
- * 认可舞伴（RECOGNITION）/ 认领（CLAIM，可选 status 过滤）/ 分享（SHARE，门店+舞伴
- * 合并）/ 收藏舞伴（FAVORITE）/ 需求单（DEMAND，可选 status 过滤）/ 上报（REPORT，
- * 信息反馈 + 暂停营业报告合并，可选 status 过滤）。
+ * 认领（CLAIM，可选 status 过滤）/ 分享（SHARE，门店+舞伴合并——舞伴系统已下线但历史分享
+ * 仍计入贡献档案「分享次数」，下钻必须与该数字对得上）/ 上报（REPORT，信息反馈 + 暂停营业
+ * 报告合并，可选 status 过滤）。<b>2026-10-09</b>：删除认可舞伴 / 收藏舞伴 / 需求单三维
+ * （舞伴系统下线，前端自 2026-09-03 起已不再调用）。
  * <p>
  * 行 = 统一 {@link AdminUserStatsRow}（title/subtitle/time/badgeText/badgeCls），前端
  * 零分支渲染；徽标配色镜像前端 buildDemandStatusBadge / CLAIM_STATUS_LABELS 字典
@@ -67,12 +61,9 @@ public class AdminUserStatsDetailService {
     private final UserRepository userRepository;
     private final PointsTransactionRepository transactionRepository;
     private final DailyCheckinRepository checkinRepository;
-    private final DancerRecognitionRepository recognitionRepository;
-    private final DancerFavoriteRepository favoriteRepository;
     private final VenueClaimRepository claimRepository;
     private final VenueShareRepository venueShareRepository;
     private final DancerShareRepository dancerShareRepository;
-    private final DemandRecordRepository demandRecordRepository;
     private final VenueFeedbackRepository feedbackRepository;
     private final StatusReportRepository statusReportRepository;
     private final BehaviorRefNameResolver refNames;
@@ -92,11 +83,8 @@ public class AdminUserStatsDetailService {
             case POINTS -> pointsRows(userId, mode);
             case REPORT_REWARD -> reportRewardRows(userId);
             case CHECKIN -> checkinRows(userId);
-            case RECOGNITION -> recognitionRows(userId);
             case CLAIM -> claimRows(userId, status);
             case SHARE -> shareRows(userId);
-            case FAVORITE -> favoriteRows(userId);
-            case DEMAND -> demandRows(userId, status);
             case REPORT -> reportRows(userId, status);
         };
     }
@@ -138,24 +126,6 @@ public class AdminUserStatsDetailService {
                         c.getId(), "每日打卡",
                         c.getCheckinDate().toString(),
                         c.getCreatedAt(), "", ""))
-                .toList();
-    }
-
-    // ── 认可舞伴（未软删，时间倒序；舞伴名批量取回） ───────────────────────────
-
-    private List<AdminUserStatsRow> recognitionRows(Long userId) {
-        List<DancerRecognition> recs = recognitionRepository.findByUserIdForAdminDetail(userId);
-        if (recs.isEmpty()) {
-            return List.of();
-        }
-        Map<Long, String> names = refNames.names(UserBehaviorEvent.RefKind.DANCER, recs.stream()
-                .map(DancerRecognition::getDancerId).toList());
-        return recs.stream()
-                .map(r -> new AdminUserStatsRow(
-                        r.getId(),
-                        "认可「" + names.getOrDefault(r.getDancerId(), BehaviorRefNameResolver.DANCER_FALLBACK) + "」",
-                        "每日认可",
-                        r.getCreatedAt(), "", ""))
                 .toList();
     }
 
@@ -208,50 +178,6 @@ public class AdminUserStatsDetailService {
         rows.sort(Comparator.comparing(AdminUserStatsRow::time,
                 Comparator.nullsLast(Comparator.reverseOrder())));
         return rows;
-    }
-
-    // ── 收藏舞伴（未软删，时间倒序；舞伴名批量取回） ───────────────────────────
-
-    private List<AdminUserStatsRow> favoriteRows(Long userId) {
-        List<DancerFavorite> favs = favoriteRepository.findByUserIdForAdminDetail(userId);
-        if (favs.isEmpty()) {
-            return List.of();
-        }
-        Map<Long, String> names = refNames.names(UserBehaviorEvent.RefKind.DANCER, favs.stream()
-                .map(DancerFavorite::getDancerId).toList());
-        return favs.stream()
-                .map(f -> new AdminUserStatsRow(
-                        f.getId(),
-                        "收藏「" + names.getOrDefault(f.getDancerId(), BehaviorRefNameResolver.DANCER_FALLBACK) + "」",
-                        "舞伴收藏",
-                        f.getCreatedAt(), "", ""))
-                .toList();
-    }
-
-    // ── 需求单（id 倒序；status 可选过滤——存量 NULL 归 APPROVED；舞伴名批量取回） ─
-
-    private List<AdminUserStatsRow> demandRows(Long userId, String status) {
-        List<DemandRecord> demands = demandRecordRepository
-                .findByUserIdForAdminDetail(userId, status);
-        if (demands.isEmpty()) {
-            return List.of();
-        }
-        Map<Long, String> names = refNames.names(UserBehaviorEvent.RefKind.DANCER, demands.stream()
-                .map(DemandRecord::getDancerId).toList());
-        return demands.stream()
-                .map(d -> {
-                    DemandStatus ds = DemandStatus.parseOrNull(d.getStatus());
-                    boolean fulfilled = d.getFulfilledAt() != null;
-                    String badgeText = ds != null ? ds.label() : "已发放";
-                    String badgeCls = ds != null ? demandBadgeCls(ds) : "badge--success";
-                    String sub = fulfilled ? "已确认履约" : "邀约";
-                    return new AdminUserStatsRow(
-                            d.getId(),
-                            "邀约「" + names.getOrDefault(d.getDancerId(), BehaviorRefNameResolver.DANCER_FALLBACK) + "」",
-                            sub,
-                            d.getCreatedAt(), badgeText, badgeCls);
-                })
-                .toList();
     }
 
     // ── 上报（信息反馈 + 暂停营业报告合并，时间倒序；status=PENDING 跨表匹配） ───
@@ -331,15 +257,6 @@ public class AdminUserStatsDetailService {
             case PENDING -> "badge--warning";
             case APPROVED -> "badge--success";
             case REJECTED, WITHDRAWN -> "badge--muted";
-        };
-    }
-
-    /** 需求单状态徽标配色（镜像前端 buildDemandStatusBadge） */
-    private static String demandBadgeCls(DemandStatus status) {
-        return switch (status) {
-            case PENDING -> "badge--warning";
-            case APPROVED, AUTO_RELEASED -> "badge--success";
-            case REJECTED, EXPIRED -> "badge--muted";
         };
     }
 

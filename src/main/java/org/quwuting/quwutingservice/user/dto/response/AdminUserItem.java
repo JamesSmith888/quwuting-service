@@ -40,10 +40,6 @@ public record AdminUserItem(
         long contributionScore,
         /** 贡献等级称号（后端权威展示名） */
         String contributionLevelName,
-        /** 需求单总数（qwt_demand_records；存量 NULL 状态等价 APPROVED 计入） */
-        long demandCount,
-        /** 履约次数（fulfilled_at 非空；2026-08-27 V54 履约闭环） */
-        long fulfilledCount,
         /** 最近露面时间（资料更新/积分流水/邀约/打卡 四源 MAX，最低回退加入时间——
          *  从未有任何行为 = 加入时间，见 AdminUserStatsService lastSeenFor 定义）。
          *  <b>语义 = 「这个账号最后一次出现」，含登录自动打卡，勿当「活跃」用</b>

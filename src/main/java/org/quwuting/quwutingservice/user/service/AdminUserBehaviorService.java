@@ -6,15 +6,19 @@ import org.quwuting.quwutingservice.user.dto.response.AdminUserBehaviorProfileRe
 import org.quwuting.quwutingservice.user.dto.response.AdminUserBehaviorTimelineResponse;
 import org.quwuting.quwutingservice.user.repository.UserBehaviorEvent;
 import org.quwuting.quwutingservice.user.repository.UserBehaviorRepository;
+import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.Collection;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -42,7 +46,12 @@ import java.util.TreeMap;
  *   <li><b>单用户读取不做用户范围过滤</b>（口径过滤发生在入口列表）：运营需要能对已标记
  *       的审核号做取证式查看，页面另有「微信审核」标记提示其口径归属；</li>
  *   <li>查询次数恒定：轨迹 = 2 条（列表 + 聚合），画像 = 1 条；取名按对象类型批量 IN，
- *       与行数无关（性能第一约束 = 最少 DB 往返，见 29-performance）。</li>
+ *       与行数无关（性能第一约束 = 最少 DB 往返，见 29-performance）；</li>
+ *   <li><b>2026-10-09 更新</b>：① 轨迹同类连发合并成一行（{@link BehaviorTimelineMerger}，
+ *       快讯浏览一次写 4~10 行）；② 筛选选项隐去「窗口内 0 条的下线功能」类型
+ *       （{@code UserBehaviorEvent#isRetired}，历史数据仍保留）；③ 画像增加扩展行为（不计活跃）
+ *       与活跃分层（{@link BehaviorSegment}，与平台页同一分类器）；④ 单对象行下发 {@code refKind/refId}
+ *       供前端深链。</li>
  * </ul>
  *
  * <h2>空值语义</h2>
@@ -65,6 +74,8 @@ public class AdminUserBehaviorService {
     private static final int DEFAULT_LIMIT = 50;
     /** 时段直方图格数（0~23 时） */
     private static final int HOURS_PER_DAY = 24;
+    /** 合并行明细里最多列出的对象名个数（其余折叠为「等 N 个」） */
+    private static final int MAX_TARGET_NAMES = 4;
     /** 「近 7 日 / 此前 7 日」对比窗口 */
     private static final int COMPARE_DAYS = 7;
 
@@ -101,8 +112,7 @@ public class AdminUserBehaviorService {
 
         Map<UserBehaviorEvent.RefKind, Map<Long, String>> namesByKind = resolveRefNames(rows);
 
-        List<AdminUserBehaviorTimelineResponse.Item> items = new ArrayList<>(rows.size());
-        int seq = 0;
+        List<BehaviorTimelineMerger.Raw> raws = new ArrayList<>(rows.size());
         for (UserBehaviorRepository.TimelineRow row : rows) {
             UserBehaviorEvent event = UserBehaviorEvent.byCode(row.getEventType());
             if (event == null) {
@@ -110,27 +120,105 @@ public class AdminUserBehaviorService {
                 // 不让整页失败（展示层兜底原则，同 BehaviorRefNameResolver）
                 continue;
             }
-            String target = targetOf(event, row.getRefId(), namesByKind);
-            items.add(new AdminUserBehaviorTimelineResponse.Item(
-                    event.code() + "#" + (++seq),
-                    event.code(),
-                    event.nature().name(),
-                    event.nature().label(),
-                    composeTitle(event, target),
-                    refNames.dictionary(event.detailDict(), row.getDetailText()),
-                    row.getEventDay(),
-                    row.getHappenedAt(),
-                    row.getEventTime() == null));
+            raws.add(new BehaviorTimelineMerger.Raw(event, row.getHappenedAt(), row.getEventDay(),
+                    row.getEventTime() == null, row.getRefId(), row.getDetailText()));
+        }
+
+        List<AdminUserBehaviorTimelineResponse.Item> items = new ArrayList<>();
+        long shown = 0;
+        int seq = 0;
+        for (BehaviorTimelineMerger.Burst burst : BehaviorTimelineMerger.merge(raws)) {
+            items.add(toItem(burst, ++seq, namesByKind));
+            shown += burst.count();
         }
 
         return new AdminUserBehaviorTimelineResponse(
                 window,
                 code == null ? "" : code,
                 total,
-                total > items.size(),
+                total > shown,
+                shown,
                 cap,
                 typeOptions(counters),
                 items);
+    }
+
+    /**
+     * 批 → 轨迹行。单条行与旧版逐字一致（标题「事件名「对象」」+ 字典明细）；
+     * 合并行（count &gt; 1）标题带「×N」：
+     * 批内只涉及<b>一个对象</b>时保留对象名（「浏览门店「A」×3」），涉及多个对象时标题只写事件名，
+     * 对象名清单下沉到明细（标题太长会在窄屏被截断，而对象清单本就是「展开信息」）。
+     */
+    private AdminUserBehaviorTimelineResponse.Item toItem(
+            BehaviorTimelineMerger.Burst burst, int seq,
+            Map<UserBehaviorEvent.RefKind, Map<Long, String>> namesByKind) {
+        UserBehaviorEvent event = burst.event();
+        BehaviorTimelineMerger.Raw latest = burst.latest();
+        int count = burst.count();
+
+        // 批内去重后的对象（保持「最近优先」的出现序）与明细文案
+        Map<Long, String> targets = new LinkedHashMap<>();
+        Set<String> details = new LinkedHashSet<>();
+        for (BehaviorTimelineMerger.Raw raw : burst.members()) {
+            if (raw.refId() != null && event.refKind() != UserBehaviorEvent.RefKind.NONE) {
+                targets.putIfAbsent(raw.refId(), targetOf(event, raw.refId(), namesByKind));
+            }
+            String detail = refNames.dictionary(event.detailDict(), raw.detail());
+            if (!detail.isBlank()) {
+                details.add(detail);
+            }
+        }
+
+        String title;
+        String detail;
+        String refKind = null;
+        Long refId = null;
+        if (count == 1) {
+            String target = targets.isEmpty() ? "" : targets.values().iterator().next();
+            title = composeTitle(event, target);
+            detail = String.join(" · ", details);
+        } else if (targets.size() == 1) {
+            title = composeTitle(event, targets.values().iterator().next()) + " ×" + count;
+            detail = String.join(" · ", details);
+        } else {
+            title = event.label() + " ×" + count;
+            detail = joinTargets(targets.values(), details);
+        }
+        if (targets.size() == 1) {
+            refKind = event.refKind().name();
+            refId = targets.keySet().iterator().next();
+        }
+
+        return new AdminUserBehaviorTimelineResponse.Item(
+                event.code() + "#" + seq,
+                event.code(),
+                event.nature().name(),
+                event.nature().label(),
+                event.isRetired(),
+                title,
+                detail,
+                latest.day(),
+                latest.happenedAt(),
+                latest.timeApprox(),
+                count,
+                count > 1 ? burst.earliest().happenedAt() : null,
+                refKind,
+                refId);
+    }
+
+    /** 合并行的明细：对象名清单（最多 {@value #MAX_TARGET_NAMES} 个，其余折叠为「等 N 个」）+ 明细字典值 */
+    private static String joinTargets(Collection<String> names, Set<String> details) {
+        List<String> shown = names.stream().filter(n -> !n.isBlank()).limit(MAX_TARGET_NAMES).toList();
+        String targetPart = String.join("、", shown);
+        if (names.size() > MAX_TARGET_NAMES) {
+            targetPart += " 等 " + names.size() + " 个";
+        }
+        List<String> parts = new ArrayList<>();
+        if (!targetPart.isBlank()) {
+            parts.add(targetPart);
+        }
+        parts.addAll(details);
+        return String.join(" · ", parts);
     }
 
     // ── 行为画像 ──────────────────────────────────────────────────────────────
@@ -144,7 +232,7 @@ public class AdminUserBehaviorService {
      */
     @Transactional(readOnly = true)
     public AdminUserBehaviorProfileResponse profile(Long userId, int days) {
-        requireUser(userId);
+        User user = requireUser(userId);
         int window = clamp(days, MIN_DAYS, MAX_DAYS, DEFAULT_DAYS);
         LocalDate sinceDay = sinceDay(window);
         LocalDate today = LocalDate.now();
@@ -154,8 +242,10 @@ public class AdminUserBehaviorService {
 
         Set<LocalDate> activeDays = new HashSet<>();
         Set<LocalDate> openDays = new HashSet<>();
+        Set<LocalDate> extendedDays = new HashSet<>();
         long eventTotal = 0;
         long activeEventTotal = 0;
+        long extendedEventTotal = 0;
         long timedOutActiveEvents = 0;
         long recent7 = 0;
         long prev7 = 0;
@@ -184,6 +274,12 @@ public class AdminUserBehaviorService {
             if (event.nature() == UserBehaviorEvent.Nature.SIGNAL) {
                 openDays.add(row.getEventDay());
             }
+            if (event.nature() == UserBehaviorEvent.Nature.EXTENDED) {
+                // 扩展行为不进任何「活跃」累加器（时段 / 近 7 日 / 首末次均只认主动行为），
+                // 单独计数供页面并排展示——「活跃为 0 但有扩展行为」是真实使用，不是巡检号
+                extendedDays.add(row.getEventDay());
+                extendedEventTotal += cnt;
+            }
             if (event.nature() != UserBehaviorEvent.Nature.ACTIVE) {
                 continue;
             }
@@ -210,12 +306,17 @@ public class AdminUserBehaviorService {
                     UserBehaviorEvent event = UserBehaviorEvent.byCode(entry.getKey());
                     TypeCounter counter = entry.getValue();
                     return new AdminUserBehaviorProfileResponse.TypeCount(
-                            event.code(), event.label(), event.category().label(),
-                            event.nature().name(), event.nature().label(),
+                            event.code(), event.label(), event.category().name(), event.category().label(),
+                            event.nature().name(), event.nature().label(), event.isRetired(),
                             counter.count, counter.days.size(), counter.lastAt);
                 })
                 .sorted((a, b) -> Long.compare(b.count(), a.count()))
                 .toList();
+
+        // 分层与平台「行为分析」页共用同一分类器；可用天数 = min(窗口, 注册至今天数 + 1)
+        long availableDays = availableDays(user, window, today);
+        BehaviorSegment segment = BehaviorSegment.classify(
+                availableDays, activeDays.size(), openDays.size(), extendedDays.size());
 
         return new AdminUserBehaviorProfileResponse(
                 window,
@@ -228,15 +329,29 @@ public class AdminUserBehaviorService {
                 timedOutActiveEvents,
                 firstActiveAt,
                 lastActiveAt,
+                extendedEventTotal,
+                extendedDays.size(),
+                availableDays,
+                new AdminUserBehaviorProfileResponse.Segment(
+                        segment.name(), segment.label(), segment.hint()),
                 breakdown,
                 boxed(hourly));
     }
 
     // ── 内部工具 ──────────────────────────────────────────────────────────────
 
-    private void requireUser(Long userId) {
-        userRepository.findByIdAndDeletedFalse(userId)
+    private User requireUser(Long userId) {
+        return userRepository.findByIdAndDeletedFalse(userId)
                 .orElseThrow(() -> new BusinessException(1004, "用户不存在"));
+    }
+
+    /** 窗口内可用天数：注册早于窗口起点取整窗口，否则取「注册日至今」（含两端）；无注册时间按整窗口 */
+    static long availableDays(User user, int window, LocalDate today) {
+        if (user.getCreatedAt() == null) {
+            return window;
+        }
+        long sinceJoin = ChronoUnit.DAYS.between(user.getCreatedAt().toLocalDate(), today) + 1L;
+        return Math.max(1L, Math.min(window, sinceJoin));
     }
 
     /** 事件码归一：空 → null（全部）；非法码 → 1007（禁静默忽略，见 {@link #timeline}） */
@@ -266,16 +381,23 @@ public class AdminUserBehaviorService {
     }
 
     /**
-     * 筛选 chips 的目录（<b>全量下发</b>）：每个事件带窗口内计数——0 条的类型也保留，
+     * 筛选 chips 的目录：<b>全部现役事件</b>下发，每个事件带窗口内计数——0 条的类型也保留，
      * 让运营能一眼看到「有这一类行为，但这个用户没做过」，而不是以为系统漏了。
+     * <p>
+     * <b>下线功能（舞伴 / 招工）例外</b>：窗口内 0 条就不下发。它们恒为 0，留在 chips 里只会让运营
+     * 以为「系统还有这个功能、只是这个用户没用过」；窗口内有历史记录时照常下发并带 {@code retired}，
+     * 保证取证时仍能按类型筛出那几天的行为（事实不因功能下线而消失）。
      */
     private static List<AdminUserBehaviorTimelineResponse.TypeOption> typeOptions(
             Map<String, TypeCounter> counters) {
         return UserBehaviorEvent.all().stream()
+                .filter(event -> !event.isRetired() || countOf(counters, event.code()) > 0)
                 .map(event -> new AdminUserBehaviorTimelineResponse.TypeOption(
                         event.code(), event.label(),
                         event.category().name(), event.category().label(),
                         event.nature().name(), event.nature().label(), event.nature().hint(),
+                        event.isRetired(),
+                        event.retiredNote() == null ? "" : event.retiredNote(),
                         countOf(counters, event.code())))
                 .toList();
     }
@@ -320,6 +442,8 @@ public class AdminUserBehaviorService {
             case DANCER -> BehaviorRefNameResolver.DANCER_FALLBACK + " #" + refId;
             case RECRUITMENT -> BehaviorRefNameResolver.RECRUITMENT_FALLBACK;
             case ANNOUNCEMENT -> BehaviorRefNameResolver.ANNOUNCEMENT_FALLBACK;
+            case BULLETIN -> BehaviorRefNameResolver.BULLETIN_FALLBACK;
+            case CROWD_REPORT -> BehaviorRefNameResolver.CROWD_REPORT_FALLBACK;
             case NONE -> "";
         };
     }

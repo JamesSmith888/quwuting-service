@@ -34,6 +34,24 @@ public final class SpendEntryLimits {
     /** venue_name varchar(100) */
     public static final int VENUE_NAME_MAX_LENGTH = 100;
 
+    /**
+     * companions_json varchar(4096)（V47）。序列化结果超过它时服务端从尾部丢人直到放得下
+     * （{@link SpendCompanions#serialize}）——同行者是元数据，绝不让它拒掉一笔账。
+     */
+    public static final int COMPANIONS_JSON_MAX_LENGTH = 4096;
+
+    /**
+     * 一笔账最多记几位同行者 = 计时分享域「单会话加入人数上限 5」+ 主持方 1 位（链式传播里一个人
+     * 既是加入者又是主持方）。客户端协议常量 {@code SPEND_COMPANION_MAX} 与本值由 check:protocol 比对。
+     */
+    public static final int COMPANION_MAX_COUNT = 6;
+
+    /** 同行者昵称上限（用户昵称列 varchar(30)，留余量吸收未来放宽；超长按字符截断而非丢弃） */
+    public static final int COMPANION_NICKNAME_MAX_LENGTH = 64;
+
+    /** 同行者头像 URL 上限（用户头像列 varchar(500)，留余量；超长的 URL 截断后无法加载，故丢弃头像而非截断） */
+    public static final int COMPANION_AVATAR_URL_MAX_LENGTH = 512;
+
     private SpendEntryLimits() {
     }
 }
