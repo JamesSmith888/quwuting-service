@@ -117,6 +117,10 @@ def main() -> int:
     parser.add_argument("--status")
     parser.add_argument("--page", type=int, default=0)
     parser.add_argument("--size", type=int, default=500)
+    parser.add_argument("--all", action="store_true",
+                        help="export 全量翻页合并（2026-10-11 固化：--size 500 只回一页，"
+                             "全量拉取曾需手写翻页脚本两轮踩坑）")
+    parser.add_argument("--out", help="export 结果落盘路径（省去 shell 重定向）")
     parser.add_argument("--items", help="JSON 数组字符串或 @文件路径")
     parser.add_argument("--report-date", help="舞讯报告日期 YYYY-MM-DD（status-reverse 必填）")
     parser.add_argument("--source-id", default="xianbao360", help="渠道标识（status-reverse）")
@@ -161,7 +165,30 @@ def main() -> int:
         params.append(f"size={args.size}")
         query = "&".join(params)
         data = _request(args.base_url, "GET", f"/admin/venue-sync/venues/export?{query}", token)
-        print(json.dumps(data, ensure_ascii=False))
+        if args.all:
+            # 全量翻页合并（返回体为顶层 content；终止判据 data.last）
+            rows = data.get("content", []) if isinstance(data, dict) else data
+            payload = data if isinstance(data, dict) else {}
+            page = args.page
+            while not (payload.get("last", True) if isinstance(payload, dict) else True):
+                page += 1
+                q2 = f"page={page}&size={args.size}"
+                if args.city:
+                    q2 = f"city={urllib.parse.quote(args.city)}&{q2}"
+                if args.status:
+                    q2 = f"status={args.status}&{q2}"
+                payload = _request(args.base_url, "GET",
+                                   f"/admin/venue-sync/venues/export?{q2}", token)
+                rows += payload.get("content", []) if isinstance(payload, dict) else payload
+            data = {"content": rows, "totalPages": None, "last": True, "number": None}
+        out = json.dumps(data, ensure_ascii=False)
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as f:
+                f.write(out)
+            n = len(data.get("content", [])) if isinstance(data, dict) else "?"
+            print(f"[ok] export -> {args.out}（{n} 条）")
+        else:
+            print(out)
         return 0
 
     if args.command == "batch-create":

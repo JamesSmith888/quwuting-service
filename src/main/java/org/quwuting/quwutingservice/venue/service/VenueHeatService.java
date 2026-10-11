@@ -143,6 +143,23 @@ public class VenueHeatService {
     /** 状态可信度矩阵阈值：不稳定门店状态持续天数 ≤ 此值视为"近期确认过"（MEDIUM），> 此值为 LOW */
     private static final long CONFIDENCE_RECENT_DAYS = 7;
 
+    /**
+     * 判定依据文案里的「距今多久」占位符（2026-10-12 根因修复，两端共用字面量）。
+     * <p>
+     * ⛔ **跨仓逐字同改契约**：前端 {@code miniprogram/utils/statusConfidence.ts} 的
+     * {@code AGO_PLACEHOLDER} 必须与本常量同值，由门禁
+     * {@code npm run check:status-ago}（scripts/check-status-ago.py）机器比对——
+     * 改一端漏改另一端 = 占位符永远不被替换、用户看到裸的 "{ago}"，且没有任何编译
+     * 错误会提示（本仓既有实证：跨 HTTP 边界的字符串类型系统看不见，见
+     * scripts/check-spend-protocol.py 的由来）。
+     * <p>
+     * 为什么不在服务端直接算"X 前"：相对时间是 <b>now 的函数</b>，而热度响应被
+     * {@link #heatCache} 缓存（refreshAfterWrite 60s / expireAfterWrite 30min）——
+     * 服务端预生成的"X 前"会被缓存固化，用户可能看到 29 分钟前算出的"刚刚"。
+     * 时刻是事实、可安全缓存；"X 前"必须留给渲染侧。
+     */
+    private static final String AGO_PLACEHOLDER = "{ago}";
+
     /** 缓存预刷新周期：60s 后访问返回旧值并触发异步重载 */
     private static final long CACHE_REFRESH_SECONDS = 60;
 
@@ -432,9 +449,11 @@ public class VenueHeatService {
         // ── 状态可信度（三维判定：状态类型 × 稳定性 × 持续天数；活跃报告 override） ──
         // 2026-09-02 传入「是否有任何状态日志」以区分「今天刚翻转（0 天）」与「无日志老店
         //（null→0 天）」，见 computeStatusConfidence 时间验证门槛注释（零点莎莎案例）。
+        // 2026-10-12 起传**原始变更时刻**（不再只传 currentStatusDays）：文案里的"距今多久"
+        // 必须能表达小时/分钟，而 currentStatusDays 是已被降精度的日期差（今天 = 0）。
         StatusConfidenceResult confidence = computeStatusConfidence(
                 venue.getStatus(), suspensionCount30d, currentStatusDays,
-                latestStatusLogTime != null, reportSummary.activeCount());
+                latestStatusLogTime, reportSummary.activeCount());
 
         // ── 收到礼物聚合（2026-08-12 礼物化：「收获的支持」礼物墙数据源；
         //     @Lazy 注入 PointsService 打破循环依赖，见构造器注释） ──
@@ -454,6 +473,8 @@ public class VenueHeatService {
                 confidence.level().name(),
                 confidence.text(),
                 confidence.ruleDetail(),
+                // 「距今多久」的事实源（与引用它的 ruleDetail 同响应下发，见字段注释）
+                latestStatusLogTime,
                 statusLogs,
                 reportSummary.activeCount(),
                 reportSummary.latestReportTime(),
@@ -607,17 +628,29 @@ public class VenueHeatService {
      * 逐字翻译给用户——信息完整但不可读。重构原则：徽标已承载结论，依据行只补
      * <b>一句白话事实 + 必要时一句行动建议</b>，完整判定矩阵不再复述（判定过程由
      * 「状态记录」区块的事件列表自证——证据即解释）。
+     * <p>
+     * ⛔ **「距今多久」一律走 {@link #AGO_PLACEHOLDER} 占位符**（2026-10-12 根因修复）：
+     * 本方法<b>禁止</b>把 {@code currentStatusDays}（天粒度日期差）拼成"X 天前"——
+     * 当天变更时它等于 0，输出「0 天前刚变更为暂停营业」（用户实报），且表达不了小时/分钟。
+     * 时间语义只有两种合法形态，各归各位：
+     * <ul>
+     *   <li><b>相对时间</b>（多久之前发生的）→ {@code {ago}} 占位符 + {@code statusChangedAt}
+     *       原始时刻，前端渲染时算；</li>
+     *   <li><b>持续时长</b>（已经多久了）→ {@code currentStatusDays} 的"N 天"（天粒度对
+     *       "持续"是合适精度，且它是判据输入，无需更高精度）。</li>
+     * </ul>
      */
     private StatusConfidenceResult computeStatusConfidence(VenueStatus status, long suspensionCount30d,
-                                                           long currentStatusDays, boolean hasAnyStatusLog,
+                                                           long currentStatusDays, LocalDateTime latestStatusLogTime,
                                                            int activeReportCount) {
         if (activeReportCount > 0) {
             return new StatusConfidenceResult(StatusConfidence.LOW, "数据可能过时",
                     "近4小时有 " + activeReportCount + " 人报告暂停营业，信息可能已过时。");
         }
+        // 无任何状态日志（null）仅可能是日志体系建立前的历史存量老店
+        boolean hasAnyStatusLog = latestStatusLogTime != null;
         if (status == VenueStatus.OPEN) {
             // 时间验证门槛：本次营业中状态已持续 >7 天才被时间验证（可进 HIGH/LOW）。
-            // 无任何状态日志（hasAnyStatusLog=false）仅可能是日志体系前的历史存量老店，
             // 按久远老店兜底视同通过——见方法注释 2026-09-02 第二次建模修正。
             boolean timeVerified = !hasAnyStatusLog || currentStatusDays > CONFIDENCE_RECENT_DAYS;
             if (!timeVerified) {
@@ -626,9 +659,7 @@ public class VenueHeatService {
                 // 不得因"近30天没暂停过"判 HIGH「稳定营业」（假阴性信号，见方法注释）。
                 if (suspensionCount30d == 0) {
                     return new StatusConfidenceResult(StatusConfidence.MEDIUM, "建议确认",
-                            currentStatusDays <= 0
-                                    ? "今天刚变更为营业中，建议出发前核实。"
-                                    : currentStatusDays + " 天前刚变更为营业中，建议出发前核实。");
+                            recentChangeDetail("营业中", latestStatusLogTime) + "建议出发前核实。");
                 }
                 return new StatusConfidenceResult(StatusConfidence.MEDIUM, "状态多变",
                         "近30天暂停过 " + suspensionCount30d + " 次，本次已连续营业 " + currentStatusDays + " 天。");
@@ -645,6 +676,21 @@ public class VenueHeatService {
                     status.getDisplayName() + "状态已持续 " + currentStatusDays + " 天，信息可信。");
         }
         return new StatusConfidenceResult(StatusConfidence.MEDIUM, "建议确认",
-                currentStatusDays + " 天前刚变更为" + status.getDisplayName() + "，建议出发前确认。");
+                recentChangeDetail(status.getDisplayName(), latestStatusLogTime) + "建议出发前确认。");
+    }
+
+    /**
+     * 「近期变更」类判定依据的时间片段（单一权威源——两个分支的"距今多久"必须同构，
+     * 2026-10-12 根因修复：旧实现 OPEN 与非 OPEN 各写一套拼接，0 天特判只做在 OPEN 分支，
+     * 非 OPEN 分支因此输出「0 天前刚变更为暂停营业」）。
+     * <p>
+     * 无变更时刻（{@code changedAt == null}，即无任何状态日志的历史存量老店）时不得输出
+     * 占位符——没有事实可派生，宁可退到不含时间的中性表述，也不留一个替换不掉的 {@code {ago}}。
+     */
+    private String recentChangeDetail(String targetDisplayName, LocalDateTime changedAt) {
+        if (changedAt == null) {
+            return "尚无状态变更记录，";
+        }
+        return AGO_PLACEHOLDER + "变更为" + targetDisplayName + "，";
     }
 }

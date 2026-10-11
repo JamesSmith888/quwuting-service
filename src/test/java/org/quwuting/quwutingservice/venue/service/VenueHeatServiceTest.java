@@ -20,6 +20,8 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -372,6 +374,21 @@ class VenueHeatServiceTest {
     // 修复后判定与文案均在后端生成（statusConfidenceText / statusConfidenceRuleDetail），
     // 以下用例断言「等级 × 文案」随状态类型与时间验证正确分治。
 
+    /**
+     * 判定依据文案里<b>不得出现自造的相对时间</b>（2026-10-12 根因回归）。
+     * <p>
+     * 「X 天前」是 <b>now 的函数</b>：服务端用天粒度日期差拼出来的「0 天前刚变更为暂停营业」
+     * 既失真（当天变更 = 0 天，表达不了小时/分钟）又会被热度缓存固化。合法形态只有两种——
+     * 占位符 {@code {ago}}（相对时间，渲染时算）与「持续 N 天」（持续时长，天粒度足够）。
+     * 断言放在这里（而非只断言某一句）是因为**任何一处复辟都会重新产生同类用户可见错误**，
+     * 单点断言挡不住下一个人照旧写法再加一句。
+     */
+    private void assertNoHardcodedRelativeTime(String ruleDetail) {
+        assertFalse(ruleDetail.matches("(?s).*\\d+\\s*(天前|小时前|分钟前).*"),
+                "判定依据不得自造相对时间（应走 {ago} 占位符）：" + ruleDetail);
+        assertFalse(ruleDetail.contains("今天刚"), "判定依据不得硬编码「今天刚」：" + ruleDetail);
+    }
+
     private void stubStatusLog(LocalDateTime latestCreatedAt, long suspensionCount30d, long reportCount) {
         stubZeroCounters();
         when(counters.getLateststatuslogtime()).thenReturn(latestCreatedAt);
@@ -405,23 +422,31 @@ class VenueHeatServiceTest {
 
         assertEquals("MEDIUM", resp.statusConfidence());
         assertEquals("建议确认", resp.statusConfidenceText());
-        assertTrue(resp.statusConfidenceRuleDetail().contains("今天刚变更为营业中"),
-                "判定依据应点明刚变更的时间事实");
+        // 2026-10-12 起「距今多久」= {ago} 占位符（旧文案「今天刚变更为营业中」由前端按
+        // statusChangedAt 渲染出「刚刚 / X分钟前 / X小时前」）——服务端不再生成时间字面量。
+        assertTrue(resp.statusConfidenceRuleDetail().contains("{ago}变更为营业中"),
+                "判定依据应点明刚变更的时间事实（占位符形态）");
         assertTrue(resp.statusConfidenceRuleDetail().contains("建议出发前核实"),
                 "判定依据应含行动建议");
+        assertNotNull(resp.statusChangedAt(), "占位符必须有可替换的事实时刻");
+        assertNoHardcodedRelativeTime(resp.statusConfidenceRuleDetail());
     }
 
     @Test
     void openVenueReopenedDaysAgoWithinWindowIsMediumSuggestion() {
         // 已停业/暂停 → 营业中 3 天（≤7 天，仍在时间验证窗口内）+ 0 次暂停 → MEDIUM「建议确认」
-        stubStatusLog(LocalDateTime.now().minusDays(3), 0L, 0L);
+        LocalDateTime changedAt = LocalDateTime.now().minusDays(3).minusHours(5);
+        stubStatusLog(changedAt, 0L, 0L);
 
         VenueHeatResponse resp = heatService.getHeat(1L);
 
         assertEquals("MEDIUM", resp.statusConfidence());
         assertEquals("建议确认", resp.statusConfidenceText());
-        assertTrue(resp.statusConfidenceRuleDetail().contains("3 天前刚变更为营业中"),
-                "判定依据应含距变更的天数");
+        assertTrue(resp.statusConfidenceRuleDetail().contains("{ago}变更为营业中"),
+                "判定依据的时间一律走占位符（天数由前端按 statusChangedAt 派生）");
+        assertEquals(changedAt, resp.statusChangedAt(),
+                "statusChangedAt 必须是未降精度的原始变更时刻（含时分秒，天粒度还原不出来）");
+        assertNoHardcodedRelativeTime(resp.statusConfidenceRuleDetail());
     }
 
     @Test
@@ -490,6 +515,47 @@ class VenueHeatServiceTest {
 
         assertEquals("MEDIUM", resp.statusConfidence());
         assertEquals("建议确认", resp.statusConfidenceText());
+        assertNoHardcodedRelativeTime(resp.statusConfidenceRuleDetail());
+    }
+
+    @Test
+    void suspendedTodayNeverSaysZeroDaysAgo() {
+        // ── 用户实报回归（2026-10-12）──
+        // 门店当天被置为暂停营业 → currentStatusDays = 0（天粒度日期差），旧实现把它
+        // 直接拼进文案 ⇒ 用户看到「0 天前刚变更为暂停营业」（"0 天前"不是人话，且
+        // 当天发生的事本该说"3小时前"）。修复后：时间语义交给 {ago} + 原始时刻。
+        LocalDateTime changedAt = LocalDateTime.now().minusHours(3);
+        venue.setStatus(VenueStatus.SUSPENDED);
+        stubStatusLog(changedAt, 0L, 0L);
+
+        VenueHeatResponse resp = heatService.getHeat(1L);
+
+        assertEquals("MEDIUM", resp.statusConfidence());
+        assertEquals("建议确认", resp.statusConfidenceText());
+        assertFalse(resp.statusConfidenceRuleDetail().contains("0 天前"),
+                "当天变更不得输出「0 天前」：" + resp.statusConfidenceRuleDetail());
+        assertTrue(resp.statusConfidenceRuleDetail().contains("{ago}变更为暂停营业"),
+                "时间应由前端按 statusChangedAt 派生为「X小时前/X分钟前」");
+        assertEquals(changedAt, resp.statusChangedAt(),
+                "必须下发原始变更时刻，否则小时/分钟精度无从派生");
+        assertNoHardcodedRelativeTime(resp.statusConfidenceRuleDetail());
+    }
+
+    @Test
+    void venueWithoutStatusLogOmitsAgoPlaceholder() {
+        // 无任何状态日志的历史存量老店（null → currentStatusDays = 0）走非营业分支时，
+        // 没有可替换的时刻 ⇒ 不得输出占位符（否则用户看到裸的 "{ago}"），退到中性表述。
+        venue.setStatus(VenueStatus.SUSPENDED);
+        stubStatusLog(null, 0L, 0L);
+
+        VenueHeatResponse resp = heatService.getHeat(1L);
+
+        assertNull(resp.statusChangedAt(), "无状态日志时不得伪造变更时刻");
+        assertFalse(resp.statusConfidenceRuleDetail().contains("{ago}"),
+                "无事实可派生时不得输出占位符：" + resp.statusConfidenceRuleDetail());
+        assertTrue(resp.statusConfidenceRuleDetail().contains("尚无状态变更记录"),
+                "应退到不含时间的中性表述");
+        assertNoHardcodedRelativeTime(resp.statusConfidenceRuleDetail());
     }
 
     @Test

@@ -156,8 +156,34 @@ public record VenueHeatResponse(
          * 后端生成下发，营业状态详情弹窗「可信度」区块直接渲染。
          * 2026-08-29 白话化重构：一句话 = 关键事实 + 必要时的行动建议，
          * 不再复述判定规则全文（规则术语用户无法一眼理解，见 VenueHeatService）。
+         * <p>
+         * ⛔ **本字段内禁止出现任何自造的相对时间字面量**（「X 天前」「今天刚」「X 小时前」…
+         * ——2026-10-12 根因修复：相对时间是「事实时刻 × 渲染时刻」的函数，服务端用天粒度
+         * 派生值拼进文案后，当天变更会输出「0 天前刚变更为暂停营业」，且该字符串会被热度
+         * 缓存固化最长 30 分钟）。凡是"距今多久"一律写占位符 {@code {ago}}（常量
+         * {@code VenueHeatService.AGO_PLACEHOLDER}），由前端按 {@link #statusChangedAt}
+         * 与渲染时刻派生（前端单一权威源 {@code utils/statusConfidence.ts}）。
          */
         String statusConfidenceRuleDetail,
+
+        /**
+         * 最近一次营业状态变更的时刻（"yyyy-MM-dd HH:mm:ss"；无状态日志 → null）。
+         * 2026-10-12 新增（根因修复：判定依据文案里的「距今多久」由本字段驱动）。
+         * <p>
+         * 与 {@link #currentStatusDays} 的分工（勿混用）：
+         * <ul>
+         *   <li>{@code currentStatusDays} = <b>天粒度的日期差</b>，只服务<b>判据</b>
+         *       （「是否已被时间验证」的 >7 天门槛）与<b>持续时长</b>表达（「已持续 N 天」）；
+         *       它被降过精度，表达不了小时/分钟。</li>
+         *   <li>本字段 = <b>未降精度的原始时刻</b>，只服务<b>相对时间</b>表达
+         *       （「3小时前变更为暂停营业」）。时刻是事实，可被缓存而不失真；
+         *       「X 前」由前端在渲染时算，天然跟随 now。</li>
+         * </ul>
+         * 同响应下发（与引用它的 ruleDetail 同源）——跨响应拼装会出现"文案与它引用的
+         * 事实不是同一时刻"的自相矛盾。
+         */
+        @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+        LocalDateTime statusChangedAt,
 
         /**
          * 近30天状态变更记录（最多 5 条，按变更时间倒序，2026-08-29 新增）。

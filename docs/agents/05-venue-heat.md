@@ -360,9 +360,11 @@ LocalDate viewUntil = today.plusDays(1);                      // views 按 DATE 
 
 ### 状态可信度（StatusConfidence）
 
-`VenueHeatResponse` 返回 `statusConfidence` 等级 + **`statusConfidenceText` 结论文案 + `statusConfidenceRuleDetail` 判定依据**（2026-08-08 新增），向用户传达"当前状态信息有多可信"。枚举值：`HIGH` / `MEDIUM` / `LOW`。**判定逻辑与文案的唯一事实源在 `VenueHeatService`，前端只渲染**（与热度公式文案 `formulaText/formulaDetail` 同模式，规则调整免发前端）。
+`VenueHeatResponse` 返回 `statusConfidence` 等级 + **`statusConfidenceText` 结论文案 + `statusConfidenceRuleDetail` 判定依据**（2026-08-08 新增），向用户传达"当前状态信息有多可信"。枚举值：`HIGH` / `MEDIUM` / `LOW`。**判定逻辑与文案的唯一事实源在 `VenueHeatService`，前端只渲染**（与热度公式文案 `formulaText/formulaDetail` 同模式，规则调整免发前端）；⚠️ 2026-10-12 起有一处**有意的分工例外**：文案里「距今多久」是 `{ago}` 占位符，由前端在渲染时刻替换（见下「占位符化」段）——相对时间是 now 的函数，不能由服务端预生成进缓存。
 
 **判定依据文案白话化（2026-08-29，用户反馈"一眼看不懂、需静下心才能明白"）**：`statusConfidenceRuleDetail` 不再复述判定规则全文（旧文案为「判定规则：近30天暂停 N 次 = 稳定…」的规则说明书口吻），改为**一句话白话 = 关键事实 + 必要时的行动建议**（如「近30天暂停过 2 次，本次已连续营业 3 天。」/「已停业状态已持续 20 天，信息可信。」）。判定过程由 `statusLogs`（状态记录区块）的事件列表自证——证据即解释，完整矩阵不再对用户展开。
+
+**「距今多久」占位符化 + `statusChangedAt` 下发（2026-10-12 根因修复：用户实报门店当天暂停营业显示「0 天前暂停营业」）**：判定依据文案里的一切「距今多久」不再由后端拼字面量，统一写占位符 `{ago}`（常量 `VenueHeatService.AGO_PLACEHOLDER`，跨仓逐字同改契约见下）；同时 `VenueHeatResponse` 新增 **`statusChangedAt`**（最近一次状态变更的**原始时刻**，"yyyy-MM-dd HH:mm:ss"，无状态日志 → null），由前端 `miniprogram/utils/statusConfidence.ts`（渲染唯一入口，复用 `timeAgo.formatTimeAgo`）在**渲染时刻**替换为「刚刚 / X分钟前 / X小时前 / X天前」。**根因三层**：① 旧实现用天粒度日期差（`currentStatusDays`）拼「X 天前」——当天变更 = 0 ⇒ 「0 天前」（不是人话），且表达不了小时/分钟；② 相对时间是 **now 的函数**，而热度响应被缓存（refreshAfterWrite 60s / expireAfterWrite 30min）⇒ 服务端预生成的「刚刚」会被缓存固化（用户可能看到 29 分钟前算出的"刚刚"）；③ OPEN 分支有 `<=0 → "今天刚"` 特判、非 OPEN 分支没有 ⇒ 同类问题必在另一处复发。**分工判据（两个时间量勿混用）**：`currentStatusDays`（天粒度，降过精度）只服务**判据**（>7 天时间验证门槛）与**持续时长**表达（「已持续 N 天」）；`statusChangedAt`（原始时刻）只服务**相对时间**表达——**缓存可以缓存事实（时刻），不能缓存派生量**。无变更时刻（历史存量老店）时 `recentChangeDetail` 退到不含时间的中性表述（禁留替换不掉的占位符）。**机器门禁**：后端测试 `assertNoHardcodedRelativeTime`（任何分支不得复辟「X 天前 / 今天刚」字面量）+ 跨仓 `npm run check:status-ago`（小程序仓；两端占位符逐字同值 / 后端字符串零自造相对时间 / `{ago}` 字面量只许在渲染模块 / 消费方必须经 `renderStatusConfidenceDetail` 渲染）。
 
 **三维矩阵（2026-08-08 根因修复：旧二维矩阵缺"状态类型"维度；2026-09-02 二次修正：OPEN 分支补时间验证门槛）**——稳定性（suspensionCount30d）× 当前状态持续天数（currentStatusDays）× **当前状态类型（营业中 vs 非营业）**：
 
