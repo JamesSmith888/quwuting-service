@@ -162,11 +162,20 @@ def main() -> int:
         and f"{_county_key(d)}市" not in plat_cities
         and _county_key(d) not in plat_cities}
 
+    # 🆕 2026-10-12：母城「空 header」（noListHeaders，如「无锡*」「镇江*」——源只写城市名、
+    # 未列任何门店）⇒ 该城市辖区视同**未报到**、不纳入暂停推断。
+    # 实证：无锡市区 #747/#748/#751/#1147 —— 源报江阴/宜兴（县级 header），母城市区是空行；
+    # 不修则 4 家市区店因「江阴/宜兴 的 mention 把无锡市带进 covered」被误列候选（本轮实测）。
+    no_list_keys = {_county_key(c) for c in (M.get("noListHeaders") or [])}
+
     def in_scope(v) -> bool:
-        """范围细化三条（close-direction-playbook §2）：市辖区随母城；县级市/县独立（仅当被点名）。"""
+        """范围细化三条（close-direction-playbook §2）：市辖区随母城；县级市/县独立（仅当被点名）。
+
+        ⚠️ 市辖区「随母城」的前提是**母城确有报到**（不是空 header）——空 header 视同未覆盖。
+        """
         d = (v.get("district") or "").strip()
         if not d or d.endswith("区"):
-            return True
+            return _county_key(v.get("city") or "") not in no_list_keys
         return d in reported_county_districts
 
     mentioned = {r["venueId"] for r in res if r.get("venueId")}
@@ -364,17 +373,35 @@ def main() -> int:
                  | {s["venueId"] for s in suspect_hold}
                  | {s["venueId"] for s in suspend_cross_source_hold})
     _gdrop_ids = {s["venueId"] for s in suspend_guard_dropped}
-    _scope_excluded = [v for v in _not_hit if v["venueId"] not in _sub_ids
-                       and v["venueId"] not in _hold_ids and v["venueId"] not in _gdrop_ids]
+    _scope_excluded_all = [v for v in _not_hit if v["venueId"] not in _sub_ids
+                           and v["venueId"] not in _hold_ids and v["venueId"] not in _gdrop_ids]
+    # 🆕 2026-10-12：把「空 header 母城的排除」从范围细化里拆出来单列——两者根因不同：
+    #   县级排除 = 非主城区未报到（district 级）；空 header = 整城未报到（city 级）。
+    #   混在一起会让旧的「⚠️ 含非县级辖区」检查误报（如无锡「梁溪区」实为正当排除）。
+    #   ⚠️ 归类优先级：district 是县级市/县的（如镇江·扬中）先归「县级排除」——它即使母城
+    #   不是空 header 也会被排除，根因是 district 级；只有市辖区/无辖区才是空 header 的锅。
+    def _is_county_district(v) -> bool:
+        d = (v.get("district") or "").strip()
+        return bool(d) and not d.endswith("区")
+
+    _nlh_excluded = [v for v in _scope_excluded_all
+                     if _county_key(v.get("city") or "") in no_list_keys
+                     and not _is_county_district(v)]
+    _scope_excluded = [v for v in _scope_excluded_all
+                       if v not in _nlh_excluded]
     print("\n🔍 量级复核（城市级差集 · 自洽校验）：")
     print(f"  覆盖城内 OPEN {len(_open_cov)} − 已点名 {len(_open_cov) - len(_not_hit)}"
           f" = 未点名 {len(_not_hit)}")
     print(f"  ⇒ 暂停提交 {len(_sub_ids)} + 护栏剔除(人工{len(suspend_manual_hold)}"
           f"/疑似{len(suspect_hold)}/跨源{len(suspend_cross_source_hold)}) {len(_hold_ids)}"
           f" + 守卫 {len(_gdrop_ids)}"
+          f" + 空header排除 {len(_nlh_excluded)}"
           f" + 范围细化排除 {len(_scope_excluded)}"
-          f" = {len(_sub_ids) + len(_hold_ids) + len(_gdrop_ids) + len(_scope_excluded)}"
+          f" = {len(_sub_ids) + len(_hold_ids) + len(_gdrop_ids) + len(_nlh_excluded) + len(_scope_excluded)}"
           f"（须 = 未点名 {len(_not_hit)}）")
+    if _nlh_excluded:
+        _nlc = Counter(v["city"] for v in _nlh_excluded)
+        print(f"  空 header 排除（母城未报到，视同未覆盖）：{dict(_nlc)}")
     if _scope_excluded:
         _cnt = Counter((v.get("district") or "（无辖区）") for v in _scope_excluded)
         # 「县级市/县/镇/旗/盟」= 非主城区的下级行政区，未被报到属正常排除；
@@ -384,6 +411,17 @@ def main() -> int:
         print(f"  排除明细（辖区）：{dict(_cnt)}")
         print("  ✅ 全部落在县级市/县（未报到）—— 正常"
               if not _bad else f"  ⚠️ 含非县级辖区，需人工复核：{_bad}")
+    # 🆕 逐城覆盖明细（2026-10-12 固化，SKILL §3B「按城拆解命中率」的落地）：
+    # 全局命中率会掩盖单城归零 —— 这是「单城失效/覆盖口径差异」的唯一可靠探针。
+    # 判据（仅提示，不参与过滤）：某城 在营≥3 且 命中/在营 <40% ⇒ 疑似「源对该城只点零星几家、
+    # 其余历来由另一源点名」（10-03/10-09 长沙/沈阳/杭州同形）⇒ 提交前先人工核，勿硬闯熔断。
+    _o = Counter(v["city"] for v in _open_cov)
+    _h = Counter(v["city"] for v in _open_cov if v["venueId"] in mentioned)
+    print("\n🧭 逐城覆盖明细（在营/命中/未点名；⚠️ 疑似覆盖差异 —— 提交前逐城核对边界）：")
+    for c in sorted(_o, key=lambda c: -(_o[c] - _h[c])):
+        n, h = _o[c], _h[c]
+        warn = "  ⚠️ 疑似覆盖差异（命中/在营 <40%）" if n >= 3 and h / n < 0.4 else ""
+        print(f"  {c}：在营 {n} / 命中 {h} / 未点名 {n - h}{warn}")
     # 🆕 新源语义准入校验（2026-10-01 立规，见 SKILL.md §Step 1「新源准入校验」）：
     # 白名单语义 = 「列出来的 = 今日营业」⇒ 源应命中该城绝大多数在营门店。
     # 命中率过低 = 源是「全量目录/参考资料」，此时「未上榜」≠ 关门，关门方向必须停用。

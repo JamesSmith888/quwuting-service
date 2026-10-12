@@ -1,7 +1,7 @@
 {
   "source": "xianbao360",
   "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-10-09",
+  "updated": "2026-10-12",
   "entries": [
     {
       "city": "西安市",
@@ -6837,6 +6837,30 @@
       "venue_id": 785,
       "kind": "alias",
       "note": "2026-10-09 市井慢时光图片源：咸阳「金沙」＝平台 #785 金莎舞吧；与 10-08 源站「金莎」互证，判为同店错字。平台别名已灌。"
+    },
+    {
+      "city": "无锡市",
+      "news_name": "北国",
+      "platform_name": "北国茶座",
+      "venue_id": 745,
+      "kind": "alias",
+      "note": "2026-10-10 低置信长尾别名固化（2026-09-25 口径，连续 ≥2 轮挂在表②）：舞讯「北国」（江阴段）vs 平台名带「茶座」后缀 ⇒ 原落 CONTAINED；10-08/10-09/10-10 连续 3 轮未收。已双写平台别名 + 本条目，重跑回读 via=alias-domain / EXACT（双源同日点名）⇒ 当日自动反转 OPEN。"
+    },
+    {
+      "city": "西安市",
+      "news_name": "金浪",
+      "platform_name": "金浪音乐酒吧",
+      "venue_id": 167,
+      "kind": "alias",
+      "note": "2026-10-12 低置信长尾别名固化（连续 2 轮：10-11 表②「金浪 CEASED·sg 独点」/ 10-12 CONTAINED fuzzy-prefix）：舞讯「金浪」vs 平台名带「音乐酒吧」后缀 ⇒ 原落 CONTAINED；alias-import 后重拉 export 回读升 EXACT，当轮自动反转 + 公告 #131。"
+    },
+    {
+      "city": "常州市",
+      "news_name": "星语",
+      "platform_name": "星语茶吧",
+      "venue_id": 799,
+      "kind": "alias",
+      "note": "2026-10-12 低置信长尾别名固化（连续 2 轮：10-11 表②「星语 CONTAINED」/ 10-12 CONTAINED contained:星语~星语茶吧）：「茶吧」后缀未被剥 ⇒ 原落 CONTAINED；alias-import 后重拉 export 回读升 EXACT，当轮自动反转 + 公告 #131。"
     }
   ],
   "removed_duplicates": [
