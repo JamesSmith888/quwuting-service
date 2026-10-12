@@ -468,6 +468,8 @@ qwt_dance_records_v1），账目表即使用事实表——**禁为统计新建�
   新增 8 事件：`BULLETIN_VIEW` 浏览快讯 / `BULLETIN_REACTION` 快讯表态 / `CROWD_LIKE` 点赞热度上报 /
   `SPEND_ENTRY` 记账 / `TIMER_SHARE_HOST` 发起计时同步 / `TIMER_SHARE_JOIN` 扫码加入计时 /
   `APP_FEEDBACK` 提交意见反馈 / `VENUE_ACTIVITY_CHECKIN` 门店活动打卡（0 行，先登记落点）。
+  **2026-10-12 增补第 9 个**：`TIMER_SHARE_LIKE` 给同行者点赞（V48 `qwt_timer_share_likes`，用户列 `liker_id`，EXTENDED、**不计活跃**；
+  `EXTENDED_SIZE` 8 → 9，见 55 号）。取消赞是软删，事实口径 = 动作发生过，照常入轨迹。
 - **事件级 `userColumn` / `timeColumn`**：点赞的归因列是 `liker_id`、计时同步主持人是 `host_user_id`，
   记账的时刻列是 `ts`（账目发生时刻，≠ `created_at` 同步上云时刻；195 条中 15 条相差 > 1 小时）。
   生成物对非 `user_id` 列统一 `AS user_id` 对齐 UNION 列名；既有 18 个事件的生成文本**逐字未变**。

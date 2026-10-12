@@ -373,9 +373,7 @@ public class TimerShareService {
      * 不用 DB now()），与 settled_at_ms 同一条时间轴；创建时间缺失（理论上不会）→ null，客户端不展示该行。
      */
     private static Long toEpochMs(TimerShareJoin join) {
-        return join.getCreatedAt() == null
-                ? null
-                : join.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+        return TimerShareClock.epochMsOf(join.getCreatedAt());
     }
 
     /** 传播链：parentToken 格式合法且存在才记；否则忽略（它只是统计口径，不值得为它拒绝请求） */

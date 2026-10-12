@@ -74,5 +74,14 @@ public enum MessageType {
      * 取消后再赞不重发；内容<b>不点名赞者</b>（赞者匿名保护）。
      * 软关联 VENUE（深链门店详情页热度卡）。
      */
-    CROWD_REPORT_LIKED
+    CROWD_REPORT_LIKED,
+    /**
+     * 计时同行者点赞（2026-10-12 新增，V48；docs/agents/54-timer-share.md §十五）：一场二维码同步的计时里，
+     * 对方给你点了赞。<b>每个(收件人, 分享会话)至多一条未读</b>——同一场里多位加入者陆续赞主持方时合并成一条
+     * 「收到 N 个赞」（{@code MessageService#createOrMergeUnread}，mergeSince = 会话创建时刻），
+     * 已读后再被赞 ⇒ 新建。仅该对<b>首次赞</b>触发（取消后再赞不重发），内容<b>不点名赞者</b>。
+     * 软关联 TIMER_SHARE（relatedId = 会话 id，仅作合并键）：<b>不深链</b>——计时页是 tab 页，
+     * 消息中心 navigateTo 到不了，且这条消息是告知而非待办。
+     */
+    TIMER_SHARE_LIKED
 }

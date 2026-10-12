@@ -22,7 +22,7 @@
 | 列 | 说明 |
 |---|---|
 | user_id | 收件人（用户级资源，查询/已读一律按此过滤，越权返回空） |
-| type | MessageType 枚举：DANCER_REVIEW（审核结果）/ DANCER_STATUS（隐藏/恢复状态变更）/ FEEDBACK_RESULT（上报处理结果，2026-08-10 新增）/ STATUS_REPORT_RESULT（突发事件采纳结果，2026-08-10）/ VENUE_STATUS_CHANGED（关注门店状态变化，2026-08-12）/ CROWD_CONFIRMED（热度确认，2026-09-03 确认后积分，见前端 docs/agents/27-venue-crowd-report.md「确认后积分」）/ CROWD_REPORT_LIKED（收到热度点赞，2026-09-03 行级点赞，同上文档「行级点赞」——首次赞且非自赞触发） |
+| type | MessageType 枚举：DANCER_REVIEW（审核结果）/ DANCER_STATUS（隐藏/恢复状态变更）/ FEEDBACK_RESULT（上报处理结果，2026-08-10 新增）/ STATUS_REPORT_RESULT（突发事件采纳结果，2026-08-10）/ VENUE_STATUS_CHANGED（关注门店状态变化，2026-08-12）/ CROWD_CONFIRMED（热度确认，2026-09-03 确认后积分，见前端 docs/agents/27-venue-crowd-report.md「确认后积分」）/ CROWD_REPORT_LIKED（收到热度点赞，2026-09-03 行级点赞，同上文档「行级点赞」——首次赞且非自赞触发）/ TIMER_SHARE_LIKED（计时同行者点赞，2026-10-12，V48，见 55 号 §三——首次赞触发，同一会话未读合并成「收到 N 个赞」，不点名、不深链；`relatedType=TIMER_SHARE` 仅作合并键） |
 | title / content | 标题 / 正文（TextSanitizer 清洗入库，长度 ≤100 / ≤500 与列定义一致） |
 | related_type / related_id | 业务软关联：DANCER → 舞伴详情页 / VENUE → 场所详情页，可空 |
 | read_at | 已读时间（null = 未读；未读数徽标依据） |

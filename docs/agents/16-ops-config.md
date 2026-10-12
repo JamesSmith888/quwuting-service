@@ -73,10 +73,12 @@
   `dancer.contact.daily.free`、`announcement.data_update.{enabled,template,auto_offline_hours}`、
   `heat.excluded.user.ids`、`presence.collect.enabled`、`venue.status_lock.{enabled,human_open_days,
   human_closed_days}`（V25）、**`venue.suspend_guard.{min_count,max_ratio_percent}`（V36，批量暂停熔断，
-  见 33 号）**、**`bulletin.content_redline.enabled`（V36，快讯红线，默认 false，见 47 号 §1.2）**。
+  见 33 号）**、**`bulletin.content_redline.enabled`（V36，快讯红线，默认 false，见 47 号 §1.2）**。、
+  **`timer.share.like.enabled`（V48，2026-10-12，计时「给同行者点赞」总开关，**默认 true**，见 55 号 §四）**。
 
-  > 计时「二维码同步给对方」**不在此列**：它是正常功能、无运营开关（2026-10-07 用户裁决删除，
-  > 见 54 号 §八）。**什么算开关**的判据：需要「一键停掉一整类用户可见行为」的能力才算；
+  > 计时「二维码同步给对方」**本身不在此列**：它是正常功能、无运营开关（2026-10-07 用户裁决删除，
+  > 见 54 号 §八）；其中**唯一配开关的是「给同行者点赞」**（对人点赞是残余审核风险最高的一面，符合下面的判据，
+  > 理由见 55 号 §四）。**什么算开关**的判据：需要「一键停掉一整类用户可见行为」的能力才算；
   > 「功能正常可用」不是开关，默认开的开关只是三端各背一份无用缓存 + 一个「忘了开就静默不可用」的失败模式。
 
 ## 长期规则

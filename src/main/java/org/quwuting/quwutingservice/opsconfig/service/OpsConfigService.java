@@ -106,6 +106,19 @@ public class OpsConfigService {
      */
     public static final String KEY_PRESENCE_COLLECT_ENABLED = "presence.collect.enabled";
 
+    /**
+     * 计时「给同行者点赞」总开关（2026-10-12，V48 迁移插入默认行 <b>true</b>；
+     * 文档 = docs/agents/54-timer-share.md §十五）：关闭后 {@code GET /timer-shares/{token}/likes}
+     * 返回 {@code enabled=false} 且无可赞对象（客户端整个隐藏入口），{@code POST} 返回 {@code DISABLED}、
+     * 不再写库也不再发被赞通知；历史数据保留。
+     * <p>
+     * <b>它是开关而计时二维码同步本身不是</b>（那个 2026-10-07 被裁决删掉了开关，见 16 号文档判据）：
+     * 判据是「需要一键停掉一整类用户可见行为」——对人点赞是 29 号舞伴交友服务驳回史里被点名的
+     * 「认可 / 表情」的单键简化版，是整个计时域里<b>残余审核风险最高</b>的一面，用户明确要求「先做，
+     * 有问题再下线」。默认开、缺键也按开（{@code isEnabled(KEY, true)}），所以没有「忘了开 ⇒ 静默不可用」的失败模式。
+     */
+    public static final String KEY_TIMER_SHARE_LIKE_ENABLED = "timer.share.like.enabled";
+
     private final OpsConfigRepository opsConfigRepository;
 
     /** 单键配置缓存（LoadingCache + Optional 承载"键不存在"——Caffeine 禁 null 值） */

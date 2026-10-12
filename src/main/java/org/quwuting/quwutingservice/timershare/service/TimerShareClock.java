@@ -39,6 +39,17 @@ public final class TimerShareClock {
     }
 
     /**
+     * 实体的业务时刻（{@code created_at}，JVM 本地时区的 {@link java.time.LocalDateTime}）→ epoch ms。
+     * <p>
+     * 本库约定业务时刻由 Java 写入、不用 DB now()，所以读回来要按<b>同一个时区</b>还原；这是 joinedAt 一类
+     * 「由流水创建时间派生的时刻」的唯一换算口（status 响应的 {@code joinedAtMs} 与点赞窗口共用，
+     * 不各写一份）。入参为 null → null。
+     */
+    public static Long epochMsOf(java.time.LocalDateTime time) {
+        return time == null ? null : time.atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+    }
+
+    /**
      * 把主持方的读数落到服务端时间轴。
      *
      * @param recvMs             服务端收到读数的时刻（epoch ms）

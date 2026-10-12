@@ -327,7 +327,14 @@ V45 的结算时刻 = 服务端**收到**时刻，隐含假设"客户端在结�
 `TimerShareWireFormatTest` +2（join view 的显式 null 契约含 `joinedAtMs`、老客户端 settle 请求仍可反序列化）；`./mvnw -q -o -Dtest='TimerShare*Test,SpendCompanionsTest,SpendServiceTest,SpendEntryLimitsMirrorTest'` 全绿。
 未验证：真实 MySQL 上跑 V47（纯 `ALTER TABLE … ADD COLUMN … NULL`，MySQL 8 即时 DDL；本机可用 Homebrew `mysql@8.0` 起一次性实例，方法见 §十一）。
 
+## 十五、给同行者点赞 → 已拆出独立文档
+
+2026-10-12（V48）新增「给同行者点赞」：**见 [`55-timer-share-likes.md`](55-timer-share-likes.md)**（本文件已超 ~300 行，按 AGENTS 维护规则拆出）。
+与本文件的接缝只有三处：① 复用 `TimerShare` / `TimerShareJoin` 作为准入事实（主持方 ↔ 加入者）；② 复用 `TimerShareClock.epochMsOf`
+（加入时刻换算）；③ §八「本功能没有运营开关」仍成立——点赞是其中**唯一**配开关的一面（`timer.share.like.enabled`，默认开，理由见 55 号 §四）。
+
 ## 相关文件
 
 `timershare/`（controller / dto / entity / enums / repository / service）、`common/ratelimit/SlidingWindowLimiter`、
-`db/migration-mysql/V42__timer_shares.sql`、测试 `src/test/.../timershare/service/*`。
+`db/migration-mysql/V42__timer_shares.sql`、`V48__timer_share_likes.sql`、测试 `src/test/.../timershare/service/*`、
+点赞：`TimerShareLikeController` / `TimerShareLikeService` / `TimerShareLikeRules` / `TimerShareLikeRepository` / `TimerShareLike`。

@@ -94,6 +94,32 @@ public final class TimerSharePolicy {
     /** 主持方每自然日（滚动 24h）最多新建的分享会话数（刷新同一场不计）——DB 计数，跨重启有效 */
     public static final int MAX_NEW_SHARES_PER_DAY = 30;
 
+    // ── 给同行者点赞（2026-10-12，V48；文档 = 54 号 §十五）──────────────────────
+
+    /**
+     * 点赞的行内码。<b>现在只有 {@code LIKE}</b>：唯一键是 (会话, 赞者, 被赞者) 一对一，所以将来要放开
+     * 表情是「同一行换码」（对齐快讯表态的一人一条恒一个），不是加表、也不是改键。
+     * 当前客户端协议里<b>没有</b>这个字段——码由服务端写死，放开表情时再加请求字段，不提前造口子。
+     */
+    public static final String LIKE_CODE = "LIKE";
+
+    /**
+     * 点赞窗口 = 该对（主持方 × 某位加入者）<b>最近一次活动</b>之后 24 小时（赞与取消都在窗口内，窗口外冻结）。
+     * <p>
+     * 「最近一次活动」取四者最大值：会话最近一次创建 / 刷新（{@code snapshot_at_ms}）、该加入者加入时刻、
+     * 主持方结算时刻、该加入者结算时刻——所以「还在计时」「刚结算」都落在窗口里，不需要另判会话状态。
+     * 窗口只回答「这份致意还来得及吗」，不是安全措施：赞无经济价值、不进任何算法、不累计到人。
+     */
+    public static final long LIKE_WINDOW_MS = 24 * 60 * 60 * 1000L;
+
+    /** 点赞写（赞 / 取消）：窗口内次数上限——有意独立于 {@link #WRITE_RATE_LIMIT}，免得狂点赞挤掉创建 / 结算上报的额度 */
+    public static final int LIKE_WRITE_RATE_LIMIT = 20;
+    public static final long LIKE_WRITE_RATE_WINDOW_MS = 10 * 60 * 1000L;
+
+    /** 点赞状态读：详情卡每打开一次读一张码，上限留足余量（切换条来回点不重读，同一次打开内缓存） */
+    public static final int LIKE_READ_RATE_LIMIT = 60;
+    public static final long LIKE_READ_RATE_WINDOW_MS = 60 * 1000L;
+
     // ── 二维码图缓存 ──────────────────────────────────────────────────────────
 
     /** 码图内存缓存时长：略长于二维码有效期，覆盖「同一张码被多次拉取」 */

@@ -3,7 +3,10 @@ package org.quwuting.quwutingservice.timershare.service;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import org.junit.jupiter.api.Test;
 import org.quwuting.quwutingservice.timershare.dto.request.CreateTimerShareRequest;
+import org.quwuting.quwutingservice.timershare.dto.request.SetTimerShareLikeRequest;
 import org.quwuting.quwutingservice.timershare.dto.request.SettleTimerShareRequest;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerShareLikeSetResponse;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerShareLikesResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareJoinResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareJoinView;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerSharePeerResponse;
@@ -160,5 +163,39 @@ class TimerShareWireFormatTest {
         String json = APP_MAPPER.writeValueAsString(new TimerShareRuleView(
                 List.of(new TimerShareRuleView.Tier(60.0, 300.0, "linear"))));
         assertTrue(json.contains("\"mode\":\"linear\""));
+    }
+
+    @Test
+    void likeRequestDeserializesLeniently() {
+        // 主持方点第 2 位加入者；多余字段被忽略；缺失字段保持 null（由服务端判 INVALID_TARGET，不猜默认值）
+        SetTimerShareLikeRequest req = APP_MAPPER.readValue(
+                "{\"relation\":\"JOINER\",\"seq\":2,\"liked\":true,\"userId\":99}", SetTimerShareLikeRequest.class);
+        assertEquals("JOINER", req.relation());
+        assertEquals(2, req.seq());
+        assertEquals(true, req.liked());
+
+        SetTimerShareLikeRequest bare = APP_MAPPER.readValue("{}", SetTimerShareLikeRequest.class);
+        assertNull(bare.relation());
+        assertNull(bare.seq());
+        assertNull(bare.liked());
+    }
+
+    @Test
+    void likeResponsesCarryNoUserIdentifiersAndAlwaysWriteTheBooleans() {
+        // 全局 non_null 只删 null；布尔恒写出（false 不是 null）。且任何响应都不含 userId / likedUserId（V45 口径）
+        JsonNode likes = APP_MAPPER.readTree(APP_MAPPER.writeValueAsString(new TimerShareLikesResponse(true,
+                List.of(new TimerShareLikesResponse.Item("JOINER", 1, false, false, false)), 1780000000123L)));
+        JsonNode item = likes.get("items").get(0);
+        assertTrue(item.has("likedByMe") && !item.get("likedByMe").asBoolean());
+        assertTrue(item.has("likesMe") && !item.get("likesMe").asBoolean());
+        assertTrue(item.has("likeable") && !item.get("likeable").asBoolean());
+        assertEquals("JOINER", item.get("relation").asString());
+        assertFalse(item.has("userId") || item.has("likedUserId") || item.has("likerId"));
+
+        JsonNode set = APP_MAPPER.readTree(APP_MAPPER.writeValueAsString(
+                new TimerShareLikeSetResponse("WINDOW_CLOSED", false, 1780000000123L)));
+        assertEquals("WINDOW_CLOSED", set.get("outcome").asString());
+        assertTrue(set.has("liked") && !set.get("liked").asBoolean());
+        assertFalse(set.has("userId"));
     }
 }

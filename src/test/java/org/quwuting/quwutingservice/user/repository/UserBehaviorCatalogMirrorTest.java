@@ -72,8 +72,9 @@ class UserBehaviorCatalogMirrorTest {
     private static final int PASSIVE_SIZE = 4;
     private static final int SIGNAL_SIZE = 1;
     private static final int COLLAB_SIZE = 1;
-    /** 扩展行为档（快讯 / 计时账本 / 热度点赞 / 意见反馈 / 活动打卡…；不计入活跃，见 Nature#EXTENDED） */
-    private static final int EXTENDED_SIZE = 8;
+    /** 扩展行为档（快讯 / 计时账本 / 热度点赞 / 意见反馈 / 活动打卡…；不计入活跃，见 Nature#EXTENDED）。
+     *  8 → 9：2026-10-12 登记 TIMER_SHARE_LIKE（给同行者点赞，V48；35 号文档已登记，不计活跃） */
+    private static final int EXTENDED_SIZE = 9;
 
     /** 轨迹/明细列禁止出现的用户敏感列（含 openId 的库列名 open_id 与联系人字段） */
     private static final List<String> FORBIDDEN_COLUMNS = List.of(

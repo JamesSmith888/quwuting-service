@@ -279,6 +279,15 @@ public enum UserBehaviorEvent {
     TIMER_SHARE_JOIN("TIMER_SHARE_JOIN", "扫码加入计时", Category.TIMER, Nature.EXTENDED,
             "qwt_timer_share_joins", null, RefKind.NONE, null, null, null),
 
+    /**
+     * 给同行者点赞（V48，2026-10-12；用户列是 {@code liker_id}）。同一场计时里主持方与加入者互赞——
+     * 轨迹可见、<b>不计活跃</b>（扩展功能，口径同上）。取消赞是软删，事实口径 = 动作发生过，所以照常入轨迹。
+     * 🚫 赞数永不进算法：这里只表达「这个用户做过这件事」，不是「这个用户被赞了多少」。
+     */
+    TIMER_SHARE_LIKE("TIMER_SHARE_LIKE", "给同行者点赞", Category.TIMER, Nature.EXTENDED,
+            "qwt_timer_share_likes", null, RefKind.NONE, null, null, null,
+            "liker_id", "created_at", null),
+
     /** 提交意见反馈（应用级反馈，区别于 VENUE_FEEDBACK 的门店信息纠错） */
     APP_FEEDBACK("APP_FEEDBACK", "提交意见反馈", Category.SUGGEST, Nature.EXTENDED,
             "qwt_app_feedbacks", null, RefKind.NONE, null,
