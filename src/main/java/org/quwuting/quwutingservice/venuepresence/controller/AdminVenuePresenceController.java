@@ -7,6 +7,7 @@ import org.quwuting.quwutingservice.venuepresence.dto.response.AdminVenueVisitor
 import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceConsentStats;
 import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceStats;
 import org.quwuting.quwutingservice.venuepresence.service.VenuePresenceService;
+import org.quwuting.quwutingservice.venuepresence.service.VenueVisitBadgeService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -26,33 +27,35 @@ import org.springframework.web.bind.annotation.RestController;
 public class AdminVenuePresenceController {
 
     private final VenuePresenceService venuePresenceService;
+    /** 展示口径唯一出口（C 侧文案 + admin 足迹各面，2026-10-13）：统计 / 名单都经它取，⛔ 不直连事实层另算 */
+    private final VenueVisitBadgeService venueVisitBadgeService;
 
     /**
-     * 单店到访统计（仅 ADMIN）。
+     * 单店足迹统计（仅 ADMIN）。
      * GET /admin/venues/{venueId}/presence
      * <p>
-     * 近 7 天 / 近 30 天到访人数（命中口径 HIT_RADIUS_M，同址门店按营业状态归因、无法归因时共享）+
-     * 近 30 天附近人数（300m 片区覆盖口径）+ 最近到访时刻 + 同址归因方式；口径参数随响应回显
-     * （服务端权威，admin 展示必须与数值同屏）。门店不存在时由 statsFor 的查询自然返回全 0
-     * （不校验存在性——统计端点只读，无副作用）。
+     * 近 7 / 30 天附近足迹人数 + 近 30 天到访次数 + 最近足迹时刻 + 小程序卡片此刻显示的原文 + 邻域内的其他门店。
+     * <b>与小程序列表卡片、admin 门店列表行读同一次计算</b>（2026-10-13，{@link VenueVisitBadgeService}）；
+     * 口径参数（取数半径 / 邻域半径 / 精度门槛）随响应回显（服务端权威，admin 展示必须与数值同屏）。
+     * 门店不存在时查询自然返回全 0（不校验存在性——统计端点只读，无副作用）。
      */
     @GetMapping("/{venueId}/presence")
     public ApiResponse<VenuePresenceStats> stats(@PathVariable Long venueId) {
         UserContext.requireAdmin();
-        return ApiResponse.ok(venuePresenceService.statsFor(venueId));
+        return ApiResponse.ok(venueVisitBadgeService.adminStatsOf(venueId));
     }
 
     /**
-     * 单店到访用户名单（仅 ADMIN，2026-10-06 名单下钻第一级）。
+     * 单店足迹用户名单（仅 ADMIN，2026-10-06 名单下钻第一级；2026-10-13 并入展示口径一源）。
      * GET /admin/venues/{venueId}/visitors?windowDays=30&page=0&size=20
      * <p>
-     * 把行内聚合数字下钻到具体的人（头像 / 昵称 / 代号 / 到访次数 / 最近到访时刻，
-     * 内部账号打标签而非排除）。人数与 {@link #stats} 的 30 天口径<b>逐人相等</b>
-     * （同一次归因与并集计算，服务端保证）——⛔ 前端不得用本地过滤近似这个名单。
+     * 把详情页 / 列表行上的聚合数字展开成具体的人（头像 / 昵称 / 代号 / 到访次数 / 最近足迹时刻，
+     * 内部账号打标签）。总人数与 {@link #stats} <b>同窗口下逐数相等</b>（同一次计算，服务端保证）：
+     * {@code windowDays=7} ↔ 卡片「7 天」，{@code windowDays=30} ↔ 卡片「30 天」及「N 次」——
+     * ⛔ 前端不得用本地过滤近似这个名单。
      * <p>
-     * {@code windowDays} 缺省 30（= 列表行的 30 天，点进去看到的总数就是列表写的人数），
-     * 可放大查历史，但被钳到 ≥ 30（小于 30 会与列表行冲突）。
-     * 口径参数（windowDays / hitRadiusM / coLocated*）随响应回显，admin 端必须与数值同屏。
+     * {@code windowDays} 缺省 30；服务端钳制到 [1, 3650]（不再钳到 ≥30：7 天也是可点的数字）。
+     * 口径参数随响应回显，admin 端必须与数值同屏。
      */
     @GetMapping("/{venueId}/visitors")
     public ApiResponse<AdminVenueVisitorPage> visitors(
@@ -61,8 +64,8 @@ public class AdminVenuePresenceController {
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size) {
         UserContext.requireAdmin();
-        return ApiResponse.ok(venuePresenceService.visitorsFor(
-                venueId, windowDays == null ? 0 : windowDays, page, size));
+        return ApiResponse.ok(venueVisitBadgeService.adminVisitorsOf(
+                venueId, windowDays == null ? 30 : windowDays, page, size));
     }
 
     /**

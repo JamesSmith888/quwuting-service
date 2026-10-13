@@ -3,11 +3,14 @@ package org.quwuting.quwutingservice.venuepresence.service;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.config.VenueHeatWeights;
 import org.quwuting.quwutingservice.venue.service.HeatAccountExclusionService;
+import org.quwuting.quwutingservice.venuepresence.dto.response.AdminVenueVisitorPage;
+import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceStats;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -68,9 +71,18 @@ import java.util.Map;
  * （V40 迁移不回改）但自此无消费方</b>；刷新任务仍写入该列（保持行自洽），
  * 删除与否留待该表整体重构时一并处理。
  *
- * <h3>与其它口径的分叉（都读同一份命中事实，⛔ 禁互相"对齐"）</h3>
- * 展示（本类）= 附近并集、无归属、无状态过滤；admin 归因 = ABSORBED/YIELDED 明细；
- * 排序 = 1/k 分摊 + 不在营记 0。三者的数字<b>有意不同</b>，取舍依据见 52 号。
+ * <h3>展示口径一源：C 侧与 admin 共用本类（2026-10-13，用户要求「admin 门店列表与小程序列表保持一致」）</h3>
+ * 本类是<b>展示给人看的足迹数字的唯一出口</b>——小程序卡片文案（{@link #visitBadgeTextsByVenue}）与
+ * admin 的门店列表行 / 详情卡 / 名单（{@link #footprintsForAdmin} / {@link #adminStatsOf} /
+ * {@link #adminVisitorsOf}）读的是<b>同一次计算</b>（{@code VenuePresenceService#nearbyFootprints}）、
+ * <b>同一个排除账号集合</b>（{@link #displayExclusions}，只在本类取一次）、<b>同一个渲染函数</b>
+ * （{@link #renderBadgeText}，admin 回显「小程序此刻显示的原文」供所见即所得核对）。
+ * <p>
+ * <b>根因与教训</b>：此前 admin 另有一套 150m 命中带 × 同址归因的算法，注释里立着
+ * 「⛔ 禁互相对齐」——分叉本意是「各自回答不同问题」，但<b>展示给人看的数字</b>只该有一个答案，
+ * 否则运营无法用后台核对用户在小程序里看到的东西，名单也对应不上那句话。
+ * 现在的分叉只保留在真正回答不同问题的地方：热度排序（1/k 分摊，{@code visitSharesForRanking}）与
+ * 单用户到访明细（{@code visitsFor}，命中带 150m 的一次次到店）。
  */
 @Service
 @RequiredArgsConstructor
@@ -100,6 +112,15 @@ public class VenueVisitBadgeService {
     private final HeatAccountExclusionService heatAccountExclusionService;
 
     /**
+     * 展示口径的排除账号集合（<b>全类唯一取点</b>）：C 侧文案与 admin 各面都经此取，
+     * 不能有任何一个面自己再去问 {@link HeatAccountExclusionService}——否则「同一集合」只是约定，
+     * 而约定正是上一次分叉的来路。
+     */
+    private List<Long> displayExclusions() {
+        return heatAccountExclusionService.excludedUserIds();
+    }
+
+    /**
      * 整页批量生成（列表卡片到店足迹行，防 N+1）：一次覆盖整页，返回 venueId → 文案。
      * <b>附近无足迹的门店不在 map 里</b>（前端按缺席不渲染）；
      * <b>有足迹（≥1 人）的门店全部展示</b>（2026-10-08：含停业门店，状态不参与过滤）。
@@ -110,7 +131,7 @@ public class VenueVisitBadgeService {
             return Map.of();
         }
         Map<Long, NearbyVisitSummary> summaries = venuePresenceService.nearbyVisitSummaries(
-                venueIds, heatAccountExclusionService.excludedUserIds());
+                venueIds, displayExclusions());
         Map<Long, String> badges = new HashMap<>();
         summaries.forEach((venueId, summary) -> {
             if (summary.visitUsers() < MIN_DISPLAY_USERS) {
@@ -119,6 +140,55 @@ public class VenueVisitBadgeService {
             badges.put(venueId, renderBadgeText(summary.visitUsers(), summary.visitEvents()));
         });
         return badges;
+    }
+
+    // ── admin 面：同一次计算的完整事实（2026-10-13） ─────────────────────────────
+
+    /**
+     * admin 门店列表一页的足迹事实（<b>每家店都有返回项</b>，无足迹 = 全 0 / 无最近时刻）。
+     * 与 {@link #visitBadgeTextsByVenue} 读同一份 {@code nearbyFootprints}、同一排除集合。
+     */
+    @Transactional(readOnly = true)
+    public Map<Long, NearbyFootprint> footprintsForAdmin(Collection<Long> venueIds) {
+        return venuePresenceService.nearbyFootprints(venueIds, displayExclusions());
+    }
+
+    /**
+     * admin 全量「附近有过足迹」的门店（按足迹排序 / 只看有足迹用；稀疏，缺席 = 从无足迹）。
+     * 与 {@link #footprintsForAdmin} 逐店同值（内部逐店走同一计算）。
+     */
+    @Transactional(readOnly = true)
+    public Map<Long, NearbyFootprint> visitedFootprintsForAdmin() {
+        return venuePresenceService.visitedNearbyFootprints(displayExclusions());
+    }
+
+    /** admin 详情页「到店信息」卡：同一计算 + 邻域门店 + 小程序此刻显示的原文（无足迹 = null） */
+    @Transactional(readOnly = true)
+    public VenuePresenceStats adminStatsOf(Long venueId) {
+        NearbyDetail detail = venuePresenceService.nearbyDetailFor(venueId, displayExclusions());
+        NearbyFootprint f = detail.footprint();
+        return new VenuePresenceStats(f.visitUsers7d(), f.visitUsers30d(), f.visitEvents30d(),
+                f.lastVisitAt(), f.excludedUsers30d(),
+                VenuePresenceService.NEARBY_RADIUS_M, VenuePresenceService.NEARBY_TRACE_RADIUS_M,
+                VenuePresenceService.HIT_MAX_ACCURACY_M,
+                badgeTextOf(f), detail.vicinityVenues());
+    }
+
+    /** admin 足迹用户名单：卡片数字的展开（同窗口下总人数 / 总次数逐数相等，见 {@link AdminVenueVisitorPage}） */
+    @Transactional(readOnly = true)
+    public AdminVenueVisitorPage adminVisitorsOf(Long venueId, int windowDays, int page, int size) {
+        return venuePresenceService.nearbyVisitorsFor(venueId, windowDays, page, size, displayExclusions());
+    }
+
+    /**
+     * 一家店此刻在小程序卡片上<b>会显示的原文</b>（无足迹 = null，卡片不渲染）。
+     * 与 {@link #visitBadgeTextsByVenue} 同一门槛 + 同一渲染函数——admin 回显它，运营才能「所见即所得」核对。
+     */
+    public String badgeTextOf(NearbyFootprint footprint) {
+        if (footprint == null || footprint.visitUsers30d() < MIN_DISPLAY_USERS) {
+            return null;
+        }
+        return renderBadgeText(footprint.visitUsers30d(), footprint.visitEvents30d());
     }
 
     /**

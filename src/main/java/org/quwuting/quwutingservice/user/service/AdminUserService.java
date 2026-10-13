@@ -6,6 +6,7 @@ import org.quwuting.quwutingservice.points.repository.PointsAccountRepository;
 import org.quwuting.quwutingservice.points.service.ContributionService;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserDetailResponse;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserItem;
+import org.quwuting.quwutingservice.user.dto.response.AdminUserMarks;
 import org.quwuting.quwutingservice.user.dto.response.AdminUserStatsResponse;
 import org.quwuting.quwutingservice.user.dto.response.CheckinSummary;
 import org.quwuting.quwutingservice.user.dto.response.ClaimSummary;
@@ -69,6 +70,8 @@ public class AdminUserService {
     private final PointsAccountRepository pointsAccountRepository;
     private final ContributionService contributionService;
     private final AdminUserStatsService statsService;
+    /** 功能状态标记装配（2026-10-13）：列表一页批量、详情单个，同一载体同一判据 */
+    private final AdminUserMarkService markService;
 
     /**
      * 用户分页列表（keyword 昵称模糊 / 代号 / 裸数据库 id + role/city 筛选 + 排序模式，全部可空/可缺省；
@@ -143,11 +146,12 @@ public class AdminUserService {
                   contributionService.aggregatesFor(userIds);
           Map<Long, LocalDateTime> lastSeen = statsService.lastSeenFor(userIds, profileUpdatedAt(users));
           Map<Long, TopVenue> topVenues = statsService.topVenuesFor(userIds);
+          Map<Long, AdminUserMarks> marks = markService.marksFor(userIds);
           return users.stream()
                   .map(u -> toItem(u, balances.getOrDefault(u.getId(), 0L),
                           contributions.get(u.getId()),
                           lastSeen.get(u.getId()), topVenues.get(u.getId()),
-                          active7dIds.contains(u.getId())))
+                          active7dIds.contains(u.getId()), marks.get(u.getId())))
                   .toList();
       }
 
@@ -240,7 +244,8 @@ public class AdminUserService {
                   Boolean.TRUE.equals(user.getWechatReview()),
                   UserCode.format(id),
                   isNicknameCustom(user),
-                  topVenue);
+                  topVenue,
+                  markService.marksOf(id));
       }
 
     /**
@@ -271,7 +276,8 @@ public class AdminUserService {
     private AdminUserItem toItem(User user, long pointsBalance,
                                  ContributionService.ContributionAggregate agg,
                                  LocalDateTime lastSeenAt,
-                                 TopVenue topVenue, boolean activeWithin7d) {
+                                 TopVenue topVenue, boolean activeWithin7d,
+                                 AdminUserMarks marks) {
         return new AdminUserItem(
                 user.getId(),
                 displayName(user),
@@ -290,7 +296,8 @@ public class AdminUserService {
                 Boolean.TRUE.equals(user.getWechatReview()),
                 UserCode.format(user.getId()),
                 isNicknameCustom(user),
-                topVenue);
+                topVenue,
+                marks);
     }
 
     /**

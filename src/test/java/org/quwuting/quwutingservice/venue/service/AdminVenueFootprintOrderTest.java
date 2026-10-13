@@ -2,8 +2,7 @@ package org.quwuting.quwutingservice.venue.service;
 
 import org.junit.jupiter.api.Test;
 import org.quwuting.quwutingservice.venue.enums.AdminVenueSort;
-import org.quwuting.quwutingservice.venuepresence.enums.CoLocatedAttribution;
-import org.quwuting.quwutingservice.venuepresence.service.VenueVisitSummary;
+import org.quwuting.quwutingservice.venuepresence.service.NearbyFootprint;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -23,7 +22,7 @@ class AdminVenueFootprintOrderTest {
     private static final List<Long> DEFAULT_ORDER = List.of(900L, 800L, 700L, 600L, 500L);
 
     /** 800：3 人 / 1 小时前；600：3 人 / 2 天前；500：1 人 / 刚刚；700：仅 40 天前到访过（30 天 0 人）；900：从无 */
-    private static final Map<Long, VenueVisitSummary> VISITED = Map.of(
+    private static final Map<Long, NearbyFootprint> VISITED = Map.of(
             800L, summary(3, NOW.minusHours(1)),
             600L, summary(3, NOW.minusDays(2)),
             500L, summary(1, NOW),
@@ -43,13 +42,13 @@ class AdminVenueFootprintOrderTest {
     }
 
     @Test
-    void visitedOnlyMeansVisitedWithinThirtyDays() {
+    void visitedOnlyMeansFootprintWithinThirtyDays() {
         assertEquals(List.of(800L, 600L, 500L),
                 AdminVenueQueryService.orderByFootprint(DEFAULT_ORDER, VISITED, AdminVenueSort.LATEST, true),
-                "只看有足迹 = 近 30 天到访 > 0，与列表「到访 30 天」列同一口径；默认序不变");
+                "只看有足迹 = 近 30 天附近足迹 > 0，与列表行「30 天」同一口径（= 小程序卡片是否渲染）；默认序不变");
     }
 
-    private static VenueVisitSummary summary(long uv30, LocalDateTime last) {
-        return new VenueVisitSummary(0, uv30, last, CoLocatedAttribution.NONE, 0);
+    private static NearbyFootprint summary(long uv30, LocalDateTime last) {
+        return new NearbyFootprint(0, uv30, uv30, last, 0, 0);
     }
 }

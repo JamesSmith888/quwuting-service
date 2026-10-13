@@ -9,8 +9,8 @@ package org.quwuting.quwutingservice.venuepresence.service;
  * 渲染为卡片文案。语义是「这一带有人留下过足迹」，<b>不是</b>「这家店有多少人到访」——
  * 刻意不做门店级归属（经纬度距离无法判定用户真实在哪家店，见常量注释）。
  * <p>
- * 与 {@link VenueVisitSummary}（admin 归因口径）是两个问题，勿混：那边回答「证据归谁」
- * （NONE/SHARED/ABSORBED/YIELDED 明细），本记录回答「这一带有多少足迹」。
+ * 本记录是 {@link NearbyFootprint} 的 C 侧投影（人数 + 次数）；admin 门店列表 / 详情 / 名单读的是
+ * 同一次计算的完整记录（2026-10-13 起两侧数字同源，不会再出现「后台 4 人、小程序 2 人」）。
  *
  * @param visitUsers  近 30 天「附近带」足迹的去重用户数（≥1 才有本记录；并集去重，同一用户多处只计 1）
  * @param visitEvents 近 30 天去重到访次数 = {@code (用户, 自然日)} 二元组并集大小；

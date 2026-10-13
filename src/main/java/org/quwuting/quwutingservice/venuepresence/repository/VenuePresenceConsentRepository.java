@@ -44,6 +44,20 @@ public interface VenuePresenceConsentRepository extends JpaRepository<VenuePrese
             Long userId, Pageable pageable);
 
     /**
+     * 一批用户的当前态（用户信息「已关闭足迹分享」标记用，2026-10-13）：每用户最新一条的
+     * Object[]{userId, enabled, source}。ROW_NUMBER 次序键与门禁 / 分布统计一致（created_at DESC, id DESC）。
+     * 调用方须保证入参非空（原生 {@code IN ()} 是语法错误）。受 {@code VenueListQueryHqlSyntaxTest}
+     * 括号配平门禁约束，改写后必跑。
+     */
+    @Query(value = "SELECT t.user_id, t.enabled, t.source FROM (" +
+            "SELECT c.user_id, c.enabled, c.source, " +
+            "ROW_NUMBER() OVER (PARTITION BY c.user_id ORDER BY c.created_at DESC, c.id DESC) AS rn " +
+            "FROM qwt_venue_presence_consents c WHERE c.deleted = 0 AND c.user_id IN (:userIds)) t " +
+            "WHERE t.rn = 1",
+            nativeQuery = true)
+    List<Object[]> findLatestByUserIds(@Param("userIds") java.util.Collection<Long> userIds);
+
+    /**
      * 当前态分布（admin 统计数据源）：每用户最新一条的 (enabled, source) → 用户数。
      * ROW_NUMBER 按 (created_at DESC, id DESC)——同一秒连拨两次开关时以大 id 为准，
      * 与「后写的覆盖先写的」直觉一致。

@@ -9,23 +9,18 @@ import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
 import org.quwuting.quwutingservice.support.HqlSyntaxAssertions;
 import org.quwuting.quwutingservice.venue.enums.VenueStatus;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
-import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceStats;
-import org.quwuting.quwutingservice.venuepresence.enums.CoLocatedAttribution;
 import org.quwuting.quwutingservice.venuepresence.repository.VenuePresenceConsentRepository;
 import org.quwuting.quwutingservice.venuepresence.repository.VenuePresencePingRepository;
 import org.quwuting.quwutingservice.venuepresence.service.VenuePresenceService;
-import org.quwuting.quwutingservice.venuepresence.service.VenueVisitSummary;
+import org.quwuting.quwutingservice.venuepresence.service.VenueVisitShare;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -33,11 +28,16 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 /**
- * 到访归因口径（2026-10-03，52 号 §4）：命中半径、同址组、营业状态消歧、时间窗、两条汇总路径同源。
+ * 到访归因口径（2026-10-03，52 号 §4）：命中半径、同址组、营业状态消歧、时间窗。
+ * <p>
+ * <b>2026-10-13 范围收窄</b>：归因（NONE/SHARED/ABSORBED/YIELDED）不再进任何展示数字——admin 与 C 侧已并入
+ * 展示口径（{@code NearbyFootprint}，见 {@link VenueNearbyVisitsTest}）；归因只剩<b>热度排序</b>在用，
+ * 所以这里的断言改为经 {@code visitSharesForRanking} 观察归因的<b>可见后果</b>（份额的人数与分摊），
+ * 而不是对已删除的 admin 归因明细枚举做断言。
  * <p>
  * 现网事故还原：南通五洲国际广场「一壶淡泊（120，F2，暂停营业）」与「丽莎（121，3 层，营业中）」
  * 坐标完全重合，nearby 并列时 ping 恒落到 120——丽莎永远 0。修复后：同址证据先按营业状态归属
- * （一壶淡泊不在营 ⇒ 证据并入丽莎），双方都在营时才共享（用户并集）。
+ * （一壶淡泊不在营 ⇒ 证据并入丽莎），双方都在营时才共享（用户并集，排序按 1/k 分摊）。
  */
 @ExtendWith(MockitoExtension.class)
 class VenuePresenceAttributionTest {
@@ -88,28 +88,24 @@ class VenuePresenceAttributionTest {
         stubHits(row(YIHU, 2L, now.minusHours(2)), row(YIHU, 210L, now.minusHours(1)),
                 row(LISA, 2L, now.minusHours(3)), row(ISOLATED, 908L, now.minusDays(1)));
 
-        Map<Long, VenueVisitSummary> s = service.visitSummaries(List.of(YIHU, LISA, ISOLATED));
+        Map<Long, VenueVisitShare> s = service.visitSharesForRanking(List.of(-1L));
 
-        assertEquals(2L, s.get(LISA).visitUsers30d(), "丽莎吸收同址暂停店上的证据，用户并集不重复计");
-        assertEquals(CoLocatedAttribution.ABSORBED, s.get(LISA).coLocatedAttribution());
-        assertEquals(0L, s.get(YIHU).visitUsers30d(), "暂停营业的一壶淡泊让渡证据，不再与丽莎同数");
-        assertEquals(CoLocatedAttribution.YIELDED, s.get(YIHU).coLocatedAttribution());
-        assertNull(s.get(YIHU).lastVisitAt(), "让渡后的「最近到访」与人数同口径：从无到访");
-        assertEquals(1L, s.get(ISOLATED).visitUsers30d(), "无同址邻居的店归因不变");
-        assertEquals(CoLocatedAttribution.NONE, s.get(ISOLATED).coLocatedAttribution());
+        assertEquals(bd("2.00"), s.get(LISA).visitUsers30d(), "丽莎吸收同址暂停店上的证据，用户并集不重复计，且不被分摊");
+        assertFalse(s.containsKey(YIHU), "暂停营业的一壶淡泊让渡证据 ⇒ 排序记 0（缺席）");
+        assertEquals(bd("1.00"), s.get(ISOLATED).visitUsers30d(), "无同址邻居的店归因不变");
     }
 
     @Test
-    void coLocatedVenuesBothOperatingShareUnionWithoutDoubleCount() {
+    void coLocatedVenuesBothOperatingShareUnionAndSplitWithoutDoubleCount() {
         stubPairs(pair(YIHU, "OPEN", LISA, "丽莎歌舞厅", "OPEN"),
                 pair(LISA, "OPEN", YIHU, "一壶淡泊音乐酒吧", "OPEN"));
         stubHits(row(YIHU, 2L, now.minusHours(2)), row(YIHU, 210L, now.minusHours(1)), row(LISA, 2L, now));
 
-        Map<Long, VenueVisitSummary> s = service.visitSummaries(List.of(YIHU, LISA));
+        Map<Long, VenueVisitShare> s = service.visitSharesForRanking(List.of(-1L));
 
-        assertEquals(2L, s.get(YIHU).visitUsers30d());
-        assertEquals(2L, s.get(LISA).visitUsers30d(), "都在营 = 定位分不出：共享同一组用户，不是相加");
-        assertEquals(CoLocatedAttribution.SHARED, s.get(LISA).coLocatedAttribution());
+        // 都在营 = 定位分不出：证据并集 {2, 210}，排序按 1/k(k=2) 分摊 ⇒ 各 1.00（⛔ 不是各记 2 人）
+        assertEquals(bd("1.00"), s.get(YIHU).visitUsers30d());
+        assertEquals(bd("1.00"), s.get(LISA).visitUsers30d());
     }
 
     @Test
@@ -125,14 +121,12 @@ class VenuePresenceAttributionTest {
         stubHits(row(XUNMENGYUAN, 908L, now.minusDays(1)), row(DOUWU, 65L, now.minusDays(1)),
                 row(NANLAIBEIWANG, 331L, now.minusDays(2)), row(NANLAIBEIWANG, 908L, now.minusDays(3)));
 
-        Map<Long, VenueVisitSummary> s = service.visitSummaries(List.of(XUNMENGYUAN, DOUWU, NANLAIBEIWANG));
+        Map<Long, VenueVisitShare> s = service.visitSharesForRanking(List.of(-1L));
 
-        assertEquals(0L, s.get(NANLAIBEIWANG).visitUsers30d(), "停业店不可能被到访：证据让渡给同楼在营门店");
-        assertEquals(CoLocatedAttribution.YIELDED, s.get(NANLAIBEIWANG).coLocatedAttribution());
-        assertEquals(3L, s.get(XUNMENGYUAN).visitUsers30d(), "908 在两处都有证据只计 1：{908, 65, 331}");
-        assertEquals(3L, s.get(DOUWU).visitUsers30d(), "两家都在营 = 定位分不开：共享同一组用户，不可相加");
-        assertEquals(CoLocatedAttribution.SHARED, s.get(XUNMENGYUAN).coLocatedAttribution());
-        assertEquals(CoLocatedAttribution.SHARED, s.get(DOUWU).coLocatedAttribution());
+        assertFalse(s.containsKey(NANLAIBEIWANG), "停业店不可能被到访：证据让渡给同楼在营门店");
+        // 908 在两处都有证据只计 1：{908, 65, 331} = 3 人，在营 2 家 ⇒ 各 1.50
+        assertEquals(bd("1.50"), s.get(XUNMENGYUAN).visitUsers30d());
+        assertEquals(bd("1.50"), s.get(DOUWU).visitUsers30d());
     }
 
     @Test
@@ -150,10 +144,9 @@ class VenuePresenceAttributionTest {
         stubPairs(pair(YIHU, "CEASED", LISA, "丽莎歌舞厅", "SUSPENDED"));
         stubHits(row(YIHU, 2L, now));
 
-        VenueVisitSummary s = service.visitSummaries(List.of(YIHU)).get(YIHU);
+        Map<Long, VenueVisitShare> s = service.visitSharesForRanking(List.of(-1L));
 
-        assertEquals(1L, s.visitUsers30d(), "全组都不在营：无从归属，如实共享而不是让证据消失");
-        assertEquals(CoLocatedAttribution.SHARED, s.coLocatedAttribution());
+        assertEquals(bd("1.00"), s.get(YIHU).visitUsers30d(), "全组都不在营：无从归属，如实共享而不是让证据消失（分摊分母兜底为 1）");
     }
 
     @Test
@@ -162,56 +155,10 @@ class VenuePresenceAttributionTest {
         stubHits(row(ISOLATED, 1L, now.minusDays(3)), row(ISOLATED, 2L, now.minusDays(10)),
                 row(ISOLATED, 3L, now.minusDays(40)));
 
-        VenueVisitSummary s = service.visitSummaries(List.of(ISOLATED)).get(ISOLATED);
+        VenueVisitShare s = service.visitSharesForRanking(List.of(-1L)).get(ISOLATED);
 
-        assertEquals(1L, s.visitUsers7d());
-        assertEquals(2L, s.visitUsers30d());
-        assertEquals(now.minusDays(3), s.lastVisitAt(), "最近到访不设时间窗");
-    }
-
-    @Test
-    void statsEchoesAttributionAndKeepsNearbyAsAreaCoverage() {
-        stubPairs(pair(YIHU, "SUSPENDED", LISA, "丽莎歌舞厅", "OPEN"));
-        List<Collection<Long>> queried = new ArrayList<>();
-        when(pingRepository.findVisitorLastSeenByVenueIds(anyCollection(), anyInt(), anyInt()))
-                .thenAnswer(inv -> {
-                    queried.add(List.copyOf(inv.<Collection<Long>>getArgument(0)));
-                    return rows(row(LISA, 2L, now));
-                });
-
-        VenuePresenceStats stats = service.statsFor(YIHU);
-
-        assertEquals(0L, stats.visitUsers30d());
-        assertEquals(1L, stats.nearbyUsers30d(), "附近是片区语义：让渡不影响「这一带出现过多少人」");
-        assertEquals(CoLocatedAttribution.YIELDED, stats.coLocatedAttribution());
-        assertEquals(List.of(new VenuePresenceStats.CoLocatedVenue(LISA, "丽莎歌舞厅", "营业中", true)),
-                stats.coLocatedVenues());
-        assertEquals(1, queried.size(), "YIELDED 无到访证据：只查一次（片区），不查空集合");
-        assertEquals(Set.of(YIHU, LISA), Set.copyOf(queried.get(0)));
-    }
-
-    @Test
-    void globalRankingPathAgreesWithPagePathAndSurfacesAbsorbingNeighbour() {
-        // 全量证据只在暂停的 120 上：丽莎经同址并入获得到访，必须进入排序候选
-        when(pingRepository.findVisitorLastSeen(anyInt(), anyInt()))
-                .thenReturn(rows(row(YIHU, 2L, now), row(YIHU, 210L, now.minusDays(2))));
-        when(venueRepository.findCoLocatedPairs(anyCollection(), eq(VenuePresenceService.CO_LOCATED_RADIUS_M)))
-                .thenAnswer(inv -> {
-                    Collection<Long> ids = inv.getArgument(0);
-                    List<VenueRepository.CoLocatedVenueRow> out = new ArrayList<>();
-                    if (ids.contains(YIHU)) {
-                        out.add(pair(YIHU, "SUSPENDED", LISA, "丽莎歌舞厅", "OPEN"));
-                    }
-                    if (ids.contains(LISA)) {
-                        out.add(pair(LISA, "OPEN", YIHU, "一壶淡泊音乐酒吧", "SUSPENDED"));
-                    }
-                    return out;
-                });
-
-        Map<Long, VenueVisitSummary> visited = service.visitedVenueSummaries();
-
-        assertEquals(Set.of(LISA), visited.keySet(), "让渡方从无到访 ⇒ 不在稀疏结果里");
-        assertEquals(2L, visited.get(LISA).visitUsers30d());
+        assertEquals(bd("1.00"), s.visitUsers7d());
+        assertEquals(bd("2.00"), s.visitUsers30d(), "40 天前的命中在 30 天窗外（SQL 已按窗口过滤，这里是内存二次判定的兜底）");
     }
 
     @Test
@@ -223,6 +170,22 @@ class VenuePresenceAttributionTest {
                 + "WHERE " + VenuePresencePingRepository.HIT_PREDICATE + " GROUP BY p.venueId, p.userId");
     }
 
+    @Test
+    void rankingKeepsHitBandWhileDisplayUsesNearbyBand() {
+        // 两条线的取数带必须不同：排序 = 命中带 150m（热度公式输入，改带宽 = 改榜单），
+        // 展示 = 附近带 300m。若有人"顺手统一"成同一个值，这条测试先红
+        assertTrue(VenuePresenceService.NEARBY_RADIUS_M > VenuePresenceService.HIT_RADIUS_M);
+        stubPairs();
+        stubHits(row(ISOLATED, 1L, now));
+
+        service.visitSharesForRanking(List.of(-1L));
+
+        org.mockito.Mockito.verify(pingRepository).findVisitorLastSeenSinceExcluding(
+                org.mockito.ArgumentMatchers.any(LocalDateTime.class),
+                eq(VenuePresenceService.HIT_RADIUS_M), eq(VenuePresenceService.HIT_MAX_ACCURACY_M),
+                anyCollection());
+    }
+
     // ── fixtures ────────────────────────────────────────────────────────────
 
     private void stubPairs(VenueRepository.CoLocatedVenueRow... pairs) {
@@ -230,17 +193,20 @@ class VenuePresenceAttributionTest {
                 .thenReturn(List.of(pairs));
     }
 
+    /** 排序路径的取数：窗口内 + 排除后的 (venueId, userId, 最近命中时刻) */
     private void stubHits(Object[]... rows) {
-        when(pingRepository.findVisitorLastSeenByVenueIds(anyCollection(), eq(VenuePresenceService.HIT_RADIUS_M), anyInt()))
-                .thenReturn(rows(rows));
+        when(pingRepository.findVisitorLastSeenSinceExcluding(
+                org.mockito.ArgumentMatchers.any(LocalDateTime.class),
+                eq(VenuePresenceService.HIT_RADIUS_M), anyInt(), anyCollection()))
+                .thenReturn(List.of(rows));
+    }
+
+    private static BigDecimal bd(String value) {
+        return new BigDecimal(value);
     }
 
     private static Object[] row(long venueId, long userId, LocalDateTime lastSeen) {
         return new Object[]{venueId, userId, lastSeen};
-    }
-
-    private static List<Object[]> rows(Object[]... rows) {
-        return List.of(rows);
     }
 
     private static VenueRepository.CoLocatedVenueRow pair(long venueId, String venueStatus,

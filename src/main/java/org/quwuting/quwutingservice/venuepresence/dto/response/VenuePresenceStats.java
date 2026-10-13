@@ -1,61 +1,60 @@
 package org.quwuting.quwutingservice.venuepresence.dto.response;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
-import org.quwuting.quwutingservice.venuepresence.enums.CoLocatedAttribution;
 
 import java.time.LocalDateTime;
 import java.util.List;
 
 /**
- * 门店到访统计（admin 详情卡的口径载体，2026-09-29 V33；列表行同源于
- * {@code VenueVisitSummary}，两处数字由同一次归因计算产出）。
+ * 门店足迹统计（admin 详情页「到店信息」卡，GET /admin/venues/{id}/presence；2026-09-29 V33，
+ * <b>2026-10-13 改为「展示口径一源」</b>：与小程序列表卡片、admin 门店列表行<b>同一次计算</b>
+ * （{@code NearbyFootprint}），详情页上每个数字都能点开看到「具体是哪些人」）。
  * <p>
  * 口径必须随数值一起下发：admin 展示的每个数字旁边都要能说出它的半径与时间窗
- * （管理端纪律：统计量必须带口径说明，否则运营会当承诺值讲）。所有字段
- * {@code ALWAYS} 序列化——「无记录 = 0 / null」与「字段缺失」是两件事，
- * non_null 全局策略会把 null 静默删掉，前端拿到 undefined 会算出 NaN
+ * （管理端纪律：统计量不带口径 = 邀请误读）。所有字段 {@code ALWAYS} 序列化——「无记录 = 0 / null」
+ * 与「字段缺失」是两件事，non_null 全局策略会把 null 静默删掉，前端拿到 undefined 会算出 NaN
  * （35 号文档实证过的坑）。
  * <p>
- * <b>同址归因（2026-10-03，52 号 §4.2 / §4.4）</b>：坐标间距 ≤ 同址半径的门店（同楼不同层、同楼不同门牌）
- * 定位不可区分，到访证据先按营业状态归属（{@link CoLocatedAttribution}），无法归属时组内共享（用户并集）。
- * admin 必须按 {@code coLocatedAttribution} 同屏说明，否则两家同址店各显示 N 人会被读成合计 2N。
+ * <b>历史（勿回退）</b>：此前本记录带「到访 7/30 天（150m 命中 × 同址归因）」与「附近 30 天（300m 片区）」
+ * 两套并列数字，且详情页明确规定「四张统计卡不可点」——因为两套数字指向的人不是同一批，做成可点会
+ * 出现「显示 40 人、名单只有 12 人」。<b>不可点是症状，两套口径并存才是病因</b>：口径合一后
+ * 卡片、列表行、名单、小程序文案指向同一批人，可点自然成立。同址归因
+ * （NONE/SHARED/ABSORBED/YIELDED）只剩热度排序在用，不再进任何展示数字。
  *
- * @param visitUsers7d         近 7 天到访人数（去重 UV；命中口径：distance ≤ hitRadiusM
- *                             且 accuracy ≤ hitRadiusM，按同址归因）
- * @param visitUsers30d        近 30 天到访人数（同上口径，时间窗放大）
- * @param nearbyUsers30d       近 30 天附近人数（片区覆盖度：distance ≤ nearbyRadiusM，同一精度门槛；
- *                             语义 = 「这一带出现过多少用户」，非实时在场；<b>片区语义不做营业归因</b>，
- *                             同址组恒合并）
- * @param lastVisitAt          最近一次到访时刻（与到访人数同一命中谓词、同一归因范围，不设时间窗）；
- *                             null = 从无到访（2026-10-03 前名 lastPresenceAt、取「任意距离的最近痕迹」，
- *                             会在「到访 0 人」旁显示一个时刻——口径与旁边的数字不一致，已改）
- * @param hitRadiusM           到访命中半径（米，服务端权威，供展示口径）
- * @param nearbyRadiusM        附近覆盖半径（米，服务端权威，供展示口径）
- * @param coLocatedRadiusM     同址半径（米，门店坐标间距 ≤ 此值即视为手机定位分不开）
- * @param coLocatedAttribution 本店的同址归因方式（NONE = 无同址门店）
- * @param coLocatedVenues      与本店同址的其他门店（含营业状态，admin 据此说明证据去向）；空 = 无
+ * @param visitUsers7d     近 7 天去重用户数（附近带 {@code nearbyRadiusM} 并集）
+ * @param visitUsers30d    近 30 天去重用户数（= 小程序「感谢 N 位舞友」的 N）
+ * @param visitEvents30d   近 30 天去重到访次数（(用户, 自然日) 并集；= 小程序「N 次」的 N）
+ * @param lastVisitAt      最近一次足迹时刻（不设时间窗）；null = 附近从无足迹
+ * @param excludedUsers30d 近 30 天因「排除账号集合」未计入的用户数（0 = 无；非 0 时展示必须明说）
+ * @param nearbyRadiusM    足迹取数半径（米，用户 ↔ 门店：距店 ≤ 此值的定位计入）
+ * @param vicinityRadiusM  邻域半径（米，门店 ↔ 门店：此范围内的门店显示同一组足迹）
+ * @param maxAccuracyM     定位精度门槛（米，不随半径放宽；精度缺失视为达标）
+ * @param footprintText    小程序列表卡片上<b>会显示的原文</b>（null = 无足迹、卡片不渲染）。
+ *                         与 C 侧同一渲染函数产出，用于「所见即所得」核对
+ * @param vicinityVenues   邻域内的其他门店（含营业状态；这些店与本店显示同一组足迹）
  */
 @JsonInclude(JsonInclude.Include.ALWAYS)
 public record VenuePresenceStats(
         long visitUsers7d,
         long visitUsers30d,
-        long nearbyUsers30d,
+        long visitEvents30d,
         LocalDateTime lastVisitAt,
-        int hitRadiusM,
+        long excludedUsers30d,
         int nearbyRadiusM,
-        int coLocatedRadiusM,
-        CoLocatedAttribution coLocatedAttribution,
-        List<CoLocatedVenue> coLocatedVenues) {
+        int vicinityRadiusM,
+        int maxAccuracyM,
+        String footprintText,
+        List<VicinityVenue> vicinityVenues) {
 
     /**
-     * 同址门店（识别信息 + 营业状态：admin 展示「与 X 同址」并说明证据归向，可下钻）。
+     * 邻域内的其他门店（识别信息 + 营业状态：admin 展示「与 X 显示同一组足迹」，可下钻）。
      *
      * @param id            门店 id
      * @param name          门店名
      * @param statusDisplay 营业状态展示文案（服务端权威）
-     * @param inOperation   是否在营（可被到访归因，判据 = {@code VenuePresenceService#isInOperation}）
+     * @param inOperation   是否在营（仅供运营识别；展示口径<b>不看</b>营业状态）
      */
     @JsonInclude(JsonInclude.Include.ALWAYS)
-    public record CoLocatedVenue(Long id, String name, String statusDisplay, boolean inOperation) {
+    public record VicinityVenue(Long id, String name, String statusDisplay, boolean inOperation) {
     }
 }

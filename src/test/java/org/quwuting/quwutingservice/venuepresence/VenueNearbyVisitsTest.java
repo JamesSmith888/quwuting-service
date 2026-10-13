@@ -9,6 +9,7 @@ import org.quwuting.quwutingservice.opsconfig.service.OpsConfigService;
 import org.quwuting.quwutingservice.venue.repository.VenueRepository;
 import org.quwuting.quwutingservice.venuepresence.repository.VenuePresenceConsentRepository;
 import org.quwuting.quwutingservice.venuepresence.repository.VenuePresencePingRepository;
+import org.quwuting.quwutingservice.venuepresence.service.NearbyFootprint;
 import org.quwuting.quwutingservice.venuepresence.service.NearbyVisitSummary;
 import org.quwuting.quwutingservice.venuepresence.service.VenuePresenceService;
 
@@ -188,6 +189,97 @@ class VenueNearbyVisitsTest {
                 eq(VenuePresenceService.NEARBY_RADIUS_M), eq(VenuePresenceService.HIT_MAX_ACCURACY_M));
     }
 
+    // ── 展示口径一源：admin 读到的是同一次计算（2026-10-13） ─────────────────────
+
+    @Test
+    void footprintCarriesSevenDayUsersAndKeepsOldFootprintsVisibleForAdmin() {
+        stubPairs();
+        // 120：用户 1 两天前、用户 2 四十天前；121：只有一条四十天前的老足迹
+        stubFacts(row(YIHU, 1L, now.minusDays(2)), row(YIHU, 2L, now.minusDays(40)),
+                row(LISA, 3L, now.minusDays(40)));
+        stubDays(day(YIHU, 1L, now.toLocalDate().minusDays(2)));
+
+        Map<Long, NearbyFootprint> f = service.nearbyFootprints(List.of(YIHU, LISA), List.of(-1L));
+
+        assertEquals(1L, f.get(YIHU).visitUsers7d());
+        assertEquals(1L, f.get(YIHU).visitUsers30d());
+        assertEquals(1L, f.get(YIHU).visitEvents30d());
+        assertEquals(now.minusDays(2), f.get(YIHU).lastVisitAt());
+        assertEquals(0L, f.get(LISA).visitUsers30d(), "窗外的老足迹不计入 30 天人数");
+        assertEquals(now.minusDays(40), f.get(LISA).lastVisitAt(),
+                "…但 admin 的「最近」仍看得到（排序 / 最近到访列需要，C 侧不消费本字段）");
+        assertEquals(Set.of(YIHU, LISA), f.keySet(), "admin 面：入参里每家店都有返回项");
+    }
+
+    @Test
+    void cardTextSetIsExactlyTheNonEmptyProjectionOfTheAdminFootprints() {
+        // 一源的结构保证：C 侧集合 = admin 完整事实里 30 天人数 > 0 的那部分，数字逐项相同
+        stubPairs();
+        stubFacts(row(YIHU, 1L, now.minusDays(2)), row(YIHU, 2L, now.minusDays(3)),
+                row(LISA, 3L, now.minusDays(40)));
+        stubDays(day(YIHU, 1L, now.toLocalDate().minusDays(2)), day(YIHU, 2L, now.toLocalDate().minusDays(3)));
+
+        Map<Long, NearbyFootprint> footprints = service.nearbyFootprints(List.of(YIHU, LISA), List.of(-1L));
+        Map<Long, NearbyVisitSummary> display = service.nearbyVisitSummaries(List.of(YIHU, LISA), List.of(-1L));
+
+        assertEquals(Set.of(YIHU), display.keySet(), "无 30 天足迹的店 C 侧缺席（不渲染）");
+        assertEquals(footprints.get(YIHU).toDisplaySummary(), display.get(YIHU),
+                "同一家店，C 侧与 admin 的人数 / 次数逐项相同");
+    }
+
+    @Test
+    void excludedAccountsAreReportedSeparatelyNotSilentlyDropped() {
+        stubPairs();
+        stubFacts(row(YIHU, 1L, now.minusDays(1)), row(YIHU, 2L, now.minusDays(1)));
+        stubDays(day(YIHU, 1L, now.toLocalDate().minusDays(1)), day(YIHU, 2L, now.toLocalDate().minusDays(1)));
+
+        NearbyFootprint f = service.nearbyFootprints(List.of(YIHU), List.of(1L)).get(YIHU);
+
+        assertEquals(1L, f.visitUsers30d());
+        assertEquals(1L, f.excludedUsers30d(), "被排除的人数明说：运营数一遍名单才不会怀疑漏了人");
+    }
+
+    @Test
+    void nearbyVenueCountExplainsWhyNeighboursShowTheSameNumbers() {
+        stubPairs(pair(YIHU, "OPEN", LISA, "丽莎歌舞厅", "OPEN"),
+                pair(LISA, "OPEN", YIHU, "一壶淡泊音乐酒吧", "OPEN"));
+        stubFacts(row(YIHU, 1L, now.minusDays(1)));
+        stubDays(day(YIHU, 1L, now.toLocalDate().minusDays(1)));
+
+        Map<Long, NearbyFootprint> f = service.nearbyFootprints(List.of(YIHU, LISA), List.of(-1L));
+
+        assertEquals(1, f.get(YIHU).nearbyVenueCount());
+        assertEquals(1, f.get(LISA).nearbyVenueCount());
+        assertEquals(f.get(YIHU).visitUsers30d(), f.get(LISA).visitUsers30d(), "同一邻域 = 同一组足迹");
+    }
+
+    @Test
+    void globalDiscoveryAgreesWithPagePathAndSurfacesNeighbourOfEvidenceStore() {
+        // 全量证据只在 120 上：121 在其邻域内，经并集拿到同一组足迹，必须进入候选（排序 / 只看有足迹要用）
+        when(pingRepository.findVisitorLastSeen(eq(VenuePresenceService.NEARBY_RADIUS_M), anyInt()))
+                .thenReturn(rows(row(YIHU, 2L, now.minusDays(1)), row(YIHU, 210L, now.minusDays(2))));
+        stubPairs(pair(YIHU, "SUSPENDED", LISA, "丽莎歌舞厅", "OPEN"),
+                pair(LISA, "OPEN", YIHU, "一壶淡泊音乐酒吧", "SUSPENDED"));
+        stubFacts(row(YIHU, 2L, now.minusDays(1)), row(YIHU, 210L, now.minusDays(2)));
+        stubDays(day(YIHU, 2L, now.toLocalDate().minusDays(1)), day(YIHU, 210L, now.toLocalDate().minusDays(2)));
+
+        Map<Long, NearbyFootprint> visited = service.visitedNearbyFootprints(List.of(-1L));
+        Map<Long, NearbyFootprint> page = service.nearbyFootprints(List.of(YIHU, LISA), List.of(-1L));
+
+        assertEquals(Set.of(YIHU, LISA), visited.keySet(), "邻居经邻域并集获得同一组足迹，不能漏");
+        assertEquals(page.get(LISA), visited.get(LISA), "全量路径与单页路径对同一家店给出同一组数字");
+        assertEquals(2L, visited.get(LISA).visitUsers30d());
+    }
+
+    @Test
+    void globalDiscoverySkipsStoresWhoseOnlyVisitorsAreExcluded() {
+        when(pingRepository.findVisitorLastSeen(eq(VenuePresenceService.NEARBY_RADIUS_M), anyInt()))
+                .thenReturn(rows(row(YIHU, 1L, now.minusDays(1))));
+
+        Map<Long, NearbyFootprint> visited = service.visitedNearbyFootprints(List.of(1L));
+
+        assertTrue(visited.isEmpty(), "证据只来自被排除账号 ⇒ 不算「有足迹」，与卡片「无足迹不渲染」一致");
+    }
     // ── fixtures ────────────────────────────────────────────────────────────
 
     private void stubPairs(VenueRepository.CoLocatedVenueRow... pairs) {

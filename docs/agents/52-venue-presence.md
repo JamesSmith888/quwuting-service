@@ -12,6 +12,54 @@
 > 不是改迁移——物化表现存错值由 30 分钟一轮的调度任务自愈（**需先部署修复后的代码**）。
 > （状态确立流水）/ `V37__presence_consent_source_comment.sql`（2026-10-03 来源列注释）。
 
+### 2026-10-13：展示口径一源 + 收款码配置统计（用户四条需求；其中 3、4 的采集部分未实现，见下）
+
+> 迁移：`V49__user_pay_qr_status.sql`（`db/migration-mysql`）。
+> **部署顺序：后端先于小程序**（纯增量：新表 + 新接口；旧客户端不知道这些接口，行为零变化）。
+> ⚠️ 取号前已核对 `db/migration-mysql` 最大号 = V48；并行工作流会抢号，部署前再核对无重复（Flyway 对重复版本号直接拒启）。
+
+**需求 → 处理**
+
+| # | 需求 | 处理 |
+|---|---|---|
+| 1 | admin 门店列表的到店足迹与小程序列表一致；详情页点统计数字能看到具体的人 | ✅ **展示口径一源**（下节）：列表行 / 详情卡 / 名单 / 小程序文案读同一次计算；详情页数字卡可点，名单同窗口下逐数相等 |
+| 2 | 计时器：admin 统计并显示配置过收款码的用户 | ✅ V49：端上只上报**张数**（收款码本体仍只存本机），admin 看板面板 + 名单 + 用户信息标记 |
+| 3 | admin 用户信息展示每次打开小程序的坐标，与门店附近坐标分开 | ⏸ **未实现**。曾做过独立授权版（V50「打开位置记录」），已按产品负责人要求整体删除（V50 从未上线）；诉求本身待决，见下节 |
+| 4 | 关闭足迹分享的用户依旧采集；用户信息标记其关闭了足迹分享 | **标记 ✅；"依旧采集"⏸ 未实现**（下节）。「到店足迹：已关闭」标记在用户列表行与详情页顶部显示（`AdminUserMarks`） |
+
+**展示口径一源（需求 1 的根因）**
+
+- **症状**：admin 列表写 4 人、小程序卡片写 2 人；详情页还明文规定"四张统计卡刻意不可点"。
+- **根因**：「展示给人看的数字」被允许有**两个答案**——admin 另算一套（150m 命中带 × 同址归因 NONE/SHARED/ABSORBED/YIELDED），
+  C 侧是另一套（邻域 150m × 附近带 300m 并集），注释里还各自立着"⛔ 禁互相对齐"。分叉的本意是"各自回答不同问题"，
+  但**展示数字**不属于这一类；后台因此无法核对用户看到的东西，名单也对应不上那句话。"卡片不可点"是症状——两套口径并存，
+  点开必然出现"显示 40 人、名单 12 人"。
+- **做法**：展示口径收敛为 `VenuePresenceService.nearbyFootprints`（唯一计算）→ `NearbyFootprint`（完整事实）。
+  C 侧 = `nearbyVisitSummaries`（人数 + 次数投影，30 天无足迹不渲染）；admin = `VenueVisitBadgeService` 的
+  `footprintsForAdmin` / `visitedFootprintsForAdmin` / `adminStatsOf` / `adminVisitorsOf`。
+  **排除账号集合只在 `VenueVisitBadgeService.displayExclusions()` 取一次**（测试钉住 C 侧与 admin 传给事实层的是同一个集合）；
+  admin 回显 `footprintText` = 小程序此刻会显示的原文（同一渲染函数，所见即所得）。
+- **删除了什么**（留着只会让下一个人再分叉一次）：`visitSummaries` / `visitedVenueSummaries` / `statsFor` / `visitorsFor` /
+  `VenueVisitSummary` / `CoLocatedAttribution` 枚举与 `Attribution.kind`。归因（`attribute` / `attributionsFor`）**只剩热度排序在用**
+  （`visitSharesForRanking`，1/k 分摊 + 不在营记 0），`VenuePresenceAttributionTest` 改为经排序路径观察归因的可见后果。
+- **仍然有意分叉的只有两处**（回答的确是不同问题）：热度排序（命中带 150m + 分摊）与单用户到访明细 `visitsFor`（命中带的一次次到店）。
+  `VenueVisitShare` 类注释是这一条的登记处。
+- **接口变化**（admin-web 须同版发布）：`AdminVenueListItem` 去 `coLocatedAttribution/coLocatedCount`，增
+  `visitEvents30d / footprintText / nearbyVenueCount`；`VenuePresenceStats` 重写（去 `hitRadiusM/nearbyUsers30d/coLocated*`，增
+  `visitEvents30d / excludedUsers30d / nearbyRadiusM / vicinityRadiusM / maxAccuracyM / footprintText / vicinityVenues`）；
+  `AdminVenueVisitorPage` 增 `totalVisitTimes / nearbyRadiusM / vicinityRadiusM / excludedUsers / vicinityVenues`，
+  去 `hitRadiusM/coLocated*`；`windowDays` 不再钳 ≥30（钳到 [1, 3650]，缺省 30）。
+- **不变量（测试钉死）**：同窗口下 名单总人数 ≡ 卡片人数（7 天 / 30 天）、名单次数合计 ≡ 卡片「N 次」、
+  `nearbyVisitSummaries ≡ nearbyFootprints` 的 30 天有足迹子集、全量发现路径与单页路径对同一家店同数。
+
+**需求 3 / 4 的采集部分为什么没有实现**（状态：待产品与合规决定）
+
+端上"到店足迹"的关闭确认明文告诉用户「关闭后不会再新增」，首问 / 设置页也写明「仅在到店时记录」——这两句已经向用户说出口。
+"每次打开都记坐标"和"对已关闭者继续采集"都超出了这个承诺范围；服务端没有可以单独打开它的开关，要做必须**先改端上承诺文案**，
+并决定存量用户（含已关闭者）是否重新取得同意。这是产品 + 合规的决定，不是后端改动。
+**曾尝试的方案**：独立授权「打开位置记录」（V50，另表 / 另接口 / 另首问），产品负责人认为额外首问会重复打扰用户，**已整体删除**
+（V50 从未部署，无数据需要清理）。**已保留**：admin 用户信息里"到店足迹：已关闭"标记（`AdminUserMarks.footprintSharing`）。
+
 ### 2026-10-08 V46：坐标随足迹入库（用户裁决，隐私形态修订）
 
 > 触发判例：user 210 在丽莎 295m 处打开小程序 → ping 落库但不入到访统计，
@@ -226,8 +274,9 @@
   ⚠️ 由此出现的新残留：**五洲对在当前坐标下（95m）不再互为排序同址** ⇒ 该处足迹不产出到访分
   （120 停业被公式守卫记 0、121 无证据）——「展示已有『附近』兜底、排序份额暂无人计」；
   是否放宽**排序侧**同址半径属独立决策（触发条件 = 到访分确需覆盖此类同商场对时再评估）。
-- **admin 归因**（ABSORBED/YIELDED/共享明细与下钻）：保持原样——运营核查要的是「证据归谁」的
-  完整账本 + 同屏状态说明；C 侧声明「附近」不代表 admin 放弃归因记录。
+- ~~**admin 归因**（ABSORBED/YIELDED/共享明细与下钻）：保持原样~~ —— **2026-10-13 作废**：用户要求
+  "admin 列表与小程序列表保持一致"，admin 已并入展示口径（`nearbyFootprints`），归因明细整体删除，
+  归因只剩热度排序在用。见文首「展示口径一源」。上面"排序 / 热度"那条分叉仍然有效。
 - **`qwt_venue_visit_metrics.share_in_operation` / `group_size`**：列保留（V40 迁移红线不可回改），
   `share_in_operation` 自此**无消费方**（刷新仍写入以保持行自洽）；删除留待该表整体重构。
 
@@ -631,10 +680,10 @@ DEFAULT）。教训：**涉及个人信息的默认值，先过合规判据，�
 |---|---|---|
 | `POST /venues/{venueId}/presence` | requireAuth | body `{distanceMeters, accuracyMeters?}`；桶幂等；判定序 = 运营开关（关 ⇒ `accepted=false(DISABLED)`）→ 频控 → **同意门禁**（无显式开启 ⇒ `accepted=false(CONSENT_REQUIRED)`，2026-10-03）→ 门店与参数校验；错误码 **1022**（门店不存在 / 不参与采集 / 参数越界 / 频控） |
 | `POST /venues/presence-consent` | requireAuth | 状态确立上报：body `{enabled, source?}`，source = `USER`（缺省）/ `PROMPT`；每次插一行流水；DEFAULT / 未知来源 / 缺 enabled ⇒ 1022。端上失败留待下个周期补发 |
-| `GET /admin/venues` | requireAdmin | 管理端门店列表（无业务裁剪全量分页，`AdminVenueQueryService`）；`sort` = `LATEST`（缺省，SQL 分页）/ `VISITS_30D` / `LAST_VISIT`、`visitedOnly`（近 30 天有到访），见 §6.1；行内带到访摘要（7d / 30d / 最近到访 / 同址归因 / 同址数）批量注入；status / sort 经 `WireEnums.parse` 宽容解析（非法 = 不筛 / 默认序） |
-| `GET /admin/venues/{id}/presence` | requireAdmin | 单店到访统计（口径参数随响应回显，admin 展示必须与数值同屏；DTO 全字段 `@JsonInclude(ALWAYS)`——non_null 全局策略会删 null，35 号教训）；2026-10-03 增 `coLocatedRadiusM` / `coLocatedAttribution` / `coLocatedVenues`（含营业状态），`lastPresenceAt` 改名 `lastVisitAt` 并改为命中口径（§4.4） |
+| `GET /admin/venues` | requireAdmin | 管理端门店列表（无业务裁剪全量分页，`AdminVenueQueryService`）；`sort` = `LATEST`（缺省，SQL 分页）/ `VISITS_30D` / `LAST_VISIT`、`visitedOnly`（近 30 天附近有足迹），见 §6.2；行内带**足迹摘要**（7d / 30d 人数 / 30d 次数 / 最近足迹 / 小程序卡片原文 / 邻域门店数），经 `VenueVisitBadgeService` **与小程序卡片同一次计算**（2026-10-13）；status / sort 经 `WireEnums.parse` 宽容解析（非法 = 不筛 / 默认序） |
+| `GET /admin/venues/{id}/presence` | requireAdmin | 单店**足迹统计**（2026-10-13 重写为展示口径一源）：7d / 30d 人数 + 30d 次数 + 最近足迹 + `excludedUsers30d` + 小程序卡片原文 `footprintText` + 邻域内其他门店 `vicinityVenues`；口径参数（`nearbyRadiusM`=300 / `vicinityRadiusM`=150 / `maxAccuracyM`）随响应回显，admin 展示必须与数值同屏；DTO 全字段 `@JsonInclude(ALWAYS)`——non_null 全局策略会删 null，35 号教训 |
 | `GET /admin/venues/presence-consent-stats` | requireAdmin | 授权统计：已允许 / 已关闭 / 待补问 + 首问回答分布 + 近 30 天设置变更次数（2026-10-03 字段 `defaultUsers` → `legacyDefaultUsers` 且语义改变，admin-web 须同版发布） |
-| `GET /admin/venues/{id}/visitors` | requireAdmin | **到访用户名单**（2026-10-06，下钻第一级）；`windowDays`（缺省 30，服务端钳 ≥30）、`page` / `size`（上限 100）。人数与 `GET /admin/venues` 行内 `visitUsers30d` **逐人相等**（同一次归因 + 并集，⛔ 前端不得本地过滤列表近似）；`visitTimes` = 窗口内去重到店日（**≠ 人数口径**，§4）；**内部账号打标签不排除**（`internalAccount`）；软删用户仍出行（只给代号）；口径（`windowDays` / `hitRadiusM` / `coLocated*`）随响应回显 |
+| `GET /admin/venues/{id}/visitors` | requireAdmin | **足迹用户名单**（2026-10-06，下钻第一级；2026-10-13 并入展示口径一源）；`windowDays`（缺省 30，服务端钳 [1, 3650]——7 天卡片点进来就是 7 天）、`page` / `size`（上限 100）。同窗口下总人数 / 次数合计与详情卡片、列表行**逐数相等**（同一次计算，⛔ 前端不得本地过滤列表近似）；`visitTimes` = 窗口内邻域去重到店日（**≠ 人数口径**，§4）；内部账号打标签（`internalAccount`），计入与否只由「排除账号集合」决定（被排除者以 `excludedUsers` 明说）；软删用户仍出行（只给代号）；口径（`windowDays` / `nearbyRadiusM` / `vicinityRadiusM` / `vicinityVenues`）随响应回显 |
 | `GET /admin/users/{id}/visits` | requireAdmin | **某用户的到访足迹**（2026-10-06，下钻第二级 = 用户详情页「到访足迹」卡）；`windowDays`（缺省 90）。按门店分组、组内展开**一次次到店**（到店时刻 / 已观测停留时长 / 采样次数 / 最近距离）；**连续采样桶在服务端合并为一条**（阈值 `VISIT_SESSION_GAP_BUCKETS` = 2 桶）；⚠️ 用户不存在/已软删 → **1004**；超上限 `truncated=true`（⛔ 禁静默截断）。路由前缀 `/admin/users` 而非 `/admin/venues`（以用户为主键、页面归属用户详情页）。**2026-10-07 增 `consent` 段**（开关四态 + 变更流水 + 全站总开关，恒非 null，见 §6.3）——admin-web 须同版发布 |
 | `GET /admin/users/{id}/track` | requireAdmin | **某用户的坐标轨迹**（2026-10-08 V46，用户详情页「位置轨迹」卡）；`windowDays` 缺省 7、服务端钳 1~90；返回窗口内全部采样点（时间升序，剔除无坐标行并计数下发 `pointsWithoutCoordinates`）+ 涉及门店（含坐标供画圈）+ 距离带分级 `HIT/NEARBY/FAR`（`PresenceTrackGrade`）；上限 `USER_TRACK_MAX_POINTS`=800（保留最近点，`truncated` 显式）。⛔ 与 visits 是两个问题两个面（本端点不过命中谓词、含 150m 外「附近/留痕」点） |
 
@@ -648,9 +697,9 @@ DEFAULT）。教训：**涉及个人信息的默认值，先过合规判据，�
 
 | 纪律 | 根因 | 实现 |
 |---|---|---|
-| 名单人数 ≡ 列表行 `visitUsers30d` | 两个数字不一致 ⇒ 运营无从判断哪个对，只能怀疑系统 | 同一个 `attributionsFor` + 同一个 `unionLastSeen`（`visitorsFor`）；窗口同一条 `lastSeenAt >= 窗口起点` 判据 |
-| 窗口**只能放大不能缩小** | 缩到 7 天 ⇒ 点进去的人比列表写的少，且无法解释 | `VISITOR_WINDOW_MIN_DAYS = 30` 钳制；响应回显实际 `windowDays` |
-| 内部账号**打标签不排除** | 现网 ADMIN 一人占到访记录约一半，排除 ⇒ 名单首行永远是平台自己人，运营以为统计出错 | `isInternalAccount`（ADMIN ∪ 微信审核 ∪ 资料缺失）；**与排序口径的排除有意不同**——「展示要完整、排序要公平」是两个决策，不是一个口径的两种实现 |
+| 名单人数 ≡ 对应窗口的卡片人数 | 两个数字不一致 ⇒ 运营无从判断哪个对，只能怀疑系统 | 同一次 `loadNearbyEvidence` + 同一个 `unionLastSeen` + 同一排除集合（`nearbyVisitorsFor` 与 `nearbyFootprints` 共用）；窗口同一条 `lastSeenAt >= 窗口起点` 判据 |
+| ~~窗口只能放大不能缩小~~（2026-10-13 作废） | 旧前提是"行里只有 30 天一个数字"；现在 7 天也是可点的数字，点进来必须恰好是那 7 天的人 | 窗口钳到 [1, 3650]；响应回显实际 `windowDays` |
+| 内部账号**打标签**，计入与否只由排除集合决定 | 现网 ADMIN 一人占到访记录约一半；展示要让运营数得出"有几个是自己人" | `isInternalAccount`（ADMIN ∪ 微信审核 ∪ 资料缺失）只是标签；排除集合与小程序文案、热度排序同一来源（`HeatAccountExclusionService`，现状为空），被排除者不进名单但以 `excludedUsers` 明说 |
 
 **逐桶合并为「一次次到店」**：`write_bucket` 序列里相邻桶间隔 ≤ `VISIT_SESSION_GAP_BUCKETS`（=2 桶 / 30 分钟）
 视为同一次到店。不合并的后果很具体：跳一支舞 3 小时 ≈ 12 个桶 ⇒ 被记成 **12 次到店**，
@@ -665,8 +714,9 @@ DEFAULT）。教训：**涉及个人信息的默认值，先过合规判据，�
    单桶记录显示「单次」而**非**「0 分钟」——后者会被读成「进去就出来了」；
 3. 名单的 `visitTimes`（自然日去重）与人数（时间窗去重）**口径不同**，⛔ 禁止互相推算（§4 已登记）。
 
-**admin-web 侧**：`views/VenueVisitorsView.vue`（名单）+ `UserDetailView.vue`「到访足迹」卡；
-`services/venueAdmin.ts` 的 `listVenueVisitors` / `getUserVisits`。列表行到访数字用 `@click.stop`
+**admin-web 侧**：`views/VenueVisitorsView.vue`（名单，窗口读 `?windowDays=`）+ `VenueDetailView.vue`（3 张数字卡可点：
+7 天 / 30 天人数 / 30 天次数；"最近足迹"是时刻不是人群，不可点）+ `UserDetailView.vue`「到访足迹」卡；
+`services/venueAdmin.ts` 的 `listVenueVisitors` / `getUserVisits`。列表行足迹数字用 `@click.stop`
 （⛔ 整卡 `@click` 已是 `openDetail`，不拦住会双跳），命中区声明在容器 `.visit-entry` 上
 （⛔ 禁挂行内 `<b>`，那会让「7」与「30」两个数字的可点范围不一致）。
 零迁移：全部读既有 `qwt_venue_presence_pings` / `qwt_venues` / `qwt_users`。
@@ -681,11 +731,11 @@ admin-web 门店基础信息详情复用既有公开 `GET /venues/{id}`（该响
 `findAdminPage` / `findAdminIds` 共用——切换排序时「共 N 家」不能跳）：
 
 - `LATEST` 且不筛足迹 → SQL 分页，与门店规模无关；
-- 足迹排序 / `visitedOnly` → 取筛选后的**全量 id**（千级 Long，id 倒序）+ 有到访门店的**稀疏摘要**
-  （`VenuePresenceService.visitedVenueSummaries`：全量命中证据 → 有证据的门店 + 其同址邻居 → 与单页路径
-  **同一个** `attributionsFor` + `summarize`），内存**稳定**排序后切页（`AdminVenueQueryService.orderByFootprint`）。
-  并列按最近到访倒序，再并列（含从无到访）回落 id 倒序 ⇒ 翻页确定。
-- 两条路径的行数据都经 `visitSummaries` 注入 ⇒ 列表、排序键、详情卡三处数字同源。
+- 足迹排序 / `visitedOnly` → 取筛选后的**全量 id**（千级 Long，id 倒序）+ 有足迹门店的**稀疏结果**
+  （`VenuePresenceService.visitedNearbyFootprints`：全量附近带证据 → 有证据的门店 + 其邻域内其他门店 → **逐店走**
+  `nearbyFootprints`，与单页路径是同一份计算），内存**稳定**排序后切页（`AdminVenueQueryService.orderByFootprint`）。
+  并列按最近足迹倒序，再并列（含从无足迹）回落 id 倒序 ⇒ 翻页确定。
+- 两条路径的行数据都经 `footprintsForAdmin` 注入 ⇒ 列表、排序键、详情卡、小程序卡片四处数字同源。
 
 **量级边界（登记，到线再做）**：每次排序请求 = 1 次 id 全量 + 1 次 ping 全表 GROUP BY + 2 次同址查询。
 门店到万级或 ping 表到 10^6 行级（约 5 年现有增速）时，改为定时物化汇总表（`venue_id, uv7d, uv30d,
@@ -729,6 +779,20 @@ last_visit_at, refreshed_at`），admin 侧标注刷新时刻——届时排序�
 
 admin-web：`UserDetailView.vue` 足迹卡顶部状态行（tag + 全站停采/待补问提示）+ 底部
 「开关记录（N 次）」默认收起的折叠区；`services/venueAdmin.ts` 的 `UserPresenceConsent`。
+
+### 6.4 2026-10-13 新增接口：收款码状态 / 用户标记
+
+| 接口 | 鉴权 | 说明 |
+|---|---|---|
+| `POST /pay-qr/status` | requireAuth | body `{count: 0~6}`——**只有张数**，协议上不存在图片 / 路径 / 摘要字段；幂等整体覆盖；越界 ⇒ 1022（不钳制，端侧与服务端上限漂移应暴露）。`first_configured_at` 服务端钟首次 count>0 时落、之后不再改；`updated_at` 仅在张数变化时推进（upsert 赋值顺序是硬约束，测试钉住） |
+| `GET /admin/pay-qr/stats` | requireAdmin | 配置过收款码的汇总（真实用户范围，`UserStatsSql.USER_SCOPE`）：当前持有 / 曾配置 / 张数合计 / 近 7、30 天新增 |
+| `GET /admin/pay-qr/users` | requireAdmin | 名单（含配置后已清空者，`cleared` 区分），最近变更在前；上限 200，超限 `truncated=true` |
+| （字段）`AdminUserItem.marks` / `AdminUserDetailResponse.marks` | — | `AdminUserMarks`：到店足迹授权态（含 `DISABLED` ⇒ 用户信息标「已关闭足迹分享」）/ 收款码张数；`AdminUserMarkService` 一页批量装配，判据全部委托各域单点（`consentStateOf` / `countsFor`） |
+
+**表**：`qwt_user_pay_qr_status`（V49，每用户一行），已在 `UserBehaviorCatalogMirrorTest.NOT_BEHAVIOR_TABLES` 登记理由（归类门禁）。
+
+**⚠️ 已知边界（如实登记）**
+- 收款码"当前持有"口径对**换机用户偏高**（服务端留着旧设备最后一次张数；换机后新设备 0 张且从未上报 ⇒ 不上报）；"曾配置"语义不受影响。
 
 ## 7. 验证边界（静态红线）
 
@@ -791,3 +855,14 @@ admin-web：`vue-tsc -b` 全绿 + `vite build` 产物生成（`UserDetailView` 2
 （与用户所见数字一致；修复后 120/121 两张卡同文案）、京扬组 = **4 人 / 4 次**
 （旧展示口径为分摊后 2 · 2）。未启动服务、未部署；真机行为（两店卡片同文案、停业店照常显示）
 交用户联调。
+
+2026-10-13（展示口径一源 + V49）验证：
+- **新增/重写测试**：`VenueNearbyVisitsTest` 14（+6：7 天人数 / 窗外老足迹对 admin 可见 / C 侧集合 ≡ admin 完整事实的 30 天子集 /
+  排除者单列 / 邻域门店数 / 全量发现路径与单页路径同数 / 仅被排除者的门店不算有足迹）、`VenueVisitorDrilldownTest` 15
+  （名单 ≡ 卡片 7 天 + 30 天人数与次数 / 窗口按 [1, 3650] 钳制 / 含邻居店足迹 / 被排除者明说 / 内部账号打标签 / 软删仍出行 / 分页有界）、
+  `VenueVisitBadgeTextTest` 6（admin 回显原文 ≡ 小程序文案 / 排除集合同源）、`VenuePresenceAttributionTest` 9（改经排序路径观察归因后果 +
+  命中带 vs 附近带取数分叉钉死）、`AdminVenueFootprintOrderTest` 3、`PayQrStatusServiceTest` 7。
+- `user` / `venue` / `venuepresence` / `spend` / `payqr` / `config` 六个包 **249 条测试全绿**（H2 / Mockito；删除「打开位置」后重跑，2026-10-13）。
+- **未验证（须联调）**：V49 迁移在真实 MySQL 上的执行（`ON DUPLICATE KEY UPDATE` 赋值顺序、原生窗口函数 `findLatestByUserIds`、
+  `LIMIT :limit` 绑定）——单测只钉了 SQL 文本约束，不跑库；`-Drun.db.tests=true` 连库契约未跑；admin-web 页面 UI 未肉眼验证。
+

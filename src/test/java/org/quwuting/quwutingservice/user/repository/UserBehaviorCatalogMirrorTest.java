@@ -342,6 +342,7 @@ class UserBehaviorCatalogMirrorTest {
             // ── 有专卡的事实（详情页已有独立卡片，放进轨迹会重复且口径不同）
             Map.entry("qwt_venue_presence_pings", "到店足迹采样（系统按打开采样；专卡『到访足迹』『位置轨迹』，口径见 52 号文档）"),
             Map.entry("qwt_venue_presence_consents", "到访授权状态流水（专卡『到访足迹』的开关记录）"),
+            Map.entry("qwt_user_pay_qr_status", "计时收款码配置状态镜像（客户端静默上报张数，非用户当下动作；用户信息标记 + 看板『计时 · 账本使用』面板专卡）"),
             // ── 运营授予 / 管理动作（用户是被授予方，不是行为人）
             Map.entry("qwt_resource_grants", "协作授权（运营授予，用户是被授予方；专卡『协作授权』）"),
             // ── 舞伴域（已下线）：历史上从未进入口径，现在补进会改写已发布的历史数字

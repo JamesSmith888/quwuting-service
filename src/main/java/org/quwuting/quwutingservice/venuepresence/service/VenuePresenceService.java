@@ -27,7 +27,6 @@ import org.quwuting.quwutingservice.venuepresence.dto.response.PresenceReportRes
 import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceConsentStats;
 import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceStats;
 import org.quwuting.quwutingservice.venuepresence.entity.VenuePresenceConsent;
-import org.quwuting.quwutingservice.venuepresence.enums.CoLocatedAttribution;
 import org.quwuting.quwutingservice.venuepresence.enums.ConsentSource;
 import org.quwuting.quwutingservice.venuepresence.enums.PresenceConsentState;
 import org.quwuting.quwutingservice.venuepresence.enums.PresenceTrackGrade;
@@ -269,7 +268,7 @@ public class VenuePresenceService {
      * 可由请求放大（运营查历史），但<b>不能小于 30</b>——否则与列表行的数字对不上，
      * 「点进去比列表写的人少」是一个无法解释的不一致。
      */
-    private static final int VISITOR_WINDOW_MIN_DAYS = 30;
+    private static final int VISITOR_WINDOW_MAX_DAYS = 3650;
 
     /** 名单分页上限（防深翻页拖库；admin-web 端 PAGE_SIZE=20，上限 100 兜住误传） */
     private static final int VISITOR_PAGE_MAX_SIZE = 100;
@@ -433,7 +432,7 @@ public class VenuePresenceService {
      * 端上声明的确立来源：缺失 = USER（协议历史——10-03 前的端只在设置页上报且不带来源，这不是猜测）；
      * 可识别的显式来源原样采用；DEFAULT（服务端历史补记来源，端上无权声明）或无法识别的值按 1022 拒绝。
      */
-    static ConsentSource resolveReportedSource(String raw) {
+    public static ConsentSource resolveReportedSource(String raw) {
         if (raw == null || raw.isBlank()) {
             return ConsentSource.USER;
         }
@@ -497,129 +496,161 @@ public class VenuePresenceService {
                 promptAllowed, promptDeclined, changes30d);
     }
 
-    // ── 读侧：到访统计 ──────────────────────────────────────────────────────────
-
     /**
-     * 单店到访统计（admin 详情卡）。到访人数 / 最近到访 = {@link #visitSummaries} 同一计算；
-     * 附近人数是片区语义（这一带出现过多少人），归属范围恒为「本店 + 全部同址门店」、不做营业归因。
-     * 口径参数与同址归因随响应回显，admin 端展示时必须与数值同屏（统计量不带口径 = 邀请误读）。
+     * 一批用户的「到店足迹」当前态（用户信息标记用，2026-10-13）：缺席 = {@link PresenceConsentState#NEVER_ASKED}。
+     * 判据单点仍是 {@link #consentStateOf}（门禁 / 分布统计 / 单用户展示 / 本方法四处同数）。
      */
-    public VenuePresenceStats statsFor(Long venueId) {
-        LocalDateTime now = LocalDateTime.now();
-        Attribution attribution = attributionsFor(List.of(venueId)).get(venueId);
-        Map<Long, Map<Long, LocalDateTime>> hitLastSeen = lastSeenByVenue(attribution.evidenceVenueIds(), HIT_RADIUS_M);
-        VenueVisitSummary summary = summarize(attribution, hitLastSeen, now);
-        Map<Long, Map<Long, LocalDateTime>> nearbyLastSeen = lastSeenByVenue(attribution.areaVenueIds(), NEARBY_RADIUS_M);
-        long nearby30d = countSince(unionLastSeen(attribution.areaVenueIds(), nearbyLastSeen), now.minusDays(30));
-        List<VenuePresenceStats.CoLocatedVenue> peers = attribution.peers().stream()
-                .map(p -> new VenuePresenceStats.CoLocatedVenue(
-                        p.id(), p.name(), displayOf(p.status()), isInOperation(p.status())))
-                .toList();
-        return new VenuePresenceStats(summary.visitUsers7d(), summary.visitUsers30d(), nearby30d,
-                summary.lastVisitAt(), HIT_RADIUS_M, NEARBY_RADIUS_M, CO_LOCATED_RADIUS_M,
-                summary.coLocatedAttribution(), peers);
-    }
-
-    /**
-     * 批量到访摘要（admin 列表一页）：同址解析 1 次 + 命中查询 1 次覆盖整页，防 N+1。
-     * 返回<b>每个</b>入参门店的摘要（无到访也有一行——归因方式本身是要展示的信息）。
-     */
-    public Map<Long, VenueVisitSummary> visitSummaries(Collection<Long> venueIds) {
-        if (venueIds.isEmpty()) {
+    @Transactional(readOnly = true)
+    public Map<Long, PresenceConsentState> consentStatesFor(Collection<Long> userIds) {
+        if (userIds == null || userIds.isEmpty()) {
             return Map.of();
         }
-        LocalDateTime now = LocalDateTime.now();
-        Map<Long, Attribution> attributions = attributionsFor(venueIds);
-        Set<Long> evidence = new LinkedHashSet<>();
-        attributions.values().forEach(a -> evidence.addAll(a.evidenceVenueIds()));
-        Map<Long, Map<Long, LocalDateTime>> lastSeen = lastSeenByVenue(evidence, HIT_RADIUS_M);
-        Map<Long, VenueVisitSummary> result = new LinkedHashMap<>();
-        attributions.forEach((id, a) -> result.put(id, summarize(a, lastSeen, now)));
+        Map<Long, PresenceConsentState> result = new HashMap<>();
+        for (Object[] row : consentRepository.findLatestByUserIds(userIds)) {
+            ConsentSource source = WireEnums.parse(ConsentSource.class, String.valueOf(row[2]));
+            result.put(((Number) row[0]).longValue(), consentStateOf(Boolean.TRUE.equals(row[1]), source));
+        }
         return result;
     }
 
-    /**
-     * 全部「有过到访」门店的摘要（admin 按足迹排序 / 只看有足迹，52 号 §6.1）：从全量命中证据出发，
-     * 候选 = 有证据的门店 + 它们的同址邻居（邻居可能经共享 / 并入获得到访），再走与
-     * {@link #visitSummaries} 完全相同的归因与汇总——两条路径对同一家店必须给出同一组数字。
-     * 只返回 lastVisitAt 非空的门店（稀疏结果；缺席 = 从无到访）。
-     */
-    public Map<Long, VenueVisitSummary> visitedVenueSummaries() {
-        LocalDateTime now = LocalDateTime.now();
-        Map<Long, Map<Long, LocalDateTime>> lastSeen =
-                toLastSeenByVenue(pingRepository.findVisitorLastSeen(HIT_RADIUS_M, HIT_MAX_ACCURACY_M));
-        if (lastSeen.isEmpty()) {
-            return Map.of();
-        }
-        Set<Long> candidates = new LinkedHashSet<>(lastSeen.keySet());
-        for (VenueRepository.CoLocatedVenueRow row
-                : venueRepository.findCoLocatedPairs(lastSeen.keySet(), CO_LOCATED_RADIUS_M)) {
-            candidates.add(row.getCoLocatedId());
-        }
-        Map<Long, VenueVisitSummary> result = new LinkedHashMap<>();
-        attributionsFor(candidates).forEach((id, a) -> {
-            VenueVisitSummary summary = summarize(a, lastSeen, now);
-            if (summary.lastVisitAt() != null) {
-                result.put(id, summary);
-            }
-        });
-        return result;
-    }
+    // ── 读侧：展示口径「附近的足迹」（2026-10-13 起 C 侧文案与 admin 共用的唯一口径） ──
 
     /** 在营判定（可被到访归因的门店状态，{@link #IN_OPERATION_STATUSES}）；状态无法识别时按在营处理（不凭未知让渡证据） */
     public static boolean isInOperation(VenueStatus status) {
         return status == null || IN_OPERATION_STATUSES.contains(status);
     }
 
-    // ── 读侧：C 侧「附近的足迹」展示（2026-10-08 重定义；2026-10-09 取数扩至附近带 300m；
-    //    唯一的消费方 = VenueVisitBadgeService） ──
-
     /**
-     * C 侧「附近的足迹」展示事实（2026-10-08 重定义；文档 = 52 号「C 侧展示：附近的足迹」节）。
-     *
-     * <p><b>语义</b>：一家店的「附近」= 本店 + 与它相距 ≤ {@link #NEARBY_TRACE_RADIUS_M} 的
-     * 在库门店；返回其上的<b>「附近带」ping</b>（距店 ≤ {@link #NEARBY_RADIUS_M}，2026-10-09
-     * 由命中的 150m 扩至 300m）的<b>用户并集</b>与 <b>(人, 自然日) 并集</b>（30 天窗）。
-     * <b>不看营业状态</b>——足迹是已发生的事实，展示只声明「附近」，停业店的位置同样可能有足迹
-     * （营业状态时常变换，今天关门、昨天有人去过两件事同时为真）。
-     *
-     * <p><b>为什么不再做门店级归属</b>（2026-10-08 用户裁决；事故复盘见 52 号）：经纬度距离
-     * 无法判定线下用户真实在哪家店（门店坐标是地址级地理编码、同商场可散布百余米；端侧
-     * 「500m 内最近一家」只是几何顺序，不是事实）。旧展示实现把一组门店的证据「归属」给某一家
-     * （按营业状态 ABSORBED/YIELDED），一次单店坐标维护就让同一批足迹「算到另一家头上」
-     * ⇒ 新口径：范围内<b>所有</b>门店都显示同一句「附近的足迹」，由用户自行判断是哪家店。
-     *
-     * <p><b>与既有口径的关系（都读同一份 ping 事实，分叉刻意，⛔ 禁互相"对齐"）</b>：
+     * 「附近的足迹」展示事实——<b>展示给人看的足迹数字的唯一出口</b>（2026-10-13 重定位；文档 =
+     * 52 号「展示口径一源」节）。消费面有两个，读的是同一次计算：
      * <ul>
-     *   <li>本方法（C 侧展示）= 附近并集、无归属、无状态过滤、无分摊；</li>
-     *   <li>admin 展示（{@link #visitSummaries} / {@link #visitedVenueSummaries}）= 同址归因明细
-     *       （NONE/SHARED/ABSORBED/YIELDED），供运营核查；</li>
-     *   <li>排序（{@link #visitSharesForRanking}）= 1/k 分摊 + 不在营记 0。</li>
+     *   <li>C 侧卡片文案 = {@link #nearbyVisitSummaries}（本方法的人数 + 次数投影）；</li>
+     *   <li>admin 门店列表 / 详情 / 名单 = 本方法全量（含 7 天人数、最近足迹、被排除人数、邻域门店数）。</li>
      * </ul>
      *
-     * <p><b>取数</b>：一次同址查询（入参集合 × 全表）+ 一次命中并集查询 + 一次到访日查询，
-     * 页面级批量、无 N+1（与 admin 单页路径同量级）。排除集合与排序口径同一来源（调用方传入；
-     * admin 展示"不排除"的分叉保持原样）。无命中足迹的门店<b>不在返回 map 里</b>
-     * （调用方按缺席处理：前端不渲染，零布局变化）。
+     * <h3>语义（2026-10-08 用户裁决，2026-10-09 取数扩至附近带，2026-10-13 admin 并入）</h3>
+     * 一家店的「附近」= 本店 + 与它相距 ≤ {@link #NEARBY_TRACE_RADIUS_M} 的在库门店；返回其上
+     * 「附近带」ping（距店 ≤ {@link #NEARBY_RADIUS_M}，精度达标）的<b>用户并集</b>与
+     * <b>(用户, 自然日) 并集</b>（30 天窗）。<b>不看营业状态、不做门店级归属</b>——经纬度距离无法判定
+     * 线下用户真实在哪家店，展示只声明「附近」（用户原话：「我们没有承诺用户百分之百是这家店，
+     * 我们只是承诺是附近，交给用户自己去判断是哪家店」）。
      *
-     * <p>量级边界：每次调用 3 条小查询（命中表稀疏 + {@code (venue_id, created_at)} 索引前缀）；
+     * <h3>为什么 admin 也读这里（2026-10-13 用户要求「admin 列表与小程序列表保持一致」）</h3>
+     * 此前 admin 另有一套（150m 命中带 × 同址归因 NONE/SHARED/ABSORBED/YIELDED），注释里还立着
+     * 「⛔ 禁互相对齐」。<b>根因不是某个数字算错，而是「展示给人看的数字」被允许有两个答案</b>：
+     * 运营在后台看到 4 人、用户在小程序看到 2 人，谁都说不清哪个对；更糟的是后台的人员名单对应不上
+     * 用户看到的那句话。分叉的合理性只存在于「回答不同问题」的地方——热度排序（1/k 分摊、
+     * 不在营记 0，见 {@link #visitSharesForRanking}）与单用户到访明细（{@link #visitsFor}，命中带 150m
+     * 的一次次到店）——<b>展示数字</b>不属于这一类。故展示口径收敛为本方法一处，admin 旧的归因路径
+     * 整体删除（留着只会让下一个人再分叉一次）。
+     *
+     * <h3>取数</h3>
+     * 一次同址查询（入参集合 × 全表）+ 一次附近带并集查询 + 一次到访日查询，页面级批量、无 N+1。
+     * <b>入参里的每家店都有返回项</b>（无足迹 = {@link NearbyFootprint#EMPTY} 形态，但
+     * {@code nearbyVenueCount} 仍如实）；C 侧「无足迹不渲染」由 {@link #nearbyVisitSummaries} 在投影时筛。
+     * 量级边界：每次 3 条小查询（附近带 ping 稀疏 + {@code (venue_id, created_at)} 索引前缀）；
      * ping 表到 10^6 行 / 门店到万级时改为物化（触发条件与 admin 侧登记同款）。
      *
-     * @param venueIds         当页门店（城市列表 / 收藏列表的一页）
-     * @param excludedUserIds  排除账号集合（恒非空由调用方保证——{@code HeatAccountExclusionService}
-     *                         契约；空集合退化为"谁都不排除"，不会产生 SQL 语法问题，本方法在 Java 侧过滤）
+     * @param venueIds        当页门店（城市列表 / 收藏列表 / admin 列表的一页）
+     * @param excludedUserIds 排除账号集合（与热度排序同一来源，由调用方传入；空 / null = 谁都不排除）。
+     *                        被排除的用户计入 {@link NearbyFootprint#excludedUsers30d()}，不计入其余数字
      */
     @Transactional(readOnly = true)
-    public Map<Long, NearbyVisitSummary> nearbyVisitSummaries(Collection<Long> venueIds,
-                                                              Collection<Long> excludedUserIds) {
+    public Map<Long, NearbyFootprint> nearbyFootprints(Collection<Long> venueIds,
+                                                       Collection<Long> excludedUserIds) {
         if (venueIds == null || venueIds.isEmpty()) {
             return Map.of();
         }
         LocalDateTime now = LocalDateTime.now();
-        LocalDateTime windowStart = now.minusDays(RANKING_WINDOW_DAYS);
+        NearbyEvidence evidence = loadNearbyEvidence(venueIds, now.minusDays(RANKING_WINDOW_DAYS));
+        Set<Long> excluded = toIdSet(excludedUserIds);
+        Map<Long, NearbyFootprint> result = new LinkedHashMap<>();
+        evidence.vicinityByVenue().forEach((venueId, stores) ->
+                result.put(venueId, footprintOf(stores, evidence, excluded, now)));
+        return result;
+    }
+
+    /**
+     * C 侧「附近的足迹」展示事实（{@link #nearbyFootprints} 的人数 + 次数投影；唯一的 C 侧消费方 =
+     * {@code VenueVisitBadgeService}）。<b>附近 30 天无足迹的门店不在返回 map 里</b>
+     * （调用方按缺席处理：前端不渲染，零布局变化——「无足迹不渲染」是唯一硬约束）。
+     */
+    @Transactional(readOnly = true)
+    public Map<Long, NearbyVisitSummary> nearbyVisitSummaries(Collection<Long> venueIds,
+                                                              Collection<Long> excludedUserIds) {
+        Map<Long, NearbyVisitSummary> result = new LinkedHashMap<>();
+        nearbyFootprints(venueIds, excludedUserIds).forEach((venueId, footprint) -> {
+            if (footprint.visitUsers30d() > 0) {
+                result.put(venueId, footprint.toDisplaySummary());
+            }
+        });
+        return result;
+    }
+
+    /**
+     * 全部「附近有过足迹」的门店（admin 按足迹排序 / 只看有足迹，52 号 §6.1）：稀疏结果，
+     * <b>缺席 = 附近从无足迹</b>（{@code lastVisitAt} 非空才返回，窗外的老足迹也算「有过」）。
+     * <p>
+     * 候选 = 有证据的门店 + 它们邻域内的其他门店（邻居共享同一组足迹），然后<b>逐店走
+     * {@link #nearbyFootprints}</b>——与单页路径是同一份计算，两条路径对同一家店给出同一组数字
+     * 是结构保证而不是约定。
+     */
+    @Transactional(readOnly = true)
+    public Map<Long, NearbyFootprint> visitedNearbyFootprints(Collection<Long> excludedUserIds) {
+        Set<Long> excluded = toIdSet(excludedUserIds);
+        Map<Long, Map<Long, LocalDateTime>> lastSeen = toLastSeenByVenue(
+                pingRepository.findVisitorLastSeen(NEARBY_RADIUS_M, HIT_MAX_ACCURACY_M));
+        Set<Long> evidenceStores = new LinkedHashSet<>();
+        lastSeen.forEach((venueId, users) -> {
+            if (users.keySet().stream().anyMatch(user -> !excluded.contains(user))) {
+                evidenceStores.add(venueId);
+            }
+        });
+        if (evidenceStores.isEmpty()) {
+            return Map.of();
+        }
+        Set<Long> candidates = new LinkedHashSet<>(evidenceStores);
+        for (VenueRepository.CoLocatedVenueRow row
+                : venueRepository.findCoLocatedPairs(evidenceStores, NEARBY_TRACE_RADIUS_M)) {
+            candidates.add(row.getCoLocatedId());
+        }
+        Map<Long, NearbyFootprint> result = new LinkedHashMap<>();
+        nearbyFootprints(candidates, excludedUserIds).forEach((venueId, footprint) -> {
+            if (footprint.lastVisitAt() != null) {
+                result.put(venueId, footprint);
+            }
+        });
+        return result;
+    }
+
+    /**
+     * 单店足迹详情（admin 详情页「到店信息」卡）：{@link #nearbyFootprints} 同一计算 + 邻域内其他门店
+     * （含营业状态，仅供运营识别「为什么隔壁店数字一样」，展示口径本身不看状态）。
+     */
+    @Transactional(readOnly = true)
+    public NearbyDetail nearbyDetailFor(Long venueId, Collection<Long> excludedUserIds) {
+        LocalDateTime now = LocalDateTime.now();
+        NearbyEvidence evidence = loadNearbyEvidence(List.of(venueId), now.minusDays(RANKING_WINDOW_DAYS));
+        NearbyFootprint footprint = footprintOf(evidence.vicinityByVenue().get(venueId), evidence,
+                toIdSet(excludedUserIds), now);
+        return new NearbyDetail(footprint, vicinityVenuesOf(venueId, evidence));
+    }
+
+    /**
+     * 附近的一页事实：「本店的邻域」「证据门店上的最近命中时刻」「证据门店上的去重到访日」。
+     * 三份映射都以<b>证据门店</b>（邻域并集内的全部门店）为键；各店再按自己的邻域求并集。
+     */
+    private record NearbyEvidence(Map<Long, Set<Long>> vicinityByVenue,
+                                  Map<Long, List<Peer>> peersByVenue,
+                                  Map<Long, Map<Long, LocalDateTime>> lastSeen,
+                                  Map<Long, Map<Long, Set<LocalDate>>> visitDays) {
+    }
+
+    private NearbyEvidence loadNearbyEvidence(Collection<Long> venueIds, LocalDateTime daysSince) {
         // ① 每店的「附近门店集合」= {本店} ∪ {与它相距 ≤ NEARBY_TRACE_RADIUS_M 的在库门店}。
         //    只做一跳（不做传递闭包）：展示单元是「这家店的附近」而非「连成一片的商圈」。
         Map<Long, Set<Long>> vicinityByVenue = new LinkedHashMap<>();
+        Map<Long, List<Peer>> peersByVenue = new HashMap<>();
         for (Long id : venueIds) {
             vicinityByVenue.computeIfAbsent(id, k -> new LinkedHashSet<>()).add(id);
         }
@@ -630,86 +661,107 @@ public class VenuePresenceService {
             Set<Long> vicinity = vicinityByVenue.get(row.getVenueId());
             if (vicinity != null) {
                 vicinity.add(row.getCoLocatedId());
+                peersByVenue.computeIfAbsent(row.getVenueId(), k -> new ArrayList<>())
+                        .add(new Peer(row.getCoLocatedId(), row.getCoLocatedName(),
+                                parseStatus(row.getCoLocatedStatus())));
             }
         }
-        // ② 一次批量取事实：范围内全部门店上的「附近带」ping（距店 ≤ NEARBY_RADIUS_M=300m，
-        //    2026-10-09 由命中带 150m 扩至 300m；⛔ 与 admin / 排序路径同表**不同谓词**——
-        //    那两处仍取命中带 150m，分叉刻意、禁对齐）。精度门槛不随半径放宽（数据质量门槛恒定）。
+        // ② 一次批量取事实：范围内全部门店上的「附近带」ping（距店 ≤ NEARBY_RADIUS_M=300m）。
+        //    ⛔ 与排序路径同表**不同谓词**——排序仍取命中带 150m（热度公式的输入，另一个问题）。
+        //    精度门槛不随半径放宽（数据质量门槛恒定）。
         Set<Long> evidenceStores = new LinkedHashSet<>();
         vicinityByVenue.values().forEach(evidenceStores::addAll);
         Map<Long, Map<Long, LocalDateTime>> lastSeen = toLastSeenByVenue(
                 pingRepository.findVisitorLastSeenByVenueIds(evidenceStores, NEARBY_RADIUS_M, HIT_MAX_ACCURACY_M));
         Map<Long, Map<Long, Set<LocalDate>>> visitDays = toVisitDaysByVenue(
-                pingRepository.findVisitorDaysByVenueIdsSince(evidenceStores, windowStart,
+                pingRepository.findVisitorDaysByVenueIdsSince(evidenceStores, daysSince,
                         NEARBY_RADIUS_M, HIT_MAX_ACCURACY_M));
-        // ③ 排除集合单点剔除（两张映射的 user 维同时过滤——「同一集合、两种消费面」，见方法注释）
-        if (excludedUserIds != null && !excludedUserIds.isEmpty()) {
-            lastSeen.values().forEach(m -> m.keySet().removeAll(excludedUserIds));
-            visitDays.values().forEach(m -> m.keySet().removeAll(excludedUserIds));
-        }
-        // ④ 逐店求并集：组内同一用户 / 同一天只计一次（⛔ 不能各店相加——52 号 §4.2 第 1 条）
-        Map<Long, NearbyVisitSummary> result = new LinkedHashMap<>();
-        vicinityByVenue.forEach((venueId, stores) -> {
-            long users = countSince(unionLastSeen(stores, lastSeen), windowStart);
-            if (users <= 0) {
-                return; // 本店附近无足迹 ⇒ 缺席 = 不渲染（「无足迹不渲染」是唯一硬约束）
-            }
-            result.put(venueId, new NearbyVisitSummary(users, countVisitEvents(stores, visitDays)));
-        });
-        return result;
+        return new NearbyEvidence(vicinityByVenue, peersByVenue, lastSeen, visitDays);
     }
 
-    // ── 读侧：到访名单下钻（2026-10-06，admin 名单页 / 用户足迹页） ─────────────────
+    /**
+     * 一家店的足迹（纯函数）：组内同一用户 / 同一天只计一次（⛔ 不能各店相加——52 号 §4.2 第 1 条）；
+     * 排除账号在<b>用户并集</b>与<b>到访日并集</b>两处同时剔除（「同一集合、两种消费面」）。
+     */
+    private static NearbyFootprint footprintOf(Set<Long> stores, NearbyEvidence evidence,
+                                               Set<Long> excluded, LocalDateTime now) {
+        Map<Long, LocalDateTime> all = unionLastSeen(stores, evidence.lastSeen());
+        Map<Long, LocalDateTime> counted = new HashMap<>(all);
+        counted.keySet().removeAll(excluded);
+        LocalDateTime since30 = now.minusDays(RANKING_WINDOW_DAYS);
+        long users30d = countSince(counted, since30);
+        LocalDateTime last = counted.values().stream().max(LocalDateTime::compareTo).orElse(null);
+        return new NearbyFootprint(
+                countSince(counted, now.minusDays(VISIT_RECENT_WINDOW_DAYS)),
+                users30d,
+                countVisitEvents(stores, evidence.visitDays(), excluded),
+                last,
+                countSince(all, since30) - users30d,
+                stores.size() - 1);
+    }
+
+    private static List<VenuePresenceStats.VicinityVenue> vicinityVenuesOf(Long venueId, NearbyEvidence evidence) {
+        return evidence.peersByVenue().getOrDefault(venueId, List.of()).stream()
+                .map(p -> new VenuePresenceStats.VicinityVenue(
+                        p.id(), p.name(), displayOf(p.status()), isInOperation(p.status())))
+                .toList();
+    }
+
+    private static Set<Long> toIdSet(Collection<Long> ids) {
+        return ids == null ? Set.of() : new HashSet<>(ids);
+    }
+
+    // ── 读侧：足迹名单下钻（2026-10-06 建；2026-10-13 并入展示口径一源） ─────────────
 
     /**
-     * 单店到访用户名单（admin 名单页，GET /admin/venues/{venueId}/visitors 的实现）。
+     * 单店足迹用户名单（admin 名单页，GET /admin/venues/{venueId}/visitors 的实现）。
      * <p>
-     * <b>与 {@link #statsFor} / {@link #visitSummaries} 同源</b>：同一个
-     * {@link #attributionsFor} 归因 + 同一个 {@link #unionLastSeen} 用户并集，
-     * ⛔ 禁在本方法里另写一份口径。否则会出现「列表写 5 人、点进去 8 人」——
-     * 运营无法判断哪个对，只能怀疑系统（52 号 §4 的同源纪律）。
+     * <b>名单 = 卡片数字的展开</b>：与 {@link #nearbyFootprints} 同一次证据加载、同一个
+     * {@link #unionLastSeen} 用户并集、同一个排除集合、同一条窗口判据（{@code 最近命中时刻 ≥ 窗口起点}），
+     * 因此 {@code windowDays=30} 时总人数 = 卡片「30 天 N 人」= 小程序「N 位舞友」，次数合计 = 「N 次」；
+     * {@code windowDays=7} 时总人数 = 卡片「7 天 N 人」。⛔ 禁在本方法里另写一份口径
+     * （否则「列表写 5 人、点进去 8 人」——运营无法判断哪个对，只能怀疑系统，52 号 §4 的同源纪律）。
      * <p>
-     * <b>窗口语义</b>：名单默认窗口 = {@link #RANKING_WINDOW_DAYS}（30 天），
-     * 与列表行 {@code visitUsers30d} <b>逐人相等</b>（同一个并集 + 同一个
-     * {@code lastSeenAt >= 窗口起点} 判定）；{@code windowDays} 可放大（查历史），
-     * 但被钳到 ≥ 30 天——放大后名单变长是可以解释的，变短则与列表行冲突。
+     * <b>窗口不再钳到 ≥30</b>（2026-10-13）：旧约束的前提是「行里只有 30 天一个数字」；现在 7 天人数
+     * 也是可点的数字，点进来必须恰好是那 7 天的人。窗口钳到 [1, {@link #VISITOR_WINDOW_MAX_DAYS}]。
      * <p>
-     * <b>分页在内存切</b>：候选 = 命中证据的用户并集（百级，同
-     * {@link #findVisitorLastSeenByVenueIds} 的量级边界），排序键 = 最近到访倒序 +
-     * userId 升序（并列时翻页确定）。
+     * <b>分页在内存切</b>：候选 = 附近带证据的用户并集（百级，同 {@code findVisitorLastSeenByVenueIds}
+     * 的量级边界），排序键 = 最近足迹倒序 + userId 升序（并列时翻页确定）。
      * <p>
-     * <b>不排除内部账号</b>（{@code AdminVenueVisitorItem#internalAccount} 打标签）：
-     * admin 展示要完整，与排序口径的排除<b>有意不同</b>。
+     * <b>内部账号打标签、不额外排除</b>（{@code AdminVenueVisitorItem#internalAccount}）：计入与否只由
+     * 「排除账号集合」决定（与小程序文案同一集合，现状为空）；ADMIN / 微信审核号只是识别标签，
+     * 让运营数得出「这里面有几个是自己人」。
      */
     @Transactional(readOnly = true)
-    public AdminVenueVisitorPage visitorsFor(Long venueId, int windowDays, int page, int size) {
+    public AdminVenueVisitorPage nearbyVisitorsFor(Long venueId, int windowDays, int page, int size,
+                                                   Collection<Long> excludedUserIds) {
         LocalDateTime now = LocalDateTime.now();
-        int window = Math.max(windowDays, VISITOR_WINDOW_MIN_DAYS);
+        int window = Math.min(Math.max(windowDays, 1), VISITOR_WINDOW_MAX_DAYS);
         int sizeBound = Math.min(Math.max(size, 1), VISITOR_PAGE_MAX_SIZE);
         int pageBound = Math.max(page, 0);
-        Attribution attribution = attributionsFor(List.of(venueId)).get(venueId);
-        Map<Long, Map<Long, LocalDateTime>> lastSeen =
-                lastSeenByVenue(attribution.evidenceVenueIds(), HIT_RADIUS_M);
-        Map<Long, LocalDateTime> users = unionLastSeen(attribution.evidenceVenueIds(), lastSeen);
         LocalDateTime windowStart = now.minusDays(window);
-        // 窗口内访客：与 countSince 同一条判据（最近命中时刻 ≥ 窗口起点）⇒ 与 visitUsers30d 逐人相等
+        NearbyEvidence evidence = loadNearbyEvidence(List.of(venueId), windowStart);
+        Set<Long> stores = evidence.vicinityByVenue().get(venueId);
+        Set<Long> excluded = toIdSet(excludedUserIds);
+        Map<Long, LocalDateTime> all = unionLastSeen(stores, evidence.lastSeen());
+        // 窗口内用户：与 countSince 同一条判据 ⇒ 与卡片数字逐人相等
         Map<Long, LocalDateTime> inWindow = new HashMap<>();
-        users.forEach((user, at) -> {
-            if (!at.isBefore(windowStart)) {
+        all.forEach((user, at) -> {
+            if (!excluded.contains(user) && !at.isBefore(windowStart)) {
                 inWindow.put(user, at);
             }
         });
-        // 次数列：同址组内 (user, day) 取并集（⛔ 不能各店 count 相加，52 号 §4.2 第 1 条）
+        long excludedUsers = countSince(all, windowStart) - inWindow.size();
+        // 次数列：邻域内 (user, day) 取并集（⛔ 不能各店 count 相加，52 号 §4.2 第 1 条）
         Map<Long, Set<LocalDate>> daysByUser = new HashMap<>();
-        if (!inWindow.isEmpty()) {
-            for (Object[] row : pingRepository.findVisitorDaysByVenueIdsSince(
-                    attribution.evidenceVenueIds(), windowStart, HIT_RADIUS_M, HIT_MAX_ACCURACY_M)) {
-                Long user = (Long) row[1];
+        for (Long store : stores) {
+            evidence.visitDays().getOrDefault(store, Map.of()).forEach((user, days) -> {
                 if (inWindow.containsKey(user)) {
-                    daysByUser.computeIfAbsent(user, k -> new HashSet<>()).add(toLocalDate(row[2]));
+                    daysByUser.computeIfAbsent(user, k -> new HashSet<>()).addAll(days);
                 }
-            }
+            });
         }
+        long totalVisitTimes = daysByUser.values().stream().mapToLong(Set::size).sum();
         List<Map.Entry<Long, LocalDateTime>> ordered = new ArrayList<>(inWindow.entrySet());
         ordered.sort((a, b) -> {
             int byTime = b.getValue().compareTo(a.getValue());
@@ -726,12 +778,10 @@ public class VenuePresenceService {
                 .map(entry -> toVisitorItem(entry.getKey(), entry.getValue(),
                         daysByUser.getOrDefault(entry.getKey(), Set.of()), profiles))
                 .toList();
-        List<VenuePresenceStats.CoLocatedVenue> peers = attribution.peers().stream()
-                .map(p -> new VenuePresenceStats.CoLocatedVenue(
-                        p.id(), p.name(), displayOf(p.status()), isInOperation(p.status())))
-                .toList();
         return new AdminVenueVisitorPage(content, totalElements, totalPages, pageBound, sizeBound,
-                from + sizeBound >= totalElements, window, HIT_RADIUS_M, attribution.kind(), peers);
+                from + sizeBound >= totalElements, window, totalVisitTimes,
+                NEARBY_RADIUS_M, NEARBY_TRACE_RADIUS_M, excludedUsers,
+                vicinityVenuesOf(venueId, evidence));
     }
 
     /**
@@ -1047,8 +1097,10 @@ public class VenuePresenceService {
      * （命中谓词 × 同址组几何 × 双方营业状态 × 用户并集），其中归因是 Java 侧计算，
      * JPQL 无 FROM 派生表能力 ⇒ 公式只能读物化结果。见 {@code VenueVisitMetric} 类注释。
      * <p>
-     * <b>与 admin 展示口径 {@link #visitedVenueSummaries()} 的三处分叉</b>（有意，见
-     * {@link VenueVisitShare}）：排除集合、分摊（1/k）而非共享、不在营门店不产出。
+     * <b>与展示口径 {@link #nearbyFootprints} 的分叉</b>（有意，见 {@link VenueVisitShare}）：
+     * 命中带 150m 而非附近带 300m、分摊（1/k）而非并集、可配排除集合在 SQL 里剔除。
+     * 排序是「该不该给分」的算法输入，展示是「给人看的数字」——两个问题；
+     * 2026-10-13 起 admin 展示已并入展示口径，这里是仅存的有意分叉。
      * <p>
      * 时间窗只取 30 天（{@link #RANKING_WINDOW_DAYS}）：7 天份额由同一份命中集在内存里
      * 二次判定，不额外查库（"用户在某窗口内到访过 ⟺ 其最近命中时刻 ≥ 窗口起点"）。
@@ -1111,7 +1163,7 @@ public class VenuePresenceService {
             double share = 1.0 / Math.max(1, attribution.inOperationCount());
             // 次数 = 证据门店的「(人, 日) 二元组并集」大小 × 同一 share（⛔ 不是日期并集：
             // 那会把"谁来的"压掉 —— 6 位用户散在 5 天会被并成 5 次，见 countVisitEvents）
-            long eventCount = countVisitEvents(attribution.evidenceVenueIds(), visitDays);
+            long eventCount = countVisitEvents(attribution.evidenceVenueIds(), visitDays, Set.of());
             result.put(id, new VenueVisitShare(
                     scaleVisits(countSince(users, windowStart) * share),
                     scaleVisits(countSince(users, now.minusDays(VISIT_RECENT_WINDOW_DAYS)) * share),
@@ -1141,7 +1193,6 @@ public class VenuePresenceService {
     /**
      * 一家店的归因结论。
      *
-     * @param kind             同址归因方式
      * @param peers            同址邻居（不含本店）
      * @param evidenceVenueIds 到访证据取自哪些门店上的 ping（YIELDED = 空 ⇒ 本店计 0）
      * @param areaVenueIds     片区范围（本店 + 全部同址门店；附近人数用，不做营业归因）
@@ -1152,20 +1203,22 @@ public class VenuePresenceService {
      *                         同址组都在营时每位用户按 1/k 分给 k 家在营店，避免同楼各家
      *                         各吃一份整楼人流（52 号 §1.1 第 1 条）
      */
-    private record Attribution(CoLocatedAttribution kind, List<Peer> peers,
+    private record Attribution(List<Peer> peers,
                                Set<Long> evidenceVenueIds, Set<Long> areaVenueIds,
                                boolean selfInOperation, int inOperationCount) {
     }
 
     /**
-     * 归因判定（52 号 §4.4，纯函数）：证据是「有人在这个位置」，归属看谁可能被到访——
+     * 归因判定（52 号 §4.4，纯函数；<b>2026-10-13 起只服务热度排序</b>——展示数字已收敛到
+     * {@link #nearbyFootprints}，不再有任何展示面消费归因结论）：证据是「有人在这个位置」，
+     * 归属看谁可能被到访——
      * <ul>
-     *   <li>无同址 → NONE，只算本店；</li>
-     *   <li>本店在营：同址另有在营店 → SHARED（分不出，共享）；否则 → ABSORBED（同址不在营店的证据并入本店）；</li>
-     *   <li>本店不在营：同址有在营店 → YIELDED（证据归它们，本店 0）；全组都不在营 → SHARED（无从归属，如实共享）。</li>
+     *   <li>无同址 → 只算本店；</li>
+     *   <li>本店在营：同址另有在营店 → 共享（分不出）；否则 → 并入（同址不在营店的证据并入本店）；</li>
+     *   <li>本店不在营：同址有在营店 → 让渡（证据归它们，本店 0）；全组都不在营 → 共享（无从归属，如实共享）。</li>
      * </ul>
      * 2026-10-06（V38）：额外产出 {@code selfInOperation} 与 {@code inOperationCount} 两个
-     * **只有排序口径消费**的字段（展示口径不受影响，见 {@link Attribution} 参数注释）。
+     * **只有排序口径消费**的字段（见 {@link Attribution} 参数注释）。
      */
     private static Attribution attribute(Long venueId, VenueStatus selfStatus, List<Peer> peers) {
         Set<Long> area = new LinkedHashSet<>();
@@ -1175,20 +1228,19 @@ public class VenuePresenceService {
         int inOperationCount = (selfInOperation ? 1 : 0)
                 + (int) peers.stream().filter(p -> isInOperation(p.status())).count();
         if (peers.isEmpty()) {
-            return new Attribution(CoLocatedAttribution.NONE, peers, area, area,
-                    selfInOperation, inOperationCount);
+            return new Attribution(peers, area, area, selfInOperation, inOperationCount);
         }
         boolean anyPeerInOperation = peers.stream().anyMatch(p -> isInOperation(p.status()));
         if (selfInOperation) {
-            CoLocatedAttribution kind = anyPeerInOperation ? CoLocatedAttribution.SHARED : CoLocatedAttribution.ABSORBED;
-            return new Attribution(kind, peers, area, area, selfInOperation, inOperationCount);
+            // 同址另有在营店 ⇒ 共享；否则同址不在营店的证据并入本店——两种情形证据范围都是整组
+            return new Attribution(peers, area, area, selfInOperation, inOperationCount);
         }
         if (anyPeerInOperation) {
-            return new Attribution(CoLocatedAttribution.YIELDED, peers, Set.of(), area,
-                    false, inOperationCount);
+            // 本店不在营且同址有在营店 ⇒ 让渡：证据归在营门店，本店无证据
+            return new Attribution(peers, Set.of(), area, false, inOperationCount);
         }
-        return new Attribution(CoLocatedAttribution.SHARED, peers, area, area,
-                false, inOperationCount);
+        // 全组都不在营 ⇒ 无从归属，如实共享
+        return new Attribution(peers, area, area, false, inOperationCount);
     }
 
     /**
@@ -1210,24 +1262,7 @@ public class VenuePresenceService {
         return result;
     }
 
-    /** 归因证据 → 摘要：组内用户并集（同一用户在两家都有 ping 只计 1，COUNT 相加会重复计） */
-    private static VenueVisitSummary summarize(Attribution attribution,
-                                               Map<Long, Map<Long, LocalDateTime>> lastSeen,
-                                               LocalDateTime now) {
-        Map<Long, LocalDateTime> users = unionLastSeen(attribution.evidenceVenueIds(), lastSeen);
-        LocalDateTime last = users.values().stream().max(LocalDateTime::compareTo).orElse(null);
-        return new VenueVisitSummary(countSince(users, now.minusDays(7)), countSince(users, now.minusDays(30)),
-                last, attribution.kind(), attribution.peers().size());
-    }
-
     // ── 证据读取（命中谓词唯一实现在 Repository） ─────────────────────────────────
-
-    private Map<Long, Map<Long, LocalDateTime>> lastSeenByVenue(Collection<Long> venueIds, int radiusM) {
-        if (venueIds.isEmpty()) {
-            return Map.of();
-        }
-        return toLastSeenByVenue(pingRepository.findVisitorLastSeenByVenueIds(venueIds, radiusM, HIT_MAX_ACCURACY_M));
-    }
 
     /** Object[]{venueId, userId, lastSeenAt} → venueId → (userId → 最近命中时刻) */
     private static Map<Long, Map<Long, LocalDateTime>> toLastSeenByVenue(List<Object[]> rows) {
@@ -1327,11 +1362,15 @@ public class VenuePresenceService {
      * 「6 位舞友 · 6 次」读起来仍偏弱是数据量问题，不是公式问题。
      */
     private static long countVisitEvents(Collection<Long> venueIds,
-                                         Map<Long, Map<Long, Set<LocalDate>>> visitDays) {
+                                         Map<Long, Map<Long, Set<LocalDate>>> visitDays,
+                                         Set<Long> excludedUsers) {
         Set<String> userDays = new HashSet<>();
         for (Long venueId : venueIds) {
-            visitDays.getOrDefault(venueId, Map.of())
-                    .forEach((user, days) -> days.forEach(day -> userDays.add(user + "|" + day)));
+            visitDays.getOrDefault(venueId, Map.of()).forEach((user, days) -> {
+                if (!excludedUsers.contains(user)) {
+                    days.forEach(day -> userDays.add(user + "|" + day));
+                }
+            });
         }
         return userDays.size();
     }

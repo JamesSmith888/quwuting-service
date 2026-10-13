@@ -68,5 +68,7 @@ public record AdminUserItem(
          */
         boolean nicknameCustom,
         /** 最常去的门店（描述性身份；无或未达阈值 = null，见 {@link TopVenue}） */
-        TopVenue topVenue
+        TopVenue topVenue,
+        /** 功能状态标记（2026-10-13）：到店足迹是否被用户关闭 / 收款码张数，见 {@link AdminUserMarks} */
+        AdminUserMarks marks
 ) {}

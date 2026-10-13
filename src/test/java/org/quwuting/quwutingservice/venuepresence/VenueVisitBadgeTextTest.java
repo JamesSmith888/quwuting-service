@@ -6,17 +6,22 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.quwuting.quwutingservice.venue.service.HeatAccountExclusionService;
+import org.quwuting.quwutingservice.venuepresence.service.NearbyFootprint;
 import org.quwuting.quwutingservice.venuepresence.service.NearbyVisitSummary;
 import org.quwuting.quwutingservice.venuepresence.service.VenuePresenceService;
 import org.quwuting.quwutingservice.venuepresence.service.VenueVisitBadgeService;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -87,5 +92,35 @@ class VenueVisitBadgeTextTest {
     void emptyPageShortCircuitsWithoutTouchingDependencies() {
         // 空页直接返回：不查事实、不取排除集合（省一次 caching 查询）
         assertEquals(Map.of(), badgeService.visitBadgeTextsByVenue(List.of()));
+    }
+
+    // ── 展示口径一源：admin 面与 C 侧共用同一渲染函数与同一排除集合（2026-10-13） ──
+
+    @Test
+    void adminEchoesTheExactTextTheMiniProgramCardShows() {
+        LocalDateTime recent = LocalDateTime.now().minusDays(1);
+        // 同样的人数 / 次数，admin 回显的原文 = C 侧文案（同一渲染函数，所见即所得）
+        assertEquals("感谢 6 位舞友 · 10 次到过这附近的足迹",
+                badgeService.badgeTextOf(new NearbyFootprint(2, 6, 10, recent, 0, 1)));
+        assertEquals("感谢 2 位舞友来过这附近",
+                badgeService.badgeTextOf(new NearbyFootprint(1, 2, 3, recent, 0, 0)));
+        // 30 天内无足迹 ⇒ 卡片不渲染 ⇒ admin 回显 null（窗外老足迹只体现在「最近」列，不冒充卡片文案）
+        assertNull(badgeService.badgeTextOf(new NearbyFootprint(0, 0, 0, recent.minusDays(60), 0, 0)));
+        assertNull(badgeService.badgeTextOf(null));
+    }
+
+    @Test
+    void cardAndAdminReadTheSameExclusionSet() {
+        // 「同一集合」不靠约定：两个面都经 displayExclusions() 取，这里钉住传给事实层的就是同一个集合
+        List<Long> exclusions = List.of(-1L, 7L);
+        when(heatAccountExclusionService.excludedUserIds()).thenReturn(exclusions);
+
+        badgeService.visitBadgeTextsByVenue(List.of(120L));
+        badgeService.footprintsForAdmin(List.of(120L));
+        badgeService.visitedFootprintsForAdmin();
+
+        verify(venuePresenceService).nearbyVisitSummaries(anyCollection(), eq(exclusions));
+        verify(venuePresenceService).nearbyFootprints(anyCollection(), eq(exclusions));
+        verify(venuePresenceService).visitedNearbyFootprints(eq(exclusions));
     }
 }
