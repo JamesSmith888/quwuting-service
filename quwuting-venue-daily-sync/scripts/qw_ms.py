@@ -122,6 +122,65 @@ def suspects_of(v: dict, city_mentions: dict) -> tuple[list, list]:
     return strong, weak
 
 
+def _resolve_token(base_url: str) -> str:
+    """与 qw_api.py / qw_match.py 同一套 token 顺序：ADMIN_TOKEN > 缓存文件（同 base_url 才复用）。"""
+    if os.environ.get("ADMIN_TOKEN"):
+        return os.environ["ADMIN_TOKEN"]
+    try:
+        with open(os.environ.get("QW_TOKEN_CACHE", "/tmp/qw_token.json"), encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return ""
+    if d.get("baseUrl") and d["baseUrl"] != base_url.rstrip("/"):
+        return ""
+    return d.get("token") or ""
+
+
+def fetch_recent_reversals(base_url: str, days: int, report_date):
+    """近 N 日内被反转为 OPEN 的门店 {venueId: {...}}。
+
+    🆕 2026-10-13：从 qw_analyze.py **上收为单一实现**（双源/单源两条链路共用，防口径漂移；
+    当时双源日刚实证 #1045 曲阳需要此护栏 - 它 10-11 被反转，13 日双源都没点名）。
+    跨日跨源判据：候选店近 N 日内曾被实际反转为 OPEN（reversals 记录 = 某一波来源的痕迹）
+    ⇒ 与「今日这一波来源没点名」形成跨日冲突，不判关门（10-03 单源日的同款护栏；
+    双源日叠加使用 = 更保守，误伤不对称原则）。
+
+    ⚠️ 接口不可达 / 无 token 时返回 **None**（而非空 dict）——护栏据此降级并**显式告警**，
+    绝不静默放过（静默 = 又回到「差点误暂停 36 家」的老路）。
+    """
+    import datetime as _dt
+    import urllib.request
+    tok = _resolve_token(base_url)
+    if not tok:
+        return None
+    try:
+        req = urllib.request.Request(
+            f"{base_url.rstrip('/')}/admin/venue-sync/reversals?limit=200",
+            headers={"Authorization": "Bearer " + tok})
+        payload = json.load(urllib.request.urlopen(req, timeout=20))
+    except Exception:
+        return None
+    rows = payload.get("data", payload)
+    if isinstance(rows, dict):
+        rows = rows.get("content", [])
+    try:
+        today = _dt.date.fromisoformat(report_date) if report_date else _dt.date.today()
+    except Exception:
+        today = _dt.date.today()
+    out = {}
+    for r in rows or []:
+        ts = str(r.get("reversedAt") or "")[:10]
+        try:
+            rd = _dt.date.fromisoformat(ts)
+        except Exception:
+            continue
+        age = (today - rd).days
+        if 0 <= age <= days and r.get("toStatus") == "OPEN":
+            out[r["venueId"]] = {"reversedAt": ts, "ageDays": age,
+                                 "city": r.get("city"), "name": r.get("venueName")}
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="双源 M/S 判定 + 五表分级")
     ap.add_argument("--mentions", required=True)
@@ -129,6 +188,10 @@ def main() -> int:
     ap.add_argument("--export", required=True)
     ap.add_argument("--out")
     ap.add_argument("--dict", default=DEFAULT_DICT)
+    ap.add_argument("--base-url", default="http://localhost:8080")
+    ap.add_argument("--cross-source-days", type=int, default=2,
+                    help="跨日跨源冲突护栏窗口（天，2026-10-13 双源版新增，与单源版同款）："
+                         "候选店近 N 日曾被反转为 OPEN ⇒ 不判关门。0 = 关闭该护栏")
     args = ap.parse_args()
 
     META = json.load(open(args.mentions, encoding="utf-8"))
@@ -176,10 +239,20 @@ def main() -> int:
                        and f"{county_key(d)}市" not in plat_cities
                        and county_key(d) not in plat_cities}
 
+    # 🆕 2026-10-13：母城「空 header」（noListHeaders，如「无锡」「扬州」——源只写城市名、
+    # 未列任何门店）⇒ 该城市辖区视同**未报到**、不纳入暂停推断。
+    # ⚠️ 10-12 此修正只落了 qw_analyze.py（单源版）⇒ 双源版口径漂移，13 日实测无锡市区
+    # #747/#748/#751/#1147 因「江阴/宜兴把无锡市带进 covered」被误列候选后**补齐**（两链路对齐）。
+    no_list_keys = {county_key(c) for c in (META.get("noListHeaders") or [])}
+
     def in_scope(v) -> bool:
+        """范围细化（close-direction-playbook §2）：市辖区随母城；县级市/县独立（仅当被点名）。
+
+        ⚠️ 市辖区「随母城」的前提是**母城确有报到**（不是空 header）——空 header 视同未覆盖。
+        """
         d = (v.get("district") or "").strip()
         if not d or d.endswith("区"):
-            return True
+            return county_key(v.get("city") or "") not in no_list_keys
         return d in reported_county
 
     # ── 逐店 M（点名该店的源集合） ──
@@ -246,8 +319,13 @@ def main() -> int:
             # 范围细化排除（县级市/县/镇未报到 ⇒ 不随母城参与推断，close-direction-playbook §2）：
             # 只记录「本该进入候选、仅因 scope 被挡」的明细用于审计输出 —— 收集顺序放在
             # mentioned 检查之后（否则被点名的店会虚高进列表；判定行为与旧版一致，见 2026-10-08）。
+            # 🆕 2026-10-13：根因分列（空 header 母城 vs 县级未报到）——两者含义不同、复核动作不同。
+            _d = (v.get("district") or "").strip()
+            _why = ("空header（母城未报到）" if (not _d or _d.endswith("区"))
+                    else "县级未报到")
             scope_drop.append({"venueId": v["venueId"], "name": v["name"], "city": v["city"],
-                               "district": v.get("district"), "S": sorted(S[v["city"]])})
+                               "district": v.get("district"), "S": sorted(S[v["city"]]),
+                               "why": _why})
             continue
         if v["venueId"] in mentioned_ids:
             continue
@@ -279,6 +357,34 @@ def main() -> int:
             t5.append(row)
         else:
             t5_single.append({**row, "why": f"单源覆盖城市 |S|={len(S[v['city']])}"})
+
+    # 🛡 跨日跨源护栏（2026-10-13 从单源版 qw_analyze.py 上收至双源版——两条链路共用同一实现）
+    # 判据：候选店近 N 日内曾被**实际反转为 OPEN**（reversals 记录 = 某一波来源的痕迹）
+    # ⇒ 与「今日这波来源没点名」构成跨日冲突，不判关门、列「待裁决」。
+    # 为什么双源日也要（10-03 旧注释「双源日 M/S 已能表达冲突」只覆盖当日两源，覆盖不了
+    # 「前几日的第三方来源」）：10-12 单源日靠它摘出 #745；10-13 双源日本应再摘 #1045 曲阳
+    # （10-11 被反转、今日两源都没点它）——缺此段就是静默缺口，故补齐。
+    t5_cross_hold = []
+    if args.cross_source_days > 0:
+        recent = fetch_recent_reversals(args.base_url, args.cross_source_days, META.get("reportDate"))
+        if recent is None:
+            print("⚠️ 跨日跨源护栏**未生效**（reversals 接口不可达/无 token）"
+                  f"——暂停清单可能含「近 {args.cross_source_days} 日被反转」的门店，提交前必须人工复核！")
+        else:
+            def _split_cross(lst):
+                keep, cross = [], []
+                for s in lst:
+                    hit = recent.get(s["venueId"])
+                    if hit:
+                        cross.append({**s, "crossSource": hit,
+                                      "why": f"近 {args.cross_source_days} 日内被点名反转为 OPEN"
+                                             f"（{hit['reversedAt']}）⇒ 跨日跨源冲突，不判关门"})
+                    else:
+                        keep.append(s)
+                return keep, cross
+            t5, _h1 = _split_cross(t5)
+            t5_single, _h2 = _split_cross(t5_single)
+            t5_cross_hold = _h1 + _h2
 
     # 全源一致确认营业中（零动作日的公告素材：仅双源城市）
     confirm = sorted({vid for vid, ms in Mv.items()
@@ -330,6 +436,7 @@ def main() -> int:
            "t1_reversal": t1, "t2_manual": t2, "t3_new": t3, "t4_ref_count": len(t4),
            "t5_suspend": t5, "t5_single_source": t5_single,
            "t5_manual_hold": t5_manual_hold, "t5_suspect_hold": t5_suspect_hold,
+           "t5_cross_source_hold": t5_cross_hold, "crossSourceDays": args.cross_source_days,
            "t3_suspect_pairs": t3_suspect_pairs,
            "scope_dropped": scope_drop,
            "guard_dropped": guard_drop,
@@ -388,10 +495,22 @@ def main() -> int:
         print(f"守卫豁免剔除 {len(guard_drop)} 家: {[x['name'] + '#' + str(x['venueId']) for x in guard_drop]}")
     if scope_drop:
         from collections import Counter as _C
-        print(f"\n🧭 范围细化排除 {len(scope_drop)} 家（县级市/县/镇未报到 ⇒ 不参与推断；"
-              f"审计用，含县级分布 {dict(_C((x.get('district') or '?') for x in scope_drop))}）：")
-        for x in scope_drop:
-            print(f"  #{x['venueId']} {x['name']}（{x['city']}·{x.get('district')}）")
+        _cty = [x for x in scope_drop if "空header" not in (x.get("why") or "")]
+        _nlc = [x for x in scope_drop if "空header" in (x.get("why") or "")]
+        if _cty:
+            print(f"\n🧭 范围细化排除 {len(_cty)} 家（县级市/县/镇未报到 ⇒ 不参与推断；"
+                  f"审计用，含县级分布 {dict(_C((x.get('district') or '?') for x in _cty))}）：")
+            for x in _cty:
+                print(f"  #{x['venueId']} {x['name']}（{x['city']}·{x.get('district')}）")
+        if _nlc:
+            print(f"  ⤷ 空 header 排除（母城未报到，视同未覆盖）{len(_nlc)} 家："
+                  f"{[x['name'] + '#' + str(x['venueId']) for x in _nlc]}")
+    if t5_cross_hold:
+        print(f"\n🛡 跨日跨源冲突 · 暂停方向不写库 {len(t5_cross_hold)} 家（近 {args.cross_source_days} "
+              f"日内被反转 OPEN ⇒ 与今日这波来源构成跨日冲突；由 Agent 复核后裁决）：")
+        for x in t5_cross_hold:
+            cs0 = x["crossSource"]
+            print(f"  #{x['venueId']} {x['name']}（{x['city']}·{x.get('district')}） ← {cs0['reversedAt']} 反转为 OPEN")
     if t5_manual_hold:
         print(f"\n🖐 人工状态待确认（statusSource=MANUAL，**已剔除、不进自动提交集**）"
               f"{len(t5_manual_hold)} 家：")

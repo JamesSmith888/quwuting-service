@@ -1,7 +1,7 @@
 {
   "source": "xianbao360",
   "description": "砂舞线报网（xianbao360.com）舞讯门店名 → 平台门店名的匹配字典（2026-09-01 建立，2026-09-02 增补）。比对阶段在规则匹配（EXACT/CONTAINED）之前先查本字典：字典命中 = 高置信 ALIAS（可自动反转），与后端 /admin/venue-sync/aliases 手动映射表并行使用。uncertain_entries 段 = 用户不确定/存疑映射（tentatively_mapped/misprint/unverified，附复核动作），比对命中时按 next_action 处理。",
-  "updated": "2026-10-12",
+  "updated": "2026-10-13",
   "entries": [
     {
       "city": "西安市",
@@ -6861,6 +6861,14 @@
       "venue_id": 799,
       "kind": "alias",
       "note": "2026-10-12 低置信长尾别名固化（连续 2 轮：10-11 表②「星语 CONTAINED」/ 10-12 CONTAINED contained:星语~星语茶吧）：「茶吧」后缀未被剥 ⇒ 原落 CONTAINED；alias-import 后重拉 export 回读升 EXACT，当轮自动反转 + 公告 #131。"
+    },
+    {
+      "city": "西安市",
+      "news_name": "鼎燊",
+      "platform_name": "鼎焱音乐吧",
+      "venue_id": 1357,
+      "kind": "typo",
+      "note": "2026-10-13 源图写法变体（「燊」三火字形与「鼎焱」互混；10-05/06 另有「鼎森」误写先例）⇒ 平台别名域 + 本字典双写；重跑回读 via=alias-domain:鼎燊 / EXACT。同轮双向收口：假新店消、#1357 离开暂停候选"
     }
   ],
   "removed_duplicates": [

@@ -48,9 +48,11 @@ from collections import Counter, defaultdict
 
 # ── 暂停方向数据护栏：与双源版 qw_ms.py **共用同一份实现**（2026-09-29 固化） ──
 # 为什么共用而不是各写一份：护栏口径必须与双源日**完全一致**，否则单源/双源两条链路
-# 会在同一形态上给出不同结论（本轮实证：单源版有 P1 人工护栏、双源版没有 ⇒ 静默缺口）。
+# 会在同一形态上给出不同结论（09-29 实证：单源版有 P1 人工护栏、双源版没有 ⇒ 静默缺口）。
+# 2026-10-13 再上收一条：`fetch_recent_reversals`（跨日跨源护栏的数据层）——原在本文件，
+# 现移入 qw_ms.py 单一实现、两条链路共用（双源版同日补齐护栏主体）。
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from qw_ms import suspects_of  # noqa: E402
+from qw_ms import suspects_of, fetch_recent_reversals as _fetch_recent_reversals  # noqa: E402
 
 DEFAULT_DICT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                              "..", "reference", "xianbao360-venue-dict.json"))
@@ -64,57 +66,8 @@ def _county_key(s: str) -> str:
     return s
 
 
-def _resolve_token(base_url: str) -> str:
-    """与 qw_match.py 同一套 token 顺序：ADMIN_TOKEN > 缓存文件（同 base_url 才复用）。"""
-    if os.environ.get("ADMIN_TOKEN"):
-        return os.environ["ADMIN_TOKEN"]
-    try:
-        with open(os.environ.get("QW_TOKEN_CACHE", "/tmp/qw_token.json"), encoding="utf-8") as f:
-            d = json.load(f)
-    except Exception:
-        return ""
-    if d.get("baseUrl") and d["baseUrl"] != base_url.rstrip("/"):
-        return ""
-    return d.get("token") or ""
-
-
-def _fetch_recent_reversals(base_url: str, days: int, report_date):
-    """近 N 日内被反转为 OPEN 的门店 {venueId: {...}}。
-
-    ⚠️ 接口不可达 / 无 token 时返回 **None**（而非空 dict）——护栏据此降级并**显式告警**，
-    绝不静默放过（静默 = 又回到「差点误暂停 36 家」的老路）。
-    """
-    import datetime as _dt
-    import urllib.request
-    tok = _resolve_token(base_url)
-    if not tok:
-        return None
-    try:
-        req = urllib.request.Request(
-            f"{base_url.rstrip('/')}/admin/venue-sync/reversals?limit=200",
-            headers={"Authorization": "Bearer " + tok})
-        payload = json.load(urllib.request.urlopen(req, timeout=20))
-    except Exception:
-        return None
-    rows = payload.get("data", payload)
-    if isinstance(rows, dict):
-        rows = rows.get("content", [])
-    try:
-        today = _dt.date.fromisoformat(report_date) if report_date else _dt.date.today()
-    except Exception:
-        today = _dt.date.today()
-    out = {}
-    for r in rows or []:
-        ts = str(r.get("reversedAt") or "")[:10]
-        try:
-            rd = _dt.date.fromisoformat(ts)
-        except Exception:
-            continue
-        age = (today - rd).days
-        if 0 <= age <= days and r.get("toStatus") == "OPEN":
-            out[r["venueId"]] = {"reversedAt": ts, "ageDays": age,
-                                 "city": r.get("city"), "name": r.get("venueName")}
-    return out
+# （`_resolve_token` / `_fetch_recent_reversals` 已于 2026-10-13 上收至 qw_ms.py 单一实现，
+#   本文件经顶部 import 复用 —— 防单源/双源两条链路漂移）
 
 
 def main() -> int:
