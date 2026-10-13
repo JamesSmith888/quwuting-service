@@ -3,6 +3,7 @@ package org.quwuting.quwutingservice.payqr.service;
 import lombok.RequiredArgsConstructor;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.payqr.dto.PayQrDtos;
+import org.quwuting.quwutingservice.payqr.enums.PayQrState;
 import org.quwuting.quwutingservice.payqr.repository.UserPayQrStatusRepository;
 import org.quwuting.quwutingservice.user.entity.User;
 import org.quwuting.quwutingservice.user.repository.UserRepository;
@@ -55,15 +56,22 @@ public class PayQrStatusService {
         return new PayQrDtos.ReportResponse(true, null);
     }
 
-    /** 批量当前张数（用户信息标记用）：缺席 = 从未上报（等价 0） */
+    /** 单个用户的收款码配置快照（张数 + 三态；用户信息标记用） */
+    public record Snapshot(int count, PayQrState state) {
+        /** 无记录用户的快照：调用方对“缺席”统一取它，禁各处自己拼 0 */
+        public static final Snapshot NO_REPORT = new Snapshot(0, PayQrState.NO_REPORT);
+    }
+
+    /** 批量快照（用户信息标记用）：缺席 = 无上报记录，调用方取 {@link Snapshot#NO_REPORT} */
     @Transactional(readOnly = true)
-    public Map<Long, Integer> countsFor(Collection<Long> userIds) {
+    public Map<Long, Snapshot> snapshotsFor(Collection<Long> userIds) {
         if (userIds == null || userIds.isEmpty()) {
             return Map.of();
         }
-        Map<Long, Integer> result = new HashMap<>();
-        for (Object[] row : repository.findCountsByUserIds(userIds)) {
-            result.put((Long) row[0], ((Number) row[1]).intValue());
+        Map<Long, Snapshot> result = new HashMap<>();
+        for (Object[] row : repository.findStatusByUserIds(userIds)) {
+            int count = ((Number) row[1]).intValue();
+            result.put((Long) row[0], new Snapshot(count, PayQrState.of(count, row[2] != null)));
         }
         return result;
     }

@@ -8,6 +8,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.quwuting.quwutingservice.exception.BusinessException;
 import org.quwuting.quwutingservice.payqr.dto.PayQrDtos;
+import org.quwuting.quwutingservice.payqr.enums.PayQrState;
 import org.quwuting.quwutingservice.payqr.repository.UserPayQrStatusRepository;
 import org.quwuting.quwutingservice.payqr.service.PayQrStatusService;
 import org.quwuting.quwutingservice.support.HqlSyntaxAssertions;
@@ -69,13 +70,31 @@ class PayQrStatusServiceTest {
     }
 
     @Test
-    void countsForShortCircuitsOnEmptyInputAndMapsRows() {
-        assertEquals(Map.of(), service.countsFor(List.of()));
-        verify(repository, never()).findCountsByUserIds(anyCollection());
+    void snapshotsForShortCircuitsOnEmptyInputAndDerivesTheThreeStates() {
+        assertEquals(Map.of(), service.snapshotsFor(List.of()));
+        verify(repository, never()).findStatusByUserIds(anyCollection());
 
-        when(repository.findCountsByUserIds(anyCollection()))
-                .thenReturn(List.<Object[]>of(new Object[]{5L, 3}));
-        assertEquals(Map.of(5L, 3), service.countsFor(List.of(5L, 6L)));
+        LocalDateTime first = LocalDateTime.now().minusDays(2);
+        when(repository.findStatusByUserIds(anyCollection())).thenReturn(List.<Object[]>of(
+                new Object[]{5L, 3, first},     // 持有 3 张
+                new Object[]{6L, 0, first},     // 配置后清空
+                new Object[]{7L, 0, null}));    // 只报过 0、从未配置
+        Map<Long, PayQrStatusService.Snapshot> got = service.snapshotsFor(List.of(5L, 6L, 7L, 8L));
+
+        assertEquals(new PayQrStatusService.Snapshot(3, PayQrState.CONFIGURED), got.get(5L));
+        assertEquals(new PayQrStatusService.Snapshot(0, PayQrState.CLEARED), got.get(6L));
+        assertEquals(PayQrState.NO_REPORT, got.get(7L).state(), "只报过 0 = 没配置过，不得读成『曾配置』");
+        assertNull(got.get(8L), "缺席由调用方取 Snapshot.NO_REPORT，服务不替它造行");
+    }
+
+    @Test
+    void everyStateHasAnExplicitDisplayAndNoReportDoesNotClaimUnconfigured() {
+        assertEquals("已配置 2 张", PayQrState.CONFIGURED.display(2));
+        assertEquals("曾配置，现已清空", PayQrState.CLEARED.display(0));
+        String noReport = PayQrState.NO_REPORT.display(0);
+        // 无记录 = 没配置过 或 旧版小程序未上报，二者不可区分——文案必须两种可能都写出来
+        assertTrue(noReport.contains("没配置过") && noReport.contains("旧版"), noReport);
+        assertEquals(PayQrState.NO_REPORT, PayQrStatusService.Snapshot.NO_REPORT.state());
     }
 
     @Test
@@ -124,7 +143,7 @@ class PayQrStatusServiceTest {
     void jpqlQueryParsesAndNativeQueriesReferenceTheSharedUserScope() throws Exception {
         // JPQL 侧只保证词法可解析（绿灯 ≠ MySQL 侧绿灯，连库契约另测）；原生 SQL 必须引用 USER_SCOPE 常量而不是抄写
         HqlSyntaxAssertions.assertParses(UserPayQrStatusRepository.class
-                .getMethod("findCountsByUserIds", java.util.Collection.class)
+                .getMethod("findStatusByUserIds", java.util.Collection.class)
                 .getAnnotation(org.springframework.data.jpa.repository.Query.class).value());
         for (String method : List.of("sumStats", "findConfiguredUsers")) {
             String sql = java.util.Arrays.stream(UserPayQrStatusRepository.class.getMethods())

@@ -13,11 +13,15 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  *
  * @param footprintSharing        到店足迹授权态枚举名（ENABLED / DISABLED / PENDING_PROMPT / NEVER_ASKED）
  * @param footprintSharingDisplay 上者的服务端展示文案
- * @param payQrCount              本机当前持有的计时收款码张数（0 = 无 / 已清空 / 从未上报；只存张数不存图）
+ * @param payQrCount              本机当前持有的计时收款码张数（0 = 无 / 已清空 / 无上报记录；只存张数不存图）
+ * @param payQrState              收款码配置三态枚举名（CONFIGURED / CLEARED / NO_REPORT，见 {@code PayQrState}）
+ * @param payQrDisplay            上者的服务端展示文案（用户详情「计时 · 账本」卡恒显示这一行；NO_REPORT 如实写明两种可能）
  */
 @JsonInclude(JsonInclude.Include.ALWAYS)
 public record AdminUserMarks(
         String footprintSharing,
         String footprintSharingDisplay,
-        int payQrCount) {
+        int payQrCount,
+        String payQrState,
+        String payQrDisplay) {
 }

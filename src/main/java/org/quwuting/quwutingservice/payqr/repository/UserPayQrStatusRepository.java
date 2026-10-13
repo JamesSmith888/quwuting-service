@@ -66,10 +66,13 @@ public interface UserPayQrStatusRepository extends JpaRepository<UserPayQrStatus
                 @Param("firstAt") LocalDateTime firstAt,
                 @Param("now") LocalDateTime now);
 
-    /** 当前持有张数（批量，用户信息标记用）：Object[]{userId, qrCount} */
-    @Query("SELECT s.userId, s.qrCount FROM UserPayQrStatus s "
+    /**
+     * 当前持有张数 + 首次配置时刻（批量，用户信息标记用）：Object[]{userId, qrCount, firstConfiguredAt}。
+     * 带上首次配置时刻是为了区分「配置后清空」与「无记录」（{@code PayQrState}）。
+     */
+    @Query("SELECT s.userId, s.qrCount, s.firstConfiguredAt FROM UserPayQrStatus s "
             + "WHERE s.userId IN :userIds AND s.deleted = false")
-    List<Object[]> findCountsByUserIds(@Param("userIds") Collection<Long> userIds);
+    List<Object[]> findStatusByUserIds(@Param("userIds") Collection<Long> userIds);
 
     /** admin 汇总（真实用户范围）：当前持有 / 曾配置 / 张数合计 / 近 7、30 天新增配置人数 */
     @Query(value = "SELECT COALESCE(SUM(CASE WHEN s.qr_count > 0 THEN 1 ELSE 0 END), 0) AS configuredUsers, "

@@ -34,10 +34,12 @@ public class AdminUserMarkService {
             return result;
         }
         Map<Long, PresenceConsentState> footprint = venuePresenceService.consentStatesFor(userIds);
-        Map<Long, Integer> payQr = payQrStatusService.countsFor(userIds);
+        Map<Long, PayQrStatusService.Snapshot> payQr = payQrStatusService.snapshotsFor(userIds);
         for (Long id : userIds) {
             PresenceConsentState f = footprint.getOrDefault(id, PresenceConsentState.NEVER_ASKED);
-            result.put(id, new AdminUserMarks(f.name(), f.getDisplayName(), payQr.getOrDefault(id, 0)));
+            PayQrStatusService.Snapshot q = payQr.getOrDefault(id, PayQrStatusService.Snapshot.NO_REPORT);
+            result.put(id, new AdminUserMarks(f.name(), f.getDisplayName(),
+                    q.count(), q.state().name(), q.state().display(q.count())));
         }
         return result;
     }
