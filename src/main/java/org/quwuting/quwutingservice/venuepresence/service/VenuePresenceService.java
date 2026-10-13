@@ -588,6 +588,45 @@ public class VenuePresenceService {
     }
 
     /**
+     * 单店「可被感谢的到访贡献者」（到访感谢域的唯一取数口，2026-10-13；docs/agents/52
+     * 「到访感谢」节）。
+     * <p>
+     * <b>为什么由本类产出、且必须复用本方法</b>：感谢的被感谢对象 = 卡片「感谢 N 位舞友」
+     * 数字背后的<b>那些人</b>——两者必须来自同一份证据（{@link #loadNearbyEvidence}）、
+     * 同一个用户并集（{@link #unionLastSeen}）、同一条窗口判据（{@link #inWindow} 30 天）、
+     * 同一个排除账号集合（调用方传入，与卡片同源）。⛔ 任何「另写一套取数」的感谢实现都会
+     * 复现 V38/V40 的版本打脸（「卡片说 6 人、感谢只谢 4 人」）——展示口径一源是本域已立
+     * 的纪律（见 {@link #nearbyFootprints} 注释），感谢是它的第三个消费面，不是例外。
+     * <p>
+     * <b>与 {@link #nearbyFootprints} 的投影关系</b>：本方法返回的 map 去掉「感谢者自己」
+     * 后的大小 = 该店可被感谢人数；加上感谢者自己（若其本人在并集内）即等于
+     * {@code NearbyFootprint#visitUsers30d}。测试钉住这条不变量（VenueVisitThanksServiceTest）。
+     * <p>
+     * 量级：单店调用（感谢的动作粒度是「一家店」），证据加载走 {@link #loadNearbyEvidence} 的
+     * 单店路径（3 条小查询）；返回行数 = 该店附近并集用户数（现网个位数）。
+     *
+     * @param excludedUserIds 排除账号集合（与 C 侧卡片同一来源，由调用方传入；此处不查
+     *                        {@code HeatAccountExclusionService}——全类唯一取点在
+     *                        {@code VenueVisitBadgeService#displayExclusions}）
+     * @return userId → 该用户最近命中时刻（窗口内）；<b>无足迹 = 空 map</b>
+     */
+    @Transactional(readOnly = true)
+    public Map<Long, LocalDateTime> nearbyContributors(Long venueId, Collection<Long> excludedUserIds) {
+        LocalDateTime windowStart = LocalDateTime.now().minusDays(RANKING_WINDOW_DAYS);
+        NearbyEvidence evidence = loadNearbyEvidence(List.of(venueId), windowStart);
+        Map<Long, LocalDateTime> counted = new HashMap<>(
+                unionLastSeen(evidence.vicinityByVenue().get(venueId), evidence.lastSeen()));
+        counted.keySet().removeAll(toIdSet(excludedUserIds));
+        Map<Long, LocalDateTime> result = new HashMap<>();
+        counted.forEach((user, at) -> {
+            if (inWindow(at, windowStart)) {
+                result.put(user, at);
+            }
+        });
+        return result;
+    }
+
+    /**
      * 全部「附近有过足迹」的门店（admin 按足迹排序 / 只看有足迹，52 号 §6.1）：稀疏结果，
      * <b>缺席 = 附近从无足迹</b>（{@code lastVisitAt} 非空才返回，窗外的老足迹也算「有过」）。
      * <p>
@@ -744,25 +783,25 @@ public class VenuePresenceService {
         Set<Long> stores = evidence.vicinityByVenue().get(venueId);
         Set<Long> excluded = toIdSet(excludedUserIds);
         Map<Long, LocalDateTime> all = unionLastSeen(stores, evidence.lastSeen());
-        // 窗口内用户：与 countSince 同一条判据 ⇒ 与卡片数字逐人相等
-        Map<Long, LocalDateTime> inWindow = new HashMap<>();
+        // 窗口内用户：与 countSince 同一条判据（均为 inWindow）⇒ 与卡片数字逐人相等
+        Map<Long, LocalDateTime> inWindowUsers = new HashMap<>();
         all.forEach((user, at) -> {
-            if (!excluded.contains(user) && !at.isBefore(windowStart)) {
-                inWindow.put(user, at);
+            if (!excluded.contains(user) && inWindow(at, windowStart)) {
+                inWindowUsers.put(user, at);
             }
         });
-        long excludedUsers = countSince(all, windowStart) - inWindow.size();
+        long excludedUsers = countSince(all, windowStart) - inWindowUsers.size();
         // 次数列：邻域内 (user, day) 取并集（⛔ 不能各店 count 相加，52 号 §4.2 第 1 条）
         Map<Long, Set<LocalDate>> daysByUser = new HashMap<>();
         for (Long store : stores) {
             evidence.visitDays().getOrDefault(store, Map.of()).forEach((user, days) -> {
-                if (inWindow.containsKey(user)) {
+                if (inWindowUsers.containsKey(user)) {
                     daysByUser.computeIfAbsent(user, k -> new HashSet<>()).addAll(days);
                 }
             });
         }
         long totalVisitTimes = daysByUser.values().stream().mapToLong(Set::size).sum();
-        List<Map.Entry<Long, LocalDateTime>> ordered = new ArrayList<>(inWindow.entrySet());
+        List<Map.Entry<Long, LocalDateTime>> ordered = new ArrayList<>(inWindowUsers.entrySet());
         ordered.sort((a, b) -> {
             int byTime = b.getValue().compareTo(a.getValue());
             return byTime != 0 ? byTime : Long.compare(a.getKey(), b.getKey());
@@ -1375,9 +1414,20 @@ public class VenuePresenceService {
         return userDays.size();
     }
 
-    /** 时间窗去重：用户在窗口内到访过 ⟺ 其最近命中时刻 ≥ 窗口起点 */
+    /**
+     * 窗口判据（<b>单点</b>，2026-10-13 提取）：用户在窗口内到访过 ⟺ 其最近命中时刻 ≥ 窗口起点。
+     * <p>
+     * 三个消费方共用（{@link #countSince} 的计数、{@link #nearbyContributors} 的返回集、
+     * 到访名单的行判定）：⛔ 禁任何一处自行写 {@code isBefore/!isBefore} ——「卡片 N 人」与
+     * 「可被感谢的人」必须由同一个谓词判定，否则窗口边界上会出现 ±1 的静默漂移。
+     */
+    private static boolean inWindow(LocalDateTime at, LocalDateTime since) {
+        return at != null && !at.isBefore(since);
+    }
+
+    /** 时间窗去重：用户在窗口内到访过 ⟺ 其最近命中时刻 ≥ 窗口起点（判据 = {@link #inWindow}） */
     private static long countSince(Map<Long, LocalDateTime> users, LocalDateTime since) {
-        return users.values().stream().filter(at -> !at.isBefore(since)).count();
+        return users.values().stream().filter(at -> inWindow(at, since)).count();
     }
 
     private static VenueStatus parseStatus(String raw) {

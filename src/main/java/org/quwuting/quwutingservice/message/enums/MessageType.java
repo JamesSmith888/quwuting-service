@@ -83,5 +83,16 @@ public enum MessageType {
      * 软关联 TIMER_SHARE（relatedId = 会话 id，仅作合并键）：<b>不深链</b>——计时页是 tab 页，
      * 消息中心 navigateTo 到不了，且这条消息是告知而非待办。
      */
-    TIMER_SHARE_LIKED
+    TIMER_SHARE_LIKED,
+    /**
+     * 到店足迹感谢（2026-10-13 新增，V50；docs/agents/52-venue-presence.md「到访感谢」节）：
+     * 有舞友在门店页面对「分享到店足迹的贡献者们」表达感谢时，发送给<b>被感谢的贡献者</b>
+     * （门店级「一次点击 = 感谢该店全部尚未感谢过的贡献者」，每位被感谢者同事务各收一次）。
+     * <b>通知义务与幂等</b>：仅该 (感谢者, 贡献者) 对首次感谢时触发一次（INSERT affected=1），
+     * 无取消、永不重发；内容<b>不点名感谢者</b>（匿名，同 CROWD_REPORT_LIKED 契约）。
+     * <b>合并</b>：同一收件人在同一门店的未读感谢合并成一条「有 N 位舞友感谢了你」
+     * （{@code MessageService#createOrMergeUnread} 无时间分界形态——「这家店的感谢」在读到
+     * 之前天然是一件事），已读后再被感谢 ⇒ 新建。软关联 VENUE（深链门店详情页）。
+     */
+    VISIT_THANKED
 }

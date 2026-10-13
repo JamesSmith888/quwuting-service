@@ -280,6 +280,37 @@ class VenueNearbyVisitsTest {
 
         assertTrue(visited.isEmpty(), "证据只来自被排除账号 ⇒ 不算「有足迹」，与卡片「无足迹不渲染」一致");
     }
+
+    // ── 到访感谢：可被感谢集合与卡片数字同源（2026-10-13，展示口径的第三消费面） ──────
+
+    @Test
+    void contributorsUseSameEvidenceWindowAndExclusionSetAsCardNumbers() {
+        stubPairs();
+        // u1 在窗口内、u2 在 40 天前（窗外）
+        stubFacts(row(YIHU, 1L, now.minusDays(1)), row(YIHU, 2L, now.minusDays(40)));
+        stubDays(day(YIHU, 1L, now.toLocalDate().minusDays(1)));
+
+        Map<Long, LocalDateTime> contributors = service.nearbyContributors(YIHU, List.of(-1L));
+        Map<Long, NearbyFootprint> f = service.nearbyFootprints(List.of(YIHU), List.of(-1L));
+
+        // 同源不变量：可被感谢集合 = 卡片人数背后的「那些人」（同一份证据、同一窗口）
+        assertEquals(Set.of(1L), contributors.keySet(), "窗口外（40 天前）的命中不在集合内");
+        assertEquals(1L, f.get(YIHU).visitUsers30d(),
+                "卡片 N 人 = 贡献者集合大小（去掉自己后的差值由感谢 Service 承担）");
+    }
+
+    @Test
+    void contributorsShareTheExclusionSetWithDisplay() {
+        stubPairs();
+        stubFacts(row(YIHU, 1L, now.minusDays(1)), row(YIHU, 2L, now.minusDays(1)));
+        stubDays(day(YIHU, 1L, now.toLocalDate().minusDays(1)), day(YIHU, 2L, now.toLocalDate().minusDays(1)));
+
+        Map<Long, LocalDateTime> contributors = service.nearbyContributors(YIHU, List.of(1L));
+
+        assertEquals(Set.of(2L), contributors.keySet(),
+                "排除账号同样从「可感谢集合」剔除——一个集合、两种消费面（同 countSince 的双消费先例）");
+    }
+
     // ── fixtures ────────────────────────────────────────────────────────────
 
     private void stubPairs(VenueRepository.CoLocatedVenueRow... pairs) {

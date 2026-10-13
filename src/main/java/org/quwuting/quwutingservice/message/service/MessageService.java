@@ -92,6 +92,36 @@ public class MessageService {
         messageRepository.save(existing);
     }
 
+    /**
+     * 创建或合并未读站内信——<b>无时间分界</b>变体（2026-10-13，到访感谢引入）。
+     * <p>
+     * 与带 {@code mergeSince} 形态的唯一差别：不设时间下界——同一 (收件人, 类型, 业务关联)
+     * 的未读消息<b>读到为止恒归并为一条</b>。
+     * <p>
+     * <b>判据（两种形态的分工，新增合并场景先按此选）</b>：合并单元是否等于完整语义——
+     * <ul>
+     *   <li>「某店收到的感谢」无论何时发生都是同一件事 ⇒ 无分界（本重载）；</li>
+     *   <li>「某条上报收到的赞」必须按上报分界（前一夜的赞不能并进这一夜）⇒ 带 mergeSince
+     *       （调用方传业务对象的创建时刻，见 {@code CrowdReportLikeService#like}）。</li>
+     * </ul>
+     * 已读之后再触发 ⇒ 新建（同带参形态契约）。
+     */
+    @Transactional
+    public void createOrMergeUnread(Long userId, MessageType type, String title, String content,
+                                    String relatedType, Long relatedId) {
+        Message existing = messageRepository
+                .findFirstByUserIdAndTypeAndRelatedTypeAndRelatedIdAndReadAtIsNullAndDeletedFalseOrderByCreatedAtDesc(
+                        userId, type, relatedType, relatedId)
+                .orElse(null);
+        if (existing == null) {
+            create(userId, type, title, content, relatedType, relatedId);
+            return;
+        }
+        existing.setTitle(TextSanitizer.sanitize(title, TITLE_MAX));
+        existing.setContent(TextSanitizer.sanitize(content, CONTENT_MAX));
+        messageRepository.save(existing);
+    }
+
     /** 我的站内信（按创建时间倒序分页） */
     @Transactional(readOnly = true)
     public Page<MessageResponse> list(Long userId, int page, int size) {

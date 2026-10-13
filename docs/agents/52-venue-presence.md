@@ -3,7 +3,8 @@
 > 后端权威文档。采集端（小程序）= quwuting 仓 `docs/agents/52-venue-presence.md`；
 > admin 展示 = quwuting-admin-web 仓 README「门店列表 / 门店详情」节。
 > 迁移 = `db/migration-mysql/V33__venue_presence_pings.sql`（头注含完整根因）/ `V34__venue_presence_consents.sql`
-> / `V39__venue_visit_metrics_events.sql`（到访**次数**列 = `(人,店,自然日)` 去重，2026-10-06）。
+> / `V39__venue_visit_metrics_events.sql`（到访**次数**列 = `(人,店,自然日)` 去重，2026-10-06）/
+> `V50__venue_visit_thanks.sql`（到访感谢，2026-10-13）。
 > **2026-10-06 admin 到访下钻（名单页 + 用户足迹卡，§6.1）零迁移**——只读既有 ping / venues / users 表。
 >
 > ⚠️ **V39 已于 2026-10-06 15:45 落库**（checksum `-508391010`，与仓内一致）⇒ **禁改一字节**
@@ -11,6 +12,88 @@
 > 同日`countVisitEvents` 的并集键bug（丢了 user 维度，见 §4）也是**改 Java 重刷**，
 > 不是改迁移——物化表现存错值由 30 分钟一轮的调度任务自愈（**需先部署修复后的代码**）。
 > （状态确立流水）/ `V37__presence_consent_source_comment.sql`（2026-10-03 来源列注释）。
+
+### 2026-10-13：到访感谢（V50，用户裁决「按推荐方式实现」）
+
+> 迁移：`V50__venue_visit_thanks.sql`（`db/migration-mysql`；取号前核对最大号 = V49，
+> 部署前再核对无重复）。设计始末 = 工作区 `quwuting-venue-visit-thanks-design-2026-10-06.md`
+> + 形式分析 `quwuting-contributor-feedback-analysis-2026-10-13.md`（后者裁决了「给什么」）。
+> **部署顺序：后端先于小程序**（纯增量：新表 + 新接口；旧客户端不知道它，行为零变化）。
+
+**做什么**：列表卡片「感谢 N 位舞友 · N 次到过这附近的足迹」这行，用户点开浮层后可以
+**感谢「分享到店足迹的这群人」**——一次点击感谢该店全部尚未感谢过的贡献者；被感谢者收到
+一条匿名站内信。这是「人际认可层」在到访域的落点（与 27 号行级点赞同族）。
+
+**根因（为什么必须有，而不是"再补一个点赞"）**——两条：
+
+1. **文案对用户说出口了，能力缺席**：卡片写「感谢 N 位舞友」，产品里却没有任何让用户
+   表达感谢的动作、贡献者（允许采集的舞友）也拿不到任何回音——「承诺与能力断裂」
+   （09 号同款判据；发现于 2026-10-13 的形式分析，本表是还的债）。
+2. **建模缺口**：到访在数据模型里是**聚合量、不是事件**（`(user, venue, 15min桶)` 原始痕迹，
+   没有「某一次到访」这个可引用实体）⇒ 不先把「(门店, 到访用户)」这一对**实体化**成
+   可被感谢、可去重的对象，感谢就没有挂载点。`qwt_venue_visit_thanks` 三元组就是那个实体化。
+
+**数据模型（V50）**：一行 = 「(感谢者, 贡献者, 门店) 三元组」；全量唯一键
+`(venue_id, thank_user_id, target_user_id)` + **无取消动作** ⇒ 同一对永不发第二次；
+索引 `(target_user_id, venue_id)` 服务站内信合并正文的「几位感谢者」计数。
+⛔ 刻意不建 `thanks_count` 冗余列（感谢不进公式）与 `notified` 标志列（通知义务由
+「首次插入 affected==1」派生——同行级点赞模式）。
+
+**机制（全部照抄已验证范式）**：
+
+- **对象 = 人群不是个人**：任何接口都不返回「谁到过这家店」的名单（「永不公开」裁决）；
+  用户不挑选、感谢对象自动取全（「这 N 位」的 N 与卡片数字**同源**——见下）；
+- **被感谢集合的单一取数口 = `VenuePresenceService#nearbyContributors`**（本表新增）：
+  与 `nearbyFootprints` 同一份证据（`loadNearbyEvidence`）、同一个用户并集
+  （`unionLastSeen`）、同一条窗口判据（`inWindow`，2026-10-13 提取为单点，`countSince` /
+  `nearbyVisitorsFor` / 本方法三处共用）、同一个排除账号集合（经
+  `VenueVisitThanksService#displayExclusions` 取，与 `VenueVisitBadgeService` 同源）。
+  ⛔ 禁任何「另写一套取数」——展示口径一源是本域已立的纪律，感谢是它的第三个消费面；
+  测试钉死「可被感谢集合 + 自己（若在集内）== 卡片人数」的不变量；
+- **不能感谢自己**：贡献者集合先去掉感谢者本人（与点赞「自赞放开」的分界：赞的对象是
+  内容、自赞=自我确认无害；感谢的对象是他人、自赞无语义）；
+- **幂等 + 通知**：逐对 `INSERT ... ON DUPLICATE KEY UPDATE`，仅 affected==1（首次）时
+  同事务发 `MessageType.VISIT_THANKED` 站内信；批量上限 `MAX_TARGETS_PER_CLICK`=50
+  （按最近到访优先截断，仅作保险丝——现网单店贡献者个位数）；
+- **频控**：每用户每店 60s（Caffeine，`userId:venueId` 键、`asMap().putIfAbsent` 原子语义；
+  超限 1022）——幂等已保证不重复通知，此限只防连点请求风暴；
+- **站内信合并（无时间分界）**：`MessageService#createOrMergeUnread` 新增重载——同一收件人
+  在同一门店的未读感谢合并成一条「有 N 位舞友感谢了你」，**读到为止都算一件事**
+  （与点赞按上报行分界刻意不同，判据见该重载注释：合并单元是否等于完整语义）。
+  正文 N = 该贡献者在该店累计收到的**不同感谢者数**（`COUNT(DISTINCT thank_user_id)`）；
+  不点名感谢者；软关联 VENUE 深链门店详情页。
+
+**接口（§6.2 详表）**：`GET /venues/{venueId}/visit-thanks`（状态：可感谢人数 /
+我尚未感谢的人数）与 `POST` 同路径（感谢；返回本次感谢数 + 剩余 + **服务端权威反馈文案**
+`feedbackText`——0/N 两种分态，前端禁自拼）。两者都需登录；请求体为空、响应只有计数
+（接口面即隐私面）。
+
+**告知义务（与本功能同批，⛔ 缺一不可）**：感谢让「用户可感知事实」新增一条（会收到
+站内信）⇒ 用户视角的处理目的发生变化，须在同意链上补告知：
+
+1. **端侧三处同源同改**（quwuting 仓；唯一事实源 = `services/presence.THANKS_NOTICE_LINE`
+   「您可能会收到其他舞友的感谢。」）：到店首问 / 手动开启提醒 / 足迹详情页
+   （presence-detail「这是什么」节）。门禁 `check:presence` **P12** 逐字断言三处包含同句
+   （已做变异验证：删任一处即红）；
+2. **运营公告**（对外的一次性补告知，覆盖存量已允许用户）：随功能上线发一条新功能公告
+   （quwuting-announcement-publish 流程，运营动作）——⛔ 不做重弹首问（感谢不新增个人信息
+   处理维度：匿名、感谢者看不到任何贡献者信息；重问的打扰成本大于收益）；
+3. 微信后台《用户隐私保护指引》当前的用途表述为「门店统计」——感谢不改变数据处理本身
+   （仍是统计与去标识聚合展示），**不涉及新增收集项**，无需改登记（与 V46 坐标收集的性质
+   不同，别顺手多改）。
+
+**🚫 红线**（照抄行级点赞，违反即死）：感谢数**永不进任何算法**（热度公式 / 到访项 /
+可信度 / 列表角标）；**不产生积分**（到店足迹首问承诺「这项功能不产生任何收益」，
+且敏感信息同意不得以利益诱导——给足迹贡献者发分是三重违规）；不引入任何新的身份暴露
+（不返名单、不点名、不显示个人足迹）。
+
+**验证（2026-10-13）**：`VenueVisitThanksServiceTest` 7 条（排除自己 / 仅首次通知 /
+幂等零新增 / pending 差值 / 上限截断 / 域错误码 / 频控）+ `VenueNearbyVisitsTest` 增 2 条
+（贡献者集合与卡片同源 / 排除集合双消费面）= 到访域 **29 条全绿**（`test-compile` SUCCESS）。
+端侧见 quwuting 仓 52 号「到访感谢」节（含 check:presence P11/P12）。
+**未做**：连库契约测试（本表无 JPQL DATE 类易错点，风险低；部署窗口按需补）、
+admin 侧感谢面板（YAGNI——感谢不进任何统计口径，运营没有"管它"的动作面；
+真需要时读 `qwt_venue_visit_thanks` 即可）。
 
 ### 2026-10-13：展示口径一源 + 收款码配置统计（用户四条需求；其中 3、4 的采集部分未实现，见下）
 
@@ -680,6 +763,8 @@ DEFAULT）。教训：**涉及个人信息的默认值，先过合规判据，�
 |---|---|---|
 | `POST /venues/{venueId}/presence` | requireAuth | body `{distanceMeters, accuracyMeters?}`；桶幂等；判定序 = 运营开关（关 ⇒ `accepted=false(DISABLED)`）→ 频控 → **同意门禁**（无显式开启 ⇒ `accepted=false(CONSENT_REQUIRED)`，2026-10-03）→ 门店与参数校验；错误码 **1022**（门店不存在 / 不参与采集 / 参数越界 / 频控） |
 | `POST /venues/presence-consent` | requireAuth | 状态确立上报：body `{enabled, source?}`，source = `USER`（缺省）/ `PROMPT`；每次插一行流水；DEFAULT / 未知来源 / 缺 enabled ⇒ 1022。端上失败留待下个周期补发 |
+| `GET /venues/{venueId}/visit-thanks` | requireAuth | **到访感谢状态**（2026-10-13 V50，C 侧浮层按钮态数据源）：返回 `{contributors, pendingThanks}`——可被感谢人数（附近 30 天并集去掉自己，与卡片数字同源）与其中我尚未感谢过的人数；**请求无 body、响应只有计数**（不返回任何贡献者身份——「永不公开」裁决在接口形态上的落实） |
+| `POST /venues/{venueId}/visit-thanks` | requireAuth | **感谢一次**（2026-10-13 V50）：感谢该店全部尚未感谢过的贡献者（逐对幂等，同一对永不重复、不重发通知；仅首次 affected==1 时同事务发 `VISIT_THANKED` 站内信）。返回 `{thankedPeople, pendingThanks, contributors, feedbackText}`（feedbackText = 服务端权威反馈文案）。频控每用户每店 60s（超限 **1022**）；批量上限 50（最近到访优先截断） |
 | `GET /admin/venues` | requireAdmin | 管理端门店列表（无业务裁剪全量分页，`AdminVenueQueryService`）；`sort` = `LATEST`（缺省，SQL 分页）/ `VISITS_30D` / `LAST_VISIT`、`visitedOnly`（近 30 天附近有足迹），见 §6.2；行内带**足迹摘要**（7d / 30d 人数 / 30d 次数 / 最近足迹 / 小程序卡片原文 / 邻域门店数），经 `VenueVisitBadgeService` **与小程序卡片同一次计算**（2026-10-13）；status / sort 经 `WireEnums.parse` 宽容解析（非法 = 不筛 / 默认序） |
 | `GET /admin/venues/{id}/presence` | requireAdmin | 单店**足迹统计**（2026-10-13 重写为展示口径一源）：7d / 30d 人数 + 30d 次数 + 最近足迹 + `excludedUsers30d` + 小程序卡片原文 `footprintText` + 邻域内其他门店 `vicinityVenues`；口径参数（`nearbyRadiusM`=300 / `vicinityRadiusM`=150 / `maxAccuracyM`）随响应回显，admin 展示必须与数值同屏；DTO 全字段 `@JsonInclude(ALWAYS)`——non_null 全局策略会删 null，35 号教训 |
 | `GET /admin/venues/presence-consent-stats` | requireAdmin | 授权统计：已允许 / 已关闭 / 待补问 + 首问回答分布 + 近 30 天设置变更次数（2026-10-03 字段 `defaultUsers` → `legacyDefaultUsers` 且语义改变，admin-web 须同版发布） |
@@ -866,3 +951,24 @@ admin-web：`vue-tsc -b` 全绿 + `vite build` 产物生成（`UserDetailView` 2
 - **未验证（须联调）**：V49 迁移在真实 MySQL 上的执行（`ON DUPLICATE KEY UPDATE` 赋值顺序、原生窗口函数 `findLatestByUserIds`、
   `LIMIT :limit` 绑定）——单测只钉了 SQL 文本约束，不跑库；`-Drun.db.tests=true` 连库契约未跑；admin-web 页面 UI 未肉眼验证。
 
+
+2026-10-13（到访感谢 V50）验证：
+- **单测**：`VenueVisitThanksServiceTest` 9 条（幂等 / 排除自己 / 已感谢对不重复计 / 频控 1022 /
+  门店不存在 1022 / 反馈文案分态 / status 同源于卡片）+ 追加 `VenueNearbyVisitsTest` 2 条
+  （「贡献者集合 + 我」≡ 卡片人数、`nearbyContributors` 与 `nearbyVisitSummaries` 同一窗口判据）。
+- **真库契约（默认禁用）**：`VenueVisitThanksSqlTest`（{@code @Tag("db")} +
+  {@code @EnabledIfSystemProperty(run.db.tests=true)}），跑法
+  {@code ./mvnw test -Dtest=VenueVisitThanksSqlTest -Drun.db.tests=true}；
+  ⚠️ <b>前置 = 目标库已执行 V50</b>（未建表 ⇒ 报「表不存在」属预期）。
+  它钉死幂等三态：**首次 affected == 1**（唯一会产生站内信的返回值）、重复 ≠ 1、
+  `countThankers` = 人数而非行数。用合成 ID + {@code @Transactional} 回滚，不污染统计。
+  ⇒ {@code VenueVisitThankRepository#thank} 这条 native SQL 上线前<b>必须跑过</b>这条才算出验证
+  （本域「改 native 必真库执行」红线）。
+- **未验证（须联调）**：写路径端到端（浮层三态 / 提交后的 toast 与站内信 / 60s 频控第 2 次点击）与真机 UI。
+- **已执行部分（2026-10-13 23:14~23:26，本机 localhost:8080 实例 + 本地签发 token）**：
+  - V50 DDL 在真实 MySQL 执行成功（`SHOW CREATE TABLE` 核对：命名唯一键
+    `qwt_uk_vvt_venue_thank_target` 与 `qwt_idx_vvt_target` 均在、表注释一致、0 行）。
+  - 读路径 `{@code GET /venues/{venueId}/visit-thanks}` 三条用例：
+    店 120 / uid(自身是贡献者) ⇒ `contributors=5`；同店 / 非贡献者 ⇒ `6`；不存在门店 ⇒ `1022 门店不存在`。
+    **并集口径已实测**：120(6 人) 与 121(3 人) 相距 ≈95m ⇒ 两家互见并集 6 人 `{2,89,210,346,567,1059}`，
+    与读侧返回值逐人相符 ⇒ 「同源 + 排除自己」两条不变量在真实数据上成立。

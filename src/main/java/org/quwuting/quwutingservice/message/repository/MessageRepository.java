@@ -39,6 +39,18 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
     Optional<Message> findFirstByUserIdAndTypeAndRelatedTypeAndRelatedIdAndReadAtIsNullAndDeletedFalseAndCreatedAtGreaterThanEqualOrderByCreatedAtDesc(
             Long userId, MessageType type, String relatedType, Long relatedId, LocalDateTime since);
 
+    /**
+     * 同上的<b>无时间分界</b>变体（2026-10-13，到访感谢引入）：同收件人、同类型、同业务关联、
+     * 仍未读的最新一条——不设 {@code since}，读到为止都归并为一条。
+     * <p>
+     * <b>什么场景适用「无分界」</b>：合并单元本身就是完整语义的场景——「某人在某店收到的
+     * 感谢」无论隔多久都是同一件事（该店的感谢），拆成多条只稀释信息；而带 since 的形态
+     * 用于「同一业务对象被反复触发、但跨对象合并会串味」的场景（如热度点赞必须按
+     * 「每条上报」分界——前一夜的赞不能并进这一夜）。见 {@code MessageService#createOrMergeUnread} 重载。
+     */
+    Optional<Message> findFirstByUserIdAndTypeAndRelatedTypeAndRelatedIdAndReadAtIsNullAndDeletedFalseOrderByCreatedAtDesc(
+            Long userId, MessageType type, String relatedType, Long relatedId);
+
     /** 单条标记已读（只更新本人未读消息；越权/已读时影响行数为 0，幂等） */
     @Modifying(clearAutomatically = true)
     @Query("UPDATE Message m SET m.readAt = :readAt WHERE m.id = :id AND m.userId = :userId AND m.readAt IS NULL")
