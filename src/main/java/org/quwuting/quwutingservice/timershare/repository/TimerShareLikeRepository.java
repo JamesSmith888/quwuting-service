@@ -1,12 +1,14 @@
 package org.quwuting.quwutingservice.timershare.repository;
 
 import org.quwuting.quwutingservice.timershare.entity.TimerShareLike;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -52,4 +54,16 @@ public interface TimerShareLikeRepository extends JpaRepository<TimerShareLike, 
 
     /** 某人在这张会话里收到的赞数（被赞通知正文里的累计数） */
     long countByShareIdAndLikedUserIdAndDeletedFalse(Long shareId, Long likedUserId);
+
+    /**
+     * 点赞记录（2026-10-13）：这些会话里<b>与记录主人有关</b>的有效点赞行（他赞的 / 赞他的），按最近一次点赞新→旧。
+     * 主人 = 调用者本人，或调用者在某张会话里点开的那位同行者（授权在服务层，见 {@code TimerShareLikeHistoryService}）。
+     * 谓词先是 {@code share_id IN (…)}——被唯一索引 {@code qwt_uk_tsl_share_pair} 的 share_id 前缀覆盖，
+     * 行再按主人过滤；<b>没有</b>以 liked_user_id 打头的索引（V48 的结构性红线：不按被赞者扫表、没有全站聚合）。
+     * 点赞行只可能产生在主人参与的会话里，所以「主人参与的会话 id」就是完整的取数范围。调用方用 {@code PageRequest.of(0, n)} 限量。
+     */
+    @Query("SELECT l FROM TimerShareLike l WHERE l.shareId IN :shareIds AND l.deleted = false "
+            + "AND (l.likerId = :userId OR l.likedUserId = :userId) ORDER BY l.updatedAt DESC, l.id DESC")
+    List<TimerShareLike> findInvolving(@Param("shareIds") Collection<Long> shareIds, @Param("userId") Long userId,
+                                       Pageable pageable);
 }

@@ -108,7 +108,7 @@ public final class TimerSharePolicy {
      * <p>
      * 「最近一次活动」取四者最大值：会话最近一次创建 / 刷新（{@code snapshot_at_ms}）、该加入者加入时刻、
      * 主持方结算时刻、该加入者结算时刻——所以「还在计时」「刚结算」都落在窗口里，不需要另判会话状态。
-     * 窗口只回答「这份致意还来得及吗」，不是安全措施：赞无经济价值、不进任何算法、不累计到人。
+     * 窗口只回答「这份致意还来得及吗」，不是安全措施：赞无经济价值、不进任何算法、不积分不排名。
      */
     public static final long LIKE_WINDOW_MS = 24 * 60 * 60 * 1000L;
 
@@ -119,6 +119,28 @@ public final class TimerSharePolicy {
     /** 点赞状态读：详情卡每打开一次读一张码，上限留足余量（切换条来回点不重读，同一次打开内缓存） */
     public static final int LIKE_READ_RATE_LIMIT = 60;
     public static final long LIKE_READ_RATE_WINDOW_MS = 60 * 1000L;
+
+    // ── 点赞记录（2026-10-13；文档 = 55 号 §八）────────────────────────────────
+
+    /**
+     * 点赞记录一次最多回溯的会话数（主持方一侧、加入者一侧各取最近这么多张）。记录读的是「调用者作为成员参与过的
+     * 会话」里的点赞行——走 {@code qwt_idx_ts_host_created} / {@code qwt_idx_tsj_user_created} 两条既有索引，再以
+     * 唯一索引的 share_id 前缀取行，<b>不需要也没有</b>以 liked_user_id 打头的索引（V48 的结构性红线原样保留）。
+     */
+    public static final int LIKE_HISTORY_MAX_SHARES = 200;
+
+    /** 一次最多取多少条有效点赞行（新→旧）。撞到即 {@code truncated} */
+    public static final int LIKE_HISTORY_MAX_ROWS = 500;
+
+    /** 响应里最多出多少个分组（按最近点赞时间倒序）；总人数仍在 summary.people */
+    public static final int LIKE_HISTORY_MAX_GROUPS = 50;
+
+    /** 每个分组里带多少条最近的事件（总数以分组的 received / given 为准） */
+    public static final int LIKE_HISTORY_EVENTS_PER_GROUP = 20;
+
+    /** 点赞记录读速率：用户打开记录页的频次远低于详情卡，独立计额，不挤占详情卡的 {@link #LIKE_READ_RATE_LIMIT} */
+    public static final int LIKE_HISTORY_READ_RATE_LIMIT = 30;
+    public static final long LIKE_HISTORY_READ_RATE_WINDOW_MS = 60 * 1000L;
 
     // ── 二维码图缓存 ──────────────────────────────────────────────────────────
 

@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.quwuting.quwutingservice.timershare.dto.request.CreateTimerShareRequest;
 import org.quwuting.quwutingservice.timershare.dto.request.SetTimerShareLikeRequest;
 import org.quwuting.quwutingservice.timershare.dto.request.SettleTimerShareRequest;
+import org.quwuting.quwutingservice.timershare.dto.response.TimerShareLikeHistoryResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareLikeSetResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareLikesResponse;
 import org.quwuting.quwutingservice.timershare.dto.response.TimerShareJoinResponse;
@@ -197,5 +198,29 @@ class TimerShareWireFormatTest {
         assertEquals("WINDOW_CLOSED", set.get("outcome").asString());
         assertTrue(set.has("liked") && !set.get("liked").asBoolean());
         assertFalse(set.has("userId"));
+    }
+
+    @Test
+    void likeHistoryCarriesNoUserIdentifiersAndWritesNullProfileFieldsExplicitly() {
+        TimerShareLikeHistoryResponse res = new TimerShareLikeHistoryResponse(true, "PEER",
+                new TimerShareLikeHistoryResponse.Summary(2, 1, 1),
+                List.of(new TimerShareLikeHistoryResponse.Group(true, null, null, 2, 1, 1780000000123L,
+                        List.of(new TimerShareLikeHistoryResponse.Event("RECEIVED", 1780000000123L)))),
+                false, 1780000000999L);
+
+        JsonNode json = APP_MAPPER.readTree(APP_MAPPER.writeValueAsString(res));
+        JsonNode group = json.get("groups").get(0);
+
+        // 昵称 / 头像未设置 = 显式 null（客户端兜底占位），不是缺字段
+        assertTrue(group.has("nickname") && group.get("nickname").isNull());
+        assertTrue(group.has("avatarUrl") && group.get("avatarUrl").isNull());
+        assertTrue(group.has("me") && group.get("me").asBoolean());
+        assertEquals("PEER", json.get("subject").asString());
+        assertEquals("RECEIVED", group.get("events").get(0).get("direction").asString());
+        assertTrue(json.has("truncated") && !json.get("truncated").asBoolean());
+        String all = json.toString();
+        for (String banned : List.of("userId", "likerId", "likedUserId", "peerUserId")) {
+            assertFalse(all.contains(banned), "点赞记录响应不得含用户标识：" + banned);
+        }
     }
 }

@@ -44,13 +44,17 @@ public class SpendController {
 
     /**
      * 月度总览（统计页数据源，一次往返返回全部）
-     * GET /spend/overview?month=yyyy-MM（缺省当前月）
+     * GET /spend/overview?month=yyyy-MM&direction=EXPENSE|INCOME
+     * <p>
+     * month 缺省当前月；direction 缺省 EXPENSE（存量语义，老客户端不带该参数照常
+     * 工作），取值解析与非法处置见 {@code SpendService#overview}。
      */
     @GetMapping("/overview")
     public ApiResponse<SpendOverviewResponse> overview(
-            @RequestParam(required = false) String month) {
+            @RequestParam(required = false) String month,
+            @RequestParam(required = false) String direction) {
         Long userId = UserContext.requireAuth();
-        return ApiResponse.ok(spendService.overview(userId, month));
+        return ApiResponse.ok(spendService.overview(userId, month, direction));
     }
 
     /**

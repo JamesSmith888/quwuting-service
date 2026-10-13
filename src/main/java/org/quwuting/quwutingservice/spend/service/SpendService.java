@@ -63,6 +63,8 @@ public class SpendService {
 
     private static final int CODE_INVALID_ENTRY = 1030;
     private static final int CODE_INVALID_MONTH = 1031;
+    /** overview 的 direction 参数取值非法（1032-1037 已被门店/公告/活动域占用） */
+    private static final int CODE_INVALID_DIRECTION = 1038;
 
     private final SpendEntryRepository spendEntryRepository;
 
@@ -198,27 +200,34 @@ public class SpendService {
     // ── 总览（统计页一次聚合） ──────────────────────────
 
     /**
-     * 月度总览：summary + 固定 6 类占比（缺类补零）+ 门店 TOP5 + 未关联桶 +
+     * 月度总览：summary + **请求方向**的合法分类占比（缺类补零）+ 门店 TOP5 + 未关联桶 +
      * 近 6 月趋势（无数据月补零）。month 格式 "yyyy-MM"（缺省 = 当前月）。
+     * <p>
+     * 2026-10-13（统计口径身份化）：`directionRaw` 缺省 = EXPENSE（存量语义，老客户端
+     * 不带该参数照常工作）；取值无法识别**显式报错**而非静默落回 EXPENSE——静默会让
+     * 舞伴看到一份"支出口径"的统计（自己的收入是 0），错得无声，同 WireEnums 的
+     * "取值非法不猜默认值"判据。
      */
     @Transactional(readOnly = true)
-    public SpendOverviewResponse overview(Long userId, String month) {
+    public SpendOverviewResponse overview(Long userId, String month, String directionRaw) {
+        SpendDirection direction = parseDirection(directionRaw);
+        String directionName = direction.name();
         YearMonth target = parseMonth(month);
         LocalDateTime monthStart = target.atDay(1).atStartOfDay();
         LocalDateTime monthEnd = target.plusMonths(1).atDay(1).atStartOfDay();
         LocalDateTime trendStart = target.minusMonths(TREND_MONTHS - 1).atDay(1).atStartOfDay();
 
-        var summaryRow = spendEntryRepository.sumByMonth(userId, monthStart, monthEnd);
+        var summaryRow = spendEntryRepository.sumByMonth(userId, monthStart, monthEnd, directionName);
         BigDecimal total = summaryRow.getTotal() == null ? BigDecimal.ZERO : summaryRow.getTotal();
         long sessionCount = summaryRow.getSessionCount();
         BigDecimal avgPerSession = sessionCount > 0
                 ? total.divide(BigDecimal.valueOf(sessionCount), 2, RoundingMode.HALF_UP)
                 : BigDecimal.ZERO;
 
-        // 固定 6 类全量返回（枚举权威，前端零补零逻辑）
-        var sliceRows = spendEntryRepository.sumByCategory(userId, monthStart, monthEnd);
+        // 该方向的合法分类集全量返回（枚举权威，前端零补零逻辑；顺序 = SpendCategory.forDirection）
+        var sliceRows = spendEntryRepository.sumByCategory(userId, monthStart, monthEnd, directionName);
         List<SpendOverviewResponse.CategorySlice> byCategory = new ArrayList<>();
-        for (SpendCategory c : SpendCategory.values()) {
+        for (SpendCategory c : SpendCategory.forDirection(direction)) {
             BigDecimal sliceTotal = BigDecimal.ZERO;
             long sliceCount = 0;
             for (var row : sliceRows) {
@@ -232,15 +241,15 @@ public class SpendService {
         }
 
         List<SpendOverviewResponse.VenueSlice> byVenueTop = new ArrayList<>();
-        for (var row : spendEntryRepository.sumByVenueTop(userId, monthStart, monthEnd, VENUE_TOP_LIMIT)) {
+        for (var row : spendEntryRepository.sumByVenueTop(userId, monthStart, monthEnd, VENUE_TOP_LIMIT, directionName)) {
             byVenueTop.add(new SpendOverviewResponse.VenueSlice(
                     row.getVenueId(), row.getVenueName(), row.getTotal()));
         }
 
-        BigDecimal unlinkedTotal = spendEntryRepository.sumUnlinked(userId, monthStart, monthEnd);
+        BigDecimal unlinkedTotal = spendEntryRepository.sumUnlinked(userId, monthStart, monthEnd, directionName);
 
         List<SpendOverviewResponse.MonthPoint> trendMonths =
-                buildTrend(userId, trendStart, monthEnd, target);
+                buildTrend(userId, trendStart, monthEnd, target, directionName);
 
         return new SpendOverviewResponse(
                 new SpendOverviewResponse.Summary(total, summaryRow.getEntryCount(),
@@ -251,12 +260,28 @@ public class SpendService {
                 trendMonths);
     }
 
+    /**
+     * 统计口径方向解析：缺省（null/空白）= EXPENSE；无法识别 ⇒ 1038（见 overview 注释）。
+     * 宽容的只有"没传"这一种情形——大小写/首尾空白经 WireEnums 归一，其余取值一律拒绝。
+     */
+    private SpendDirection parseDirection(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return SpendDirection.EXPENSE;
+        }
+        SpendDirection parsed = WireEnums.parse(SpendDirection.class, raw);
+        if (parsed == null) {
+            throw new BusinessException(CODE_INVALID_DIRECTION, "direction 取值应为 EXPENSE 或 INCOME");
+        }
+        return parsed;
+    }
+
     /** 趋势补零：SQL 只返回有数据月，服务端按月序列补 0（前端零补零逻辑） */
     private List<SpendOverviewResponse.MonthPoint> buildTrend(Long userId,
                                                               LocalDateTime trendStart,
                                                               LocalDateTime trendEnd,
-                                                              YearMonth target) {
-        var rows = spendEntryRepository.sumByMonthTrend(userId, trendStart, trendEnd);
+                                                              YearMonth target,
+                                                              String direction) {
+        var rows = spendEntryRepository.sumByMonthTrend(userId, trendStart, trendEnd, direction);
         List<SpendOverviewResponse.MonthPoint> points = new ArrayList<>();
         for (int i = TREND_MONTHS - 1; i >= 0; i--) {
             YearMonth m = target.minusMonths(i);

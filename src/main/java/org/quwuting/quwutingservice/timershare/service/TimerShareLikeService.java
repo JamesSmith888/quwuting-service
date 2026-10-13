@@ -35,8 +35,9 @@ import java.util.function.LongSupplier;
  * 计时「给同行者点赞」（2026-10-12，V48；文档 = docs/agents/54-timer-share.md §十五）。
  * <p>
  * 是什么：同一场二维码同步的计时里，主持方与加入者可以对彼此点一个赞——结算时顺手致意，不是评价、
- * 不是礼物。🚫 <b>无任何经济价值且永不进算法</b>：不给积分、不累计到人、不进榜、不进任何主页、不下发对方 userId，
- * 只在这一场里被双方看见（也因此不需要、也不应该有「赞数」这个跨场聚合量）。
+ * 不是礼物。🚫 <b>无任何经济价值且永不进算法</b>：不给积分、不进榜、不进任何主页、不下发对方 userId，
+ * 也没有「赞数」这个跨场聚合量（2026-10-13 起一位用户的点赞记录可被同场对家查看，但那是按人的一份时间线，
+ * 见 {@code TimerShareLikeHistoryService}，不是聚合）。
  *
  * <h3>为什么不放进 {@link TimerShareService}</h3>
  * 那个类是<b>刻意没有 {@code @Transactional} 的编排层</b>——它要在事务外做微信码图外呼与唯一键冲突重试。
@@ -131,6 +132,25 @@ public class TimerShareLikeService {
                     TimerShareLikeRules.withinWindow(pair, nowMs)));
         }
         return new TimerShareLikesResponse(true, items, nowMs);
+    }
+
+    /**
+     * 点赞记录用（2026-10-13）：把请求里的「会话码 + 角色 + 序号」解析成<b>对方的用户 id</b>（仅服务端内部，不下发）。
+     * 与读 / 写共用同一个 {@link #loadContext} 与 {@link TimerShareLikeRules#find}——「谁是这位对方」只有一份推导。
+     * 不判窗口（记录是历史，窗口只管能不能赞）；非成员 / 目标不存在 / 协议值非法 → null（调用方当「解析不出」）。
+     */
+    @Transactional(readOnly = true)
+    public Long resolvePeerUserId(Long userId, String token, String relation, Integer seq) {
+        TimerShareRole role = WireEnums.parse(TimerShareRole.class, relation);
+        if (role == null || (role == TimerShareRole.JOINER && !isPositive(seq))) {
+            return null;
+        }
+        Context ctx = loadContext(userId, token);
+        if (ctx == null) {
+            return null;
+        }
+        Pair target = TimerShareLikeRules.find(ctx.pairs, role, role == TimerShareRole.HOST ? 0 : seq);
+        return target == null ? null : target.otherUserId();
     }
 
     // ── 写 ───────────────────────────────────────────────────────────────────

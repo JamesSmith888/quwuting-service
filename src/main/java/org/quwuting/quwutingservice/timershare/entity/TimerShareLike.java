@@ -15,8 +15,9 @@ import org.quwuting.quwutingservice.base.BaseEntity;
  * 取消 = 软删、再赞 = 原行复活（对齐 {@code qwt_venue_crowd_report_likes} 的 toggle 先例——被赞通知只在
  * 「首次赞」触发一次，由 INSERT 的受影响行数派生，不需要标志列）。
  * <p>
- * 🚫 <b>红线：赞无任何经济价值、永不进算法</b>——不产生积分、不累计到人、不进榜、不进任何主页、不改
- * 任何排序或统计口径；只在这一场里被双方看见。管理端行为目录里它是 EXTENDED 档（轨迹可见、不计活跃）。
+ * 🚫 <b>红线：赞无任何经济价值、永不进算法</b>——不产生积分、不进榜、不进任何主页、不改任何排序或统计口径；
+ * 没有全站聚合量（无计数列、无 liked_user_id 索引）。2026-10-13 起一位用户的点赞记录可被同场对家查看（见
+ * {@code TimerShareLikeHistoryService}，按该用户参与的会话在内存里分组）。管理端行为目录里它是 EXTENDED 档（轨迹可见、不计活跃）。
  * <p>
  * 所有列名显式写 {@code @Column(name = ...)}（同 {@link TimerShare} 的理由：让实体 ↔ 迁移的对应关系一眼可查）。
  * 索引与唯一约束只在 V48 迁移里声明（{@code ddl-auto=validate} 不校验索引，实体上再写一份只会多一处可漂移的副本）。

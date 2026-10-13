@@ -1,5 +1,7 @@
 package org.quwuting.quwutingservice.spend.enums;
 
+import java.util.List;
+
 /**
  * 消费分类（固定 7 类，禁自定义——2026-09-09 用户拍板，docs/agents/44-spend-ledger.md）。
  * <p>
@@ -29,5 +31,27 @@ public enum SpendCategory {
     /** 其他 */
     OTHER,
     /** 客人（收入向：客人付给我的钱；与 PARTNER 互为反向） */
-    GUEST
+    GUEST;
+
+    /**
+     * 支出向合法分类集（顺序即 overview.byCategory 的返回顺序 = 前端图例/横条顺序，
+     * 高频前 3 在前）。
+     */
+    private static final List<SpendCategory> EXPENSE_SET =
+            List.of(PARTNER, TICKET, DRINK, SNACK, TRANSPORT, OTHER);
+
+    /** 收入向合法分类集（与 {@code SPEND_CATEGORIES_BY_DIRECTION.income} 逐项同序）。 */
+    private static final List<SpendCategory> INCOME_SET = List.of(GUEST, OTHER);
+
+    /**
+     * 某方向的**合法分类集**（overview 补零的遍历源；2026-10-13 统计口径身份化时新增）。
+     * <p>
+     * ⚠️ 本表是前端 `miniprogram/types/spend.ts` 的 `SPEND_CATEGORIES_BY_DIRECTION`
+     * 的**契约镜像**——两端的集合与顺序必须逐项一致（overview.byCategory 按本表
+     * 顺序补零返回，前端按同一顺序渲染图例；顺序漂移 = 两端图例顺序打架）。
+     * 改任何一侧必须先改另一侧。
+     */
+    public static List<SpendCategory> forDirection(SpendDirection direction) {
+        return direction == SpendDirection.INCOME ? INCOME_SET : EXPENSE_SET;
+    }
 }

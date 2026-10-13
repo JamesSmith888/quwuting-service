@@ -323,4 +323,25 @@ class TimerShareLikeServiceTest {
             }
         }
     }
+
+    // ── 点赞记录的焦点解析（2026-10-13）──────────────────────────────────────
+
+    @Test
+    void resolvePeerUserIdMapsRoleAndSeqToTheOtherUserWithoutCheckingTheWindow() {
+        // 主持方看第 2 位 = B；加入者看主持方 = HOST。窗口外也解析（记录是历史，窗口只管能不能赞）
+        now[0] = T0 + 10 * DAY;
+        assertEquals(B, service.resolvePeerUserId(HOST, TOKEN, "JOINER", 2));
+        assertEquals(HOST, service.resolvePeerUserId(A, TOKEN, "HOST", 0));
+        assertEquals(HOST, service.resolvePeerUserId(A, TOKEN, "HOST", null), "主持方目标不需要 seq");
+    }
+
+    @Test
+    void resolvePeerUserIdReturnsNullForEveryUnresolvableRequest() {
+        assertEquals(null, service.resolvePeerUserId(STRANGER, TOKEN, "HOST", 0), "非成员");
+        assertEquals(null, service.resolvePeerUserId(HOST, TOKEN, "JOINER", 9), "序号越界");
+        assertEquals(null, service.resolvePeerUserId(HOST, TOKEN, "JOINER", null), "加入者目标必须带 seq");
+        assertEquals(null, service.resolvePeerUserId(HOST, TOKEN, "NOPE", 1), "协议值非法");
+        assertEquals(null, service.resolvePeerUserId(A, TOKEN, "JOINER", 2), "加入者之间不开放");
+        assertEquals(null, service.resolvePeerUserId(HOST, "bad token", "JOINER", 1), "token 非法");
+    }
 }
