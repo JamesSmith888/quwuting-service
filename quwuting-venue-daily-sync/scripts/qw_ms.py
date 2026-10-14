@@ -455,6 +455,35 @@ def main() -> int:
               "    第二更仅在用户主动要求时处理（重跑 + 回滚 + 公告 §3 应急）。")
     print(f"无名单 header（整城未动）: {out['noListHeaders']}")
     print(f"县级回挂: {sorted(reported_county)}")
+    # 🆕 逐城覆盖明细（2026-10-14 从 qw_analyze.py 补齐至双源版——10-12 只落了单源版，
+    #    双源日一直靠 Agent 手算；本次西安 24 家/无锡 5 家的整城判断即靠人工算，属弯路）。
+    # 判据（仅提示，不参与过滤）：某城 在营≥3 且 命中/在营 <40% ⇒ 疑似「源对该城只点零星几家、
+    # 其余历来由另一源点名」（10-03/10-09/10-12/10-13/10-14 反复出现：长沙/沈阳/无锡/西安）。
+    # ⚠️ 2026-10-14 分母口径修正：**分母 = 范围细化后参与推断的在营店（in_scope）**，而非 city 全量。
+    #    实证：孝感 city 全量 5 家在营（含未报到的汉川 2 + 安陆 1）⇒ 1/5 = 20% 假 ⚠️；
+    #    其真正参与集 = 孝南区 2 家 ⇒ 1/2 = 50% 达标。**含县级分母会诱发「整城误剔除」= 漏关**，
+    #    分母必须与范围细化门槛（in_scope）一致。
+    _open_cov = [v for v in VEN if v["status"] == "OPEN" and v["city"] in covered]
+    _open_scope = [v for v in _open_cov if in_scope(v)]
+    _h_cnt = Counter(v["city"] for v in _open_scope if v["venueId"] in mentioned_ids)
+    _o_cnt = Counter(v["city"] for v in _open_scope)
+    print("\n🧭 逐城覆盖明细（范围细化后在营/命中/未点名；⚠️ 疑似覆盖差异 —— 提交前逐城核对边界）：")
+    for c in sorted(_o_cnt, key=lambda c: -(_o_cnt[c] - _h_cnt[c])):
+        n, h = _o_cnt[c], _h_cnt[c]
+        warn = "  ⚠️ 疑似覆盖差异（命中/在营 <40%）" if n >= 3 and h / n < 0.4 else ""
+        print(f"  {c}：在营 {n} / 命中 {h} / 未点名 {n - h}{warn}")
+    # 🔍 量级复核（自洽等式，2026-10-14 补齐至双源版）：未点名总数必须 = 各桶之和
+    #（提交 + 各护栏 + 范围细化），两侧对不上 = 有桶重叠/漏记（单源版 2026-10-01 立规的镜像）。
+    # ⚠️ 此处用 city 全量（含 in_scope 外的县级未报到店——它们落在 scope_drop 桶），与明细口径不同。
+    _h_all = Counter(v["city"] for v in _open_cov if v["venueId"] in mentioned_ids)
+    _not_hit = len(_open_cov) - sum(_h_all.values())
+    _sum = (len(t5) + len(t5_single) + len(t5_manual_hold) + len(t5_suspect_hold)
+            + len(t5_cross_hold) + len(guard_drop) + len(scope_drop))
+    _flag = "✓" if _sum == _not_hit else "⚠️ 对不上（查桶重叠/漏记）"
+    print(f"\n🔍 量级复核：未点名 {_not_hit} = 表⑤ {len(t5)} + 表⑤′ {len(t5_single)}"
+          f" + 人工 {len(t5_manual_hold)} + 疑似 {len(t5_suspect_hold)}"
+          f" + 跨源 {len(t5_cross_hold)} + 守卫 {len(guard_drop)}"
+          f" + 范围细化 {len(scope_drop)} = {_sum} {_flag}")
     print(f"\n表① 反转（M==S 高置信）{len(t1)} 家")
     for r in t1:
         print(f"  #{r['venueId']} {r['name']}（{r['city']}·{r['district']}）{r['status']} ← {' / '.join(r['news'])}")

@@ -368,9 +368,12 @@ def main() -> int:
     # 全局命中率会掩盖单城归零 —— 这是「单城失效/覆盖口径差异」的唯一可靠探针。
     # 判据（仅提示，不参与过滤）：某城 在营≥3 且 命中/在营 <40% ⇒ 疑似「源对该城只点零星几家、
     # 其余历来由另一源点名」（10-03/10-09 长沙/沈阳/杭州同形）⇒ 提交前先人工核，勿硬闯熔断。
-    _o = Counter(v["city"] for v in _open_cov)
-    _h = Counter(v["city"] for v in _open_cov if v["venueId"] in mentioned)
-    print("\n🧭 逐城覆盖明细（在营/命中/未点名；⚠️ 疑似覆盖差异 —— 提交前逐城核对边界）：")
+    # ⚠️ 2026-10-14 分母口径修正（与双源版 qw_ms.py 对齐）：**分母 = 范围细化后参与推断的
+    #    在营店（in_scope）**，而非 city 全量。实证：孝感 city 5 家（含未报到的汉川/安陆）
+    #    ⇒ 1/5 = 20% 假 ⚠️；参与集仅孝南区 2 家 ⇒ 1/2 = 50% 达标。含县级分母 = 诱发「整城误剔除」。
+    _o = Counter(v["city"] for v in _open_cov if in_scope(v))
+    _h = Counter(v["city"] for v in _open_cov if in_scope(v) and v["venueId"] in mentioned)
+    print("\n🧭 逐城覆盖明细（范围细化后在营/命中/未点名；⚠️ 疑似覆盖差异 —— 提交前逐城核对边界）：")
     for c in sorted(_o, key=lambda c: -(_o[c] - _h[c])):
         n, h = _o[c], _h[c]
         warn = "  ⚠️ 疑似覆盖差异（命中/在营 <40%）" if n >= 3 and h / n < 0.4 else ""
