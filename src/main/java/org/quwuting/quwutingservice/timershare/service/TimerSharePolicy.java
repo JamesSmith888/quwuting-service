@@ -80,7 +80,18 @@ public final class TimerSharePolicy {
     public static final int WRITE_RATE_LIMIT = 30;
     public static final long WRITE_RATE_WINDOW_MS = 10 * 60 * 1000L;
 
-    /** 主持方状态轮询：弹层开着每 3 秒一次（20 次/分），上限留 3 倍余量 */
+    /**
+     * 状态读的速率护栏（`status` 与 `peer` <b>共用同一个桶</b>，按用户计）。<b>两个消费方</b>：
+     * <ul>
+     *   <li>「同步给舞伴」弹层：开着时每 3 秒一次 = <b>20 次/分</b>；</li>
+     *   <li>小程序端的同行者对账轮询（前端 59 号 §十八）：节奏按「预算 ÷ 目标数」派生——
+     *       1 张码 2s、5~6 张码 10s，故<b>恒为 30 次/分</b>（前端门禁 X4 逐档校验）。</li>
+     * </ul>
+     * 两者同时在场的最坏情形 50 次/分，对本值留 1.2 倍余量。
+     * <p>
+     * ⚠️ 调整本值前先读前端 59 号 §十八 的成本边界：把额度当成"只留给弹层"会低估一半用量
+     * （这一行注释 2026-10-14 前就只提了弹层，与前端实际用量不符）。
+     */
     public static final int STATUS_RATE_LIMIT = 60;
     public static final long STATUS_RATE_WINDOW_MS = 60 * 1000L;
 
