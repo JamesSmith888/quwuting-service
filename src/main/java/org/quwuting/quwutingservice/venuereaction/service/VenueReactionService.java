@@ -245,16 +245,15 @@ public class VenueReactionService {
 
     /**
      * 详情页完整 Reaction 统计：门店域全部合法 code（legacy + 目录去重，2026-08-24 全放开），
-     * 按声明顺序返回（无数据时计数为 0）。聚合计数走缓存共享；个人参与状态（今日已参与）
-     * 单独实时查询，不与聚合数据混存。
+     * 按声明顺序返回（无数据时计数为 0）。聚合计数走缓存共享；个人参与记忆（今日这一票
+     * {@code reactedByMe} + 今天之前最近一次 {@code lastReactedDate}）单独实时查询，
+     * 不与聚合数据混存。
      */
     @Transactional(readOnly = true)
     public ReactionStatsResponse getStats(Long venueId, Long currentUserId) {
         Map<String, long[]> aggregate = aggregateService.getAggregate(venueId);
-        Set<String> myCodes = currentUserId != null
-                ? new HashSet<>(venueReactionRepository.findTodayCodesByUserAndVenue(
-                        currentUserId, venueId, LocalDate.now()))
-                : Collections.emptySet();
+        Map<String, MyReactionMark> myMarks =
+                loadMyMarks(currentUserId, List.of(venueId), LocalDate.now()).getOrDefault(venueId, Collections.emptyMap());
 
         List<ReactionStat> stats = new ArrayList<>();
         for (String code : ReactionCode.allCodes()) {
@@ -263,10 +262,11 @@ public class VenueReactionService {
             long countToday = counts != null ? counts[1] : 0L;
             long count7d = counts != null ? counts[2] : 0L;
             long count30d = counts != null ? counts[3] : 0L;
+            MyReactionMark mark = myMarks.getOrDefault(code, MyReactionMark.NONE);
             stats.add(new ReactionStat(
                     code, ReactionCode.emojiOf(code), ReactionCode.labelOf(code),
                     countToday, count7d, count30d, countAll,
-                    myCodes.contains(code)));
+                    mark.reactedToday(), mark.lastReactedBeforeToday()));
         }
         return new ReactionStatsResponse(stats);
     }
@@ -276,17 +276,16 @@ public class VenueReactionService {
      * {@code countAll=0}（有史以来无人点过）的不展示。
      * <b>完整展示</b>：返回<b>有史以来</b>所有用户点击过的全部表情，**不做任何截断**
      * （2026-08-09 需求定稿 + 2026-10-06 三职责拆开，见 {@link #buildTopBadgesFromCounts} javadoc）。
-     * 复用聚合缓存的窗口分量，个人状态（reactedByMe）单独实时查询（成本为一次按
-     * userId+venueId+date 的索引查询），仅作徽标标注属性、不参与集合构成。
+     * 复用聚合缓存的窗口分量，个人参与记忆（reactedByMe + lastReactedDate，见
+     * {@link VenueReactionRepository#findMyReactionMarks}）单独实时查询（一次按 userId+venueId 的
+     * 索引范围查询），仅作徽标标注属性、不参与集合构成。
      */
     @Transactional(readOnly = true)
     public List<ReactionBadge> getBadges(Long venueId, Long currentUserId) {
         Map<String, long[]> aggregate = aggregateService.getAggregate(venueId);
-        Set<String> myCodes = currentUserId != null
-                ? new HashSet<>(venueReactionRepository.findTodayCodesByUserAndVenue(
-                        currentUserId, venueId, LocalDate.now()))
-                : Collections.emptySet();
-        return buildTopBadges(aggregate, myCodes);
+        Map<String, MyReactionMark> myMarks =
+                loadMyMarks(currentUserId, List.of(venueId), LocalDate.now()).getOrDefault(venueId, Collections.emptyMap());
+        return buildTopBadges(aggregate, myMarks);
     }
 
     /**
@@ -327,27 +326,67 @@ public class VenueReactionService {
             count30dByVenue.computeIfAbsent(venueId, k -> new HashMap<>()).put(code, count30d);
         }
 
-        Map<Long, Set<String>> myCodesByVenue = new HashMap<>();
-        if (currentUserId != null) {
-            for (Object[] row : venueReactionRepository.findTodayCodesByUserAndVenueIds(currentUserId, venueIds, today)) {
-                Long venueId = (Long) row[0];
-                String code = (String) row[1];
-                myCodesByVenue.computeIfAbsent(venueId, k -> new HashSet<>()).add(code);
-            }
-        }
+        Map<Long, Map<String, MyReactionMark>> myMarksByVenue = loadMyMarks(currentUserId, venueIds, today);
 
         Map<Long, List<ReactionBadge>> result = new HashMap<>();
         for (Long venueId : venueIds) {
             Map<String, Long> countAlls = countAllByVenue.getOrDefault(venueId, Collections.emptyMap());
             Map<String, Long> count7ds = count7dByVenue.getOrDefault(venueId, Collections.emptyMap());
             Map<String, Long> count30ds = count30dByVenue.getOrDefault(venueId, Collections.emptyMap());
-            Set<String> myCodes = myCodesByVenue.getOrDefault(venueId, Collections.emptySet());
-            result.put(venueId, buildTopBadgesFromCounts(countAlls, count7ds, count30ds, myCodes));
+            Map<String, MyReactionMark> myMarks = myMarksByVenue.getOrDefault(venueId, Collections.emptyMap());
+            result.put(venueId, buildTopBadgesFromCounts(countAlls, count7ds, count30ds, myMarks));
         }
         return result;
     }
 
-    private List<ReactionBadge> buildTopBadges(Map<String, long[]> aggregate, Set<String> myCodes) {
+    /**
+     * 当前用户对一批场所的<b>个人参与记忆</b>：venueId → code → {@link MyReactionMark}。
+     * 未登录 / 无场所 → 空 Map（不发查询）。
+     * <p>
+     * <b>今天的口径只在这里定义一次</b>：{@code today} 由调用方传入同一个 {@code LocalDate.now()}
+     * （与写路径 {@code toggle} 的 {@code reactionDate} 同源），查询把「今日」与「今天之前」两个事实
+     * 在同一次扫描里切开——读取侧不得再各自推导「今天」。
+     */
+    private Map<Long, Map<String, MyReactionMark>> loadMyMarks(Long userId, List<Long> venueIds, LocalDate today) {
+        if (userId == null || venueIds == null || venueIds.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<Long, Map<String, MyReactionMark>> marks = new HashMap<>();
+        for (Object[] row : venueReactionRepository.findMyReactionMarks(userId, venueIds, today)) {
+            Long venueId = (Long) row[0];
+            String code = (String) row[1];
+            boolean reactedToday = row[2] != null && ((Number) row[2]).intValue() > 0;
+            LocalDate lastBeforeToday = toLocalDate(row[3]);
+            marks.computeIfAbsent(venueId, k -> new HashMap<>())
+                    .put(code, new MyReactionMark(reactedToday, lastBeforeToday));
+        }
+        return marks;
+    }
+
+    /** JPQL 的 {@code MAX(date)} 结果归一为 LocalDate（Hibernate 6 返回 LocalDate；防御驱动层给 java.sql.Date） */
+    private static LocalDate toLocalDate(Object value) {
+        if (value instanceof LocalDate d) {
+            return d;
+        }
+        if (value instanceof java.sql.Date d) {
+            return d.toLocalDate();
+        }
+        return null;
+    }
+
+    /**
+     * 用户对「某场所某表情」的个人参与记忆（读模型，不入库）。两个事实互相独立：
+     * <ul>
+     *   <li>{@code reactedToday}：今日这一票（写入侧语义，驱动 {@code reactedByMe}；次日自动归 false）；</li>
+     *   <li>{@code lastReactedBeforeToday}：今天之前最近一次投的日期（读取侧归属，驱动前端「曾投」；
+     *       不会因过零点而消失，也不会因今天取消而改变）。</li>
+     * </ul>
+     */
+    private record MyReactionMark(boolean reactedToday, LocalDate lastReactedBeforeToday) {
+        static final MyReactionMark NONE = new MyReactionMark(false, null);
+    }
+
+    private List<ReactionBadge> buildTopBadges(Map<String, long[]> aggregate, Map<String, MyReactionMark> myMarks) {
         // aggregate value: long[]{countAll, countToday, count7d, count30d}
         Map<String, Long> countAllByCode = new HashMap<>();
         Map<String, Long> count7dByCode = new HashMap<>();
@@ -358,7 +397,7 @@ public class VenueReactionService {
             count7dByCode.put(entry.getKey(), v[2]);
             count30dByCode.put(entry.getKey(), v[3]);
         }
-        return buildTopBadgesFromCounts(countAllByCode, count7dByCode, count30dByCode, myCodes);
+        return buildTopBadgesFromCounts(countAllByCode, count7dByCode, count30dByCode, myMarks);
     }
 
     /**
@@ -372,7 +411,7 @@ public class VenueReactionService {
      * 表情（不做 Top N 截断）。历史口径演进：① 2026-08-08 "当前用户已参与的 code 不受
      * Top 4 截断"豁免——把交互层状态保持问题错误上升为数据契约变更；② 2026-08-09 上午
      * "纯 Top N"——仍保留 4 条截断，同样违背"全部展示"需求本义。两版均已撤销。
-     * 个人参与状态（myCodes）只作徽标标注属性（reactedByMe），不参与集合构成。
+     * 个人参与记忆（myMarks）只作徽标标注属性（reactedByMe / lastReactedDate），不参与集合构成。
      * <p>
      * <b>2026-10-06 三职责彻底拆开（用户驱动 + 生产数据取证）</b>：{@code ReactionWindow}
      * 历史上同时兼任集合过滤、排序、展示数字三职责，本次全部摘除（该枚举与请求参数
@@ -397,7 +436,7 @@ public class VenueReactionService {
     private List<ReactionBadge> buildTopBadgesFromCounts(Map<String, Long> countAllByCode,
                                                          Map<String, Long> count7dByCode,
                                                          Map<String, Long> count30dByCode,
-                                                         Set<String> myCodes) {
+                                                         Map<String, MyReactionMark> myMarks) {
         // 集合与排序同口径（countAll）：
         // - 集合 = 有史以来有人点过（countAll > 0）
         // - 排序 = 累计降序（大者在左，与徽标展示数字同口径 ⇒ 用户看到的数字必然从大到小）
@@ -418,11 +457,12 @@ public class VenueReactionService {
         List<ReactionBadge> badges = new ArrayList<>();
         for (Map.Entry<String, Long> e : ranked) {
             String code = e.getKey();
+            MyReactionMark mark = myMarks.getOrDefault(code, MyReactionMark.NONE);
             badges.add(new ReactionBadge(code, ReactionCode.emojiOf(code), ReactionCode.labelOf(code),
                     countAllByCode.getOrDefault(code, 0L),
                     count7dByCode.getOrDefault(code, 0L),
                     count30dByCode.getOrDefault(code, 0L),
-                    myCodes.contains(code)));
+                    mark.reactedToday(), mark.lastReactedBeforeToday()));
         }
         return badges;
     }

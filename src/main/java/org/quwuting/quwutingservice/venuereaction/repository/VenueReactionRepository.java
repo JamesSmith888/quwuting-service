@@ -78,16 +78,6 @@ public interface VenueReactionRepository extends JpaRepository<VenueReaction, Lo
                                @Param("date") LocalDate date);
 
     /**
-     * 当前用户在该场所"今日已参与"的 Reaction 代码集合（个人状态，实时查询不缓存）。
-     * 每日一记模型下"已参与"语义 = 今日存在该记录——次日自动恢复可点击状态（新增一行而非恢复旧行）。
-     */
-    @Query("SELECT r.reactionCode FROM VenueReaction r " +
-           "WHERE r.userId = :userId AND r.venueId = :venueId AND r.reactionDate = :date")
-    List<String> findTodayCodesByUserAndVenue(@Param("userId") Long userId,
-                                              @Param("venueId") Long venueId,
-                                              @Param("date") LocalDate date);
-
-    /**
      * 单场所全部 Reaction 的四时间窗口聚合（详情页 /reactions/stats 用，场所级聚合缓存的 loader）。
      * 返回 Object[]{reactionCode, countAll, countToday, count7d, count30d}。
      * <p>
@@ -136,16 +126,38 @@ public interface VenueReactionRepository extends JpaRepository<VenueReaction, Lo
                                               @Param("since30d") LocalDateTime since30d);
 
     /**
-     * 批量场所内当前用户"今日已参与"的 Reaction 代码（列表页个人状态，实时查询不缓存）。
-     * 返回 Object[]{venueId, reactionCode}。仅登录用户调用；未登录场景由 Service 层跳过此查询。
+     * 当前用户在一批场所内的<b>个人参与记忆</b>（个人状态，实时查询不缓存）——
+     * 单场所（详情 stats）与批量（列表页）共用这一条，调用方传 {@code List.of(venueId)} 即可。
+     * 返回 Object[]{venueId, reactionCode, reactedToday, lastReactedBeforeToday}：
+     * <ul>
+     *   <li>{@code reactedToday}（0/1）：今日是否已投——「每日一记」写入侧语义，驱动 {@code reactedByMe}
+     *       （次日自动恢复可点击状态：新增一行而非恢复旧行）；</li>
+     *   <li>{@code lastReactedBeforeToday}（LocalDate，可空）：<b>今天之前</b>最近一次投该表情的日期，
+     *       驱动前端「曾投」标记。</li>
+     * </ul>
+     * <b>为什么一条查询答两件事</b>（2026-10-15 个人参与记忆）：「我投没投」原先被定义成
+     * {@code reaction_date = 今天}——<b>把写入侧的「每日限一票」当成了读取侧的「我的归属」</b>，
+     * 过零点后用户的高亮与「从没投过」一模一样（数字里有我、却认不出哪份是我）。两个事实同源同扫
+     * （同一用户同一批场所的行），拆成两条只会把同一批行扫两遍，还要在调用方对齐两份结果。
      * <p>
+     * 只统计 {@code deleted = false} 的行，与 {@link #countByVenueIdsGroupByCode} /
+     * {@link #aggregateByVenue} 的计数同口径——<b>保证「有曾投标记 ⇒ 我那一票确实在展示的数字里」</b>
+     * （迁移前模型遗留的软删行是已取消的票，不得变成「曾投」）。
+     * 不加载 {@code reaction_date} 之外的列；走唯一键 {@code (user_id, venue_id, reaction_code,
+     * reaction_date)} 的 user/venue 前缀范围，一页约 20 家店、单用户行数有限，成本可忽略。
+     * <p>
+     * 仅登录用户调用；未登录场景由 Service 层跳过此查询。
      * 例外说明：列表层通常不查询个人状态（见 AGENTS.md「标签热度」章节），但 Reaction 列表卡片
      * 明确要求"点击即知当前是否已参与"（产品规则，见需求「列表页需求」），故此处专门为 Reaction
      * 打破该惯例——仅此一条 IN 查询，成本远低于逐场所查询。
      */
-    @Query("SELECT r.venueId, r.reactionCode FROM VenueReaction r " +
-           "WHERE r.userId = :userId AND r.venueId IN :venueIds AND r.reactionDate = :date")
-    List<Object[]> findTodayCodesByUserAndVenueIds(@Param("userId") Long userId,
-                                                   @Param("venueIds") List<Long> venueIds,
-                                                   @Param("date") LocalDate date);
+    @Query("SELECT r.venueId, r.reactionCode, " +
+           "MAX(CASE WHEN r.reactionDate = :today THEN 1 ELSE 0 END), " +
+           "MAX(CASE WHEN r.reactionDate < :today THEN r.reactionDate END) " +
+           "FROM VenueReaction r " +
+           "WHERE r.userId = :userId AND r.venueId IN :venueIds AND r.deleted = false " +
+           "GROUP BY r.venueId, r.reactionCode")
+    List<Object[]> findMyReactionMarks(@Param("userId") Long userId,
+                                       @Param("venueIds") List<Long> venueIds,
+                                       @Param("today") LocalDate today);
 }

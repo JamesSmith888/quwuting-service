@@ -173,7 +173,7 @@ Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对�
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
-| GET | `/venues/{venueId}/reactions/stats` | 公开（软鉴权） | 字典内全部 Reaction 的四窗口统计 + 当前用户"今日已参与"状态，详情页"大家对这里的感受"+"查看更多"用 |
+| GET | `/venues/{venueId}/reactions/stats` | 公开（软鉴权） | 字典内全部 Reaction 的四窗口统计 + 当前用户"今日已参与"状态（`reactedByMe`）+ "曾投"日期（`lastReactedDate`，2026-10-15），详情页"大家对这里的感受"+"查看更多"用 |
 | POST | `/venues/{venueId}/reactions/{code}` | 需登录 | toggle 语义（2026-08-14 每日一票：今日未参与=参与、今日已参与=取消、已选其他=**换票**），返回 `{reacted, replacedFrom}`；`code` 为路径变量而非请求体（字典固定，路径更简洁） |
 | GET | `/venues` | 公开（软鉴权） | 卡片 Top Reaction 徽标（`topReactions`）：集合 = 有史以来 `countAll>0`、展示数字与排序 = `countAll` 累计（大者在左），**与任何请求参数无关**（原 `window` 参数已于 2026-10-06 移除） |
 
@@ -190,8 +190,8 @@ Reaction **不允许用户自由创建**——避免色情/攻击/广告/竞对�
 
 **三窗口计数语义（2026-08 每日一记模型确立）**：`ReactionBadge` 携带 `countAll` / `count7d` / `count30d` 三个窗口计数 + `reactedByMe`。服务端只做"按所选窗口排序/筛选（count=0 不返回）"，前端展示数字 = 所选窗口计数，切换窗口仅本地重算（无需为每个窗口重复请求）。排序/展示统一所选窗口（不再是旧模型的"排序 count30d、展示 countAll"双计数分离）——每日一记模型下取消只作用于当日记录，三窗口的本地 ±1 全部精确，乐观更新无需回滚校正窗口计数。
 
-- **例外：含个人参与状态（`reactedByMe`）**——这是对项目既有"列表层不含个人状态"惯例（原 `tagLikeCounts` 的设计）的刻意打破。原因是产品规则明确要求"点击 Emoji：未参与→+1，已参与→取消"必须在列表页直接可用，用户点击前必须知道自己是否已参与，否则会造成"点了却不知道是加还是减"的困惑。**注意**：此例外仅指徽标**携带**个人状态字段，不改变徽标**集合构成**（见上"完整展示契约"）。此例外**不违反**「缓存内容的强制约束」——聚合计数仍然缓存共享（`VenueReactionAggregateService`），个人参与状态通过**独立的、不缓存的实时批量查询**（`findTodayCodesByUserAndVenueIds`，一次 `IN` 查询覆盖整页场所）获取，两者未被塞进同一个缓存 key
-- **个人状态语义**：`reactedByMe` = "今日已参与"（`reactionDate = 今天` 的记录存在）——次日自动恢复可点击状态，与"每日一记"模型一致
+- **例外：含个人参与状态（`reactedByMe`）**——这是对项目既有"列表层不含个人状态"惯例（原 `tagLikeCounts` 的设计）的刻意打破。原因是产品规则明确要求"点击 Emoji：未参与→+1，已参与→取消"必须在列表页直接可用，用户点击前必须知道自己是否已参与，否则会造成"点了却不知道是加还是减"的困惑。**注意**：此例外仅指徽标**携带**个人状态字段，不改变徽标**集合构成**（见上"完整展示契约"）。此例外**不违反**「缓存内容的强制约束」——聚合计数仍然缓存共享（`VenueReactionAggregateService`），个人参与状态通过**独立的、不缓存的实时批量查询**（`findMyReactionMarks`，2026-10-15 起取代原 `findTodayCodesByUserAndVenueIds` / `findTodayCodesByUserAndVenue`；一次 `IN` 查询覆盖整页场所，同时给出今日态与「曾投」日期）获取，两者未被塞进同一个缓存 key
+- **个人状态语义**：`reactedByMe` = "今日已参与"（`reactionDate = 今天` 的记录存在）——次日自动恢复可点击状态，与"每日一记"模型一致。**⚠️ 它只表达写入侧"今天这一票"，不是读取侧的"我投过没有"**——后者由 2026-10-15 新增的 `lastReactedDate`（今天之前最近一次）承载，见文末「2026-10-15 个人参与记忆」
 - **批量查询**：`VenueReactionService.batchGetBadges(venueIds, currentUserId, window)` 一次 `IN` 查询（`countByVenueIdsGroupByCode`，单条 SQL 用条件 SUM 同时聚合 countAll/count7d/count30d）覆盖聚合计数、一次 `IN` 查询覆盖个人状态（仅登录用户触发），避免逐场所查询的 N+1
 
 toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（本模块聚合缓存）与 `VenueHeatService`（Reaction 总量是热度公式输入之一），见 `VenueReactionService.toggle()`。
@@ -277,3 +277,30 @@ toggle 写操作完成后必须同时失效 `VenueReactionAggregateService`（�
 **已消除的副作用（排序改为累计后不复存在）**：曾出现"小数字排在大数字前面"——老表情累计 8 次但近 7 天无人点，会排在近 7 天有 2 次点击的新表情之后；**现网实测 56 家中 3 家存在此类倒挂**。**排序改为 `countAll` 降序后该现象不复存在**，用户看到的 chip 数字必然从大到小。
 
 **验证**：`./mvnw -s settings-central.xml -q test-compile` 通过；前端 tsc（隔离工作区 5.9.3）通过、`check:tokens` / `check:es-syntax` / `check:list-filters`（7 维度接线）通过。 前端细节见[前端文档](../../quwuting/docs/agents/08-reaction-system.md) · 「2026-10-06 集合与统计窗口解耦」。
+
+## 2026-10-15 个人参与记忆（`lastReactedDate`）：写入侧"每天限投一票"≠ 读取侧"我投没投过"
+
+**需求/根因**（用户报障"门店列表 reaction 日重置后，之前点的痕迹完全感觉不到了"；完整分析见[前端文档](../../quwuting/docs/agents/08-reaction-system.md)·「2026-10-15 个人参与记忆」）：`reactedByMe` 来自 `reaction_date = 今天`——**把写入侧的"每日限一票"直接当成了读取侧的"我投没投"**，过零点后昨天投过的表情与从没投过的不可区分，而累计数字（`countAll`）里明明还有我那一票。原则：**写入侧按天限票（管新鲜度、防刷），读取侧终身记忆（管归属、确认）**；写入语义（每日一记 / 每日一票 / 换票 / 唯一键）**一行不动**。
+
+**契约**
+
+- `ReactionBadge` / `ReactionStat` 新增 `lastReactedDate`（`LocalDate`，`@JsonFormat(pattern = "yyyy-MM-dd")`，序列化为 `"2026-10-12"` 字符串而非数组；`spring.jackson.default-property-inclusion: non_null` ⇒ 没有时**省略**）。语义 = 当前用户**今天之前**最近一次投该表情的日期；从没投过 / 只有今天一票 / 未登录 → null。
+- 与 `reactedByMe` **互相独立、各管一事**：`reactedByMe` = 今天这一票（次日自动归 false），`lastReactedDate` = 读取侧归属（不随过零点消失，也不随今天取消而改变）；今天又投了一次时两者可同时有值。前端据此派生三态：今日（实心）/ 曾投（描边环）/ 未投。
+- 详情基础响应（`VenueService.computeVenueDetailPublic` → `getBadges(id, null)`）是**匿名公共缓存体**，不含个人态（个人态在 `/reactions/stats` 实时给）——`lastReactedDate` 沿用同一边界：个人记忆**永远实时查询、不入任何共享缓存**。
+
+**实现**
+
+- `VenueReactionRepository.findMyReactionMarks(userId, venueIds, today)`：**一条 JPQL 同时答两个事实**——`MAX(CASE WHEN reactionDate = :today THEN 1 ELSE 0 END)`（今日是否已投）与 `MAX(CASE WHEN reactionDate < :today THEN reactionDate END)`（今天之前最近一次），按 `(venueId, reactionCode)` 分组；同一批行扫一遍，不拆成两条（拆开只会把同一批行扫两遍、还要在调用方对齐两份结果）。**取代**原 `findTodayCodesByUserAndVenue` / `findTodayCodesByUserAndVenueIds`；单场所（`getStats` / `getBadges`）传 `List.of(venueId)` 复用同一条。
+- **`deleted = false` 与计数同口径**（`countByVenueIdsGroupByCode` / `aggregateByVenue` 都过滤）——保证"有曾投标记 ⇒ 我那一票确实在展示的数字里"。迁移前 hold 模型遗留的软删行是已取消的票，不得变成"曾投"。
+- "今天"只在 `VenueReactionService` 取一次（`LocalDate.now()`，与写路径 `toggle` 的 `reactionDate` 同源）并作为参数传入；读取侧不得各自推导。
+- 服务层读模型 `MyReactionMark(reactedToday, lastReactedBeforeToday)`（私有 record，不入库不出接口）；`buildTopBadgesFromCounts` 的个人参与入参从 `Set<String> myCodes` 改为 `Map<String, MyReactionMark>`。**曾投不参与集合构成**（与 `reactedByMe` 同属标注属性）：`countAll = 0` 的表情即使有个人行也不会凭空出现。
+- 成本：一页约 20 家店，走唯一键 `(user_id, venue_id, reaction_code, reaction_date)` 的 user/venue 前缀范围，单用户行数有限；原"今日"查询本来就要扫同一批行（`reaction_date` 是该索引第 4 列，无法提前定界），所以**没有新增一次往返、也没有新增扫描量**（按索引列序推断，**未在真库跑 EXPLAIN**）。
+- **无迁移**。部署顺序：**后端先于小程序**；旧小程序忽略新字段；新小程序遇旧后端 → 字段缺省 → 全部退化为旧的两态，不报错。
+
+**测试**
+
+- `VenueReactionServiceTest`（Mockito，13 项）：曾投跨日重置后仍在 / 今日与曾投互相独立 / 只有今天一票无痕迹 / 驱动层给 `java.sql.Date` 也归一 / 跨场所不串 / 曾投不凭空造徽标 / `getStats` 同源携带 / 匿名不发个人记忆查询 / JSON 契约（`yyyy-MM-dd` 字符串、null 省略）。
+- `VenueReactionQueryHqlSyntaxTest`（不依赖数据库）：用 Hibernate 自带 ANTLR 语法解析 `@Query` 原文 + 判别力自测（坏文本必须被拒绝）+ 口径护栏（必须同时含"今日 / 今天之前 / 软删过滤 / 分组粒度"）。
+- `VenueReactionMarksSqlTest`（`@Tag("db")`，默认禁用）：真库执行语义——软删 / 他人 / 他店的行不串入、取"今天之前最近一次"而不是更早的。**已写好但尚未在真库跑过**（须用一次性 MySQL 8，`-Drun.db.tests=true`；⚠️ 禁用 `application-mysql.yaml` = 生产 RDS）。
+
+**未验证**：`MAX(CASE …)` 在 MySQL 8 上的真实执行结果（语法级 + Mockito 已覆盖，真库用例待跑）。

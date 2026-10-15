@@ -1,0 +1,797 @@
+{
+ "reportDate": "2026-10-15",
+ "sources": [
+  "shijingshiguang"
+ ],
+ "cityHeaderMap": {
+  "江阴": "无锡市",
+  "宜兴": "无锡市",
+  "昆山": "苏州市",
+  "句容": "镇江市",
+  "丹阳": "镇江市",
+  "嘉善": "嘉兴市",
+  "海盐": "嘉兴市",
+  "桐乡": "嘉兴市",
+  "仁寿": "眉山市"
+ },
+ "noListHeaders": [
+  "上海",
+  "无锡",
+  "扬州",
+  "泰州",
+  "海宁",
+  "绍兴",
+  "东阳",
+  "宁波"
+ ],
+ "mentions": [
+  {
+   "city": "成都",
+   "name": "天涯",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "爵尔顿",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "群众",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "金卡",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "心芳情",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "千禧",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "樱花",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "红石榴",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "梦舞蝶",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "辉夜城",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "凤鸣扬",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "永立",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "恋梦",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "欢聚",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "星星",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "新恋曲",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "星耀乐",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "枫亚之夜",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "十里河",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "小百灵",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "舞点",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "兰夜",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "昕青龙",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "时代",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "新盈汇",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "紫罗兰",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "龙鑫亚",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "鑫天地",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "菲琳",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "兰馨",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "虹光",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "玫瑰天堂",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "天天和",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "伴生缘",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "迪乐汇",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "夜潮",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "世纪红",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "成都",
+   "name": "花舞",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "重庆",
+   "name": "金岗",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "重庆",
+   "name": "百林",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "重庆",
+   "name": "金都",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "重庆",
+   "name": "蒙迪",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "重庆",
+   "name": "子帆",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "重庆",
+   "name": "华新",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "重庆",
+   "name": "食品",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "重庆",
+   "name": "金沙川",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "重庆",
+   "name": "天涯",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "重庆",
+   "name": "金海洋",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "重庆",
+   "name": "999",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "绵阳",
+   "name": "金砂",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "绵阳",
+   "name": "英吉利",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "绵阳",
+   "name": "夜江岚",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "绵阳",
+   "name": "白渡",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "绵阳",
+   "name": "紫竹飞天",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "绵阳",
+   "name": "凤舞龙飞",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "绵阳",
+   "name": "嫚妙",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "仁寿",
+   "name": "汇锦",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "仁寿",
+   "name": "盛邦",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "乐山",
+   "name": "煌潮",
+   "note": "煌潮{晚}；美星",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "乐山",
+   "name": "美星",
+   "note": "煌潮{晚}；美星",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "西安",
+   "name": "星河汇",
+   "note": "分区枚举：西2/东3/南1，(中)(北)空",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "西安",
+   "name": "夜色",
+   "note": "分区枚举：西2/东3/南1，(中)(北)空",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "西安",
+   "name": "星语",
+   "note": "分区枚举：西2/东3/南1，(中)(北)空",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "西安",
+   "name": "炫彩",
+   "note": "分区枚举：西2/东3/南1，(中)(北)空",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "西安",
+   "name": "鼎焱",
+   "note": "分区枚举：西2/东3/南1，(中)(北)空",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "西安",
+   "name": "统领",
+   "note": "分区枚举：西2/东3/南1，(中)(北)空",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "咸阳",
+   "name": "陌路人",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "咸阳",
+   "name": "火凤凰",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "咸阳",
+   "name": "开心",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "咸阳",
+   "name": "火舞",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "咸阳",
+   "name": "西海岸",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "咸阳",
+   "name": "金莎",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "长沙",
+   "name": "美琪",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "长沙",
+   "name": "蓝钻",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "长沙",
+   "name": "音之舞",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "长沙",
+   "name": "美伦",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "长沙",
+   "name": "红浪漫",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "孝感",
+   "name": "晚风",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "江阴",
+   "name": "猴子",
+   "note": "{晚}",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "宜兴",
+   "name": "悦动",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "苏州",
+   "name": "乐乐",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "苏州",
+   "name": "新华",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "苏州",
+   "name": "景气",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "苏州",
+   "name": "蓝堡",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "昆山",
+   "name": "金佰利",
+   "note": "{晚}",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "常州",
+   "name": "老朱",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "常州",
+   "name": "星语",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "常州",
+   "name": "忆梦",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "南通",
+   "name": "丽莎",
+   "note": "海尚壹号 图片连写；站上通道为『海尚 壹号』",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "南通",
+   "name": "寻梦缘",
+   "note": "海尚壹号 图片连写；站上通道为『海尚 壹号』",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "南通",
+   "name": "蒙纳戈",
+   "note": "海尚壹号 图片连写；站上通道为『海尚 壹号』",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "南通",
+   "name": "抖舞",
+   "note": "海尚壹号 图片连写；站上通道为『海尚 壹号』",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "南通",
+   "name": "玛莎",
+   "note": "海尚壹号 图片连写；站上通道为『海尚 壹号』",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "南通",
+   "name": "百老汇",
+   "note": "海尚壹号 图片连写；站上通道为『海尚 壹号』",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "南通",
+   "name": "外滩",
+   "note": "海尚壹号 图片连写；站上通道为『海尚 壹号』",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "南通",
+   "name": "魅莎",
+   "note": "海尚壹号 图片连写；站上通道为『海尚 壹号』",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "南通",
+   "name": "海尚壹号",
+   "note": "海尚壹号 图片连写；站上通道为『海尚 壹号』",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "句容",
+   "name": "超唱",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "句容",
+   "name": "旋音",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "句容",
+   "name": "浪卡",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "丹阳",
+   "name": "喜见",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "丹阳",
+   "name": "k2",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "丹阳",
+   "name": "纽斯",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "镇江",
+   "name": "好声音",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "镇江",
+   "name": "天世缘",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "滁州",
+   "name": "澜夜",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "滁州",
+   "name": "幻新",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "杭州",
+   "name": "718",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "杭州",
+   "name": "紫茂",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "杭州",
+   "name": "漫游",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "杭州",
+   "name": "芳正",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "杭州",
+   "name": "兰博",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "杭州",
+   "name": "A8",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "嘉兴",
+   "name": "大鹏来",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "嘉兴",
+   "name": "余新",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "嘉善",
+   "name": "云轩",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "海盐",
+   "name": "夜燎",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "桐乡",
+   "name": "9号",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "湖州",
+   "name": "梦田",
+   "note": "{卡座}",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "台州",
+   "name": "夜江楠",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "沈阳",
+   "name": "港汇",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "沈阳",
+   "name": "新合富",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "鞍山",
+   "name": "亿嘉园",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "鞍山",
+   "name": "艺年华",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "鞍山",
+   "name": "振源",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "长春",
+   "name": "蝶恋花",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "长春",
+   "name": "双赫",
+   "note": "",
+   "src": "shijingshiguang"
+  },
+  {
+   "city": "长春",
+   "name": "万仁合",
+   "note": "",
+   "src": "shijingshiguang"
+  }
+ ]
+}
