@@ -181,7 +181,14 @@ public class VenueResponseMapper {
      * 语义边界与门槛依据见 {@link VenueResponse#visitBadgeText()}。
      * <p>
      * 注入边界同 isHot / crowdBadgeText 先例：仅列表场景（城市列表/收藏列表）传真实值；
-     * 详情/编辑/创建回显走十参重载（恒 null）——详情页不重复承载（同一事实只呈现一次）。
+     * 详情/编辑/创建回显走十参重载（恒 null）。
+     * <p>
+     * ⚠️ <b>详情页的足迹行不经本字段</b>（2026-10-16 订正 10-06 的「详情页不重复承载」）：详情响应是缓存体
+     * （三层缓存都以门店 id 为键），而足迹行由 30 天滚动窗实时计算且带浏览者维度，故走独立动态接口
+     * {@code GET /venues/{id}/visit-footprint}（{@code VenueVisitBadgeService#footprintViewOf}），
+     * 文案与本字段<b>同一渲染函数、逐字相同</b>。「同一事实只呈现一次」当年立论的前提是这行只是
+     * 一句陈述；10-13 它变成了<b>入口</b>（点开能感谢），入口不是事实——且感谢站内信深链落在详情页，
+     * 落点上没有入口就是闭环断在最后一步。
      */
     public VenueResponse toResponse(Venue v, List<ReactionBadge> topReactions, boolean isHot, long viewCount,
                                     List<String> photos, String crowdBadgeText, String crowdLatestText,

@@ -676,6 +676,34 @@ public class VenuePresenceService {
     }
 
     /**
+     * 浏览者视角的单店足迹（门店详情页「到店足迹」行 + 贡献者回路，2026-10-16；文档 = 52 号
+     * 「详情页到店足迹 + 贡献者回路」节）：{@link #nearbyFootprints} 同一计算 + 浏览者<b>自己</b>在其中的位置。
+     * <p>
+     * <b>为什么详情页要这个</b>：列表卡片「感谢 N 位舞友 · N 次…」自 10-13 起是<b>入口</b>（点开能感谢），
+     * 而被感谢者收到的站内信深链落在这家店的详情页——落点页上什么都没有 ⇒ 闭环断在最后一步。
+     * 详情页因此需要同一行、同一浮层；而贡献者在这里需要的不是别人的明细（那是「永不公开」），
+     * 是<b>他自己的痕迹</b>（{@link ViewerFootprint.Mine}）。
+     * <p>
+     * <b>与卡片数字同源</b>：同一次 {@link #loadNearbyEvidence}、同一 {@link #footprintOf} 与
+     * {@link #mineOf} 共用 {@link #unionLastSeen} / {@link #unionVisitDays} / {@link #inWindow} /
+     * 同一个排除集合——「卡片上的 N 位舞友里有没有我」是结构保证（测试钉死：全体用户 mine 之和 = 卡片次数）。
+     * <p>
+     * 量级：单店调用，3 条小查询（同 {@link #nearbyContributors}）；详情页每次打开最多一次。
+     *
+     * @param viewerId 浏览者；{@code null}（未登录）⇒ {@code mine} 恒 null，其余照常（卡片原文是公开信息）
+     */
+    @Transactional(readOnly = true)
+    public ViewerFootprint nearbyFootprintForViewer(Long venueId, Long viewerId,
+                                                    Collection<Long> excludedUserIds) {
+        LocalDateTime now = LocalDateTime.now();
+        NearbyEvidence evidence = loadNearbyEvidence(List.of(venueId), now.minusDays(RANKING_WINDOW_DAYS));
+        Set<Long> stores = evidence.vicinityByVenue().get(venueId);
+        Set<Long> excluded = toIdSet(excludedUserIds);
+        return new ViewerFootprint(footprintOf(stores, evidence, excluded, now),
+                mineOf(stores, evidence, excluded, viewerId, now));
+    }
+
+    /**
      * 附近的一页事实：「本店的邻域」「证据门店上的最近命中时刻」「证据门店上的去重到访日」。
      * 三份映射都以<b>证据门店</b>（邻域并集内的全部门店）为键；各店再按自己的邻域求并集。
      */
@@ -739,6 +767,29 @@ public class VenuePresenceService {
                 stores.size() - 1);
     }
 
+    /**
+     * 浏览者自己的足迹（纯函数；判据与 {@link #footprintOf} 逐项同源）：
+     * 「在被计入的人里」⟺ 已登录 + 未被排除 + 最近命中在 30 天窗内（与卡片人数同一条
+     * {@link #inWindow}）。次数 = 自己的 {@code (用户, 自然日)} 并集大小（{@link #unionVisitDays}）。
+     * <p>
+     * 返回 null 的三种情形都读作「不对他说这句话」：未登录、被排除（卡片不计他，就不能对他说
+     * 「你留下过」）、不在窗内。另有一种防御——在窗内却取不到任何到访日（两个查询谓词一致，
+     * 现实中不应出现）：<b>不渲染</b>而不是渲染「0 次」，因为这句话的全部内容就是那个次数，
+     * 没有次数就没有可陈述的事实。
+     */
+    private static ViewerFootprint.Mine mineOf(Set<Long> stores, NearbyEvidence evidence,
+                                               Set<Long> excluded, Long viewerId, LocalDateTime now) {
+        if (viewerId == null || excluded.contains(viewerId)) {
+            return null;
+        }
+        LocalDateTime lastSeen = unionLastSeen(stores, evidence.lastSeen()).get(viewerId);
+        if (!inWindow(lastSeen, now.minusDays(RANKING_WINDOW_DAYS))) {
+            return null;
+        }
+        int days = unionVisitDays(stores, evidence.visitDays()).getOrDefault(viewerId, Set.of()).size();
+        return days == 0 ? null : new ViewerFootprint.Mine(days);
+    }
+
     private static List<VenuePresenceStats.VicinityVenue> vicinityVenuesOf(Long venueId, NearbyEvidence evidence) {
         return evidence.peersByVenue().getOrDefault(venueId, List.of()).stream()
                 .map(p -> new VenuePresenceStats.VicinityVenue(
@@ -791,15 +842,10 @@ public class VenuePresenceService {
             }
         });
         long excludedUsers = countSince(all, windowStart) - inWindowUsers.size();
-        // 次数列：邻域内 (user, day) 取并集（⛔ 不能各店 count 相加，52 号 §4.2 第 1 条）
-        Map<Long, Set<LocalDate>> daysByUser = new HashMap<>();
-        for (Long store : stores) {
-            evidence.visitDays().getOrDefault(store, Map.of()).forEach((user, days) -> {
-                if (inWindowUsers.containsKey(user)) {
-                    daysByUser.computeIfAbsent(user, k -> new HashSet<>()).addAll(days);
-                }
-            });
-        }
+        // 次数列：邻域内 (user, day) 取并集（⛔ 不能各店 count 相加，52 号 §4.2 第 1 条）。
+        // 并集实现单点 = unionVisitDays（卡片次数 / 浏览者自己的次数 / 本名单三处共用）
+        Map<Long, Set<LocalDate>> daysByUser = unionVisitDays(stores, evidence.visitDays());
+        daysByUser.keySet().retainAll(inWindowUsers.keySet());
         long totalVisitTimes = daysByUser.values().stream().mapToLong(Set::size).sum();
         List<Map.Entry<Long, LocalDateTime>> ordered = new ArrayList<>(inWindowUsers.entrySet());
         ordered.sort((a, b) -> {
@@ -1403,15 +1449,33 @@ public class VenuePresenceService {
     private static long countVisitEvents(Collection<Long> venueIds,
                                          Map<Long, Map<Long, Set<LocalDate>>> visitDays,
                                          Set<Long> excludedUsers) {
-        Set<String> userDays = new HashSet<>();
+        return unionVisitDays(venueIds, visitDays).entrySet().stream()
+                .filter(entry -> !excludedUsers.contains(entry.getKey()))
+                .mapToLong(entry -> entry.getValue().size())
+                .sum();
+    }
+
+    /**
+     * 多店证据的<b>(用户 → 去重到店日并集)</b>——{@code (人, 日)} 二元组语义的<b>唯一实现</b>
+     * （2026-10-16 提取）。三个消费方共用：{@link #countVisitEvents}（卡片「N 次」= 各用户并集大小之和）、
+     * {@link #nearbyVisitorsFor} 的名单次数列、{@link #nearbyFootprintForViewer} 的「你自己的次数」。
+     * <p>
+     * <b>为什么提成单点</b>：此前并集写了两遍（一遍拼 {@code "user|day"} 字符串、一遍按用户建集合），
+     * 两种写法等价只靠人脑核对；再多一个「浏览者自己的次数」就是第三遍。三处次数是同一个数字的
+     * 不同切片——卡片 N ≡ 全体用户之和、名单行 ≡ 单个用户、浏览者那句 ≡ 单个用户——共用一个实现后，
+     * 「你的次数 ≤ 卡片次数」「全体之和 = 卡片次数」是结构保证，不是测试才敢断言的巧合。
+     * <p>
+     * 返回<b>全新的可变 map</b>（调用方可直接 retainAll 裁剪，不会污染证据）；不做排除账号过滤——
+     * 排除是展示口径的决策，由各消费方按自己的集合施加。
+     */
+    private static Map<Long, Set<LocalDate>> unionVisitDays(Collection<Long> venueIds,
+                                                            Map<Long, Map<Long, Set<LocalDate>>> visitDays) {
+        Map<Long, Set<LocalDate>> daysByUser = new HashMap<>();
         for (Long venueId : venueIds) {
-            visitDays.getOrDefault(venueId, Map.of()).forEach((user, days) -> {
-                if (!excludedUsers.contains(user)) {
-                    days.forEach(day -> userDays.add(user + "|" + day));
-                }
-            });
+            visitDays.getOrDefault(venueId, Map.of()).forEach((user, days) ->
+                    daysByUser.computeIfAbsent(user, k -> new HashSet<>()).addAll(days));
         }
-        return userDays.size();
+        return daysByUser;
     }
 
     /**

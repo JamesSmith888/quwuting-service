@@ -6,10 +6,13 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.quwuting.quwutingservice.venue.service.HeatAccountExclusionService;
+import org.quwuting.quwutingservice.venuepresence.dto.response.VenueVisitFootprintResponse;
+import org.quwuting.quwutingservice.venuepresence.repository.VenueVisitThankRepository;
 import org.quwuting.quwutingservice.venuepresence.service.NearbyFootprint;
 import org.quwuting.quwutingservice.venuepresence.service.NearbyVisitSummary;
 import org.quwuting.quwutingservice.venuepresence.service.VenuePresenceService;
 import org.quwuting.quwutingservice.venuepresence.service.VenueVisitBadgeService;
+import org.quwuting.quwutingservice.venuepresence.service.ViewerFootprint;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -20,7 +23,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -37,6 +42,8 @@ class VenueVisitBadgeTextTest {
     private VenuePresenceService venuePresenceService;
     @Mock
     private HeatAccountExclusionService heatAccountExclusionService;
+    @Mock
+    private VenueVisitThankRepository visitThankRepository;
 
     @InjectMocks
     private VenueVisitBadgeService badgeService;
@@ -122,5 +129,101 @@ class VenueVisitBadgeTextTest {
         verify(venuePresenceService).nearbyVisitSummaries(anyCollection(), eq(exclusions));
         verify(venuePresenceService).nearbyFootprints(anyCollection(), eq(exclusions));
         verify(venuePresenceService).visitedNearbyFootprints(eq(exclusions));
+    }
+
+    // ── 详情页「到店足迹」行 + 贡献者回路（2026-10-16） ─────────────────────────────
+
+    private static final long ME = 7L;
+    private static final LocalDateTime RECENT = LocalDateTime.now().minusDays(1);
+
+    @Test
+    void detailBadgeTextIsByteIdenticalToTheListCardText() {
+        // 同一家店、同一份事实：详情页 badgeText 与列表卡片文案必须逐字相同（展示口径一源，
+        // ⛔ 详情页不得另拼一份——否则列表写 6 位、详情写 5 位这类割裂又会出现）
+        when(heatAccountExclusionService.excludedUserIds()).thenReturn(List.of(-1L));
+        NearbyFootprint fact = new NearbyFootprint(2, 6, 10, RECENT, 0, 1);
+        when(venuePresenceService.nearbyVisitSummaries(anyCollection(), anyCollection()))
+                .thenReturn(Map.of(120L, fact.toDisplaySummary()));
+        when(venuePresenceService.nearbyFootprintForViewer(eq(120L), eq(ME), anyCollection()))
+                .thenReturn(new ViewerFootprint(fact, null));
+
+        String listText = badgeService.visitBadgeTextsByVenue(List.of(120L)).get(120L);
+        VenueVisitFootprintResponse detail = badgeService.footprintViewOf(120L, ME);
+
+        assertEquals(listText, detail.badgeText(), "详情页足迹行 ≡ 列表卡片文案（同一渲染函数）");
+    }
+
+    @Test
+    void detailAndCardReadTheSameExclusionSet() {
+        List<Long> exclusions = List.of(-1L, 9L);
+        when(heatAccountExclusionService.excludedUserIds()).thenReturn(exclusions);
+        when(venuePresenceService.nearbyFootprintForViewer(eq(120L), eq(ME), anyCollection()))
+                .thenReturn(new ViewerFootprint(NearbyFootprint.EMPTY, null));
+
+        badgeService.footprintViewOf(120L, ME);
+
+        verify(venuePresenceService).nearbyFootprintForViewer(120L, ME, exclusions);
+    }
+
+    @Test
+    void contributorSeesTheirOwnLineWithThanksCountFromThisVenue() {
+        when(heatAccountExclusionService.excludedUserIds()).thenReturn(List.of(-1L));
+        when(venuePresenceService.nearbyFootprintForViewer(eq(121L), eq(ME), anyCollection()))
+                .thenReturn(new ViewerFootprint(new NearbyFootprint(2, 5, 8, RECENT, 0, 1),
+                        new ViewerFootprint.Mine(3)));
+        // 站内信正文的 N 与这里取的是同一个数（countThankers(本店, 我)）——点信落在本页，数字必须逐字一致
+        when(visitThankRepository.countThankers(121L, ME)).thenReturn(2L);
+
+        VenueVisitFootprintResponse resp = badgeService.footprintViewOf(121L, ME);
+
+        assertEquals("你在这附近留下过 3 次足迹 · 2 位舞友感谢了你", resp.mineText());
+        assertEquals("感谢 5 位舞友 · 8 次到过这附近的足迹", resp.badgeText());
+    }
+
+    @Test
+    void notYetThankedContributorGetsNoGapMessage() {
+        assertEquals("你在这附近留下过 1 次足迹", VenueVisitBadgeService.renderMineText(1, 0),
+                "没人感谢时只陈述自己的痕迹——⛔ 不写「暂无人感谢」：把没有的东西说成缺口等于催促去要感谢");
+        assertEquals("你在这附近留下过 12 次足迹 · 1 位舞友感谢了你", VenueVisitBadgeService.renderMineText(12, 1));
+    }
+
+    @Test
+    void mineLineNeverUsesTheShareWordOrNamesAnyone() {
+        for (String text : List.of(VenueVisitBadgeService.renderMineText(1, 0),
+                VenueVisitBadgeService.renderMineText(5, 3))) {
+            assertFalse(text.contains("分享"),
+                    "⛔ 禁用「分享」：用户没有主动外发任何东西，与首问承诺的「不会对外展示」观感冲突");
+            assertFalse(text.contains("真实"), "「真实」措辞已退役（2026-10-08），不得以任何形态回填");
+        }
+    }
+
+    @Test
+    void anonymousAndNonContributorViewersGetNoMineLineAndZeroThanksQueries() {
+        when(heatAccountExclusionService.excludedUserIds()).thenReturn(List.of(-1L));
+        NearbyFootprint fact = new NearbyFootprint(1, 3, 3, RECENT, 0, 0);
+        when(venuePresenceService.nearbyFootprintForViewer(eq(120L), eq(null), anyCollection()))
+                .thenReturn(new ViewerFootprint(fact, null));
+        when(venuePresenceService.nearbyFootprintForViewer(eq(120L), eq(99L), anyCollection()))
+                .thenReturn(new ViewerFootprint(fact, null));
+
+        VenueVisitFootprintResponse guest = badgeService.footprintViewOf(120L, null);
+        VenueVisitFootprintResponse stranger = badgeService.footprintViewOf(120L, 99L);
+
+        assertNull(guest.mineText(), "游客：没有「自己」可说");
+        assertNull(stranger.mineText(), "登录但不在被计入的贡献者之列：不对他说这句话");
+        assertEquals(guest.badgeText(), stranger.badgeText(), "足迹行原文是公开信息，对所有人相同");
+        verify(visitThankRepository, never()).countThankers(anyLong(), anyLong());
+    }
+
+    @Test
+    void venueWithoutFootprintsRendersNothingAtAll() {
+        when(heatAccountExclusionService.excludedUserIds()).thenReturn(List.of(-1L));
+        when(venuePresenceService.nearbyFootprintForViewer(eq(120L), eq(ME), anyCollection()))
+                .thenReturn(new ViewerFootprint(NearbyFootprint.EMPTY, null));
+
+        VenueVisitFootprintResponse resp = badgeService.footprintViewOf(120L, ME);
+
+        assertNull(resp.badgeText(), "附近无足迹 ⇒ 详情页整行不渲染（与列表同一硬约束）");
+        assertNull(resp.mineText());
     }
 }

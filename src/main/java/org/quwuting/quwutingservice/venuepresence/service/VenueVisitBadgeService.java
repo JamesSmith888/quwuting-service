@@ -5,6 +5,8 @@ import org.quwuting.quwutingservice.config.VenueHeatWeights;
 import org.quwuting.quwutingservice.venue.service.HeatAccountExclusionService;
 import org.quwuting.quwutingservice.venuepresence.dto.response.AdminVenueVisitorPage;
 import org.quwuting.quwutingservice.venuepresence.dto.response.VenuePresenceStats;
+import org.quwuting.quwutingservice.venuepresence.dto.response.VenueVisitFootprintResponse;
+import org.quwuting.quwutingservice.venuepresence.repository.VenueVisitThankRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -110,6 +112,8 @@ public class VenueVisitBadgeService {
 
     private final VenuePresenceService venuePresenceService;
     private final HeatAccountExclusionService heatAccountExclusionService;
+    /** 感谢计数读取（叶子仓储，仅 {@code countThankers}；不经 VenueVisitThanksService，避免展示层依赖通知链） */
+    private final VenueVisitThankRepository visitThankRepository;
 
     /**
      * 展示口径的排除账号集合（<b>全类唯一取点</b>）：C 侧文案与 admin 各面都经此取，
@@ -189,6 +193,55 @@ public class VenueVisitBadgeService {
             return null;
         }
         return renderBadgeText(footprint.visitUsers30d(), footprint.visitEvents30d());
+    }
+
+    // ── 详情页面（2026-10-16）：同一行 + 贡献者回路 ─────────────────────────────
+
+    /**
+     * 门店详情页「到店足迹」行的数据（GET /venues/{venueId}/visit-footprint 的实现）。
+     * <p>
+     * <b>两句话，两种读者</b>：
+     * <ul>
+     *   <li>{@code badgeText}——<b>所有人</b>读到的足迹行原文，与列表卡片逐字相同（同一次计算、同一排除
+     *       集合、同一渲染函数；⛔ 详情页不得另拼一份——展示口径一源）；</li>
+     *   <li>{@code mineText}——只给<b>被计入的贡献者本人</b>：「你在这附近留下过 N 次足迹 · N 位舞友感谢了你」。
+     *       这是详情页上唯一允许比列表「更具体」的内容，且它只具体到<b>读者自己</b>：
+     *       逐条足迹 / 名单 / 时段 / 最近一次都会指认他人（N=1 的店尤其），与「永不公开谁到过」
+     *       相冲，故不做。贡献者想知道的恰恰是「我的付出有没有被看见」，这句话回答的正是这个。</li>
+     * </ul>
+     * <b>「感谢了你」的计数为什么按<i>本店</i>取</b>（{@code countThankers(venueId, viewerId)}）：
+     * 感谢三元组按「被感谢发生的那家店」落库，站内信正文「有 N 位舞友在「X」感谢了你」的 N 也是它；
+     * 贡献者点站内信落在 X 的详情页，看到的数字必须与信里的逐字一致，否则读作「系统数错了」。
+     * （邻域共址的 A、B 两家各被感谢一次时，两页各显示各自的 N——已登记的既有边界，见 52 号。）
+     * <p>
+     * 只在 {@code mine} 非空时才查感谢计数——游客与非贡献者零额外查询。
+     */
+    @Transactional(readOnly = true)
+    public VenueVisitFootprintResponse footprintViewOf(Long venueId, Long viewerId) {
+        ViewerFootprint view = venuePresenceService.nearbyFootprintForViewer(
+                venueId, viewerId, displayExclusions());
+        String mineText = null;
+        if (view.mine() != null) {
+            long thankers = visitThankRepository.countThankers(venueId, viewerId);
+            mineText = renderMineText(view.mine().visitEvents30d(), thankers);
+        }
+        return new VenueVisitFootprintResponse(badgeTextOf(view.footprint()), mineText);
+    }
+
+    /**
+     * 浏览者自己的足迹句渲染（纯函数，单点；改文案只改这里）。
+     * <ul>
+     *   <li>被感谢过（{@code thankers > 0}）：「你在这附近留下过 N 次足迹 · N 位舞友感谢了你」；</li>
+     *   <li>否则：「你在这附近留下过 N 次足迹」——⛔ 不写「暂无人感谢」：把没有的东西说成缺口，
+     *       等于催促贡献者去要感谢，与「感谢是回报不是诱导」相反。</li>
+     * </ul>
+     * 「次」= 与卡片同一口径（{@code (人, 自然日)} 去重，读作「来了几个晚上」）。
+     * ⛔ 禁用「分享」一词（用户没有主动外发任何东西，与首问承诺的「不会对外展示」观感冲突）；
+     * ⛔ 不点名感谢者、不给时间——只有计数。
+     */
+    public static String renderMineText(long visitEvents, long thankers) {
+        String base = "你在这附近留下过 " + visitEvents + " 次足迹";
+        return thankers > 0 ? base + " · " + thankers + " 位舞友感谢了你" : base;
     }
 
     /**

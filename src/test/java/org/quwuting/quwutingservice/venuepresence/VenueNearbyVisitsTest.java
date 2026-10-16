@@ -12,6 +12,7 @@ import org.quwuting.quwutingservice.venuepresence.repository.VenuePresencePingRe
 import org.quwuting.quwutingservice.venuepresence.service.NearbyFootprint;
 import org.quwuting.quwutingservice.venuepresence.service.NearbyVisitSummary;
 import org.quwuting.quwutingservice.venuepresence.service.VenuePresenceService;
+import org.quwuting.quwutingservice.venuepresence.service.ViewerFootprint;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -22,6 +23,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
@@ -309,6 +311,90 @@ class VenueNearbyVisitsTest {
 
         assertEquals(Set.of(2L), contributors.keySet(),
                 "排除账号同样从「可感谢集合」剔除——一个集合、两种消费面（同 countSince 的双消费先例）");
+    }
+
+    // ── 详情页浏览者视角：「我在不在卡片的 N 位里」是结构保证（2026-10-16） ───────────────
+
+    @Test
+    void viewerMinesSumToTheCardEventsAndShareOneSnapshotWithIt() {
+        // 五洲双店：u1 在两家同一天都有命中（只算 1 次）、再加一天 ⇒ 2 次；u2 只来 1 天；u3 来 1 天
+        stubPairs(pair(YIHU, "OPEN", LISA, "丽莎歌舞厅", "OPEN"),
+                pair(LISA, "OPEN", YIHU, "一壶淡泊音乐酒吧", "OPEN"));
+        LocalDate today = now.toLocalDate();
+        stubFacts(row(YIHU, 1L, now.minusDays(1)), row(LISA, 1L, now.minusDays(1)),
+                row(LISA, 2L, now.minusDays(3)), row(YIHU, 3L, now.minusDays(2)));
+        stubDays(day(YIHU, 1L, today.minusDays(1)), day(LISA, 1L, today.minusDays(1)),
+                day(LISA, 1L, today.minusDays(5)), day(LISA, 2L, today.minusDays(3)),
+                day(YIHU, 3L, today.minusDays(2)));
+
+        ViewerFootprint v1 = service.nearbyFootprintForViewer(LISA, 1L, List.of(-1L));
+        ViewerFootprint v2 = service.nearbyFootprintForViewer(LISA, 2L, List.of(-1L));
+        ViewerFootprint v3 = service.nearbyFootprintForViewer(LISA, 3L, List.of(-1L));
+
+        assertEquals(2L, v1.mine().visitEvents30d(), "同一天在两家都命中只算 1 次，加另一天 = 2（(人, 日) 并集）");
+        assertEquals(1L, v2.mine().visitEvents30d());
+        assertEquals(1L, v3.mine().visitEvents30d());
+        // 结构不变量：全体用户「自己的次数」之和 ≡ 卡片「N 次」——它们是同一个数字的切片
+        assertEquals(v1.footprint().visitEvents30d(),
+                v1.mine().visitEvents30d() + v2.mine().visitEvents30d() + v3.mine().visitEvents30d(),
+                "卡片次数 = 每个被计入的人自己的次数之和（共用 unionVisitDays 单点）");
+        assertEquals(3L, v1.footprint().visitUsers30d(), "卡片人数不因浏览者不同而变");
+        assertEquals(v1.footprint(), v2.footprint(), "足迹行事实对所有浏览者相同（只有 mine 随人变）");
+    }
+
+    @Test
+    void viewerOutsideTheCountedContributorsGetsNoMine() {
+        stubPairs();
+        stubFacts(row(YIHU, 1L, now.minusDays(1)), row(YIHU, 2L, now.minusDays(40)));
+        stubDays(day(YIHU, 1L, now.toLocalDate().minusDays(1)));
+
+        // 陌生人（从未到过）/ 最近命中在窗外（40 天前）/ 游客（viewerId = null）
+        assertNull(service.nearbyFootprintForViewer(YIHU, 99L, List.of(-1L)).mine(), "不在贡献者之列：不对他说这句话");
+        assertNull(service.nearbyFootprintForViewer(YIHU, 2L, List.of(-1L)).mine(),
+                "最近命中在窗外 ⇒ 卡片不计他 ⇒ 不能对他说「你留下过」（与卡片同一条 inWindow 判据）");
+        ViewerFootprint guest = service.nearbyFootprintForViewer(YIHU, null, List.of(-1L));
+        assertNull(guest.mine(), "游客没有「自己」");
+        assertEquals(1L, guest.footprint().visitUsers30d(), "游客照样拿到公开的足迹行事实");
+    }
+
+    @Test
+    void excludedViewerIsNotToldTheyLeftFootprintsBecauseTheCardDoesNotCountThem() {
+        stubPairs();
+        stubFacts(row(YIHU, 1L, now.minusDays(1)), row(YIHU, 2L, now.minusDays(1)));
+        stubDays(day(YIHU, 1L, now.toLocalDate().minusDays(1)), day(YIHU, 2L, now.toLocalDate().minusDays(1)));
+
+        ViewerFootprint excluded = service.nearbyFootprintForViewer(YIHU, 1L, List.of(1L));
+        ViewerFootprint other = service.nearbyFootprintForViewer(YIHU, 2L, List.of(1L));
+
+        assertNull(excluded.mine(), "被排除账号：卡片不计他，就不能对他说「你留下过 N 次」");
+        assertEquals(1L, excluded.footprint().visitUsers30d(), "排除后卡片只剩 u2");
+        assertEquals(1L, other.mine().visitEvents30d());
+    }
+
+    @Test
+    void viewerInWindowButWithoutAnyVisitDayRendersNoMineInsteadOfZeroTimes() {
+        // 防御：两个查询谓词一致，现实中不应出现；真出现时「0 次」比不渲染更糟（这句话的全部内容就是那个次数）
+        stubPairs();
+        stubFacts(row(YIHU, 1L, now.minusDays(1)));
+        stubDays();
+
+        assertNull(service.nearbyFootprintForViewer(YIHU, 1L, List.of(-1L)).mine());
+    }
+
+    @Test
+    void viewerPathUsesTheSameThreeQueriesAsTheSingleVenuePaths() {
+        // 与 nearbyContributors / nearbyDetailFor 同形态：一次同址 + 一次证据 + 一次到访日（无 N+1，无额外取数面）
+        stubPairs();
+        stubFacts(row(YIHU, 1L, now.minusDays(1)));
+        stubDays(day(YIHU, 1L, now.toLocalDate().minusDays(1)));
+
+        service.nearbyFootprintForViewer(YIHU, 1L, List.of(-1L));
+
+        verify(venueRepository).findCoLocatedPairs(anyCollection(), eq(VenuePresenceService.NEARBY_TRACE_RADIUS_M));
+        verify(pingRepository).findVisitorLastSeenByVenueIds(anyCollection(),
+                eq(VenuePresenceService.NEARBY_RADIUS_M), anyInt());
+        verify(pingRepository).findVisitorDaysByVenueIdsSince(anyCollection(), any(LocalDateTime.class),
+                eq(VenuePresenceService.NEARBY_RADIUS_M), anyInt());
     }
 
     // ── fixtures ────────────────────────────────────────────────────────────

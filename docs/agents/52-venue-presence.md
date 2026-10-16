@@ -13,6 +13,73 @@
 > 不是改迁移——物化表现存错值由 30 分钟一轮的调度任务自愈（**需先部署修复后的代码**）。
 > （状态确立流水）/ `V37__presence_consent_source_comment.sql`（2026-10-03 来源列注释）。
 
+### 2026-10-16：详情页「到店足迹」行 + 贡献者回路（用户裁决「按推荐方式，第一步第二步都做」）
+
+> 零迁移、零新表；**部署顺序：后端先于小程序**（纯增量：新增一个 GET；旧客户端不知道它）。
+> 端侧 = quwuting 仓 52 号 §4.7。
+
+**症状**：列表卡片这行点开能感谢，但门店详情页没有任何体现；被感谢的人点站内信（`VISIT_THANKED`，
+深链落在这家店的详情页）落到一个什么都没有的页面——闭环断在最后一步。
+
+**根因（两层，勿只修表面）**：
+
+1. **决策依据被悄悄改了前提**：10-06 在 `VenueResponseMapper` / `VenueResponse` / `VenueService` 三处注释里立了
+   「详情页不重复承载（同一事实只呈现一次）」。当年成立，因为这行只是**一句陈述**（事实）；10-13 加
+   「感谢」动作后它变成了**入口**（能力）——事实只需呈现一次，能力必须出现在**消息所指的落点**。
+   前提变了，依赖它的决策没人回头复核（三处都只是散文注释，没有任何机器断言把「站内信落点」与
+   「落点上有入口」连起来）。
+2. **加通知类型时没有核对落点**：`VISIT_THANKED` 带深链，但没有任何环节问「落点页上有没有消息所指的东西」。
+
+**系统性防线（不是补一个行）**：① 前端门禁 `check:presence` **P13**——站内信 VENUE 深链落点（门店详情页）必须
+挂得出到店足迹行与同一个 `presence-sheet`，文案零拼接，已做 6 条变异验证；
+② 三处「详情页不重复承载」注释已订正为「详情页走独立动态接口，文案与列表逐字相同」；
+③ 判据入 AGENTS.md：**新增站内信类型 / 深链时，必须核对落点页承载消息所指的能力，并配一条落点断言**。
+
+**接口**：`GET /venues/{venueId}/visit-footprint`（`VenueVisitFootprintController`，**软鉴权公开读**）→
+`{ badgeText, mineText }`（`VenueVisitFootprintResponse`，全字段 `@JsonInclude(ALWAYS)`——全局 NON_NULL 会把
+`mineText: null` 删成字段缺失，控制器测试用生产同款映射器钉住）。
+
+| 字段 | 谁能读到 | 内容 |
+|---|---|---|
+| `badgeText` | 所有人 | 与列表卡片 `visitBadgeText` **逐字相同**（同一次计算、同一排除集合、同一渲染函数 `badgeTextOf`）；30 天无足迹 = null，前端整行不渲染 |
+| `mineText` | 登录且**被计入的贡献者本人** | 「你在这附近留下过 N 次足迹 · N 位舞友感谢了你」（无人感谢时只有前半句）；null = 游客 / 非贡献者 / 被排除账号 |
+
+**为什么独立接口而不塞进门店详情响应**：详情响应是缓存体（服务端 `venueDetailPublicCache` + 小程序会话内详情缓存 +
+SWR 持久缓存，三层都以门店 id 为键），而本数据是 30 天滚动窗实时计算且带浏览者维度；塞进去要么把「我的足迹」
+写进共享缓存（串人），要么让整个详情响应失去可缓存性。⚠️ 本接口及其上游**不得挂任何共享缓存**
+（当前部署无 HTTP 缓存层；若引入须列入绕过名单，已写入控制器类注释）。
+
+**「第二步」为什么只做「自己的」**（对应 10-16 分析 §4）：详情页能比列表「更具体」的唯一安全方向是**读者自己**。
+逐条足迹 / 名单 / 时段 / 最近一次都会指认他人（N=1 的店尤其；生产 20 家店只有 1 人），与「永不公开谁到过」
+冲突。贡献者真正想知道的是「我的付出有没有被看见」，`mineText` 回答的正是这个——接口面只有两个字符串。
+
+**口径一源（结构保证，不是约定）**：`VenuePresenceService#nearbyFootprintForViewer` 一次证据加载同时产出卡片事实与
+`Mine`，`footprintOf` / `mineOf` 共用 `unionLastSeen` / `unionVisitDays` / `inWindow` / 同一排除集合。
+本次顺手把 `(用户, 日)` 并集提成单点 `unionVisitDays`（此前在 `countVisitEvents` 与 `nearbyVisitorsFor`
+各写一遍），于是「卡片次数 ≡ 每个被计入的人自己的次数之和」是结构保证——测试
+`viewerMinesSumToTheCardEventsAndShareOneSnapshotWithIt` 钉死。
+
+**「感谢了你」的计数按本店取**（`countThankers(venueId, viewerId)`）：感谢三元组按「被感谢发生的那家店」落库，
+站内信正文「有 N 位舞友在「X」感谢了你」的 N 也是它；贡献者点信落在 X 的详情页，看到的数字必须与信里逐字一致。
+**已知边界（10-16 分析 §5，仍未处理）**：邻域共址的 A、B 两家，同一个人可以在两边各感谢同一群人一次，
+贡献者收到两条信，两页各显示各自的 N。多了详情页入口后更容易触发；是否按邻域去重属独立决策。
+
+**文案红线**：⛔ 禁「分享」一词；⛔ 无人感谢时不写「暂无人感谢」（把没有的东西说成缺口 = 催促去要感谢，
+与「感谢是回报不是诱导」相反）；⛔ 不点名感谢者、不给时间。
+
+**⚠️ 我替用户定的（等确认）**：① 行落点在今晚热度卡**之前**（用户 2026-10-16 校准；最初放在热度卡之后）；② 第二行直接上页面（不只放浮层里）——
+站内信落点要一眼看到回音；③ 浮层不改（复用，不含个人行）；④ 游客能看到足迹行（与列表同为公开信息）、看不到个人行；
+⑤ 个人行「次」沿用卡片口径（(人, 自然日) 去重，读作「来了几个晚上」）。
+
+**验证（2026-10-16）**：`VenueNearbyVisitsTest` 21（+5：自己的次数之和 ≡ 卡片次数且同一快照 / 非贡献者·窗外·游客无个人行 /
+被排除账号无个人行 / 窗内无到访日不渲染「0 次」/ 查询形态同单店路径）、`VenueVisitBadgeTextTest` 13（+7：详情文案 ≡ 列表文案 /
+同一排除集合 / 感谢计数取本店 / 无人感谢不写缺口 / 禁「分享」「真实」/ 游客与非贡献者零感谢查询 / 无足迹整行为空）、
+`VenueVisitFootprintControllerTest` 3（游客 200 非 401 且 `mineText` 显式 null——去掉 ALWAYS 注解即红，已变异验证 / 登录 id 透传 / 无写动词）；
+回归 `VenueVisitorDrilldownTest` 15 / `VenueVisitThanksServiceTest` 7 / `VenuePresenceAttributionTest` 9 / `FavoriteServiceTest` 2 /
+`VenueListQueryHqlSyntaxTest` / `AdminVenueFootprintOrderTest` / `UserBehaviorCatalogMirrorTest` 全绿。
+**未验证**：真库（本次无新 SQL，复用既有查询与 `countThankers`）；真机；Spring 容器装配（`contextLoads` 为既有环境红灯，
+未起容器——新 Bean 依赖仅叶子仓储，无环）。
+
 ### 2026-10-13：到访感谢（V50，用户裁决「按推荐方式实现」）
 
 > 迁移：`V50__venue_visit_thanks.sql`（`db/migration-mysql`；取号前核对最大号 = V49，
@@ -765,6 +832,7 @@ DEFAULT）。教训：**涉及个人信息的默认值，先过合规判据，�
 | `POST /venues/presence-consent` | requireAuth | 状态确立上报：body `{enabled, source?}`，source = `USER`（缺省）/ `PROMPT`；每次插一行流水；DEFAULT / 未知来源 / 缺 enabled ⇒ 1022。端上失败留待下个周期补发 |
 | `GET /venues/{venueId}/visit-thanks` | requireAuth | **到访感谢状态**（2026-10-13 V50，C 侧浮层按钮态数据源）：返回 `{contributors, pendingThanks}`——可被感谢人数（附近 30 天并集去掉自己，与卡片数字同源）与其中我尚未感谢过的人数；**请求无 body、响应只有计数**（不返回任何贡献者身份——「永不公开」裁决在接口形态上的落实） |
 | `POST /venues/{venueId}/visit-thanks` | requireAuth | **感谢一次**（2026-10-13 V50）：感谢该店全部尚未感谢过的贡献者（逐对幂等，同一对永不重复、不重发通知；仅首次 affected==1 时同事务发 `VISIT_THANKED` 站内信）。返回 `{thankedPeople, pendingThanks, contributors, feedbackText}`（feedbackText = 服务端权威反馈文案）。频控每用户每店 60s（超限 **1022**）；批量上限 50（最近到访优先截断） |
+| `GET /venues/{venueId}/visit-footprint` | **软鉴权**（公开读；有 token 才带个人行） | **详情页「到店足迹」行数据**（2026-10-16）：返回 `{badgeText, mineText}`——`badgeText` 与列表卡片逐字相同（null = 30 天无足迹，整行不渲染）；`mineText` 仅登录且被计入的贡献者本人有（「你在这附近留下过 N 次足迹 · N 位舞友感谢了你」，只含自己的数字）。独立于门店详情响应（后者是缓存体，本数据实时 + 带浏览者维度）⇒ ⛔ 不得挂共享缓存；⛔ 不得改 `requireAuth`（401 会触发前端清凭证自愈链）。详见文首「2026-10-16」节 |
 | `GET /admin/venues` | requireAdmin | 管理端门店列表（无业务裁剪全量分页，`AdminVenueQueryService`）；`sort` = `LATEST`（缺省，SQL 分页）/ `VISITS_30D` / `LAST_VISIT`、`visitedOnly`（近 30 天附近有足迹），见 §6.2；行内带**足迹摘要**（7d / 30d 人数 / 30d 次数 / 最近足迹 / 小程序卡片原文 / 邻域门店数），经 `VenueVisitBadgeService` **与小程序卡片同一次计算**（2026-10-13）；status / sort 经 `WireEnums.parse` 宽容解析（非法 = 不筛 / 默认序） |
 | `GET /admin/venues/{id}/presence` | requireAdmin | 单店**足迹统计**（2026-10-13 重写为展示口径一源）：7d / 30d 人数 + 30d 次数 + 最近足迹 + `excludedUsers30d` + 小程序卡片原文 `footprintText` + 邻域内其他门店 `vicinityVenues`；口径参数（`nearbyRadiusM`=300 / `vicinityRadiusM`=150 / `maxAccuracyM`）随响应回显，admin 展示必须与数值同屏；DTO 全字段 `@JsonInclude(ALWAYS)`——non_null 全局策略会删 null，35 号教训 |
 | `GET /admin/venues/presence-consent-stats` | requireAdmin | 授权统计：已允许 / 已关闭 / 待补问 + 首问回答分布 + 近 30 天设置变更次数（2026-10-03 字段 `defaultUsers` → `legacyDefaultUsers` 且语义改变，admin-web 须同版发布） |
